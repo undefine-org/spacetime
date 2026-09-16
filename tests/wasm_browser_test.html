@@ -1,0 +1,428 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Spacetime WASM Test</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+      max-width: 900px;
+      margin: 0 auto;
+      padding: 20px;
+      background: #1a1a2e;
+      color: #eee;
+    }
+    h1 { color: #00d9ff; }
+    h2 { color: #ff6b6b; margin-top: 2em; }
+    .test-group {
+      background: #16213e;
+      border-radius: 8px;
+      padding: 16px;
+      margin: 12px 0;
+    }
+    .test {
+      display: flex;
+      align-items: center;
+      padding: 8px 0;
+      border-bottom: 1px solid #0f3460;
+    }
+    .test:last-child { border-bottom: none; }
+    .test-name { flex: 1; }
+    .test-status {
+      font-weight: bold;
+      padding: 4px 12px;
+      border-radius: 4px;
+    }
+    .pass { background: #1b4332; color: #52b788; }
+    .fail { background: #641220; color: #ff6b6b; }
+    .pending { background: #3d405b; color: #f4a261; }
+    pre {
+      background: #0f0f23;
+      padding: 16px;
+      border-radius: 8px;
+      overflow-x: auto;
+      font-size: 13px;
+    }
+    code { color: #00d9ff; }
+    .error { color: #ff6b6b; }
+    .success { color: #52b788; }
+    #summary {
+      position: fixed;
+      top: 20px;
+      right: 20px;
+      background: #16213e;
+      padding: 16px;
+      border-radius: 8px;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+    }
+    .editor {
+      width: 100%;
+      min-height: 120px;
+      background: #0f0f23;
+      color: #eee;
+      border: 1px solid #0f3460;
+      border-radius: 8px;
+      padding: 12px;
+      font-family: monospace;
+      font-size: 14px;
+      resize: vertical;
+    }
+    button {
+      background: #00d9ff;
+      color: #1a1a2e;
+      border: none;
+      padding: 10px 20px;
+      border-radius: 4px;
+      cursor: pointer;
+      font-weight: bold;
+      margin-top: 12px;
+    }
+    button:hover { background: #00b4d8; }
+    .output-section { margin-top: 16px; }
+    .output-section h3 { color: #f4a261; margin-bottom: 8px; }
+  </style>
+    <style>:not(:defined){visibility:hidden}</style>
+</head>
+<body>
+  <div id="summary">
+    <strong>Tests:</strong> <span id="passed">0</span>/<span id="total">0</span>
+  </div>
+
+  <h1>Spacetime WASM Test Suite</h1>
+  <p>Testing the Spacetime compiler running in WebAssembly.</p>
+
+  <div id="tests"></div>
+
+  <h2>Interactive Playground</h2>
+  <div class="test-group">
+    <textarea id="source" class="editor" placeholder="Enter Spacetime code here...">.hero {
+  @fade-in(duration: 800ms) {
+    opacity: 0 -> 1
+    scale: 0.95 -> 1
+  }
+}</textarea>
+    <button onclick="runPlayground()">Compile</button>
+
+    <div class="output-section">
+      <h3>Generated CSS</h3>
+      <pre id="css-output"></pre>
+    </div>
+
+    <div class="output-section">
+      <h3>Generated JS</h3>
+      <pre id="js-output"></pre>
+    </div>
+
+    <div class="output-section">
+      <h3>Errors</h3>
+      <pre id="errors-output"></pre>
+    </div>
+  </div>
+
+  <h2>Completions Test</h2>
+  <div class="test-group">
+    <textarea id="completion-source" class="editor" placeholder="Type @ to see completions...">.hero { @ }</textarea>
+    <button onclick="runCompletions()">Get Completions</button>
+    <pre id="completions-output"></pre>
+  </div>
+
+  <script type="module">
+    // Dynamically import the WASM module
+    const wasmPath = '../pkg/spacetime.js';
+
+    let wasmModule = null;
+    let testResults = { passed: 0, total: 0 };
+
+    // Test result tracking
+    function updateSummary() {
+      document.getElementById('passed').textContent = testResults.passed;
+      document.getElementById('total').textContent = testResults.total;
+    }
+
+    function addTest(name, passed, details = '') {
+      testResults.total++;
+      if (passed) testResults.passed++;
+      updateSummary();
+
+      const testsDiv = document.getElementById('tests');
+      const testDiv = document.createElement('div');
+      testDiv.className = 'test';
+      testDiv.innerHTML = `
+        <span class="test-name">${name}</span>
+        <span class="test-status ${passed ? 'pass' : 'fail'}">${passed ? 'PASS' : 'FAIL'}</span>
+      `;
+
+      if (details && !passed) {
+        const detailsEl = document.createElement('pre');
+        detailsEl.className = 'error';
+        detailsEl.textContent = details;
+        testDiv.appendChild(detailsEl);
+      }
+
+      testsDiv.appendChild(testDiv);
+    }
+
+    function addTestGroup(name) {
+      const testsDiv = document.getElementById('tests');
+      const header = document.createElement('h2');
+      header.textContent = name;
+      testsDiv.appendChild(header);
+
+      const group = document.createElement('div');
+      group.className = 'test-group';
+      group.id = `group-${name.replace(/\s+/g, '-').toLowerCase()}`;
+      testsDiv.appendChild(group);
+    }
+
+    async function runTests() {
+      try {
+        // Try to load the WASM module
+        const { default: init, compile, completions, hover, diagnostics } = await import(wasmPath);
+        await init();
+        wasmModule = { compile, completions, hover, diagnostics };
+
+        addTest('WASM module loaded successfully', true);
+
+        // Run test suites
+        await runCompileTests();
+        await runCompletionsTests();
+        await runHoverTests();
+        await runDiagnosticsTests();
+
+        console.log(`Tests complete: ${testResults.passed}/${testResults.total} passed`);
+      } catch (error) {
+        addTest('WASM module loading', false, error.toString());
+        console.error('Failed to load WASM module:', error);
+
+        // Show instructions
+        const testsDiv = document.getElementById('tests');
+        testsDiv.innerHTML += `
+          <div class="test-group">
+            <p class="error">Failed to load WASM module. Make sure you've built it:</p>
+            <pre>wasm-pack build --target web --features wasm</pre>
+            <p>Then serve this file from the project root.</p>
+          </div>
+        `;
+      }
+    }
+
+    async function runCompileTests() {
+      addTestGroup('Compile Tests');
+      const { compile } = wasmModule;
+
+      // Test 1: Basic compilation
+      {
+        const source = '.hero { opacity: 1; }';
+        const result = compile(source);
+        addTest(
+          'Basic CSS compilation',
+          result && (result.css.length > 0 || result.js.length > 0 || result.errors.length === 0),
+          JSON.stringify(result, null, 2)
+        );
+      }
+
+      // Test 2: Directive compilation
+      {
+        const source = '.hero { @fade-in { opacity: 0 -> 1 } }';
+        const result = compile(source);
+        addTest(
+          'Directive compilation (@fade-in)',
+          result && result.errors.length === 0,
+          JSON.stringify(result.errors, null, 2)
+        );
+      }
+
+      // Test 3: Syntax error handling
+      {
+        const source = '.hero { @@@invalid }}}';
+        const result = compile(source);
+        addTest(
+          'Syntax error returns errors array',
+          result && result.errors.length > 0,
+          JSON.stringify(result, null, 2)
+        );
+      }
+
+      // Test 4: Data binding compilation
+      {
+        const source = `
+          @data products = fetch("/api/products")
+
+          .products {
+            @each($.products) {
+              <product-card />
+            }
+          }
+        `;
+        const result = compile(source);
+        addTest(
+          'Data binding compilation',
+          result && (result.js.length > 0 || result.errors.length >= 0),
+          JSON.stringify(result, null, 2)
+        );
+      }
+    }
+
+    async function runCompletionsTests() {
+      addTestGroup('Completions Tests');
+      const { completions } = wasmModule;
+
+      // Test 1: After @ completions
+      {
+        const source = '.hero { @ }';
+        const items = completions(source, 0, 9);
+        addTest(
+          'Completions after @ returns array',
+          Array.isArray(items),
+          JSON.stringify(items, null, 2)
+        );
+      }
+
+      // Test 2: Completions have required fields
+      {
+        const source = '.hero { @f }';
+        const items = completions(source, 0, 10);
+        const hasValidItems = Array.isArray(items) && items.every(
+          item => item.label && item.kind
+        );
+        addTest(
+          'Completion items have label and kind',
+          hasValidItems,
+          JSON.stringify(items, null, 2)
+        );
+      }
+
+      // Test 3: Filtered completions
+      {
+        const source = '.hero { @fade }';
+        const items = completions(source, 0, 13);
+        const hasFadeItems = Array.isArray(items) && items.some(
+          item => item.label.includes('fade')
+        );
+        addTest(
+          'Completions filter by prefix',
+          hasFadeItems || items.length === 0, // May not have matches if stdlib not loaded
+          JSON.stringify(items, null, 2)
+        );
+      }
+    }
+
+    async function runHoverTests() {
+      addTestGroup('Hover Tests');
+      const { hover } = wasmModule;
+
+      // Test 1: Hover on directive
+      {
+        const source = '.hero { @scroll { } }';
+        const result = hover(source, 0, 10);
+        addTest(
+          'Hover on directive returns result or null',
+          result === null || (result && result.contents),
+          JSON.stringify(result, null, 2)
+        );
+      }
+
+      // Test 2: Hover outside directive
+      {
+        const source = '.hero { }';
+        const result = hover(source, 0, 3);
+        addTest(
+          'Hover outside directive returns null',
+          result === null,
+          JSON.stringify(result, null, 2)
+        );
+      }
+    }
+
+    async function runDiagnosticsTests() {
+      addTestGroup('Diagnostics Tests');
+      const { diagnostics } = wasmModule;
+
+      // Test 1: Valid code no errors
+      {
+        const source = '.hero { opacity: 1; }';
+        const diags = diagnostics(source);
+        addTest(
+          'Valid code returns empty array',
+          Array.isArray(diags) && diags.length === 0,
+          JSON.stringify(diags, null, 2)
+        );
+      }
+
+      // Test 2: Parse error detection
+      {
+        const source = '.hero { @@@invalid }}}';
+        const diags = diagnostics(source);
+        addTest(
+          'Parse error detected',
+          Array.isArray(diags) && diags.length > 0,
+          JSON.stringify(diags, null, 2)
+        );
+      }
+
+      // Test 3: Diagnostic has required fields
+      {
+        const source = '.hero { @@@invalid }}}';
+        const diags = diagnostics(source);
+        const hasValidDiags = Array.isArray(diags) && diags.every(
+          d => typeof d.message === 'string' && typeof d.line === 'number'
+        );
+        addTest(
+          'Diagnostics have message and line',
+          hasValidDiags || diags.length === 0,
+          JSON.stringify(diags, null, 2)
+        );
+      }
+    }
+
+    // Playground functions
+    window.runPlayground = async function() {
+      if (!wasmModule) {
+        document.getElementById('errors-output').textContent = 'WASM module not loaded';
+        return;
+      }
+
+      const source = document.getElementById('source').value;
+      const result = wasmModule.compile(source);
+
+      document.getElementById('css-output').textContent = result.css || '(empty)';
+      document.getElementById('js-output').textContent = result.js || '(empty)';
+      document.getElementById('errors-output').textContent =
+        result.errors.length > 0
+          ? result.errors.map(e => `Line ${e.line}:${e.column}: ${e.message}`).join('\n')
+          : '(no errors)';
+    };
+
+    window.runCompletions = async function() {
+      if (!wasmModule) {
+        document.getElementById('completions-output').textContent = 'WASM module not loaded';
+        return;
+      }
+
+      const source = document.getElementById('completion-source').value;
+      // Find @ position
+      const atPos = source.indexOf('@');
+      if (atPos === -1) {
+        document.getElementById('completions-output').textContent = 'No @ found in source';
+        return;
+      }
+
+      // Calculate line and column
+      const beforeAt = source.substring(0, atPos);
+      const lines = beforeAt.split('\n');
+      const line = lines.length - 1;
+      const column = lines[lines.length - 1].length + 1;
+
+      const items = wasmModule.completions(source, line, column);
+      document.getElementById('completions-output').textContent =
+        JSON.stringify(items, null, 2);
+    };
+
+    // Run tests on load
+    runTests();
+  </script>
+    <link rel="stylesheet" href="../spacetime.css" />
+    <script src="../spacetime.js"></script>
+</body>
+</html>

@@ -1,0 +1,38 @@
+GH-36 optional trailing literal in %form — VERDICT: FIXED (W3, PLAN-137)
+
+Root causes, both fixed:
+1. The `timeout:` literal is ONE `%form` token but the CST tokenizes `timeout`
+   and `:` separately, so the greedy `$condition:expr` swallowed the whole
+   `timeout : $timeout:time = 5000` run and the literal could never match.
+2. `timeout: $timeout:time = 5000` was a REQUIRED trailing clause (the
+   `timeout:` literal had to be present), so the documented bare spelling
+   `@wait_until cond` matched no form and was silently dropped.
+
+Fixes (stdlib/testing/test.st `wait-until` / `wait-for`):
+- Form rewritten with an INLINE OPTIONAL GROUP: `@wait_until $condition:expr
+  ( timeout : $timeout:time = 5000 )?` — the genuinely-optional trailing clause
+  is grammar DATA (a `( … )?` group), not a Rust special case or sibling form.
+- New inline-group support: FormInlineElement::Group (meta_ast), parsed by
+  `%form` (parser/mod.rs; a `( … )?` paren is not mistaken for the param list),
+  matched with rollback + in-group defaults in form_compiler.rs, and the expr
+  boundary stops at the group's leading literal so the greedy `$condition` no
+  longer swallows `timeout`.
+- `ST.parseMs` (BUG-317) turns the `:time` scalar's "500ms" string into the ms
+  number the emit needs.
+
+Evidence (binary: CARGO_TARGET_DIR=/home/user/w3-target/debug/spacetime, `cargo
+build --features headless`):
+
+Command: test stdlib/testing/meta/wait-timing.test.st --headless
+  15 passed, 0 failed, 0 skipped   (was 9/15 failing)
+
+Command: test tests/repro/gh-36-wait-until-optional/index.test.st --headless
+  ✓ full form with timeout binds
+  ✓ bare form (no timeout literal)     (2 passed, 0 failed)
+
+Decisive probe (decisive.test.st): `@wait_until false timeout: 500ms`
+  test --headless → fails with "Timeout after 500ms waiting for condition"
+  (NOT "Assertion failed"): the wait loop NOW emits and genuinely times out.
+
+Emitted JS now contains: `const __timeout = ST.parseMs("500ms");`, the
+`while (Date.now() - __start < __timeout)` loop, and the "Timeout after" throw.

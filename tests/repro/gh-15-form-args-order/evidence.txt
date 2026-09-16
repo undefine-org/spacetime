@@ -1,0 +1,38 @@
+GH-15 named %form args out of order — VERDICT: FIXED-WORKS
+
+shape: named args to @object passed OUT of %form declaration order (order:
+shape, size, detail, ...). Issue claimed an earlier-declared param silently
+defaults when written after a later one, with zero diagnostic.
+
+The three repro files (all @import "stdlib/3d", @stage(camZ:5) { @object(...) }):
+
+  in-order.st:      @object(shape: "sphere", size: 1.4, detail: 6)
+  out-of-order.st:  @object(shape: "sphere", detail: 6, size: 1.4)   // size AFTER detail
+  scrambled.st:     @object(metalness: 0.9, shape: "sphere", detail: 6, size: 1.4, roughness: 0.15)
+
+Command: inspect --layer ir <file>.st | grep -E 'const s =|const d ='
+  in-order:      const s = 1.4;   const d = Math.max(0, Math.round(6));
+  out-of-order:  const s = 1.4;   const d = Math.max(0, Math.round(6));   // was `const s = 1`
+  scrambled:     const s = 1.4;   const d = Math.max(0, Math.round(6));
+
+Command: build scrambled.st ; grep for material params in emitted JS
+  roughness: 0.15
+  metalness: 0.9
+  geomFor("sphere")
+
+All named args — size, detail, shape, roughness, metalness — bind by NAME
+regardless of call-site order. check passes all three clean.
+
+Real-world confirmation — demos/3d/glass-hero/index.st (issue claimed it emitted
+`const s = 1` and `switch ("standard")` despite source passing size:1.7 and
+material:"physical"):
+  Command: inspect --layer ir demos/3d/glass-hero/index.st | grep -E 'const s =|switch \('
+  const s = 1.7;
+  switch ("physical") {      // both now match the source — the demo renders correctly
+
+CONCLUSION: the forward-only-cursor matcher in form_compiler.rs that silently
+defaulted out-of-order named args is fixed; named args bind by name in any
+order, on @object/@stage and the shipped demos. (No .test.st behavioral gate
+filed: the values are 3D geometry/material, only observable through IR/emitted
+JS — the headless V8 logic backend cannot render THREE/WebGL objects; IR is the
+issue's own evidence channel.) FIXED-WORKS.

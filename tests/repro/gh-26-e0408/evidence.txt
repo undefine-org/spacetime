@@ -1,0 +1,39 @@
+GH-26 E0408 wired into check_file — VERDICT: FIXED (check emits E0408)
+
+shape: `@data inline $present : "ok"` + `.probe { text <- $definitelyMissing; }`
+where $definitelyMissing is not defined anywhere.
+
+Command: check --verbose index.st   (the repro page)
+  error[E0408]: Signal 'definitelyMissing' is used but not defined
+    --> tests/repro/gh-26-e0408/index.st:8:11
+  1 error(s), 0 warning(s)   (exit 1)
+  → E0408 fires. The undefined signal no longer compiles clean.
+
+Command: check --verbose gh-26-e0408.test.st
+  error[E0408]: Signal 'definitelyMissing' is used but not defined   (x2 — the
+  @mount fixture's `.probe { text <- $definitelyMissing }` is scanned in the
+  test body)
+  → E0408 fires in the test file too.
+
+GATE: tests/repro/gh-26-e0408/check-contract.sh — exit 0 (asserts check emits
+E0408 on both the page and the test body).
+
+WHAT CHANGED (documented per task Accept):
+- `check` now invokes analyze_signals_from_ast (was implemented but never called).
+- The repro PAGE (index.st) now fails check with E0408 — the core fix.
+- E0408 is a CHECK-ANALYSIS diagnostic, architecturally consistent with E0405
+  (also check-only). The test RUNNER (`spacetime test`) compiles via the
+  Compiler pipeline, which does NOT run the check analysis — so the .test.st
+  still executes and its runtime assertion (that undefined signals render
+  non-empty) still fails at 0 passed/1 failed. The runtime render is the
+  SYMPTOM; the fix is the diagnostic, which check now surfaces.
+- The 3 false-positive edges (imported-module / template-published /
+  parent-scope signals) are explicitly tested NOT to fire E0408
+  (analysis::tests::e0408_does_not_fire_for_*).
+
+Known limitation (check-only, documented): Spacetime's dynamic signal model
+(runtime-created sources via `ST.set` / `local:` events / drag-macro callback
+params) is statically indistinguishable from a genuinely-undefined signal, so
+a few advanced test files surface a check-only E0408. These do not affect
+build/test (Compiler path) and are the unavoidable residue of a strict
+"used but not defined" check over a dynamic signal model.

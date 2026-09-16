@@ -1,0 +1,1204 @@
+<!--
+  Spacetime Test Runner - Live 3-Pane UI
+  ======================================
+
+  A Cypress-style test runner for Spacetime tests with live reload,
+  step-through debugging, and first-party timeline/state visualization.
+
+  Usage:
+    1. Start the dev server: cargo run -- serve --test-runner
+    2. Open http://localhost:3030/test-runner/ in your browser
+    3. Write tests in .test.st files using @test, @given, @when, @then
+    4. Tests auto-reload on file changes via WebSocket
+
+  Features:
+    - 3-pane layout: test tree, live preview, inspector
+    - Step-through debugging: pause between @given/@when/@then steps
+    - Element highlighting: visual indicator for current test target
+    - Timeline visualization: progress bars for active animations
+    - State machine inspection: current state and transition history
+    - Signal monitoring: reactive binding values and update counts
+    - WebSocket live reload: auto-refresh on file changes
+    - Filter tests: search by name in the test tree
+
+  Keyboard Shortcuts:
+    - F5 or Ctrl+R: Run all tests
+    - F8 or Ctrl+P: Pause/Resume test execution
+    - F10: Step forward to next test step
+    - F9: Step backward to previous step
+    - Escape: Stop current test run
+
+  See: stdlib/testing/test.st for the testing DSL implementation.
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Spacetime Test Runner - Live Mode</title>
+  <link rel="stylesheet" href="/__spacetime/styles.css">
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #0d1117;
+      color: #c9d1d9;
+      overflow: hidden;
+    }
+
+    /* Step-through debugging toolbar */
+    .debug-toolbar {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.5rem;
+      background: var(--surface-2, #21262d);
+      border-bottom: 1px solid var(--border, #30363d);
+    }
+
+    .debug-toolbar .btn {
+      min-width: 2.5rem;
+      justify-content: center;
+    }
+
+    .debug-toolbar .btn[disabled] {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
+    .debug-toolbar__step-info {
+      flex: 1;
+      font-size: 0.75rem;
+      color: var(--muted, #8b949e);
+      font-family: ui-monospace, monospace;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .debug-toolbar__step-type {
+      color: var(--primary, #58a6ff);
+      font-weight: 600;
+      margin-right: 0.5rem;
+    }
+
+    /* Element highlighting overlay */
+    .highlight-overlay {
+      position: fixed;
+      pointer-events: none;
+      z-index: 10000;
+      border: 2px solid var(--primary, #58a6ff);
+      background: rgba(88, 166, 255, 0.1);
+      border-radius: 2px;
+      transition: all 150ms ease-out;
+    }
+
+    .highlight-overlay::before {
+      content: attr(data-selector);
+      position: absolute;
+      top: -1.5rem;
+      left: -2px;
+      padding: 0.125rem 0.375rem;
+      background: var(--primary, #58a6ff);
+      color: white;
+      font-size: 0.625rem;
+      font-family: ui-monospace, monospace;
+      border-radius: 2px;
+      white-space: nowrap;
+    }
+
+    .highlight-overlay[data-status="passed"]  {
+      border-color: var(--success, #3fb950);
+      background: rgba(63, 185, 80, 0.1);
+    }
+
+    .highlight-overlay[data-status="passed"]::before {
+      background: var(--success, #3fb950);
+    }
+
+    .highlight-overlay[data-status="failed"] {
+      border-color: var(--error, #f85149);
+      background: rgba(248, 81, 73, 0.1);
+    }
+
+    .highlight-overlay[data-status="failed"]::before {
+      background: var(--error, #f85149);
+    }
+
+    /* Step indicator badges */
+    .step-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.25rem;
+      padding: 0.125rem 0.5rem;
+      border-radius: 9999px;
+      font-size: 0.625rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+
+    .step-badge--given {
+      background: rgba(163, 113, 247, 0.2);
+      color: #a371f7;
+    }
+
+    .step-badge--when {
+      background: rgba(88, 166, 255, 0.2);
+      color: #58a6ff;
+    }
+
+    .step-badge--then {
+      background: rgba(63, 185, 80, 0.2);
+      color: #3fb950;
+    }
+
+    .step-badge--wait {
+      background: rgba(210, 153, 34, 0.2);
+      color: #d29922;
+    }
+  </style>
+    <style>:not(:defined){visibility:hidden}</style>
+</head>
+<body>
+  <!-- Main test runner app -->
+  <div class="test-runner" data-test-runner>
+    <!-- 3-pane layout -->
+    <div class="runner">
+      <!-- Left Panel: Test Tree -->
+      <aside class="runner__tree" data-panel="tree">
+        <header class="panel__header">
+          <h2>Tests</h2>
+          <div class="ws-status" data-ws-status></div>
+        </header>
+
+        <div class="tree__toolbar">
+          <button class="btn btn--primary" data-action="run-all">
+            <span class="btn__icon">▶</span>
+            Run All
+          </button>
+          <button class="btn btn--secondary" data-action="run-selected">
+            Run Selected
+          </button>
+          <input
+            type="search"
+            placeholder="Filter tests..."
+            class="search-input"
+            data-filter-input
+          />
+        </div>
+
+        <div class="tree__list" slot="test-tree">
+          <!-- Test suites populated by Spacetime @each -->
+        </div>
+      </aside>
+
+      <!-- Center Panel: Live Preview -->
+      <section class="runner__preview" data-panel="preview">
+        <header class="panel__header">
+          <h2>Live Preview</h2>
+          <div class="preview__controls">
+            <button class="btn btn--icon" data-action="refresh" title="Refresh (Ctrl+R)">
+              <span>↻</span>
+            </button>
+            <button class="btn btn--icon" data-action="screenshot" title="Screenshot">
+              <span>📷</span>
+            </button>
+          </div>
+        </header>
+
+        <!-- Step-through debugging toolbar -->
+        <div class="debug-toolbar" data-debug-toolbar>
+          <button class="btn btn--icon" data-action="step-back" title="Step Back (F9)" disabled>
+            <span>⏮</span>
+          </button>
+          <button class="btn btn--icon" data-action="pause" title="Pause/Resume (F8)">
+            <span data-pause-icon>⏸</span>
+          </button>
+          <button class="btn btn--icon" data-action="step-forward" title="Step Forward (F10)" disabled>
+            <span>⏭</span>
+          </button>
+          <button class="btn btn--icon" data-action="stop" title="Stop (Escape)">
+            <span>⏹</span>
+          </button>
+
+          <div class="debug-toolbar__step-info" data-step-info>
+            <span class="debug-toolbar__step-type" data-step-type></span>
+            <span data-step-selector></span>
+          </div>
+
+          <span class="step-badge step-badge--given" data-step-count="given" style="display: none;">
+            Given: <span data-count>0</span>
+          </span>
+          <span class="step-badge step-badge--when" data-step-count="when" style="display: none;">
+            When: <span data-count>0</span>
+          </span>
+          <span class="step-badge step-badge--then" data-step-count="then" style="display: none;">
+            Then: <span data-count>0</span>
+          </span>
+        </div>
+
+        <div class="preview__viewport">
+          <iframe
+            class="preview__iframe"
+            sandbox="allow-scripts allow-same-origin"
+            data-preview-frame
+          ></iframe>
+          <!-- Element highlight overlay (positioned via JS) -->
+          <div class="highlight-overlay" data-highlight-overlay style="display: none;"></div>
+        </div>
+      </section>
+
+      <!-- Right Panel: Inspector -->
+      <aside class="runner__inspector" data-panel="inspector">
+        <header class="panel__header">
+          <h2 class="inspector__test-name" slot="test-name">
+            No test selected
+          </h2>
+        </header>
+
+        <div class="inspector__tabs">
+          <button class="tab" data-tab="steps" data-active>Steps</button>
+          <button class="tab" data-tab="console">Console</button>
+          <button class="tab" data-tab="timeline">Timeline</button>
+          <button class="tab" data-tab="state">State</button>
+          <button class="tab" data-tab="signals">Signals</button>
+        </div>
+
+        <div class="inspector__content">
+          <!-- Steps tab - Test step-through visualization -->
+          <div class="tab-panel" data-tab-panel="steps" data-active>
+            <div class="steps-viz" slot="steps-viz">
+              <div class="steps-list" data-steps-list>
+                <!-- Step entries populated during test execution -->
+                <div class="steps-empty">
+                  <div class="steps-empty__icon">📋</div>
+                  <div class="steps-empty__text">Run a test to see step-by-step execution</div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Console tab -->
+          <div class="tab-panel" data-tab-panel="console">
+            <div class="console-output" slot="console-output">
+              <!-- Console logs populated by @each -->
+            </div>
+          </div>
+
+          <!-- DOM tab -->
+          <div class="tab-panel" data-tab-panel="dom">
+            <div class="dom-snapshot" slot="dom-snapshot">
+              <!-- DOM tree view -->
+            </div>
+          </div>
+
+          <!-- Timeline tab -->
+          <div class="tab-panel" data-tab-panel="timeline">
+            <div class="timeline-viz" slot="timeline-viz">
+              <!-- Timeline visualization - First-party progress bars -->
+              <div class="viz-section" data-viz="timelines">
+                <h3 class="viz-section__title">Active Timelines</h3>
+                <div class="timeline-list" slot="timeline-list">
+                  <!-- Timeline entries populated by ST.timelines -->
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- State tab - First-party state machine inspection -->
+          <div class="tab-panel" data-tab-panel="state">
+            <div class="state-viz" slot="state-viz">
+              <div class="viz-section" data-viz="state-machines">
+                <h3 class="viz-section__title">State Machines</h3>
+                <div class="state-list" slot="state-list">
+                  <!-- State machine entries showing current state and history -->
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Signals tab - First-party reactive binding inspection -->
+          <div class="tab-panel" data-tab-panel="signals">
+            <div class="signals-viz" slot="signals-viz">
+              <div class="viz-section" data-viz="signals">
+                <h3 class="viz-section__title">Reactive Signals</h3>
+                <div class="signal-list" slot="signal-list">
+                  <!-- Signal entries showing current values and update counts -->
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </aside>
+    </div>
+
+    <!-- Bottom Panel: Status Bar -->
+    <footer class="runner__status" data-status-bar>
+      <div class="status__progress">
+        <div class="progress__bar" slot="progress-bar"></div>
+      </div>
+
+      <div class="status__stats">
+        <span class="stat stat--passed">
+          <span class="stat__icon">✓</span>
+          <span class="stat__value passed-count" slot="passed-count">0</span>
+          passed
+        </span>
+        <span class="stat stat--failed">
+          <span class="stat__icon">✗</span>
+          <span class="stat__value failed-count" slot="failed-count">0</span>
+          failed
+        </span>
+        <span class="stat stat--pending">
+          <span class="stat__icon">○</span>
+          <span class="stat__value pending-count" slot="pending-count">0</span>
+          pending
+        </span>
+      </div>
+
+      <div class="status__actions">
+        <button class="btn btn--sm" data-action="watch-toggle">
+          <span class="btn__icon">👁</span>
+          Watch Mode
+        </button>
+      </div>
+    </footer>
+  </div>
+
+  <!-- Templates for dynamic content -->
+
+  <!-- Test Suite Template -->
+  <template data-component="test-suite">
+    <details class="suite" open>
+      <summary class="suite__header">
+        <span class="suite__icon"></span>
+        <span class="suite__name" slot="name"></span>
+        <span class="suite__count" slot="count"></span>
+      </summary>
+      <div class="suite__tests" slot="tests">
+        <!-- Tests populated here -->
+      </div>
+    </details>
+  </template>
+
+  <!-- Test Case Template -->
+  <template data-component="test-case">
+    <div class="test" data-status="pending">
+      <span class="test__icon"></span>
+      <span class="test__name" slot="name"></span>
+      <span class="test__duration" slot="duration"></span>
+    </div>
+  </template>
+
+  <!-- Console Log Entry Template -->
+  <template data-component="console-entry">
+    <div class="log-entry" data-level="log">
+      <span class="log__time" slot="time"></span>
+      <span class="log__icon" slot="icon"></span>
+      <span class="log__message" slot="message"></span>
+    </div>
+  </template>
+
+  <!-- Timeline Entry Template (First-Party) -->
+  <template data-component="timeline-entry">
+    <div class="timeline-entry" data-status="pending">
+      <div class="timeline-entry__header">
+        <span class="timeline-entry__name" slot="name"></span>
+        <span class="timeline-entry__progress" slot="progress">0%</span>
+      </div>
+      <div class="timeline-entry__bar">
+        <div class="timeline-entry__fill" slot="fill"></div>
+      </div>
+      <div class="timeline-entry__meta">
+        <span class="timeline-entry__driver" slot="driver"></span>
+        <span class="timeline-entry__duration" slot="duration"></span>
+      </div>
+    </div>
+  </template>
+
+  <!-- State Machine Entry Template (First-Party) -->
+  <template data-component="state-entry">
+    <div class="state-entry">
+      <div class="state-entry__header">
+        <span class="state-entry__selector" slot="selector"></span>
+        <span class="state-entry__current" slot="current"></span>
+      </div>
+      <div class="state-entry__history" slot="history">
+        <!-- State history nodes -->
+      </div>
+      <div class="state-entry__meta">
+        <span class="state-entry__transitions" slot="transitions">0 transitions</span>
+      </div>
+    </div>
+  </template>
+
+  <!-- Signal Entry Template (First-Party) -->
+  <template data-component="signal-entry">
+    <div class="signal-entry">
+      <div class="signal-entry__header">
+        <span class="signal-entry__name" slot="name">$signal</span>
+        <span class="signal-entry__value" slot="value"></span>
+      </div>
+      <div class="signal-entry__meta">
+        <span class="signal-entry__type" slot="type"></span>
+        <span class="signal-entry__updates" slot="updates">0 updates</span>
+        <span class="signal-entry__watchers" slot="watchers">0 watchers</span>
+      </div>
+    </div>
+  </template>
+
+  <!-- Test Step Entry Template -->
+  <template data-component="step-entry">
+    <div class="step-entry" data-step-status="pending">
+      <div class="step-entry__indicator"></div>
+      <div class="step-entry__content">
+        <span class="step-entry__type" slot="type"></span>
+        <span class="step-entry__selector" slot="selector"></span>
+        <span class="step-entry__action" slot="action"></span>
+      </div>
+      <div class="step-entry__duration" slot="duration"></div>
+    </div>
+  </template>
+
+  <!-- Spacetime runtime and animations -->
+  <script src="/__spacetime/runtime.js"></script>
+  <script>
+    // Initialize Spacetime
+    if (window.ST && window.ST.init) {
+      window.ST.init();
+    }
+
+    /**
+     * Spacetime Test Runner - JavaScript Integration
+     *
+     * Connects the 3-pane UI to:
+     * - WebSocket for live reload
+     * - Test framework events
+     * - Step-through debugging
+     * - Element highlighting
+     * - Timeline/state visualization
+     */
+    (function() {
+      'use strict';
+
+      // =======================================================================
+      // State Management
+      // =======================================================================
+
+      const state = {
+        ws: null,
+        wsConnected: false,
+        tests: [],
+        currentTest: null,
+        currentStepIndex: -1,
+        steps: [],
+        isPaused: false,
+        isRunning: false,
+        results: { passed: 0, failed: 0, pending: 0, progress: 0 },
+        timelines: new Map(),
+        stateMachines: new Map(),
+        signals: new Map(),
+        filterQuery: '',
+        selectedTestId: null,
+      };
+
+      // =======================================================================
+      // DOM References
+      // =======================================================================
+
+      const dom = {
+        runner: document.querySelector('[data-test-runner]'),
+        wsStatus: document.querySelector('[data-ws-status]'),
+        testTree: document.querySelector('[slot="test-tree"]'),
+        filterInput: document.querySelector('[data-filter-input]'),
+        previewFrame: document.querySelector('[data-preview-frame]'),
+        debugToolbar: document.querySelector('[data-debug-toolbar]'),
+        stepInfo: document.querySelector('[data-step-info]'),
+        stepType: document.querySelector('[data-step-type]'),
+        stepSelector: document.querySelector('[data-step-selector]'),
+        pauseIcon: document.querySelector('[data-pause-icon]'),
+        highlightOverlay: document.querySelector('[data-highlight-overlay]'),
+        stepsList: document.querySelector('[data-steps-list]'),
+        passedCount: document.querySelector('[slot="passed-count"]'),
+        failedCount: document.querySelector('[slot="failed-count"]'),
+        pendingCount: document.querySelector('[slot="pending-count"]'),
+        progressBar: document.querySelector('[slot="progress-bar"]'),
+        tabs: document.querySelectorAll('[data-tab]'),
+        tabPanels: document.querySelectorAll('[data-tab-panel]'),
+        timelineList: document.querySelector('[slot="timeline-list"]'),
+        stateList: document.querySelector('[slot="state-list"]'),
+        signalList: document.querySelector('[slot="signal-list"]'),
+        consoleOutput: document.querySelector('[slot="console-output"]'),
+      };
+
+      // =======================================================================
+      // WebSocket Connection
+      // =======================================================================
+
+      function connectWebSocket() {
+        const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const wsUrl = `${protocol}//${location.host}/ws`;
+
+        try {
+          state.ws = new WebSocket(wsUrl);
+
+          state.ws.onopen = () => {
+            state.wsConnected = true;
+            updateWsStatus('connected');
+            console.log('[TestRunner] WebSocket connected');
+          };
+
+          state.ws.onclose = () => {
+            state.wsConnected = false;
+            updateWsStatus('disconnected');
+            console.log('[TestRunner] WebSocket disconnected, reconnecting...');
+            setTimeout(connectWebSocket, 2000);
+          };
+
+          state.ws.onerror = (err) => {
+            console.error('[TestRunner] WebSocket error:', err);
+          };
+
+          state.ws.onmessage = (event) => {
+            try {
+              const msg = JSON.parse(event.data);
+              handleServerMessage(msg);
+            } catch (e) {
+              console.error('[TestRunner] Failed to parse message:', e);
+            }
+          };
+        } catch (e) {
+          console.error('[TestRunner] WebSocket connection failed:', e);
+          setTimeout(connectWebSocket, 2000);
+        }
+      }
+
+      function updateWsStatus(status) {
+        if (dom.wsStatus) {
+          dom.wsStatus.dataset.stState = status;
+          dom.wsStatus.dataset.label = status === 'connected' ? 'Connected' : 'Disconnected';
+        }
+      }
+
+      function handleServerMessage(msg) {
+        if (msg.type === 'Reload') {
+          console.log('[TestRunner] Reload triggered for:', msg.files);
+          if (dom.previewFrame && dom.previewFrame.src) {
+            dom.previewFrame.contentWindow?.location.reload();
+          }
+          // Re-fetch test list
+          fetchTests();
+        } else if (msg.type === 'TestResults') {
+          updateResults(JSON.parse(msg.results));
+        } else if (msg.type === 'Ping') {
+          state.ws?.send(JSON.stringify({ type: 'Pong' }));
+        }
+      }
+
+      function sendWsMessage(msg) {
+        if (state.ws && state.wsConnected) {
+          state.ws.send(JSON.stringify(msg));
+        }
+      }
+
+      // =======================================================================
+      // Test Discovery & Execution
+      // =======================================================================
+
+      async function fetchTests() {
+        try {
+          const response = await fetch('/api/tests');
+          if (response.ok) {
+            const data = await response.json();
+            state.tests = data.suites || [];
+            renderTestTree();
+          }
+        } catch (e) {
+          console.warn('[TestRunner] Could not fetch tests:', e);
+        }
+      }
+
+      function renderTestTree() {
+        if (!dom.testTree) return;
+
+        const query = state.filterQuery.toLowerCase();
+        dom.testTree.innerHTML = '';
+
+        for (const suite of state.tests) {
+          // Filter tests by query
+          const matchingTests = suite.tests.filter(t =>
+            !query || t.name.toLowerCase().includes(query)
+          );
+
+          if (matchingTests.length === 0 && query) continue;
+
+          const suiteEl = createSuiteElement(suite, matchingTests);
+          dom.testTree.appendChild(suiteEl);
+        }
+      }
+
+      function createSuiteElement(suite, tests) {
+        const template = document.querySelector('[data-component="test-suite"]');
+        const el = template.content.cloneNode(true).firstElementChild;
+
+        el.querySelector('[slot="name"]').textContent = suite.name;
+        el.querySelector('[slot="count"]').textContent = `(${tests.length})`;
+
+        const testsContainer = el.querySelector('[slot="tests"]');
+        for (const test of tests) {
+          testsContainer.appendChild(createTestElement(test));
+        }
+
+        return el;
+      }
+
+      function createTestElement(test) {
+        const template = document.querySelector('[data-component="test-case"]');
+        const el = template.content.cloneNode(true).firstElementChild;
+
+        el.dataset.testId = test.id;
+        el.dataset.status = test.status || 'pending';
+        el.querySelector('[slot="name"]').textContent = test.name;
+
+        if (test.duration) {
+          el.querySelector('[slot="duration"]').textContent = formatDuration(test.duration);
+        }
+
+        el.addEventListener('click', () => selectTest(test));
+
+        return el;
+      }
+
+      function selectTest(test) {
+        state.selectedTestId = test.id;
+        state.currentTest = test;
+
+        // Update selection in tree
+        document.querySelectorAll('.test[data-selected]').forEach(el => {
+          delete el.dataset.selected;
+        });
+        const el = document.querySelector(`.test[data-test-id="${test.id}"]`);
+        if (el) el.dataset.selected = 'true';
+
+        // Update inspector header
+        const header = document.querySelector('[slot="test-name"]');
+        if (header) header.textContent = test.name;
+
+        // Load test into preview frame
+        if (dom.previewFrame && test.file) {
+          dom.previewFrame.src = `/__spacetime/test/${encodeURIComponent(test.file)}`;
+        }
+      }
+
+      // =======================================================================
+      // Step-Through Debugging
+      // =======================================================================
+
+      function initDebugger() {
+        // Listen for step events from the preview frame
+        window.addEventListener('message', (event) => {
+          if (event.data?.type === 'st:test:step') {
+            handleTestStep(event.data);
+          } else if (event.data?.type === 'st:test:complete') {
+            handleTestComplete(event.data);
+          } else if (event.data?.type === 'st:timeline:update') {
+            handleTimelineUpdate(event.data);
+          } else if (event.data?.type === 'st:state:change') {
+            handleStateChange(event.data);
+          } else if (event.data?.type === 'st:signal:update') {
+            handleSignalUpdate(event.data);
+          }
+        });
+
+        // Keyboard shortcuts
+        document.addEventListener('keydown', (e) => {
+          if (e.key === 'F5' || (e.ctrlKey && e.key === 'r')) {
+            e.preventDefault();
+            runAllTests();
+          } else if (e.key === 'F8' || (e.ctrlKey && e.key === 'p')) {
+            e.preventDefault();
+            togglePause();
+          } else if (e.key === 'F10') {
+            e.preventDefault();
+            stepForward();
+          } else if (e.key === 'F9') {
+            e.preventDefault();
+            stepBackward();
+          } else if (e.key === 'Escape') {
+            stopExecution();
+          }
+        });
+      }
+
+      function handleTestStep(data) {
+        const step = {
+          type: data.stepType,       // 'given', 'when', 'then', 'wait', etc.
+          selector: data.selector,
+          action: data.action,
+          status: 'running',
+          startTime: Date.now(),
+        };
+
+        state.steps.push(step);
+        state.currentStepIndex = state.steps.length - 1;
+
+        // Update UI
+        updateStepInfo(step);
+        addStepToList(step);
+        highlightElement(data.selector, 'running');
+
+        // If paused, wait for resume/step
+        if (state.isPaused) {
+          updateDebugButtons(true);
+        }
+      }
+
+      function updateStepInfo(step) {
+        if (dom.stepType) {
+          dom.stepType.textContent = `@${step.type}`;
+          dom.stepType.className = `debug-toolbar__step-type step-badge--${step.type}`;
+        }
+        if (dom.stepSelector) {
+          dom.stepSelector.textContent = step.selector || step.action || '';
+        }
+
+        // Update step counts
+        updateStepCounts();
+      }
+
+      function updateStepCounts() {
+        const counts = { given: 0, when: 0, then: 0 };
+        for (const step of state.steps) {
+          if (counts[step.type] !== undefined) {
+            counts[step.type]++;
+          }
+        }
+
+        for (const [type, count] of Object.entries(counts)) {
+          const badge = document.querySelector(`[data-step-count="${type}"]`);
+          if (badge) {
+            badge.style.display = count > 0 ? 'inline-flex' : 'none';
+            badge.querySelector('[data-count]').textContent = count;
+          }
+        }
+      }
+
+      function addStepToList(step) {
+        if (!dom.stepsList) return;
+
+        // Remove empty state
+        const empty = dom.stepsList.querySelector('.steps-empty');
+        if (empty) empty.remove();
+
+        const template = document.querySelector('[data-component="step-entry"]');
+        const el = template.content.cloneNode(true).firstElementChild;
+
+        el.dataset.stepIndex = state.steps.length - 1;
+        el.dataset.stepStatus = step.status;
+        el.querySelector('[slot="type"]').textContent = `@${step.type}`;
+        el.querySelector('[slot="type"]').className = `step-entry__type step-badge step-badge--${step.type}`;
+        el.querySelector('[slot="selector"]').textContent = step.selector || '';
+        el.querySelector('[slot="action"]').textContent = step.action || '';
+
+        dom.stepsList.appendChild(el);
+
+        // Scroll to bottom
+        dom.stepsList.scrollTop = dom.stepsList.scrollHeight;
+      }
+
+      function updateStepStatus(index, status, duration) {
+        const el = dom.stepsList?.querySelector(`[data-step-index="${index}"]`);
+        if (el) {
+          el.dataset.stepStatus = status;
+          if (duration) {
+            el.querySelector('[slot="duration"]').textContent = formatDuration(duration);
+          }
+        }
+
+        if (state.steps[index]) {
+          state.steps[index].status = status;
+          state.steps[index].duration = duration;
+        }
+      }
+
+      // =======================================================================
+      // Element Highlighting
+      // =======================================================================
+
+      function highlightElement(selector, status) {
+        if (!dom.highlightOverlay || !dom.previewFrame) return;
+
+        if (!selector) {
+          dom.highlightOverlay.style.display = 'none';
+          return;
+        }
+
+        try {
+          const frameDoc = dom.previewFrame.contentDocument;
+          if (!frameDoc) return;
+
+          const el = frameDoc.querySelector(selector);
+          if (!el) {
+            dom.highlightOverlay.style.display = 'none';
+            return;
+          }
+
+          const rect = el.getBoundingClientRect();
+          const frameRect = dom.previewFrame.getBoundingClientRect();
+
+          dom.highlightOverlay.style.display = 'block';
+          dom.highlightOverlay.style.top = `${frameRect.top + rect.top}px`;
+          dom.highlightOverlay.style.left = `${frameRect.left + rect.left}px`;
+          dom.highlightOverlay.style.width = `${rect.width}px`;
+          dom.highlightOverlay.style.height = `${rect.height}px`;
+          dom.highlightOverlay.dataset.selector = selector;
+          dom.highlightOverlay.dataset.status = status || '';
+        } catch (e) {
+          // Cross-origin or other error
+          dom.highlightOverlay.style.display = 'none';
+        }
+      }
+
+      // =======================================================================
+      // Debug Controls
+      // =======================================================================
+
+      function togglePause() {
+        state.isPaused = !state.isPaused;
+        if (dom.pauseIcon) {
+          dom.pauseIcon.textContent = state.isPaused ? '▶' : '⏸';
+        }
+
+        sendWsMessage({
+          type: state.isPaused ? 'Pause' : 'Resume'
+        });
+
+        // Notify preview frame
+        dom.previewFrame?.contentWindow?.postMessage({
+          type: state.isPaused ? 'st:debug:pause' : 'st:debug:resume'
+        }, '*');
+
+        updateDebugButtons(state.isPaused);
+      }
+
+      function stepForward() {
+        if (!state.isPaused) return;
+
+        sendWsMessage({ type: 'Step', direction: 'forward' });
+
+        dom.previewFrame?.contentWindow?.postMessage({
+          type: 'st:debug:step',
+          direction: 'forward'
+        }, '*');
+      }
+
+      function stepBackward() {
+        if (!state.isPaused || state.currentStepIndex <= 0) return;
+
+        sendWsMessage({ type: 'Step', direction: 'backward' });
+
+        dom.previewFrame?.contentWindow?.postMessage({
+          type: 'st:debug:step',
+          direction: 'backward'
+        }, '*');
+      }
+
+      function stopExecution() {
+        state.isRunning = false;
+        state.isPaused = false;
+
+        dom.previewFrame?.contentWindow?.postMessage({
+          type: 'st:debug:stop'
+        }, '*');
+
+        highlightElement(null);
+        updateDebugButtons(false);
+      }
+
+      function updateDebugButtons(isPaused) {
+        const stepBack = document.querySelector('[data-action="step-back"]');
+        const stepForward = document.querySelector('[data-action="step-forward"]');
+
+        if (stepBack) stepBack.disabled = !isPaused || state.currentStepIndex <= 0;
+        if (stepForward) stepForward.disabled = !isPaused;
+      }
+
+      function runAllTests() {
+        state.isRunning = true;
+        state.steps = [];
+        state.currentStepIndex = -1;
+
+        // Clear steps list
+        if (dom.stepsList) {
+          dom.stepsList.innerHTML = '';
+        }
+
+        // Trigger tests in preview frame
+        dom.previewFrame?.contentWindow?.postMessage({
+          type: 'st:test:run-all'
+        }, '*');
+      }
+
+      // =======================================================================
+      // Timeline/State/Signal Visualization
+      // =======================================================================
+
+      function handleTimelineUpdate(data) {
+        state.timelines.set(data.name, {
+          name: data.name,
+          progress: data.progress,
+          driver: data.driver,
+          duration: data.duration,
+          status: data.status,
+        });
+        renderTimelines();
+      }
+
+      function handleStateChange(data) {
+        const existing = state.stateMachines.get(data.selector) || {
+          selector: data.selector,
+          history: [],
+          transitions: 0,
+        };
+
+        existing.current = data.state;
+        existing.history.push(data.state);
+        existing.transitions++;
+
+        state.stateMachines.set(data.selector, existing);
+        renderStateMachines();
+      }
+
+      function handleSignalUpdate(data) {
+        const existing = state.signals.get(data.name) || {
+          name: data.name,
+          updates: 0,
+          watchers: 0,
+        };
+
+        existing.value = data.value;
+        existing.type = typeof data.value;
+        existing.updates++;
+        existing.watchers = data.watchers || 0;
+
+        state.signals.set(data.name, existing);
+        renderSignals();
+      }
+
+      function renderTimelines() {
+        if (!dom.timelineList) return;
+
+        dom.timelineList.innerHTML = '';
+        const template = document.querySelector('[data-component="timeline-entry"]');
+
+        for (const [, timeline] of state.timelines) {
+          const el = template.content.cloneNode(true).firstElementChild;
+
+          el.querySelector('[slot="name"]').textContent = timeline.name;
+          el.querySelector('[slot="progress"]').textContent = `${Math.round(timeline.progress * 100)}%`;
+          el.querySelector('[slot="fill"]').style.width = `${timeline.progress * 100}%`;
+          el.querySelector('[slot="driver"]').textContent = timeline.driver || 'time';
+          el.querySelector('[slot="duration"]').textContent = formatDuration(timeline.duration);
+          el.dataset.status = timeline.status;
+
+          dom.timelineList.appendChild(el);
+        }
+      }
+
+      function renderStateMachines() {
+        if (!dom.stateList) return;
+
+        dom.stateList.innerHTML = '';
+        const template = document.querySelector('[data-component="state-entry"]');
+
+        for (const [, sm] of state.stateMachines) {
+          const el = template.content.cloneNode(true).firstElementChild;
+
+          el.querySelector('[slot="selector"]').textContent = sm.selector;
+          el.querySelector('[slot="current"]').textContent = sm.current;
+          el.querySelector('[slot="transitions"]').textContent = `${sm.transitions} transitions`;
+
+          // Render history
+          const historyEl = el.querySelector('[slot="history"]');
+          for (let i = 0; i < sm.history.length; i++) {
+            const node = document.createElement('span');
+            node.className = 'state-node';
+            node.textContent = sm.history[i];
+            if (i === sm.history.length - 1) {
+              node.dataset.current = 'true';
+            }
+            historyEl.appendChild(node);
+          }
+
+          dom.stateList.appendChild(el);
+        }
+      }
+
+      function renderSignals() {
+        if (!dom.signalList) return;
+
+        dom.signalList.innerHTML = '';
+        const template = document.querySelector('[data-component="signal-entry"]');
+
+        for (const [, signal] of state.signals) {
+          const el = template.content.cloneNode(true).firstElementChild;
+
+          el.querySelector('[slot="name"]').textContent = signal.name;
+          el.querySelector('[slot="value"]').textContent = JSON.stringify(signal.value);
+          el.querySelector('[slot="type"]').textContent = signal.type;
+          el.querySelector('[slot="updates"]').textContent = `${signal.updates} updates`;
+          el.querySelector('[slot="watchers"]').textContent = `${signal.watchers} watchers`;
+
+          dom.signalList.appendChild(el);
+        }
+      }
+
+      // =======================================================================
+      // Results & Stats
+      // =======================================================================
+
+      function handleTestComplete(data) {
+        const stepIndex = state.currentStepIndex;
+        const step = state.steps[stepIndex];
+
+        if (step) {
+          const duration = Date.now() - step.startTime;
+          updateStepStatus(stepIndex, data.passed ? 'passed' : 'failed', duration);
+          highlightElement(step.selector, data.passed ? 'passed' : 'failed');
+        }
+      }
+
+      function updateResults(results) {
+        state.results = results;
+
+        if (dom.passedCount) dom.passedCount.textContent = results.passed;
+        if (dom.failedCount) dom.failedCount.textContent = results.failed;
+        if (dom.pendingCount) dom.pendingCount.textContent = results.pending;
+
+        if (dom.progressBar) {
+          const total = results.passed + results.failed + results.pending;
+          const progress = total > 0 ? (results.passed + results.failed) / total : 0;
+          dom.progressBar.style.width = `${progress * 100}%`;
+        }
+      }
+
+      // =======================================================================
+      // Tab Navigation
+      // =======================================================================
+
+      function initTabs() {
+        dom.tabs.forEach(tab => {
+          tab.addEventListener('click', () => {
+            const tabName = tab.dataset.tab;
+
+            // Update active tab
+            dom.tabs.forEach(t => delete t.dataset.active);
+            tab.dataset.active = '';
+
+            // Update active panel
+            dom.tabPanels.forEach(panel => {
+              if (panel.dataset.tabPanel === tabName) {
+                panel.dataset.active = '';
+              } else {
+                delete panel.dataset.active;
+              }
+            });
+          });
+        });
+      }
+
+      // =======================================================================
+      // Button Actions
+      // =======================================================================
+
+      function initActions() {
+        document.querySelectorAll('[data-action]').forEach(btn => {
+          btn.addEventListener('click', () => {
+            const action = btn.dataset.action;
+
+            switch (action) {
+              case 'run-all':
+                runAllTests();
+                break;
+              case 'run-selected':
+                if (state.selectedTestId) {
+                  dom.previewFrame?.contentWindow?.postMessage({
+                    type: 'st:test:run',
+                    testId: state.selectedTestId
+                  }, '*');
+                }
+                break;
+              case 'refresh':
+                dom.previewFrame?.contentWindow?.location.reload();
+                break;
+              case 'pause':
+                togglePause();
+                break;
+              case 'step-forward':
+                stepForward();
+                break;
+              case 'step-back':
+                stepBackward();
+                break;
+              case 'stop':
+                stopExecution();
+                break;
+              case 'watch-toggle':
+                // Toggle watch mode (auto-run tests on file change)
+                btn.classList.toggle('btn--active');
+                break;
+            }
+          });
+        });
+
+        // Filter input
+        if (dom.filterInput) {
+          dom.filterInput.addEventListener('input', (e) => {
+            state.filterQuery = e.target.value;
+            renderTestTree();
+          });
+        }
+      }
+
+      // =======================================================================
+      // Utilities
+      // =======================================================================
+
+      function formatDuration(ms) {
+        if (ms == null) return '';
+        if (ms < 1000) return `${ms}ms`;
+        return `${(ms / 1000).toFixed(2)}s`;
+      }
+
+      // =======================================================================
+      // Initialization
+      // =======================================================================
+
+      function init() {
+        connectWebSocket();
+        initDebugger();
+        initTabs();
+        initActions();
+        fetchTests();
+
+        console.log('[TestRunner] Initialized');
+      }
+
+      // Start when DOM is ready
+      if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', init);
+      } else {
+        init();
+      }
+    })();
+  </script>
+    <link rel="stylesheet" href="../../spacetime.css" />
+    <script src="../../spacetime.js"></script>
+</body>
+</html>

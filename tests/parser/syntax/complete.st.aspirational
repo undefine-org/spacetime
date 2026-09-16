@@ -1,0 +1,220 @@
+// Complete Spacetime syntax reference file
+// Shows a full .st file structure with all top-level constructs
+
+// ============================================
+// Imports
+// ============================================
+
+@import "./base.st"
+@import "./components/button.st"
+@import "spacetime/stdlib"
+
+// ============================================
+// Preset Definitions
+// ============================================
+
+@preset easing ~smooth: cubic-bezier(0.4, 0, 0.2, 1)
+@preset easing ~bouncy: spring(1, 100, 10, 0)
+
+@preset duration ~fast: 150ms
+@preset duration ~normal: 300ms
+@preset duration ~slow: 500ms
+
+@preset animation ~fadeIn {
+    from { opacity: 0 }
+    to { opacity: 1 }
+    duration: ~normal
+    easing: ~smooth
+}
+
+// ============================================
+// Type Definitions
+// ============================================
+
+@type Item {
+    id: string
+    name: string
+    count: number
+    active?: boolean
+}
+
+@type CartItem {
+    item: Item
+    quantity: number
+    price: number
+}
+
+// ============================================
+// Data Sources
+// ============================================
+
+@data items: Item[] from "api/items"
+@data cart: CartItem[] from localStorage("cart")
+
+// ============================================
+// Computed Values
+// ============================================
+
+@computed totalItems: number from $cart {
+    filter: $item.quantity > 0
+    reduce: sum($item.quantity)
+}
+
+@computed totalPrice: number from $cart {
+    map: $item.price * $item.quantity
+    reduce: sum
+}
+
+// ============================================
+// Function Definitions
+// ============================================
+
+@fn formatPrice(value: number): string {
+    return `$${value.toFixed(2)}`
+}
+
+@fn clampValue(value: number, min: number, max: number): number {
+    return Math.min(Math.max(value, min), max)
+}
+
+// ============================================
+// Global Definitions (in body scope)
+// ============================================
+
+body {
+    $count number: 0;
+    $expanded boolean: false;
+    &modal .modal-container;
+}
+
+// ============================================
+// Pattern Definitions
+// ============================================
+
+@pattern fadeInOut($duration: 300) {
+    @state_machine(initial: "hidden");
+    @state(when: "hidden") { opacity: 0; visibility: hidden; }
+    @state(when: "visible") { opacity: 1; visibility: visible; }
+    @transition(from: "hidden", to: "visible", on: "show");
+    @transition(from: "visible", to: "hidden", on: "hide");
+}
+
+@pattern hoverScale($scale: 1.05) {
+    @state_machine(initial: "idle");
+    @state(when: "idle") { transform: scale(1); }
+    @state(when: "hovered") { transform: scale($scale); }
+    @transition(from: "idle", to: "hovered", on: "mouseenter");
+    @transition(from: "hovered", to: "idle", on: "mouseleave");
+}
+
+// ============================================
+// Scope Blocks (Main Content)
+// ============================================
+
+.app {
+    display: flex;
+    flex-direction: column;
+    min-height: 100vh;
+}
+
+.header {
+    $menuOpen boolean: false;
+
+    background: #fff;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+
+    > .menu-toggle {
+        @on click {
+            $menuOpen <- !$menuOpen;
+        }
+    }
+
+    > .nav {
+        @fadeInOut(duration: 200)
+
+        @state-machine idle {
+            hidden, visible
+        }
+
+        @when $menuOpen {
+            visible
+        }
+    }
+}
+
+.product-card {
+    &image .card-image;
+    &title .card-title;
+    &price .card-price;
+
+    $quantity number: 1;
+
+    @hoverScale(scale: 1.02)
+
+    > .quantity-control {
+        > .decrement {
+            @on click {
+                $quantity <- Math.max(1, $quantity - 1);
+            }
+        }
+        > .increment {
+            @on click {
+                $quantity <- $quantity + 1;
+            }
+        }
+    }
+
+    > .add-to-cart {
+        @on click {
+            @addToCart($item, $quantity)
+        }
+    }
+}
+
+.cart {
+    @each($cart) as $cartItem {
+        @slot text .item-name: $cartItem.item.name
+        @slot text .item-price: formatPrice($cartItem.price)
+        @slot text .item-quantity: $cartItem.quantity
+    }
+
+    > .total {
+        @slot text .total-items: $totalItems
+        @slot text .total-price: formatPrice($totalPrice)
+    }
+}
+
+.modal {
+    $visible boolean: false;
+
+    @fadeInOut(duration: 300)
+
+    @state-machine hidden {
+        hidden, visible
+    }
+
+    @when $visible {
+        visible
+    }
+
+    &backdrop .modal-backdrop {
+        @on click {
+            $visible <- false;
+        }
+    }
+
+    &content .modal-content {
+        @on visible slideIn(300ms) {
+            transform: translateY(20px) -> translateY(0);
+            opacity: 0 -> 1;
+        }
+    }
+}
+
+// ============================================
+// File-Level Macro Calls
+// ============================================
+
+@registerComponent("ProductCard", .product-card)
+@registerComponent("Cart", .cart)
+@registerComponent("Modal", .modal)

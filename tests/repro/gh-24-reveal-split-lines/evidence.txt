@@ -1,0 +1,24 @@
+# gh-24 @reveal split:lines RE-SPLITS GENERATED DOM
+RUNTIME: spacetime test tests/repro/gh-24-reveal-split-lines/split-lines.test.st --headless
+  ✓ lines-mode reveal: RO availability + initial split under headless
+    @assert window.__ro === 'undefined' PASSED (ResizeObserver does NOT exist at headless rung)
+    @assert window.__units24 >= 1 PASSED (lines split DID happen at init)
+EMITTED-JS (spacetime inspect --layer emit split-lines.st), salient lines:
+  6854:  const originalNodes = Array.from(el.childNodes);   <-- snapshots INSIDE splitText, EVERY call
+  6857:  el.innerHTML = '';
+  7244:  // ResizeObserver for lines mode to re-split on resize
+  7246:  resizeObserver = new ResizeObserver(() => { splitText(); ... });
+SOURCE (stdlib/primitives/reveal.st): splitText() still re-reads el.childNodes each call (line 53); no immutable author-source snapshot (the issue's fix direction #1). ResizeObserver (line 446) still re-calls splitText() while unrevealed.
+
+VERDICT: STILL-SILENT — the re-snapshot defect is alive in the emitted primitive (re-snapshots generated DOM on a 2nd splitText, nests masks). Headless cannot EXERCISE the RO re-split path (no ResizeObserver shim at this rung), and check/build emit the unchanged re-snapshotting primitive with zero diagnostic.
+
+BEHAVIORAL-GATE VERDICT: RUNG-BLOCKED headless — the ResizeObserver re-split path cannot fire at the logic rung (no RO shim; `split-lines.test.st` asserts `typeof ResizeObserver === 'undefined'` and pins the initial split). The real gate is `split-lines.cdp.test.st` (needs layout, --cdp): mounts a lines reveal, records baseline `.st-reveal-line` count + textContent, resizes the element to trigger a real RO callback, and asserts the unit count is UNCHANGED and textContent is NOT multiplied — the issue's acceptance criteria. RED today (RO re-split nests stale units / multiplies textContent); GREEN once splitText is rebuilt from an immutable author snapshot. UNRUNNABLE here (no Chromium) — compiles, skips headless via `needs layout`.
+
+W5 RESOLUTION (PLAN-137 W5 / I5): splitText() now reads from an IMMUTABLE snapshot of
+author content captured once (`const originalNodes = Array.from(el.childNodes)` at setup)
+instead of re-snapshotting el.childNodes on every call. A 2nd split (the ResizeObserver
+re-split) rebuilds from the SAME author source — no nesting, no multiplication. The
+headless `split-lines.test.st` adds an idempotency gate (drives a 2nd split via the
+`_revealSplit` hook, asserts unit count + textContent unchanged; RED on the old
+re-snapshotting code). The real resize-driven gate remains `split-lines.cdp.test.st`
+(needs layout, --cdp).

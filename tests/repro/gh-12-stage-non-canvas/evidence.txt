@@ -1,0 +1,62 @@
+GH-12 @stage element constraint — VERDICT: see bottom (RED → GREEN)
+
+## The defect (GitHub #12)
+`@stage` bound to ANY selector with zero compile-time diagnostic. `check` and
+`build` both succeeded; the failure was runtime-only: three.js threw inside
+`three-stage`'s try/catch because `canvas.getContext` does not exist on a div,
+and sibling primitives logged separate `console.warn`s. Nothing rendered, and
+nothing in the compiler's output could be searched for.
+
+## The fix (user ruling: element `%scope`)
+`@stage` now declares `%scope selector element(canvas)`; the compiler resolves
+the bound selector's implied element and refuses when it cannot be a canvas.
+`element(<tag>)` is a registry variant alongside `file | selector |
+within(<construct>)` — kinds-as-data, not a Rust arm per case.
+
+## The unknowable case — DECIDED: warn-not-error (W0963)
+A selector with no element evidence (`.hero`), or a runtime-inserted node,
+cannot have its element determined at compile time. Ruling: WARN, do not error.
+An error would hard-block the legitimate pattern where a `<canvas>` is created
+at runtime (JS) and the `.st` only knows its class. But it must NOT pass
+silently — that silence is exactly how GH-23 (and this bug) happened. So
+`element()` behaves in three tiers:
+  - implied tag == required      → OK (canvas.st: `canvas.hero`)
+  - implied tag != required      → ERROR E0963 (index.st: `div.hero`)
+  - implied tag unknowable       → WARNING W0963 (unknowable.st: `.hero`)
+
+## Evidence (RED, bug live — binary: /home/user/w6-target/debug/spacetime)
+`@stage` on `div.hero`: check emits ZERO E0963 (compiles clean) → leg 1 RED.
+`@stage` on `.hero` (unknowable): check emits ZERO W0963 (silent) → leg 3 RED.
+`@stage` on `canvas.hero`: check clean (control) → leg 2 GREEN.
+
+## Evidence (GREEN, fix landed — binary: /home/user/w6-target/debug/spacetime, rebuilt after the fix)
+`@stage` on `div.hero` (index.st):
+  error[E0963]: @stage binds to a <div> element, but requires a <canvas> element — it would fail only at runtime.
+  --> tests/repro/gh-12-stage-non-canvas/index.st:19:3
+  = hint: The selector 'div.hero' resolves to a <div> element, but @stage only renders into a <canvas>. Change the selector's element to 'canvas' (e.g. 'canvas.hero') ...
+  → leg 1 GREEN (compile error naming the required element).
+
+`@stage` on `canvas.hero` (canvas.st): check clean AND `spacetime build` emits spacetime.js (1132683 bytes, 8 x WebGLRenderer) — the correct spelling compiles AND still emits (a constraint that rejects everything is not a fix). leg 2 GREEN.
+
+`@stage` on `.hero` (unknowable.st):
+  warning[W0963]: @stage requires a <canvas> element, but its selector '.hero' carries no element tag — cannot verify it will be one.
+  --> tests/repro/gh-12-stage-non-canvas/unknowable.st:14:3
+  = hint: Selector '.hero' carries no element tag, so the element cannot be verified at compile time. If the element is created at runtime this is fine; otherwise add an element (e.g. 'canvas.hero') ...
+  → leg 3 GREEN (warn-not-error, never silent).
+
+GATE: tests/repro/gh-12-stage-non-canvas/check-contract.sh — exit 0.
+
+## Files
+- index.st        div.hero { @stage } — the RED leg (must E0963)
+- canvas.st       canvas.hero { @stage } — control (must stay clean)
+- unknowable.st   .hero { @stage } — warn-not-error leg (must W0963)
+- check-contract.sh — the three-leg gate
+
+## Runtime special case demoted
+`three-stage.st`'s `new THREE.WebGLRenderer({ canvas, ... })` try/catch is kept
+(WebGL genuinely can be unavailable / context-loss) but is no longer the ONLY
+signal that a stage is on the wrong element — the compile-time E0963/W0963 fires
+first. The sibling `console.warn("[Spacetime] three-stage: target element not
+found.")` on a missing `%&el` remains a genuine guard (selector matches 0..N
+elements at runtime), distinct from the wrong-ELEMENT case now caught at compile
+time.

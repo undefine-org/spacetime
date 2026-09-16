@@ -1,0 +1,15 @@
+# gh-18 @reveal CUSTOM KEYFRAMES BODY DROPPED
+COMPILE: spacetime check tests/repro/gh-18-reveal-keyframes/reveal-keyframes.st
+  ✓ All 1 file(s) passed  (compiles clean, NO diagnostic)
+COMPILE-EVIDENCE: spacetime inspect --layer emit reveal-keyframes.st
+  grep -c 'blur'  ->  0   (custom body 'filter: blur(18px) -> blur(0)' NOT forwarded to reveal-engine)
+  the single '0.25' hit is runtime Math.sin, not the custom opacity keyframe
+RUNTIME: spacetime test tests/repro/gh-18-reveal-keyframes/reveal-keyframes.test.st --headless
+  ✓ custom keyframes body does NOT reach reveal-engine
+    @assert window.__units18 === 2 PASSED (reveal still SPLITS — primitive runs)
+    @assert window.__blurApplied === '' PASSED (custom filter:blur keyframe never materialized on split units)
+SOURCE: stdlib/macros/reveal.st reveal-with-keyframes %binds omits $body (same arg list as reveal-simple); reveal-engine has no keyframes param.
+
+VERDICT: STILL-SILENT — compiles clean, no diagnostic; the custom keyframes body is silently dropped (built-in split works, body has zero effect).
+
+BEHAVIORAL-GATE VERDICT: RED gate = `reveal-keyframes.cdp.test.st` (needs layout, --cdp): after the visible-trigger reveal, it asserts the WAAPI reveal animation's keyframes include a `filter` property. Body is dropped today → 'filter' absent → RED; goes GREEN when the macro forwards `$body:keyframes` into the engine. UNRUNNABLE here (no Chromium) — compiles, skips headless via `needs layout`. Headless `reveal-keyframes.test.st` documents the logic-rung ceiling: reveal splits into 2 word units and each starts a WAAPI animation (so the engine runs), but the headless WAAPI shim exposes no `effect.getKeyframes()`, so the keyframe-application claim is not assertable at the logic rung (RUNG-BLOCKED for that claim); it also pins the observed state that the custom filter is absent from applied inline styles.

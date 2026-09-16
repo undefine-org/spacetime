@@ -1,0 +1,83 @@
+GH-35 object local-state initializer — VERDICT: FIXED (BUG-342, commit a0e3aa0d)
+
+shape: `$user object: { name: "Ada" };` in a body — an object-typed local-state
+initializer, read as `.card { text <- $user.name; }`.
+
+THREE ERAS. This file described era 2 for a while after era 3 had shipped; the
+polarity of both gates has now been corrected, so read the whole arc:
+
+  era 1 — SILENTLY ELIDED
+    The declaration form's `$value` capture stopped before the `{ … }` object
+    literal (parsed as a BODY, not an expression), the leftover body was
+    discarded, the match was ACCEPTED, and the consumer still emitted
+    `ST.resolve(__node, 'user')` → `undefined` at runtime with ZERO
+    diagnostics. (BUG-205 family: a wrong answer, delivered confidently.)
+
+  era 2 — REFUSED (E0946)
+    W3 consume-or-refuse: the statement's bounded region was not fully
+    consumed, so the match failed loud —
+      error[E0946]: Expected capture `$value:Expr` but no tokens remaining
+      error[E0408]: Signal 'user' is used but not defined
+    Strictly better than era 1 (a refusal beats a silent wrong answer), but
+    still not the feature.
+
+  era 3 — FIXED (current)
+    `variable_ref` now applies the SAME `starts_object_literal` guard that
+    `directive()` already had, so a `{` in VALUE position is an object literal
+    instead of a body. The guard discriminates by POSITION: an object value
+    follows the `:` that introduces it; a body follows a directive head.
+
+    Why this was the right shape of fix: `$u object: { … }` failed while
+    `$u object: [1,2]` worked — adding a type removed a value shape that
+    already worked, and one path had the guard while its twin did not. Reusing
+    the single guard rather than adding a second notion of "is this an object"
+    is the point; two notions are how the paths came to disagree.
+
+CURRENT EVIDENCE (binary: ~/.cache/cargo-target/debug/spacetime)
+
+  $ spacetime check tests/repro/gh-35-object-local-state/index.st
+    ✓ tests/repro/gh-35-object-local-state/index.st
+    0 errors                              (era 1: 0 errors but wrong output;
+                                           era 2: E0946 + E0408)
+
+  $ tests/repro/gh-35-object-local-state/check-contract.sh
+    PASS: object-typed local-state initializer compiles clean (no E0946/E0408).
+
+  $ spacetime test tests/repro/gh-35-object-local-state/ --headless
+    ✓ object-typed local state renders a field
+    ✓ a quoted-key object literal renders the same
+    ✓ scalar local-state control renders true (harness works)
+    ✓ a css declaration body is still a body, not an object value
+    4 passed, 0 failed
+
+CANARY (the gates are known to detect, not merely observed green)
+
+  Disabling ONLY the `variable_ref` guard (`if false && …`, leaving
+  `directive()`'s intact) and rebuilding:
+    - behavioral gate: exactly the 2 object tests fail
+        "Expected .card to have text \"Ada\", got \"\""
+      the scalar control and the css-body companion stay GREEN — so the
+      instrument discriminates the object shape specifically, not the harness.
+    - contract gate: reports all three conditions (E0946, E0408, non-zero exit).
+  Restored → 4 passed, contract PASS.
+
+GATE POLARITY — why check-contract.sh was rewritten
+
+It asserted `>=1 E0946`, which was the correct contract in era 2 and became
+FALSE in era 3: it then FAILED AGAINST CORRECT CODE. That is what a
+refusal-gate always does once the feature lands — it pins the workaround, not
+the contract. It now asserts the real contract (clean compile, no E0946/E0408),
+which is false in era 1 AND era 2 and true only in era 3.
+
+The source check cannot prove rendering, so the behavioral half lives in
+gh-35-object-local-state.test.st. index.st also gained the markup it was
+missing — without an element the page exported nothing ("Export produced no
+pages"), so no build could have shown whether the value survived.
+
+RELATED, NOT A DEFECT
+
+The UNTYPED spelling (`$o: { name: "Bea" };`) does not declare a signal — it
+reports E0408 with the hint "Define the signal with a `$name type: value;`
+declaration". Measured across shapes: `$s: "hi"`, `$n: 42`, `$b: true` and
+`$a: [1,2]` ALL behave identically. So the type is required uniformly for every
+value type; the object is not a special case, and there is nothing to fix.

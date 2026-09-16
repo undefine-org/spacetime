@@ -1,0 +1,29 @@
+GH-20 raw CSS @font-face — VERDICT: STILL-SILENT
+
+shape: top-level `@font-face { font-family:"Test Font"; src:url(...); ... }`
+then `body { font-family: "Test Font", sans-serif; }`.
+
+Commands (fresh binary):
+  check index.st       -> ✓ index.st, ✓ All 1 file(s) passed (no diagnostic)
+  build index.st       -> ✓ Build complete; dist/spacetime.css (49 bytes):
+                           body { font-family: "Test Font", sans-serif; }
+                           (@font-face block ABSENT from output)
+  inspect --layer emit | grep -i 'font-face' -> only the body usage line
+                           "font-family: \"Test Font\", sans-serif;"
+                           no @font-face rule, no diagnostic hinting @font(...)
+
+CONCLUSION: standard CSS `@font-face { ... }` still silently vanishes with zero
+diagnostics — no error, no warning, no pointer toward the `@font("Family"){...}`
+macro. The silent-drop class is alive for this spelling.
+
+BEHAVIORAL-GATE VERDICT: RUNG-BLOCKED headless — asserting the @font-face "reached the stylesheet / registered the family" needs CSSOM: `document.styleSheets` and `document.fonts` are BOTH undefined at the logic rung, and the headless getComputedStyle stub only mirrors inline style (cannot prove resolution). `font-face.test.st` documents these gaps explicitly and is GREEN headless. The real gate is `font-face.cdp.test.st` (needs layout, --cdp): scans `document.styleSheets` for a CSSFontFaceRule (type 5) declaring "Test Font". RED today (rule is dropped at compile time); written to go GREEN once @font-face support lands (product-ruled supported). UNRUNNABLE here (no Chromium) — compiles, skips headless via `needs layout`.
+
+--- RESOLVED (W7, 2026-08-07) ---
+Product ruled raw @font-face SUPPORTED (PLAN-137 W7 #20): it joins the host CSS
+at-rule passthrough registry (HOST_CSS_PASSTHROUGH_AT_RULES, src/parser/mod.rs)
+alongside @media/@supports/@keyframes. `build index.st` now emits the @font-face
+rule verbatim into spacetime.css (converging with the @font("Family") macro on
+the same rule), and `check` is silent (the misleading W0714 "not a known
+directive" no longer fires). GREEN gate: check-contract.sh (emitted-stylesheet
+half) + font-face.cdp.test.st (browser/CSSOM half, --cdp). Design rule recorded
+in docs/language/css-interop.md.

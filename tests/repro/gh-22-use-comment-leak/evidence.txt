@@ -1,0 +1,27 @@
+GH-22 @use '// Primitive not found: use' leak — VERDICT: FIXED-WORKS
+
+shape: module.st (badge %macro + badge-emit %primitive) + index.st using @use.
+
+Commands (fresh binary /home/user/.cache/cargo-target/debug/spacetime):
+
+1. minimal: `@use "./module.st"` + markup   -> build ✓, 0-byte, NO comment.
+2. corrected full page (badge call WITH its required body):
+   @use "./module.st" as b
+   <main><span class="badge"></span></main>
+   .badge { @b/badge("NEW") { color: red } }
+   -> build ✓ ; grep -c 'Primitive not found' d2/spacetime.js = 0  (leak GONE)
+   -> d2/spacetime.css = ".badge::before { content: "$label"; }"  (namespaced @use
+      resolves module macro + emits primitive correctly)
+
+NOTE on the issue's LITERAL repro (`@b/badge("NEW")` with NO body): it now fails
+build with error[E0946]: Directive does not match its declared grammar: Expected
+body block `{ ... }`. The badge %form requires a body; the issue-era call omitted
+it. This is grammar strictness (BUG-264-style), NOT the @use leak — @use itself
+builds and works. The reported symptom (leaked comment) is resolved.
+
+=== GATE (2026-08-06) ===
+check-contract.sh — GREEN regression gate (exit 0). Asserts `build index2.st`
+ships ZERO `Primitive not found` in spacetime.js AND emits the module's
+`.badge::before` rule into spacetime.css; today both hold, so the fix is
+locked. Emitted-artifact inspection is the natural shell contract. Quoted pass:
+  PASS: 0 leaked 'Primitive not found'; module CSS (.badge::before) emitted.
