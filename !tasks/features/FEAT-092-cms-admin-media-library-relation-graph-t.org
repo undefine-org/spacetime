@@ -1,0 +1,87 @@
+#+TITLE: CMS admin: media library + relation graph tool views
+#+STATE: DONE
+#+SESSION_ID: 14fc108ed3772fa8
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-04T14-32-37-965Z_14fc108ed3772fa8.jsonl]]
+#+CUSTOM_ID: FEAT-092-cms-admin-media-library-relation-graph-t
+#+COMPLETION_HASH: d3dd13aab9950e32
+
+* Initial Message
+
+what do you need from me to implement FEAT-076 fully and in a Spacetime-y way? I am going to sleep so you'll auto-accept the most ambitious and Spacetime-y choice every time (unlimited budget). Ask me questions one last time, if needed, before going off
+
+* FUP — media library + relation graph (FEAT-076 W4 deferred aux views)
+
+** Parent
+[[id:FEAT-076-rebuild-the-cms-admin-multi-file-the-pro]] — the two lowest-value aux tool
+views, deferred from W4 so the core admin (collections/schema-editing/CRUD/relations/theme)
+could complete + cut over. NOT blocking the acceptance proof (admin already runs entirely
+on platform constructs; only persist.st keeps %emit js).
+
+** Scope
+1. MEDIA LIBRARY (@portal modal): a grid picker over /__spacetime/dev/assets.json; the
+   media widget's "Library" button opens it; picking sets the field value. Needs the
+   asset-upload flow (dev/upload endpoint exists). Monolith: openMediaLibrary (admin-app.st
+   ~843).
+2. RELATION GRAPH: an SVG view of the content graph (entries + id(T) relation edges) for
+   collections that declare relations. The list pane's List/Graph toggle switches to it.
+   Monolith: renderGraph (admin-app.st ~482), typeHasRelations/relationFields (~461-482).
+
+** Approach
+- Media: @portal(when:$mediaOpen) on a .ad-medialib modal; @each over fetched assets →
+  &asset-card; click sets the active media field's value via adEditField + closes.
+- Graph: a tool pane (like theme) that fetches the active collection's entries + the
+  type's relation fields, lays out nodes + edges as inline SVG, rendered by a runtime
+  helper (the SVG layout is computational — a helper like adFormFields is acceptable glue).
+
+** Acceptance
+- [ ] Media picker opens, lists assets, picking sets + persists the field.
+- [ ] Graph renders nodes/edges for a relation-bearing collection; List/Graph toggle works.
+- [ ] Browser-verified against a fixture with assets + relations.
+
+NOTE [2026-06-10]: UNBLOCKED for the declarative tool-pane rebuild: BUG-077 (committed 40e9d938) fixed the @data derive paren-led grammar, so the theme pane can now be fully declarative — verified `@data fetch $td : theme.json; @data derive $tokens : $td.tokens; @each($tokens as $t){...}` compiles clean. The W4 final-swarm flagged that the current theme/palette/motion panes render via imperative innerHTML in st.js (ST._adRenderTheme etc.), which the reviewer said undercuts the 'entirely declarative' claim (the core content admin IS fully declarative — that's the acceptance proof; the tool panes were the one seam). Recommended approach for the declarative rebuild: theme pane = @data fetch theme.json → @data derive per-type groups (or a runtime grouping helper kept minimal) → @each → &token-card template with @on input persist (EditToken, debounced). Same pattern for palette (templates.json) + motion (motion.json). This + the media library + relation graph completes FEAT-092. Also: BUG-079 fixed (multibyte unicode now renders literally) so no entity workarounds needed in the new templates.
+
+* Deep review (2026-06-06) — what's available vs what's missing
+
+** Server (ALL contracts already exist — zero Rust needed for data)
+- GET /__spacetime/dev/assets.json (src/server.rs:3492) → {images:[{path,..}]}, bounded walk of assets/, exts png/jpg/jpeg/gif/webp/svg, depth≤6, cap 2000
+- POST /__spacetime/dev/upload (src/server.rs:~2000) → multipart, 10MB cap, blake3 content-hash dedup → {path}
+- theme.json {tokens:[{name,type,value,file}]} · templates.json {templates:[{name,params}]} · motion.json {animations:[{kind,file}]}
+- dev-ws ops: EditJson/EditJsonArray/EditToken (src/sync/protocol.rs:11)
+
+** Platform capabilities verified by probe (post BUG-077/079)
+- ✓ multi-signal derive w/ arrow-fn filter: `@data derive $shown : ($doc.tokens || []).filter(t => t.path.indexOf($q) !== -1)` COMPILES (search-filter pattern works)
+- ✓ SVG tags + attrs parse + build (<svg viewBox><circle cx>) — grammar fine
+- ✓ @each inside <svg> compiles
+- ✗ **SVG NAMESPACE GAP (the one true platform gap)**: BOTH render paths create SVG elements in the HTML namespace → they never paint:
+  1. reactive builder emit_element (src/emit/html_reactive.rs:385) — `document.createElement(tag)` unconditionally; needs createElementNS('http://www.w3.org/2000/svg', tag) inside svg context
+  2. each-inline makeRow (stdlib/primitives/data/each-inline.st:209-211) — `tpl.innerHTML = rowHtml; tpl.content.firstElementChild` parses `<circle>` outside <svg> context → HTMLUnknownElement; needs SVG-context wrap when the each container is SVG
+
+** Monolith behavioral specs (recovered from git 2fc402a4~1)
+- openMediaLibrary (~843): overlay modal, search input filters by path substring, grid of thumb buttons (background-image), click → onPick(path)+close; assets cached on state
+- media wiring (~916-957): Replace = hidden file input → FormData POST upload → persist returned path; Library = openMediaLibrary → persist picked path
+- renderGraph (~482): bipartite layout — source entries column (lx=150) vs deduped relation-target column (rx=W-150), rowH 56; cubic-bezier edges under nodes; node click → open drawer; legend = relation fields; empty state when no edges
+- relationFields (~470): from types.json properties — widget relation → {field, target:x-st-ref, multi:false}; relation-multi → items.x-st-ref, multi:true
+
+** Imperative seams to kill (st.js ~1094-1199)
+- adRenderToolPane + _adToolHead + _adRenderTheme + _adRenderPalette + _adRenderMotion (~110 lines innerHTML)
+- KEEP (accepted glue/data-shaping): adEditToken (debounce), adHydrateControls, adFormFields, _adRelCache loaders
+
+* W3 DONE (2026-06-06) — declarative SVG relation graph
+- The FIRST data-driven vector rendering in the platform. Bipartite graph: source entries (left) → deduped relation targets (right), cubic-bezier edges, all REAL <svg> markup via @each. Zero imperative DOM, zero string-concat SVG.
+- graph.st: @data inline $graph <- adGraphLayout (effect on $entries/$view); @data derive $graphNodes/$graphEdges/$graphH/$graphViewBox; &ad-gedge (<path d=$e.d>) + &ad-gnode (<g><circle><text>) templates; @each fills the <g> mounts; node-click → adGraphNodeIndex/adGraphNodeOpens (source opens drawer, target -1 no-op); List/Graph toggle ($view) hidden when !$activeHasRelations.
+- app.st: $view + $activeHasRelations signals; the <svg class=ad-graph><g ad-graph-edges><g ad-graph-nodes> skeleton as FILE-SCOPE shell markup (selector-nested markup is dropped — FEAT-076 learning — and the static path namespaces the <svg> correctly).
+- st.js glue (data-shaping seam): adGraphLayout (bipartite geometry + bezier d-strings), _adRelationFields, adTypeHasRelations, _adTargetLabel, adGraphNodeIndex/Opens.
+- KEY platform extension (BUG-082 follow-up): the reactive builder now createElementNS's UNAMBIGUOUSLY-SVG tags (g/path/circle/text/… via is_svg_tag) even at svg_depth 0 — a standalone @template body (e.g. &ad-gnode) whose <svg> mount parent the compiler can't see still paints. RED→GREEN standalone_svg_template_root_is_namespaced (lib) + feat092_graph_layout_bipartite_nodes_edges (v8). Browser-verified: posts→authors graph paints (6 SVG-ns nodes + 6 edges all painted), source node-click opens drawer, target no-op. Screenshot: projects/cms-testbed/feat092-w3-graph.png.
+- Gates: lib 2181/0, integration 170/0, v8 344/12 (BUG-039 baseline), stdlib clean.
+
+* W4 DONE (2026-06-06) — declarative tool panes (last innerHTML seam killed)
+- The theme/palette/motion tool panes are now FULLY DECLARATIVE: @data fetch {theme,templates,motion}.json → shaping derives → @each + dynamic-dispatch templates. Deleted ST.adRenderToolPane + _adToolHead + _adRenderTheme/_adRenderPalette/_adRenderMotion (~110 lines of innerHTML). The only admin st.js left is DATA-SHAPING (adThemeRows/adComponentCards/adMotionCards/adTool*) + persist glue (adEditToken debounce) + control hydration (adHydrateControls) — the accepted seams.
+- tools.st: 5 widget templates (&ad-token-group/color/row, &ad-palette-card, &ad-motion-card); theme uses dynamic dispatch &$r.tpl($r) (group headers interleaved with color/text token cards); .shown classes key each grid on $pane.
+- app.st: structured .ad-tool-pane with header (reactive title/sub) + theme/palette/motion grid mounts.
+- LATENT BUG FIXED: the old _adRenderMotion read d.animations but the server emits `motions` → motion pane was ALWAYS empty. The declarative rebuild reads the correct key (verified: reveal fade + scroll parallax render).
+- Browser-verified: Theme (3 type groups, 7 tokens, 3 color pickers, "brand scarlet"), Components (card/hero with $sig signatures), Motion (reveal fade/scroll parallax). Theme token edit → live-preview (--brand-scarlet #00AAFF applied to documentElement) + persisted to index.st via EditToken dev-ws. Screenshot: projects/cms-testbed/feat092-w4-theme.png.
+- Bugs FILED mid-flight (worked around, not blocking): BUG-084 (derive grammar: nested ternary with parenthesized branch fails → moved 3-way string selection to shaping helpers, cleaner anyway); BUG-085 (nested @each inside a @template body renders as literal text → param chips shaped to one $sig string).
+- RED→GREEN: feat092_tool_pane_shaping (v8). Gates: lib 2190/0, integration 170/0, v8 344/12 (BUG-039 baseline), stdlib clean. Snapshot deletions = exactly the removed renderers.
+- **ALL FOUR FEAT-092 waves complete.** The admin is now end-to-end declarative: every visible pane (content list, relation graph, media library, all tool panes) is .st markup + @data/@each/@template/@portal. The only remaining st.js is network/data-shaping/hydration glue.
+
+NOTE [2026-06-10]: ALL FOUR WAVES COMPLETE. W1 SVG namespace platform fix (BUG-082, commit b594b9d0) + standalone-SVG-template extension (is_svg_tag, in W3 commit). W2 declarative media library (commit 0a25fc74). W3 declarative SVG relation graph (commit e7c93949) — first data-driven vector rendering in the platform. W4 declarative tool panes (commit d5a6c0e6) — killed the last innerHTML seam. Surfaced+fixed BUG-083 (events-grammar paren-led derive truncation, commit 66b9f047); filed BUG-084 (nested-ternary-paren derive grammar) + BUG-085 (nested @each in template body) with declarative workarounds. The CMS admin is now END-TO-END DECLARATIVE: content list, relation graph, media library, and all tool panes are .st markup + @data/@each/@template/@portal/@effect. The only remaining admin st.js is network/data-shaping/hydration glue (the accepted seams, same class as adFormFields). Screenshots: feat092-w3-graph.png, feat092-w4-theme.png. Gates: lib 2190/0, integration 170/0, v8 344/12 (BUG-039 baseline, zero new), stdlib clean. The one reviewer concern from FEAT-076 W4 ("tool panes use imperative innerHTML, undercutting the entirely-declarative claim") is now fully resolved.

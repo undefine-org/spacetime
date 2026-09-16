@@ -1,0 +1,128 @@
+#+TITLE: Relocate compiler test fixtures and remove private-site tests
+#+STATE: DONE
+#+SESSION_ID: 14cb41bb54d20fb7
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-04-27T16-41-54-259Z_14cb41bb54d20fb7.jsonl]]
+#+CUSTOM_ID: PROJ-002-relocate-compiler-test-fixtures-and-remo
+#+EFFORT: 45m
+#+LAYER: tooling
+#+PRIORITY: #A
+
+* Initial Message
+
+I want you to make it very easy to make websites with spacetime.
+
+this means you reorganise the various websites into a projects/ folder that is gitignored, and you move all the websites inside it. i'll move the demo ones back at some point. initialise a new git repository there to keep track of our private websites.
+
+on top of that, the projects/ folder has a .gitignore of **/dist which is where the built website is put.
+
+make sure the experience of the product and the instructions on how to use it match this
+
+* Scope
+** In-scope
+- Move =site/test-runner/= to =tests/fixtures/test-runner/= (it is the browser test-runner UI used by =spacetime test --live=, not a user website).
+- Move =site/landing/{1,2,3}/= to =tests/fixtures/landing/{1,2,3}/= (compiler integration fixtures referenced by =tests/integration/landing_pages.rs= and =src/metasystem/tests.rs::test_index_st_zero_false_unknown_directives=).
+- Update every Rust path string referencing =site/test-runner= and =site/landing/<n>= to the new =tests/fixtures/= location.
+- Delete the four tests in =tests/integration/landing_pages.rs= that depend on private user sites: =compile_ikarchitecte=, =test_ikarchitecte_compiles_clean=, =test_ikarchitecte_no_comments_in_selectors=, =compile_oraventures=, =test_oraventures_compiles_clean=, =test_oraventures_no_e0402= (and any other test in that file that references =ikarchitecte/index.st= or =ora-ventures.com/index.st=).
+- Verify the rest of the test suite passes after the moves and deletions.
+
+** Out of scope
+- Moving user websites to =projects/= (handled by sibling layout item).
+- Adjusting =examples/= layout — =tests/test_helpers.rs::load_example= and =tests/validation/output_harness.rs= continue to point at =examples/=.
+- Re-implementing the deleted private-site tests as portable fixtures.
+
+* Existing Patterns
+- =tests/fixtures/= already exists in many Rust projects as the canonical home for static fixture content; introduce that directory here.
+- Path constants in tests use =PathBuf::from("site/...")= or =fs::read_to_string("site/...")= — replace literal strings, no helper extraction yet.
+- =run_live_test_runner= in =src/main.rs= keeps the same logic; only the directory path changes.
+
+* Tests
+- =cargo test --test integration_tests landing_page= passes after path update for landing/{1,2,3}.
+- =cargo test --test integration_tests test_runner_site= passes after path update.
+- =cargo test --lib metasystem::tests::tests::test_index_st_zero_false_unknown_directives= passes after path update.
+- =cargo test --lib= passes overall (1574+ baseline; allow for the 6 deleted private-site tests, so expect 1568+).
+- =cargo test --test integration_tests= passes (442+ baseline; subtract deleted tests).
+- =cargo run -- test --live= (smoke) loads the test runner UI from =tests/fixtures/test-runner/= and serves it.
+- =grep -rn "site/test-runner\|site/landing/" src/ tests/= returns zero hits after the change.
+- =grep -rn "ikarchitecte/index.st\|ora-ventures.com/index.st" src/ tests/= returns zero hits.
+
+* Implementation
+** ITEM Inventory all source-code references to moved fixtures
+:PROPERTIES:
+:CUSTOM_ID: PROJ-002-relocate-compiler-test-fixtures-and-remo::ref-inventory
+:END:
+- Run =grep -rn 'site/test-runner\|site/landing/' src/ tests/= and capture the exact lines/files.
+- Confirmed call sites (must all be updated):
+  - =src/main.rs::run_live_test_runner= — three string literals at lines ~2487, ~2498, ~2500, ~2501, ~2512, ~2544.
+  - =src/metasystem/tests.rs::test_index_st_zero_false_unknown_directives= — two strings at line ~1559–1560.
+  - =tests/integration/landing_pages.rs::compile_landing_page= — format string at line ~12, plus three direct =fs::read_to_string= calls at lines ~95, ~128, ~161.
+  - =tests/integration/test_runner_site.rs= — four =PathBuf::from("site/test-runner/...")= at lines ~18, ~66, ~93, ~117.
+  - =tests/e2e/live_test_runner.rs= — three =PathBuf::from("site/test-runner/...")= at lines ~68, ~93, ~117.
+
+** ITEM Move site/test-runner → tests/fixtures/test-runner
+:PROPERTIES:
+:CUSTOM_ID: PROJ-002-relocate-compiler-test-fixtures-and-remo::move-test-runner
+:DEPENDS: PROJ-002-relocate-compiler-test-fixtures-and-remo::ref-inventory
+:END:
+- =mkdir -p tests/fixtures=
+- =git mv site/test-runner tests/fixtures/test-runner=
+- Verify =ls tests/fixtures/test-runner/index.html tests/fixtures/test-runner/index.st= succeed.
+
+** ITEM Move site/landing/{1,2,3} → tests/fixtures/landing/{1,2,3}
+:PROPERTIES:
+:CUSTOM_ID: PROJ-002-relocate-compiler-test-fixtures-and-remo::move-landing
+:DEPENDS: PROJ-002-relocate-compiler-test-fixtures-and-remo::ref-inventory
+:END:
+- =mkdir -p tests/fixtures/landing=
+- =git mv site/landing/1 tests/fixtures/landing/1=
+- =git mv site/landing/2 tests/fixtures/landing/2=
+- =git mv site/landing/3 tests/fixtures/landing/3=
+- After this, =site/landing/= is empty — =rmdir site/landing= (or let the sibling layout item =rm -rf site/= cover it).
+
+** ITEM Update Rust path constants for test-runner
+:PROPERTIES:
+:CUSTOM_ID: PROJ-002-relocate-compiler-test-fixtures-and-remo::update-test-runner-paths
+:DEPENDS: PROJ-002-relocate-compiler-test-fixtures-and-remo::move-test-runner
+:END:
+- In =src/main.rs::run_live_test_runner=, replace every =site/test-runner= literal with =tests/fixtures/test-runner=.
+- Update the user-facing eprintln messages similarly: "Test runner site not found at =tests/fixtures/test-runner/=", "  - =tests/fixtures/test-runner/index.html=", "  - =tests/fixtures/test-runner/index.st=".
+- In =tests/integration/test_runner_site.rs= and =tests/e2e/live_test_runner.rs=, replace each =PathBuf::from("site/test-runner/...")= literal correspondingly.
+
+** ITEM Update Rust path constants for landing/{1,2,3}
+:PROPERTIES:
+:CUSTOM_ID: PROJ-002-relocate-compiler-test-fixtures-and-remo::update-landing-paths
+:DEPENDS: PROJ-002-relocate-compiler-test-fixtures-and-remo::move-landing
+:END:
+- In =tests/integration/landing_pages.rs::compile_landing_page=, replace =format!("site/landing/{}/index.st", num)= with =format!("tests/fixtures/landing/{}/index.st", num)=.
+- Replace each direct =fs::read_to_string("site/landing/<n>/index.st")= in the same file.
+- In =src/metasystem/tests.rs::test_index_st_zero_false_unknown_directives=, replace both occurrences of =site/landing/1/index.st=.
+
+** ITEM Delete private-site tests
+:PROPERTIES:
+:CUSTOM_ID: PROJ-002-relocate-compiler-test-fixtures-and-remo::delete-private-tests
+:END:
+- In =tests/integration/landing_pages.rs=, delete the entire "IKARCHITECTE TESTS" section (helper =compile_ikarchitecte=, =test_ikarchitecte_compiles_clean=, =test_ikarchitecte_no_comments_in_selectors=) and the entire "ORAVENTURES.COM TESTS" section (helper =compile_oraventures=, =test_oraventures_compiles_clean=, =test_oraventures_no_e0402=).
+- Remove any now-unused imports left behind.
+- Add a brief comment in the file: "Tests for private user sites moved out with the projects/ reorganization."
+- Confirm =grep -n 'ikarchitecte\|ora-ventures.com' tests/= returns zero matches.
+
+** ITEM Verify suite green
+:PROPERTIES:
+:CUSTOM_ID: PROJ-002-relocate-compiler-test-fixtures-and-remo::verify-tests
+:DEPENDS: PROJ-002-relocate-compiler-test-fixtures-and-remo::update-test-runner-paths PROJ-002-relocate-compiler-test-fixtures-and-remo::update-landing-paths PROJ-002-relocate-compiler-test-fixtures-and-remo::delete-private-tests
+:END:
+- =cargo test --lib= passes.
+- =cargo test --test integration_tests= passes.
+- =cargo run -- check tests/fixtures/landing/1/= and same for 2 and 3 produce no parse errors (sanity that the fixture moved cleanly).
+
+* Edge Cases
+- =live_test_runner= cli command output now references =tests/fixtures/test-runner=. Doc updates will rephrase user-facing wording so this internal path is not surfaced as if it were a user website.
+- If any other call site references those paths (skill files, =DEV_SERVER_README.md=, etc.), the docs sibling item handles those — code paths must be exhaustive in this item, docs prose can reuse human terms.
+- Tests that ran =cargo run -- serve site/landing/1/= as a manual reproducer: now run =cargo run -- serve tests/fixtures/landing/1/= (documented in commit message; historical task notes are not retroactively rewritten).
+- Deletion of =compile_oraventures= removes one regression check for E0402 errors. The check was specific to a private site; if a generic equivalent is needed, a follow-up FUP can re-introduce it as a synthetic =.st= fixture.
+
+* Acceptance Criteria
+- =cargo test --lib && cargo test --test integration_tests= both green.
+- =grep -rn 'site/test-runner\|site/landing/' src/ tests/= prints nothing.
+- =grep -rn 'ikarchitecte/index.st\|ora-ventures\.com/index\.st' src/ tests/= prints nothing.
+- =tests/fixtures/test-runner/index.html= and =tests/fixtures/landing/1/index.st= exist; their =site/...= origins do not.
+- =cargo run -- test --live= boots the test runner UI from the new path (smoke test).

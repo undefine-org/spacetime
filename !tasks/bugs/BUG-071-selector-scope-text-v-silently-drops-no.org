@@ -1,0 +1,65 @@
+#+TITLE: Selector-scope `text <- $v` silently drops (no binding, no diagnostic)
+#+STATE: DONE
+#+SESSION_ID: 14fc108ed3772fa8
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-04T14-32-37-965Z_14fc108ed3772fa8.jsonl]]
+#+CUSTOM_ID: BUG-071-selector-scope-text-v-silently-drops-no
+#+COMPLETION_HASH: 8bb480eadbf58503
+
+* Initial Message
+
+ok dude! the original reason why we did all of this is to support Spacetime's Framer/Squarespace killer features, can you come back to them and show me how you'll implement the Spacetime-y version of them? I think the plan was already written
+
+* Parent
+[[id:FEAT-072-reactive-properties-lt-as-sole-surface-h]] — spec lines 50-51 + 67:
+the `<-` injection MUST parse + emit at FILE/selector scope, not only template bodies.
+Found by reviewer swarm (CodegenTruth lens) post-FEAT-072 cutover.
+
+* Symptom (emitted-JS verified, 2026-06-06)
+At SELECTOR scope, a bare `name <- $expr;` produces ZERO binding JS and NO diagnostic:
+| author (selector scope)         | emits NOW        | should emit                    |
+|---------------------------------+------------------+--------------------------------|
+| `.x { text <- $v; }`            | nothing (no-op)  | textContent binding on `.x`    |
+| `.x { src <- $.url; }`          | nothing          | setAttribute('src', …) on `.x` |
+| `.x { value <- $q; }`           | nothing          | setAttribute('value', …)       |
+Contrast: `.x { [slot] <- $v; }` (ATTRIBUTE arrow) DOES emit (separate path), and
+`.x { text: $v; }` (COLON form) DOES emit textContent. Only the BARE-ident arrow drops.
+
+The cutover migrated examples/data-binding/styles.st (`text <- $cartTotal`,
+`$cartCount`) + examples/tutorial/tutorial.st (`text <- $state`) onto this broken
+form, and the E0910 migration hints recommend it → dead reactive bindings shipped.
+This is the silent-swallow trap PLAN-030 forbids.
+
+* Root cause (two layers)
+1. PARSER (src/syntax/cst/parser.rs `parse_css_property_or_statement` ~2706): the
+   is_property lookahead only matches `name (ws) (?) COLON`. A `LEFT_ARROW` is not
+   recognized → the IDENT is `bump()`-ed, value dropped. No CssDeclaration, no
+   FormMatch → even E0909 (scans FormMatch captures) never fires.
+2. STALE CONSTRAINT (src/pipeline/mod.rs `check_injection_outside_template`, E0909):
+   asserts `<-` is "only valid inside a @template body" — contradicts FEAT-072 spec
+   lines 50-51 (must work at file/selector scope). Must be lifted for selector-scope.
+
+* Fix (FEAT-072-aligned)
+- Parser: extend `parse_css_property_or_statement` to also treat `name (ws) LEFT_ARROW`
+  as a CSS_PROPERTY (parse via a `class_property`-style path that keeps the `<-` so the
+  emitter sees the arrow). Mirror in events grammar if needed.
+- Reify/emit: a selector-scope CssDeclaration whose value is `<- $expr` lowers via
+  emit_reactive_binding_js → `text`/`content` ⇒ textContent; else ⇒ setAttribute(name).
+  Route the arrow RHS through the same transpile + `local:<dep>:updated` arc the COLON
+  form uses (incl. `| filter` pipes — spec line 68).
+- E0909: do NOT fire for selector-scope `<-` (only for genuinely-invalid contexts, if
+  any remain). Re-scope or remove check_injection_outside_template accordingly.
+
+* Repro (RED first)
+tests/integration/reactive_properties.rs: selector-scope `text <- $v;` emits a
+textContent binding + `local:v:updated`; `src <- $u;` emits setAttribute('src').
+V8: selector-scope `text <- $v` updates textContent on signal change.
+
+* Acceptance
+- [ ] selector-scope `text <- $v;` emits textContent binding (emitted-JS asserted)
+- [ ] selector-scope `src <- $u;` emits setAttribute('src')
+- [ ] `text <- $v | filter;` routes through the value-fn
+- [ ] no E0909 false-positive at selector scope; template-body `<-` unchanged
+- [ ] examples/data-binding/styles.st + tutorial.st now emit live bindings (re-verify)
+- [ ] full suite green
+
+NOTE [2026-06-09]: Fixed 14398693. Parser (cst/parser.rs parse_arrow_property: name <- value lowers as CSS_PROPERTY keeping the arrow; lookahead detects LEFT_ARROW). emit_reactive_binding_js routes text/content→textContent, else→setAttribute; pipes work. E0909 no longer false-positives (arrow now a CssDeclaration, not a FormMatch). Also fixed reviewer P2s: events is_class_property accepts keyword class names; bind_migration_hint guards non-empty class/attr/style; bind_cutover_invariant widened scan + word-boundary matcher. RED-first: 2 integration + 1 V8 (hydrate+react). Re-verified migrated styles.st/tutorial.st now emit live bindings. Gates: integration 168/0, v8 317/12 (pre-existing). Found by FEAT-072 reviewer swarm (CodegenTruth P1).

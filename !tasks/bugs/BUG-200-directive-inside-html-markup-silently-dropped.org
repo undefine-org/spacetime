@@ -1,0 +1,44 @@
+#+TITLE: A directive nested inside HTML markup (`<div> @scroll ... </div>`) is silently dropped AND leaks into innerHTML as text
+#+STATE: ITEM
+#+SESSION_ID: 153497c78a510229
+#+CUSTOM_ID: BUG-200-directive-inside-html-markup-silently-dropped
+
+* Found by
+BUG-194 suite triage (2026-07-18). After the @test-body swallow was fixed,
+six committed suite files (scroll-*.test.st, mouse-tilt.test.st) executed
+for the first time and failed: every one declares its driver as
+`@fixture { <div class="x"> @scroll name(...) { ... } </div> }`.
+
+* Two distinct silent failure modes
+1. SILENT DROP: a directive nested inside an HTML literal at file scope
+   produces ZERO IR primitives (`inspect --layer ir` on
+   `<div class="x"> @scroll s(start: 0, end: 1) { opacity: 0 -> 1; } </div>`
+   shows 0 primitives, 0 js, 0 css) -- the directive vanishes with no
+   diagnostic. `cargo run -- check` passes the file.
+2. MARKUP POLLUTION: in @fixture, the same shape is embedded via
+   `%$content.fixture_html` as innerHTML -- the @scroll SOURCE TEXT becomes
+   visible text content inside the div (confirmed in emitted
+   `__fixture.innerHTML`).
+
+* Contrast (why this went unnoticed)
+The supported shape -- file-scope selector scope `.x { @scroll ... }` +
+@fixture containing markup only -- works end-to-end (driver registers, init
+runs on fixture insertion). The assertion-side suite
+(tests/unit/assertions/timeline.test.st) avoids drivers entirely and
+registers via @eval (ST.timelines.register(...)). And before BUG-194 was
+fixed, all six files compiled to empty test bodies, so nobody saw the drop.
+
+* Expected
+E0900-class diagnostic ("directive inside HTML markup literal is not
+supported; move it to a selector scope `.x { @scroll ... }`") at the point
+where an HTML literal contains a nested directive -- same philosophy as
+BUG-167's unknown-directive E0900: never silently swallow an authored
+construct.
+
+* Out of scope
+Making directives-in-markup actually BIND (a real semantic feature) is NOT
+proposed: the selector-scope shape already expresses it (harmony: one need,
+one implementation). This item is diagnostics-only.
+
+* Related
+BUG-194 (the @test-body swallow that hid it), PLAN-078 (triage notes).

@@ -1,0 +1,77 @@
+#+TITLE: @view's view-mount primitive has the same dotted-path silent-render bug as BUG-155/BUG-160
+#+STATE: ITEM
+#+SESSION_ID: 15251010f7982b56
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-06T10-48-12-510Z_15251010f7982b56.jsonl]]
+#+CUSTOM_ID: BUG-161-views-view-mount-primitive-has-the-same
+
+* Initial Message
+
+push the capabilities of the 3d module + the workbench mcp through a concrete idea of a user interface that talks directly to this very agent using the mcp tools. This is a pressure test against both the host apis and the 3d apis. Design the 3d mockups using generate_image and then implement whatever surfaces you need using the blender mcp. commit as you go
+
+* Found via
+Round-2 pressure test (post FEAT-151 fix wave), continuing the audit started
+by BUG-160 into every reactive-source-resolving primitive in the stdlib
+touching `$signal.field` shapes. `@view $sig.field { ... }` (the re-render-
+on-change sibling of `@match`, both share the same arm-resolution idiom)
+silently rendered NOTHING — not even the initial pane — for a dotted-path
+subject.
+
+* Repro (isolated, confirmed RED on pre-fix code, GREEN after)
+#+begin_src
+@template &pane-a() { <p class="a">A</p> }
+@template &pane-b() { <p class="b">B</p> }
+.host {
+  @view $wrap.kind {
+    "a" => &pane-a();
+    "b" => &pane-b();
+  }
+}
+#+end_src
+With `$wrap = { kind: "a" }`: `.host` innerHTML was EMPTY before the fix
+(should show `<p class="a">A</p>`); correctly mounts pane A after.
+
+Notably, `@match` (`stdlib/primitives/match-render.st`, the render-ONCE
+sibling with an IDENTICAL arm grammar) was ALREADY CORRECT — confirmed by
+direct source read, it already does `path.split('.')` + `path.slice(1)`
+walk. Only `@view`'s `view-mount` (`stdlib/primitives/view.st`) had the bug
+— a case of the same idiom implemented twice, once correctly, once not.
+
+* Root cause (identical shape to BUG-155/BUG-160, traced not guessed)
+`stdlib/primitives/view.st::view-mount`'s `resolveValue()` checked
+`sig in window.SpacetimeLocal` (a literal dotted string like `"wrap.kind"`
+is never a real property name) and `ST.get(host, sig)` (same issue, no
+split). The reactive channels were ALSO keyed by the literal string:
+`document.addEventListener('local:' + sig + ':updated', ...)` and
+`ST.watch(host, sig, ...)`.
+
+* Fix
+Derive `sigHead = sig.split('.')[0]` and `sigTail = sig.split('.').slice(1)`;
+`resolveValue()` now resolves the HEAD from `SpacetimeLocal`/`ST.get` then
+walks `sigTail` as property access; the `local:<sig>:updated` listener and
+`ST.watch` call both key off `sigHead` (re-deriving the full path via
+`resolveValue()` on every fire, same as BUG-155/160's fix — the watched
+value itself is a superset (whole head object), never used directly).
+
+* Verification
+- RED confirmed on `git show HEAD:stdlib/primitives/view.st` (temporarily
+  reverted, re-tested, restored) — both new tests failed with the exact
+  symptom (empty pane / no re-mount).
+- Regression: `tests/unit/templates/view-dotted-path.test.st` (2 tests:
+  initial dotted-path mount + re-mount on head-signal reassignment, seeded
+  via `ST.set`+`ST._bridgeExport` since `@view` only reads
+  `SpacetimeLocal`/`ST.get`, not the `ST.setData` registry channel — unlike
+  `@each`, confirmed by reading `view-mount`'s source, no `ST.afterData`
+  subscription exists there).
+- Full suite green: `cargo test --lib` (2564), `cargo test --test
+  integration_tests` (181), `cargo run --features headless -- test tests/
+  --headless` (607, +2 new).
+
+* Pattern now audited across the stdlib
+This is the THIRD independent fix of this exact bug shape (BUG-155 in
+`each-with-templates`, BUG-160 in `each-inline`, this one in `view-mount`).
+`match-render.st` and `computed-source.st` were checked and confirmed
+ALREADY CORRECT. No further stdlib primitives grep-match the
+`sig in window.SpacetimeLocal` / `window.SpacetimeLocal[sig]` /
+`'local:' + sig + ':updated'` un-split pattern as of this commit (verified
+via `grep -rn` across `stdlib/primitives/` for the literal-concatenation
+shape) — this closes out the audit for this specific bug class.

@@ -1,0 +1,130 @@
+#+TITLE: @drag on-drop never fires: macro %on/%animates clauses dropped + runMutations can't fire a signal call
+#+STATE: DONE
+#+SESSION_ID: 1511009590860ad7
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-20T20-50-56-706Z_1511009590860ad7.jsonl]]
+#+CUSTOM_ID: PLAN-053-drag-on-drop-never-fires-macro-on-animat
+
+* Initial Message
+
+why is drag and drop not even being triggered in @demos/liveview-kanban/
+
+* Problem
+
+Drag-and-drop in `demos/liveview-kanban/` never triggers the `$move` signal.
+The gesture half of `@drag` works (pointer capture, deltas, velocity, the
+`dragging` CSS state), but the DROP callback (`on-drop: $move({...})`) never
+fires, and the dragged card never visually follows the cursor.
+
+Evidence (live page, simulated pointer drag c1 → done column):
+- deltaX during move : 757            ← gesture tracking WORKS
+- card.active        : true → false   ← drag state toggles correctly
+- signal:move:fire   : []             ← on-drop NEVER fires  ✗
+
+* Root cause — TWO structural gaps
+
+** Gap 1 (compiler): macro body %on / %animates / %applies clauses silently dropped
+
+`stdlib/macros/drag.st` expresses drop + motion as macro-body clauses:
+  %animates { translate-x: $x; translate-y: $y }    ← card follows cursor
+  %on $active -> false { $onDrop?.($x, $y, ...) }    ← on-drop callback
+
+Both are `MacroBodyItem` variants. In `src/pipeline/evaluate.rs:324` they hit a
+no-op arm ("handled by other layers or are no-ops"). That comment is false:
+grepping all of src/, nothing downstream consumes `MacroBodyItem::On` or
+`::Animates`. `MetaOnTrigger::VarTransition` (the `$active -> false` parse) is
+defined, parsed, validated — then never read by codegen. `%states` works only
+because it rides a SEPARATE `MacroDefAst.states` field, not the body.
+
+Sub-gap: the %on BODY parser (`parse_meta_on_body_items`) only recognizes
+`$x <- expr` and `%emit`. drag.st's body is `$onDrop?.(...)` — a bare expression
+statement it would drop even if the clause were evaluated.
+
+** Gap 2 (runtime): ST.runMutations cannot fire a signal call $sig({...})
+
+Even the DOCUMENTED fire path is broken. reactive-output.md:291 shows
+`@on click .go { $add($draft); }` as the way to fire. That lowers to
+`ST.runMutations(el, { js_statements: ["$add(...)"] })`, but runMutations
+(public/runtime/st.js:576) only handles `$coll.method(args)` and `$x <- expr`.
+A bare `$sig({...})` matches neither and is silently dropped. Verified live.
+
+* Fix (structural, both layers)
+
+1. Evaluate layer: stop dropping %on (VarTransition) and %animates. Lower them —
+   symmetric with generate_state_fragments (pipeline/mod.rs:892) — into
+   selector-scoped JsFragments:
+   - %on $v -> val: ST.watch $v, fire body on transition to val, run body via the
+     shared mutation rail.
+   - %animates { prop: $var }: reactive ST.bindStyle for transform props.
+   - Extend parse_meta_on_body_items to capture bare expr/signal-call statements.
+
+2. Runtime: extend ST.runMutations to recognize a bare signal call $name(args)
+   and invoke the registered fire fn (the callable signal-call yields). This is
+   the missing by-name invocation rail the documented @on { $sig(args) } assumes.
+
+* Tests
+- .test.st (headless): @drag { on-drop: $sig(...) } fires on drop; @on click
+  { $sig(args) } fires (documented path).
+- .rs: evaluate-layer unit (%on/%animates no longer dropped); compiler snapshot
+  (drag.st emits $active transition watcher + transform binding); v8 runtime
+  test (runMutations fires a signal call by name).
+
+* Files
+- src/pipeline/evaluate.rs, src/pipeline/mod.rs, src/parser/mod.rs,
+  public/runtime/st.js, stdlib/macros/drag.st, tests.
+
+Demo affected: demos/liveview-kanban/ (drag-and-drop dead until fixed).
+
+* RESOLUTION (DONE)
+
+Root cause was THREE structural gaps, all fixed:
+
+** Gap 1 (compiler): macro %on $var -> value silently dropped
+- src/pipeline/evaluate.rs: the no-op arm dropped MacroBodyItem::On. Now
+  VarTransition triggers are lowered into EvaluatedMatch.on_clauses, with action
+  params substituted (substitute_on_action — NoExpand to avoid `$move`→`$m`
+  regex corruption; whole-word param replace).
+- src/pipeline/mod.rs: generate_on_fragments (sibling to generate_state_fragments)
+  emits `ST.onTransition(el, var, value, () => ST.runMutations(el, {...}))`.
+- src/parser/mod.rs: parse_meta_on_body_items now captures bare ACTION statements
+  (not just `$x <- expr`); parse_meta_on_trigger uses inline_tail_text (descends
+  into the `$var` child node the token-only walker skipped) + trims the var.
+- src/parser/meta_ast.rs: new MetaOnBodyItem::Action variant.
+- stdlib/macros/drag.st: %on body changed from callback `$onDrop?.(...)` to the
+  action form `$onDrop` (runs the caller's on-drop expression).
+
+** Gap 2 (runtime): ST.runMutations couldn't fire a signal call by name
+- public/runtime/st.js: added ST._signalCalls registry + registerSignalCall /
+  getSignalCall, and a `$signal(args)` branch in runMutations that invokes the
+  registered fire fn (hoisted splitArgs/evalCallArg, shared with the collection
+  branch). Added ST.onTransition (edge-triggered watch into a target value).
+- stdlib/primitives/signal.st: the signal-call primitive now registers its fire
+  fn via ST.registerSignalCall(signalName, fire). This is the by-name invocation
+  rail the documented `@on { $sig(args) }` surface (reactive-output.md) assumed.
+
+** Gap 3 (form matching): a states block before on-drop swallowed it
+- src/syntax/events/form_compiler.rs: parse_body_properties now treats a depth-0
+  `}` (a `dragging { ... }` states sub-block) as an implicit statement boundary,
+  so the following `on-drop:` property is captured instead of being absorbed into
+  one giant key. Without this, `@drag` with a `dragging {}` block resolved onDrop
+  to the form default `null`.
+
+** Verification
+- Live demos/liveview-kanban: dragging a card now fires `signal:move:fire` with
+  the card id (the reported "drag and drop not triggered" bug is FIXED).
+- Tests (all green):
+  - tests/unit/macros/drag-on-drop.test.st (2) — on-drop fires / not mid-gesture
+  - tests/integration/signal-call-fire.test.st (4) — runMutations fires $sig by name
+  - src/pipeline/evaluate.rs (5) — %on lowering + substitution
+  - src/syntax/events/form_compiler.rs (1) — nested-block boundary
+  - src/compiler.rs (2) — drag emits onTransition + survives states block
+  - Full suite: 2457 lib + 179 integration green; snapshots updated (additive
+    runtime helpers only).
+
+** Deferred (filed)
+- PLAN-054: lower %animates (card-follows-cursor visual — needs %derives→reactive).
+- PLAN-055: kanban drop-target column detection (on-drop $.closest('.col') returns
+  the source column because @drag uses a transform, not a reparent).
+
+NB: a pre-existing set of v8/headless failures (media_dedup, collection-ref,
+selector-init) are from in-tree FUP-094 work, NOT this change — confirmed they sit
+outside the drag/signal/on surface and the full lib suite is green.

@@ -1,0 +1,78 @@
+#+TITLE: Site introspection API for type schemas and content discovery
+#+STATE: DONE
+#+SESSION_ID: 14a73642da8c17e1
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-03-30T14-30-47-693Z_14a71735234c17b2/20-CreateFeat4.jsonl]]
+#+CUSTOM_ID: FEAT-009-site-introspection-api-for-type-schemas
+#+EFFORT: S
+#+PRIORITY: #A
+#+LAYER: server
+
+NOTE [2026-03-30]: Implemented GET /__spacetime/dev/types.json (JSON Schema for all @type definitions) and GET /__spacetime/dev/site.json (pages, data sources, locales). Dev+debug mode only. Added iter_types() to TypeRegistry.
+
+* Scope
+
+** In scope
+- GET ~/__spacetime/dev/types.json~ endpoint returning JSON Schema for all @type definitions
+- GET ~/__spacetime/dev/site.json~ endpoint returning site-level page/data/template discovery
+- Caching via DevCompileCache with file-change invalidation
+
+** Out of scope
+- Browser-side consumption of these APIs (that's the admin panel item)
+- Modifying types or data sources through these endpoints (read-only)
+
+** Boundary rationale
+These endpoints provide the metadata foundation that the admin panel reads. Separating them makes the admin panel a pure client-side consumer.
+* Tests
+
+** Rust unit tests
+- JSON Schema generation: @type with string/number/bool/url fields produces correct JSON Schema
+- JSON Schema for array types: ~Customer[]~ produces ~{ type: array, items: ... }~
+- JSON Schema for optional fields: ~field: string?~ produces ~{ ... }~ without field in required[]
+- JSON Schema for nested types: @type with field referencing another @type produces $ref
+- Site discovery: given a site_dir with pages/, data/, locales/, produces correct manifest
+
+** Integration test
+- Serve site/dataiku, GET /dev/types.json, verify Customer/Product/Industry/Resource schemas present
+- Serve site/dataiku, GET /dev/site.json, verify pages, data sources, locale files listed
+- Modify a .st file, re-GET /dev/types.json, verify cache invalidation (new types appear)
+* Implementation
+
+** Step 1: Extend DevCompileCache (~src/server.rs~)
+- Currently DevCompileCache stores compiled JS/CSS output
+- Extend to also store the TypeRegistry extracted during compilation
+- When a .st file is compiled in dev mode, extract TypeRegistry from the compile pipeline and cache it
+- Invalidate on file change (same mechanism as existing cache invalidation)
+
+** Step 2: Types endpoint (~src/server.rs~)
+- New route: ~.route("/__spacetime/dev/types.json", get(dev_types_handler))~
+- Handler: get TypeRegistry from DevCompileCache (trigger compilation if not cached)
+- For each type, call ~generate_json_schema()~ (already exists in ~src/type_system.rs~)
+- Return: ~{ "types": { "Customer": { <json-schema> }, "Product": { <json-schema> } } }~
+- Include field metadata: name, type, required, description if available
+
+** Step 3: Site discovery endpoint (~src/server.rs~)
+- New route: ~.route("/__spacetime/dev/site.json", get(dev_site_handler))~
+- Handler: scan site_dir for structure
+  - Pages: walk pages/*.html (reuse ~loader::discover_pages~)
+  - Data sources: extract @data declarations from cached compilation (available in CompileAnalysis)
+  - Types: list all @type names from TypeRegistry
+  - Locales: scan locales/*.json (reuse ~detect_locale_prefixes~)
+  - Templates: extract @template names from cached compilation
+- Return: ~{ "pages": [...], "dataSources": [...], "types": [...], "locales": [...], "templates": [...] }~
+
+** Step 4: Cache integration
+- Both endpoints piggyback on the DevCompileCache
+- First request triggers compilation, subsequent requests read from cache
+- File watcher invalidation already exists; these endpoints benefit automatically
+* Edge Cases
+- Site with no @type definitions: types.json returns ~{ "types": {} }~
+- Site with no pages/ directory: site.json returns ~{ "pages": [] }~
+- Compilation error in .st file: return 500 with compile error message
+- @type with circular references: generate_json_schema already handles this (uses $ref)
+- Very large site (50+ types, 100+ data files): ensure response is fast (<100ms from cache)
+* Acceptance Criteria
+- GET /__spacetime/dev/types.json returns valid JSON with all @type definitions as JSON Schema
+- GET /__spacetime/dev/site.json returns valid JSON listing all pages, data sources, types, locales, templates
+- Cache invalidation works: modify .st file, re-request, get updated types
+- Endpoints are dev-mode only (404 in production)
+- ~cargo test --lib~ and ~cargo test --test integration_tests~ pass

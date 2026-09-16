@@ -1,0 +1,78 @@
+#+TITLE: Workbench editing-model rethink — separate server/client/canvas state planes
+#+STATE: DONE
+#+SESSION_ID: 1522aa9778a04732
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-04T14-07-53-826Z_1522aa9778a04732.jsonl]]
+#+CUSTOM_ID: PLAN-065-workbench-editing-model-rethink-separate
+#+COMPLETION_HASH: b696989405957218
+
+* Initial Message
+
+i have restarted the session, can you do the visual confirmation now?
+
+User-reported (live, autonomous session 2026-07-05), all three reproduced in SOURCE + confirmed by oracle:
+1. Editing anything in the right inspector makes it DISAPPEAR.
+2. Opening a side drawer dims+shrinks the stage (can't see what you edit).
+3. Clicking "Open environment" does nothing (no feedback on server-action failure).
+
+** ROOT FAULT (oracle-confirmed)
+The workbench made the poll-repaint snapshot the OWNER of interaction DOM. Server truth, client selection, draft input value, focus, action acknowledgement, and canvas visibility all share ONE ~1s repaint loop. So every real edit races the next server publish (bug 1), and server-action failures vanish unless the poll happens to produce visible UI (bug 3). Bug 2 is a modal-dialog metaphor (stage recedes) misapplied to a side panel meant to be used WHILE looking at the canvas.
+
+** CORRECTED MODEL — three state planes
+- SERVER plane: $mcpSnapshot / published arrays = immutable remote read-model (poll-repainted). Read-only lists ONLY (navigator, gallery, cards, events).
+- CLIENT plane: $selectedNode, $activeEditor(node+fields), per-field draft/dirty/pending/error. Owns focus + in-progress edits. NEVER repainted by the poll.
+- CANVAS plane: mounted guest bundle, seeded ONLY from committed overrides/source (not inspector drafts). Stays bright + geometrically stable while panels are open.
+
+Editing = optimistic-local-first: @on input updates local draft immediately; @mcp-action commits on blur/change carrying {fieldKey,target,value,baseRevision}; ack updates base + clears dirty; error keeps draft + shows field error. Poll reconciles clean fields, NEVER overwrites a dirty/focused input.
+
+** KEEP (verified sound, do NOT rewrite)
+The shared Structure IR + dotted-node selection spine: one canonical address (data-st-node) spans canvas DOM stamps + navigator rows + inspector selection + edit routing. src/introspect/mod.rs + src/mcp/bundle.rs stamping + env.st selection ring. The bug is ownership/lifecycle around repaint, NOT the id model.
+
+** BUILD ORDER (oracle waves, reordered cheapest-decisive-first)
+- W_dim (kills bug 2): DELETE the drawer-wide stage transform/filter recede rules (styles.st:416-423). Side drawers must not reduce stage luminance or scale. Pure CSS. Verify: computed .mcp-stage transform=none filter=none with inspector open.
+- W_feedback (kills bug 3 class): classify nested action.ok===false as an ACTION error in the host bridge (host.st:62-63 only checks top-level ok); publish $mcpActionError/$mcpActionPending; surface server error/summary in a toast. Make st_env_open visible (open/focus nav result). Verify: valid path -> success toast + visible env card; empty/invalid -> visible error, no silent no-op.
+- W_session (kills bug 1 primary): client editor-session projection. On selection, COPY the matching snapshot rows (mcpStageNodeBindings/mcpStageNodeParams) into client-owned $activeEditorFields; render inspector inputs from THAT client array, not @each(server-array when ==$selectedNode). Poll can no longer replace a focused input. Verify: focus input, type without commit, wait multiple polls -> input stays mounted+focused+draft preserved.
+- W_commit (kills bug 1 fully): optimistic commit + reconciliation. Commit carries field key + base revision; mark pending; ack updates base/clears dirty; failure keeps draft + field error; never blank the editor. Canvas re-renders from committed state via existing region-override rail. Verify: commit -> canvas updates after poll, input stays; force rejection -> input stays w/ draft + error.
+- W_hygiene (hardening): keep poll-driven @each for READ-ONLY surfaces; add keys where useful for churn; gate selection invalidation (selected id absent in new structure -> stale-selection notice, not mid-keystroke clear).
+
+** RISK / primitive note
+If Spacetime lacks a declarative "project selected row into a client signal" primitive, add a small OWNED primitive/directive for it (same category as @mcp-input/@mcp-action — platform editing infrastructure, NOT custom page JS). Per-field dynamic inputs MAY still use @each, but only over CLIENT-owned editor fields; the invariant is SOURCE OWNERSHIP, not absence of loops.
+
+** Constraints
+No custom page JS (signals + reactive classes + @on + selector directives + primitives only); :where() zero-specificity house styles; guest CSS wins in its own root; don't break the verified selection-id model.
+
+Oracle consult: agent://18-WorkbenchRedesign. Supersedes the "all green" claim from the prior session's live-verification note on PLAN-064 (that verification was invalid — it called handlers directly + dispatched synthetic events, testing code paths not user paths).
+
+NOTE [2026-07-05]: PROGRESS (2026-07-05, all live-verified on a self-launched MCP instance driven with REAL puppeteer interaction \u2014 not synthetic events):
+
+W_dim (BUG-152) DONE + swarm-cleared (0.92) \u2014 commit a05d4487. Stage no longer dims/shrinks/click-blocks when a side drawer opens; scrim inert. Verified: computed .mcp-stage transform=none filter=none with inspector AND with nav drawer open (screenshots plan065-wdim-inspector-open, plan065-feedback-success-toast).
+
+W_feedback (BUG-153) DONE + swarm-remediated \u2014 commits ac0f115b (BUG-154 compiler dep) + 531fca9f + f557d428 (P2 fix). Real-click Open environment (valid) -> 'Environment env-1 → tutorial' toast; invalid path -> red toast with server's verbatim error. Was a silent no-op. Screenshots plan065-feedback-success/error-toast.
+  - UNCOVERED + FIXED a compiler bug BUG-154 (DONE): %macro %binds output alias never threaded to the %yield write-time remap, so $mcpLastMessage (and all host-bridge aliased signals) were never written. This is why the U6 toast never worked either. Fixed in the compiler (4 sites) + RED->GREEN test. Retiring the mcp-input republish workaround is a clean follow-up.
+  - UNCOVERED FUP-111: reactive `text: $a || $b` drops all but the first term. Worked around by having the host bridge compute ONE $mcpActionText string. Filed for a real fix.
+
+Bugs filed for the 3 user reports: BUG-151 (edit disappears, -> W_session/W_commit), BUG-152 (DONE), BUG-153 (DONE). FEAT-150 (client editor plane). FUP-109 (IA reconception spike \u2014 PLAN-065 built layout-independent so it's mostly cosmetic later), FUP-110 (HTTP-only serve mode so we can drive without the MCP stdio), FUP-111 (reactive-|| drop).
+
+NEXT: W_session (BUG-151 primary) \u2014 client editor-session projection. code-explorer mapping the exact client-signal/array-projection/keyed-@each capabilities before design (may need a small owned primitive per the oracle). Then W_commit, W_hygiene.
+
+Self-launched driver: python3 /tmp/wb_driver2.py boots `spacetime mcp` over stdio, mounts st_workbench + registers/composes verify-hero, writes the URL to /tmp/wb_url.txt. This is how live verification is now done (real clicks), pending FUP-110 (HTTP-only mode).
+
+NOTE [2026-07-05]: COMPLETE (2026-07-05). All 5 waves shipped, each live-verified with REAL puppeteer interaction on a self-launched MCP instance (not synthetic events), swarm-reviewed, and remediated. Full test matrix green: lib 2556 · integration 181 · headless 598.
+
+THE THREE USER BUGS \u2014 ALL FIXED + LIVE-PROVEN:
+- BUG-152 (stage dims/shrinks when a drawer opens): W_dim (a05d4487). Removed the drawer-wide stage transform/filter recede + made the scrim inert. Verified: computed .mcp-stage transform=none filter=none with a drawer open; stage stays full-bright + clickable. Swarm 0.92.
+- BUG-153 (Open environment does nothing / silent server-action failures): W_feedback (531fca9f + f557d428). The action DID run server-side; the failure was FEEDBACK. host.st now classifies nested action.ok===false + computes one $mcpActionText (error>summary>name); env.st toast + styles.st red error pill. Verified: valid open -> 'Environment env-1 → tutorial'; invalid -> red server error. Swarm found + fixed a P2 (error-toast reset outlasts its 4.6s hold).
+- BUG-151 (editing the inspector makes it disappear): W_session (09bf4717). THE core rethink. Editable inputs were in a poll-driven @each that replaceChildren'd the focused input on every 1s tick. Now the CLIENT owns edit state: on selection the handlers project the node's rows into @data inline $activeBindings/$activeParams; the inspector @each iterates THOSE (which change only on selection, never on poll). @each watches only its own signal (ST.watchScoped, template.st:428), so the poll can't touch the inputs. Verified: type without committing, wait 5 poll ticks (4s) -> input exists, SAME DOM node, value + focus retained. Swarm 0.88.
+
+COMPILER BUG UNCOVERED + FIXED (BUG-154, ac0f115b): the whole feedback rail was dead because a %macro %binds output alias ($lastMessage as $mcpLastMessage) was never threaded into the %yield write-time remap, so $mcpLastMessage (and every host-bridge aliased signal) was never written. Traced by librarian (agent://20-AliasThreading). Fixed by threading the existing field through 4 pipeline sites + RED->GREEN test. This is why the U6 toast never worked either. Also means the mcp-input republish workaround can be retired (native alias now works).
+
+W_commit: CLOSED as substantially-delivered-by-W_session (oracle agent://25-ValidateWcommitScope). The baseRevision/conflict/reconcile machinery was designed for a poll that fights the input; W_session removed that causal path. Live-proven: commit updates canvas + persists (reselect shows committed value) + clean fields stay stable. Building the machinery would be speculative complexity (elegance-bar violation). Residual (quiet edit toasts) folded into W_hygiene.
+
+W_hygiene (2c076ab4 + bb71ccbc): (1) suppress noisy per-edit success toasts for mcp_param/mcp_node_param (failures still toast); (2) frame-param editor now shows value= (was placeholder-only, FUP-108 #3) + client-owned like the node editors (poll-survival); (3) removed dead .mcp-scrim.is-active. Swarm found + fixed a P2: reset the editor session on compose/clear so switching guests doesn't leave stale frame params.
+
+ARCHITECTURE (oracle three-plane model, agent://18-WorkbenchRedesign): SERVER snapshot = read-only poll-repainted lists; CLIENT plane = selection + edit drafts (never poll-repainted); CANVAS = committed state only, stays bright. The shared Structure IR + dotted-node selection spine was KEPT (verified sound) \u2014 the bug was the repaint/edit lifecycle, not the id model.
+
+PURE SPACETIME throughout: @data inline client signals + @on projection + @each + reactive classes + host-primitive %emit js (platform infra). Zero custom page JS.
+
+TOOLING: verified via a self-launched driver (python3 /tmp/wb_driver2.py boots `spacetime mcp` over stdio, mounts the workbench + composes a hero, writes the URL). FUP-110 filed to add an HTTP-only serve mode so this is a first-class capability.
+
+FOLLOW-UPS FILED: FUP-109 (IA reconception spike \u2014 PLAN-065 built layout-independent so it's mostly cosmetic later), FUP-110 (HTTP-only serve mode), FUP-111 (reactive `text: $a || $b` drops the fallback \u2014 worked around here), FUP-112 (mcp_node_param stale-span guard \u2014 the one genuine escalation case, single-user-acceptable for now). BUG-154 (compiler) + BUG-151/152/153 all DONE. FEAT-150 (client editor plane) delivered by W_session.

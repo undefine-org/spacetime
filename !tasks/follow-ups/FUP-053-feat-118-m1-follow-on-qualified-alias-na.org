@@ -1,0 +1,50 @@
+#+TITLE: FEAT-118 M1 follow-on: qualified @alias/name refs + bare-ambiguity error
+#+STATE: ITEM
+#+SESSION_ID: 1508cbf54b12d2b0
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-14T11-53-10-188Z_1508cbf54b12d2b0.jsonl]]
+#+CUSTOM_ID: FUP-053-feat-118-m1-follow-on-qualified-alias-na
+
+* Initial Message
+
+look at ~/code/ora/verse and how it generates tree-sitter from the meta-compiler language.
+
+your goal is to look at how pi-* crates manage dynamic language profiles. Consider runtime/kdl/some other addition (also consider something specific to Spacetime. Weigh in all the options and show me your reasoning).
+
+Please understand the nuances of the work here. You are also free to propose improvements to the tree sitter generator and to the Spacetime LSP to make it world-class, as it hasn't been touched in a while and could benefit from some love. Since I am the creator of both Spell and Spacetime, I would LOVE to make the two seamlessly work with each other (also look at the Spacetime MCP btw).
+
+Deep architecture dive first, then come back with your insights, revelations, challenges (to me and to you), questions, and overall state of things
+
+Parent: FEAT-118. The enhancement half of @use, deferred because it's a larger parser-grammar unit, not a dispatch tweak. Open @use (namespacing + collision-avoidance) already works end-to-end (commits 532fdd05, d708598a).
+
+REMAINING:
+1. Qualified references @alias/name and @ns/name. BLOCKER: the lexer/parser only accepts @ident directive names — `/` is NOT allowed in a directive name today (src/syntax/cst/lexer.rs AT_SIGN path). This is the SpacetimeNameLexer path-split axis (unification spec §3.6): directives must accept `/`-separated segments. Real grammar change.
+2. ImportScope per file: capture as/only/hiding from the @use INVOCATION via directive.inline_tokens_text() (gives raw "...\" as s only (a,b)"); build ImportScope{open,aliased,explicit,hidden} keyed by source_file.
+3. Dispatch resolver: thread ImportScope into find_macro_for_match (registry.rs:400; callers pipeline/evaluate.rs:117, resolve.rs:52/115 + the :391 shim). Resolve @alias/name -> FQN exact lookup; bare @name -> candidates in scope; >1 -> AMBIGUITY error (reuse dispatch_ambiguity FEAT-088).
+
+NB current state is coherent without this: dispatch is key-agnostic (matches form.directive_name), so namespaced macros are reachable by bare @name; namespace only prevents duplicate-KEY collisions. This follow-on adds DISAMBIGUATION + qualified addressing, not basic reachability.
+
+ALSO needed eventually: namespace primitives/capture-types too (currently only MacroDefAst has the module field; merge_ast stamps macros only).
+
+NOTE [2026-06-14]: SCOPING REFINEMENT (investigated, zone now uncontended but deliberately scoped for a focused run): FUP-053 must be done as ONE coherent unit, not split. Reason: erroring on bare-name ambiguity WITHOUT offering qualification (@alias/name) is a dead-end UX. So the /-grammar (the risky prerequisite) and the ImportScope/resolver are coupled.
+
+PARTS + findings:
+1. /-in-directive grammar: parse_directive (src/syntax/cst/parser.rs:523) consumes one IDENT name after AT_SIGN. Adding optional `/ IDENT`+ sequences is a real grammar change AND risks CSS-value parsing regressions (/ is CSS division/shorthand: font 12px/1.5, grid 1/3). Needs careful lexer-position discipline (/ only in directive-NAME position, not value position). Highest-risk part.
+2. ImportScope: per-file {open[], aliased{alias->ns}, only{}, hidden{}}, built in resolve_imports from the @use ImportAst fields (alias/only/hiding — these AST fields exist from M1 but are currently always empty; need to capture from the @use INVOCATION via directive.inline_tokens_text()).
+3. Dispatch resolver: thread ImportScope into find_macro_for_match (registry.rs:400; callers evaluate.rs:117, resolve.rs:52/115). Resolve @alias/name->FQN exact; bare @name-> in-scope candidates.
+4. Ambiguity: FEAT-088 dispatch_ambiguity ALREADY exists (registry.rs:~445) detecting score-ties. Extend to detect cross-namespace bare-name collisions -> require qualification.
+
+NB current state WITHOUT FUP-053 is coherent: open @use works, dispatch is key-agnostic so namespaced macros reachable by bare name, namespace prevents duplicate-KEY collisions. FUP-053 adds DISAMBIGUATION (qualified addressing + collision errors), the refinement layer. Best as a dedicated focused run given the /-grammar risk. Unblocks M2 (%public/%reexport enforcement) + M3 (%using scoping).
+
+NOTE [2026-06-14]: CORE DONE this session (5 commits, 2258 lib green). Qualified module references @scene/camera / @alias/camera now PARSE and DISPATCH end-to-end:
+- af070676 (1/3): CST /-qualified directive names. parse_directive consumes tight /IDENT runs; name_text() reconstructs scene/camera; spaced-/ (CSS) NOT a qualifier. 4 tests.
+- 40d2deb8 (2/3): @use captures alias/only/hiding into ImportAst (parse_use_clause_tail). 4 tests.
+- cac1c08e (3a): event-matcher tokenizes qualified names (at_tight_qualifier raw-byte-adjacency check).
+- 7f8b6381 (3b): qualified invocations match the unqualified %form (TokenCursor::skip_namespace_qualifier in match_directive_prefix). @scene/on hover matches @on form + captures args. 1 test.
+
+KEY MECHANIC PROVEN: a qualified call dispatches to the unqualified form by skipping the qualifier prefix; the qualifier carries namespace/alias for resolution.
+
+REMAINING (polish layer, separable — split to follow-on): 
+1. ImportScope ENFORCEMENT: build per-file ImportScope from the ImportAst alias/only/hiding (captured but not yet consumed at dispatch); verify @alias/x's alias is actually in scope, @ns/x's ns is imported, only/hiding filter visibility. Currently the qualifier is skipped but not VALIDATED against imports.
+2. Cross-namespace AMBIGUITY error: when 2 open @use modules export the same @name, require qualification (extend FEAT-088 dispatch_ambiguity which already detects score-ties).
+
+These are correctness/safety refinements on top of the working addressing mechanic. M2 (%public/%reexport) + M3 (%using) can now build on qualified dispatch.

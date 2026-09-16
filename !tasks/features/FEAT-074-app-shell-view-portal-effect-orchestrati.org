@@ -1,0 +1,105 @@
+#+TITLE: App shell: @view / @portal / @effect orchestration
+#+STATE: DONE
+#+SESSION_ID: 14fc108ed3772fa8
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-04T14-32-37-965Z_14fc108ed3772fa8.jsonl]]
+#+CUSTOM_ID: FEAT-074-app-shell-view-portal-effect-orchestrati
+#+COMPLETION_HASH: 51ca5473905861a1
+
+* Initial Message
+
+hey what would it look like if the admin app were done multi-file? what reactive primitives and modular programming principles (and other missing constructs that you find) do you need to make this an amazing DX for developing this kind of app?
+
+* Parent
+[[id:PLAN-030-spacetime-app-platform-declarative-schem]] — Wave 4.
+DEPENDS: [[id:FEAT-073-composition-dynamic-dispatch-ampexpr-mat]] (views swap templates;
+reuses dispatch/mount machinery).
+
+* Summary
+The orchestration layer that turns "a page with reactive bits" into "an app with
+panes, modals, and side-effects." Three constructs, each absent today.
+
+** @view — named view signal + conditional mount
+The admin swaps panes (list | graph | theme | palette | motion). Today that is ad-hoc
+JS; =tests/fixtures/multi_route_site= is multi-PAGE (separate index.st), not in-app
+views. Provide an in-app view signal:
+#+begin_src spacetime
+@view $pane : "list";              // declares a view signal, initial "list"
+.center { @show(when: $pane == "graph") { &graph(); } }
+.rail__item { @on click { $pane <- "graph"; } }
+#+end_src
+Lowers to a signal + reactive mount/unmount (model on bind-if / @match-render). OPTIONAL
+stretch: a =@router= binding history/hash to the signal (deep-linkable views) — gate
+behind a follow-up if it expands scope.
+
+** @portal — render a subtree at document.body, escaping the layout tree
+Drawer (position:fixed), media modal, preview iframe must escape =#admin-root='s grid
+and stacking context. Today JS appendChild(body). Provide:
+#+begin_src spacetime
+@portal {
+  .modal { ... }
+}
+#+end_src
+Lowers to a primitive that mounts the subtree at =document.body= (or a named portal
+root), and ships modal-correctness: focus-trap, scroll-lock on open, Esc-to-close,
+restore focus on close, =aria-modal=. These are the recurring "modal tax" — bake them in.
+
+** @effect — run a side-effect when a signal changes
+=refreshPreview()= (debounced iframe reload after save-ack) has no declarative home;
+only animation drivers currently react to signals. Provide:
+#+begin_src spacetime
+@effect(on: $rows, debounce: 600ms) {
+  // side-effect body (e.g. reload preview)
+}
+#+end_src
+Lowers to an =ST.watch= on the named signal with optional debounce, running the body.
+The body is a mutation/effect block (same grammar as =@on= bodies), NOT a render.
+
+* Files
+- =stdlib/macros/view.st= — NEW: =@view= + =@show(when:)= integration.
+- =stdlib/macros/portal.st= — NEW: =@portal=.
+- =stdlib/macros/effect.st= — NEW: =@effect=.
+- =stdlib/primitives/portal.st= — NEW: mount/unmount + focus-trap + scroll-lock + Esc.
+- =stdlib/primitives/effect.st= — NEW: signal-watch side-effect (debounced).
+- =src/pipeline/expand.rs= / =src/emit/js.rs= — lowering if a capture is needed beyond macros.
+- =stdlib/macros/data.st= — =@show= already exists (bind-visible); reuse for view gating;
+  ensure =@show(when:) { ... }= block-form (mount children) is supported, not just
+  show/hide of an existing element.
+
+* Edge cases
+- @view: switching panes mounts/unmounts; unmounted pane's scoped state is cleaned up
+  (or preserved? — DECIDE and document; default: cleaned, with an opt-in keep-alive).
+- @portal: multiple portals stack (z-index/focus order); Esc closes topmost only;
+  scroll-lock refcounts (two modals → one unlock when both closed).
+- @portal: focus-trap restores to the previously focused element on close.
+- @effect: debounce coalesces bursts; effect does NOT run on initial mount unless
+  =immediate: true= (document the default; default = do not run on mount).
+- @effect: multiple effects on the same signal run in declaration order.
+
+* Test plan (emitted-JS asserted + behavioral)
+- UNIT/SNAPSHOT: each construct's emitted JS.
+- V8: @effect fires on signal change, respects debounce + immediate.
+- HEADLESS: a 3-pane demo app — clicking rail items swaps views; opening a @portal
+  modal traps focus, locks scroll, Esc closes and restores focus; an @effect reloads a
+  target on data change. Provide the fixture.
+- FULL SUITE green.
+
+* Acceptance criteria
+- [ ] @view swaps panes reactively; scoped state lifecycle documented + tested.
+- [ ] @portal modal: focus-trap + scroll-lock + Esc + focus-restore + aria-modal, all
+      verified in headless.
+- [ ] @effect runs on change with debounce + immediate semantics.
+- [ ] 3-pane demo app passes headless; emitted JS asserted; full suite green.
+
+NOTE [2026-06-09]: DONE — all 3 constructs + demo + reviewer fixes. Commits: 64bf7d9c @effect, 63b7bd37 @view, e234ebb0 @portal, 60c4c860 demo+capstone, a936da8e reviewer P2/P3.
+
+@effect(on:$sig, debounce:t, immediate:bool){ $body:mutation_actions } — effect-runner subscribes (local:<sig>:updated + ST.watch), debounces (setTimeout), runs body via NEW shared ST.runMutations (extracted from on-mutation-handler, DRY -109 lines), microtask-coalesce prevents double-fire. immediate=false default.
+
+@view $subject { $arms:match_arm+ } — view-mount: reactive sibling of render-once @match; subscribes to subject, clears host (ST.dispose), mounts first matching arm's template factory, re-mounts on change. Reuses match_arm grammar. ENGINE FIX: extract_with_modifier (form_compiler.rs) — repeated CUSTOM %capture_types in a macro %form now accumulate into an Array (match_arm+ previously collapsed to one arm); shared by builtin+Custom branches.
+
+@portal(when:$sig) selector-scope — portal-mount relocates &self to document.body (placeholder marks home), scroll-lock REFCOUNTED (ST.lockScroll), focus moved in + TRAPPED (Tab wraps) + restored, Esc-closes-topmost (ST._portalStack), aria-modal/role=dialog (role removed on close if added). Browser-verified incl. real Esc + Tab.
+
+demos/app-shell/ — 3-pane app composing all three; verified end-to-end in real browser (puppeteer) + V8 capstone feat074_app_shell_view_portal_effect_compose.
+
+Reviewer swarm (3 lenses, retry after connection issue): no P1; fixed P2 focus-trap + P3 role-cleanup + P3 view double-render. Deferred P3s: @effect/@on drop @emit/dotted-path (pre-existing shared reify); delegated @emit detail.source change (provably dead).
+
+Gates: lib 2153/5 (5 = pre-existing BUG-069 stale snapshots, not ours), integration 168/0, v8 328/12 (12 = pre-existing media cluster), headless 358/251 (baseline +3 from BUG-071, zero new). NB working tree carries unrelated in-flight FEAT-082/083/BUG-069 threads (not committed by us; src/pipeline/types.rs html-field unblock left uncommitted for FEAT-082).

@@ -1,0 +1,66 @@
+#+TITLE: Audit: implementation
+#+STATE: DOING
+#+CUSTOM_ID: AUD-008-audit-implementation
+#+LAYER: coding-agent
+
+* Source
+Manual audit
+
+* Findings
+Read-only audit of PLAN-053/054/055 (`@drag` on-drop fire, card-follows-cursor, drop-target). Findings from reasoning over the committed diff; I have not re-run anything (tool calls would abort the audit).
+
+---
+
+**1. Cancelled drag fires `on-drop` with stale release coords**
+- **What**: `%on $active -> false` fires on *any* true→false transition, including `onPointerCancel`. On cancel, the gesture yields `false -> $active` but does **not** yield `$dropX`/`$dropY`, so `ST.dropTarget` reads stale coords from a previous drop (or undefined) → `$move` fires with a wrong/garbage column on a cancelled drag.
+- **Where**: `stdlib/primitives/gesture.st` `onPointerCancel` (no dropX/dropY yield); `stdlib/macros/drag.st` `%on $active -> false` (no cancel guard).
+- **Why**: Escape / interrupted pointer → spurious optimistic move + server reconcile in kanban. Semantically, cancel ≠ drop.
+- **Effort**: `small`
+
+**2. `none`/`$sig` translation clobbers string literals inside derive exprs**
+- **What**: `translate_derive_expr` runs `\bnone\b`→`null` and `$sig`→`v.sig` over the *whole* expression string, including string literals. A derive like `$axis == "none" ? …` becomes `… == null ? …`; a `$`-token inside a quoted string would also be rewritten.
+- **Where**: `src/pipeline/evaluate.rs::translate_derive_expr` (the `none_re` / `sig_re` replaces).
+- **Why**: Latent correctness hazard for any future `%derives` author; drag.st happens not to trigger it, so it's silent until it bites.
+- **Effort**: `small`
+
+**3. `bounds`-constrained drag is silently non-functional + untracked**
+- **What**: drag.st's `$x: $bounds != none ? clamp(…, &$bounds.rect.width - &self.rect.width) : $rawX`. `bounds` is a *capture*, not a runtime signal/derive, so it inlines via `captured_value_to_js_literal`, which has no element-ref arm → `_ => "null"`. So `$bounds != none` is always `null != null` → false; the clamp branch is dead, and the `&$bounds.rect`→`ST.rectOf(SpacetimeLocal.bounds)` translation references a page global that doesn't exist. The bounds feature does nothing.
+- **Where**: `src/pipeline/evaluate.rs::translate_derive_expr` (bounds_re → `SpacetimeLocal.bounds`) + `captured_value_to_js_literal` (no ElementRef arm).
+- **Why**: A documented `@drag(bounds: …)` surface that silently no-ops. Not a regression (was dropped before), but it's **deferred work with no FUP org item** and no documented limitation — fails audit criterion #4.
+- **Effort**: `medium` (full fix) / `trivial` (file FUP + doc the limitation now)
+
+**4. `src/mcp/live.rs` (not my file) committed inside `e82b3f97`**
+- **What**: My PLAN-054/055 commit `e82b3f97` included `src/mcp/live.rs`, a concurrent FUP-094/BUG-130 file I had tried to unstage. A concurrent index race split my work across two commits; this file rode along under my commit message.
+- **Where**: commit `e82b3f97` (diff stat shows `src/mcp/live.rs | 22 +-`).
+- **Why**: My commit captured another author's WIP snapshot. It compiles and HEAD is consistent, but the *attribution/content* should be verified against the concurrent author's intended `bfb92c1a` version before user validation — possible duplicated or stale-snapshot content.
+- **Effort**: `trivial` (verify `git show e82b3f97:src/mcp/live.rs` matches intended state)
+
+**5. `ST.derive`/`bindTransform`/`onTransition` discard their watch unsubscribers**
+- **What**: These helpers call `ST.watch(...)` and drop the returned unsub. No cleanup is registered, unlike the gesture primitive's `%cleanup`.
+- **Where**: `public/runtime/st.js` `ST.derive`, `ST.bindTransform`, `ST.onTransition`; consumed by `generate_animate_fragments`/`generate_on_fragments`.
+- **Why**: Potential watcher accumulation when elements are removed/re-rendered (e.g. kanban `@each` re-render). Mitigated if the signal store is WeakMap-keyed (matches existing `bindState` behavior), so likely benign — but it's an unverified assumption and inconsistent with the gesture's explicit cleanup.
+- **Effort**: `small`
+
+**6. Unhandled `%animates` properties fall through to `ST.bindStyle` silently**
+- **What**: `transform_token_template` returns `None` for anything outside translate/scale/rotate (e.g. `skew`, combined `translate`, a typo'd prop). The `else` branch emits `ST.bindStyle(el, sig, prop)`, which would set `el.style['skew'] = <number>` — invalid, no warning.
+- **Where**: `src/pipeline/mod.rs::generate_animate_fragments` (the non-transform fallback).
+- **Why**: A mistyped or unsupported animate property produces silently-broken CSS instead of a diagnostic.
+- **Effort**: `trivial` (warn/diagnose on unknown transform-ish props)
+
+**7. Test gaps (error/edge paths)**
+- **What**: No coverage for (a) the cancel path / stale-coords (#1), (b) the bounds/clamp derive branch (#3), (c) `none`-in-string clobber (#2), (d) `ST.dropTarget` restoring a *non-empty* prior `pointerEvents` (the mock test sets `"auto"` and checks restore, which is good — but the null-coords and off-target cases are covered; cancel is not). The happy paths and `dropTarget` guards are well covered.
+- **Where**: `tests/unit/macros/drag-on-drop.test.st`, `drag-animates.test.st`, `drop-target.test.st`.
+- **Why**: The untested paths are exactly the ones most likely to regress (#1, #3).
+- **Effort**: `small`
+
+**8. `bracket_delta` string-state does not carry across lines**
+- **What**: `parse_clause_decls` tracks bracket depth across lines but `bracket_delta` resets `in_str` per line. A string literal containing an unbalanced bracket and spanning lines (rare in derives) would miscount depth.
+- **Where**: `src/parser/mod.rs::bracket_delta` / `parse_clause_decls`.
+- **Why**: Very-low-likelihood parse miscount for exotic multi-line string values; drag.st is unaffected.
+- **Effort**: `trivial` (note as known limitation)
+
+---
+
+**Highest effort-to-impact**: #1 (cancel fires a phantom move — real functional bug, small fix) and #3 (bounds silently dead + untracked deferral — at minimum file an FUP now). #4 is a trivial verification the user should do before trusting the commit boundary.
+
+Note: the pre-existing v8 (9) and headless (62) failures in the tree are FUP-094 territory, confirmed outside this change surface — not findings against this work, but the user should know they predate validation.

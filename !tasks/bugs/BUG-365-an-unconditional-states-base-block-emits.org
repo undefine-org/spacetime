@@ -1,0 +1,106 @@
+#+TITLE: An unconditional %states base block emits no CSS
+#+STATE: ITEM
+#+SESSION_ID: 153f5ed0617636c7
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-26T21-12-46-213Z_153f5ed0617636c7.jsonl]]
+#+CUSTOM_ID: BUG-365-an-unconditional-states-base-block-emits
+
+* Initial Message
+
+ok so is there any point in keeping the worktree now? verify
+
+* Symptom
+
+A `%states` block with an UNCONDITIONAL state emits nothing. The macro matches,
+resolves, passes `check` — and its declared custom properties never reach the
+stylesheet.
+
+#+begin_src spacetime
+%macro mobile-motion {
+  %form { @mobile-motion }
+  %states {
+    base {
+      --st-duration-fast: 150ms
+      --st-ease-out: cubic-bezier(0.16, 1, 0.3, 1)
+    }
+  }
+}
+#+end_src
+
+A page doing `@import "stdlib/mobile"` then `.c { @mobile-motion }` builds
+clean and emits **30 bytes** of CSS — the page's own `body` rule, nothing else.
+`--st-duration-fast` is absent.
+
+* Root cause — one branch, `src/pipeline/mod.rs:935` `generate_state_fragments`
+
+The per-state loop emits CSS only INSIDE the conditional arm:
+
+#+begin_src rust
+if let Some(cond) = condition {
+    if let Some(pattern) = parse_pattern_match(cond) { ...css_frags.push... }
+    else { ...js_stmts.push(bindState)...; ...css_frags.push... }
+}
+// <-- no else: an unconditional state emits NOTHING
+#+end_src
+
+A state with `condition: None` falls off the end of the iteration silently.
+There is no `else` writing the plain rule.
+
+Note the guard just above it:
+
+#+begin_src rust
+if properties.is_empty() && condition.is_none() { continue; }
+#+end_src
+
+That `&&` shows the intent: a state with PROPERTIES but no condition was meant
+to survive and emit. It survives the guard and then finds no branch to emit
+from.
+
+* Why this looked like "%states is dead"
+
+Measuring `@mobile-colors-dark` shows 1253 bytes of CSS, so `%states` appears to
+work there. It does not — that macro also has `%binds`, and the bytes come from
+the bind. Its `%states` is `dark when $dark { ... }`, i.e. CONDITIONAL, which is
+the branch that IS implemented.
+
+The discriminator is not `%binds` vs no `%binds`, and it is not mobile vs
+non-mobile (`@resize-handle` in `stdlib/macros/drag.st` is a non-mobile macro
+with a real `%binds` whose `resizing when $active` state does emit). It is
+CONDITIONAL vs UNCONDITIONAL. Every one of the 17 macros called dead in
+PLAN-147 uses `base { ... }`.
+
+* Scope
+
+17 macros in `stdlib/mobile/` (theme tokens, typography, colors, safe-area,
+device/touch testing helpers) declare only unconditional `base` states.
+Real-page usage is 3 sites, all in `examples/mobile-tasks/app.st`
+(`@mobile-tokens`, `@mobile-typography`, `@safe-area`) — a file that already
+fails to build for unrelated E0946 grammar errors.
+
+* Acceptance
+
+- A gate asserting `--st-duration-fast` reaches the emitted CSS from
+  `@mobile-motion`, seen RED first.
+- The conditional path is unchanged: `@mobile-colors-dark`'s `dark when $dark`
+  and `@resize-handle`'s `resizing when $active` still emit exactly as today.
+- A `base` state emits a plain rule for the macro's selector with no
+  `ST.bindState` call — there is no condition to bind.
+
+* Relationship to the delete decision
+
+This is the reason the 17 macros were about to be deleted as dead. They are not
+dead; they are the ONLY users of an unimplemented branch. Deleting them would
+remove the evidence and leave the gap in `generate_state_fragments` for the next
+author to rediscover.
+
+Whether the 17 mobile macros should ALSO be deleted (near-zero usage, an
+unmaintained opt-in module) is a separate call — but it should be made on
+"nobody uses mobile", not on "%states does not work".
+
+* Found by
+
+PLAN-147's design pass. The chain of measurement is worth keeping: a
+`%states`-only macro emits nothing -> a macro with `%binds` + `%states` emits
+plenty -> so it looked like `%states` needs `%binds` -> but reading the two
+`%states` blocks side by side showed one is `base` and the other is
+`when $dark`. The clause-level scan could not have found this; only comparing
+two instances of the same clause could.

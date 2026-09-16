@@ -1,0 +1,61 @@
+#+TITLE: Workbench selection GESTURES and the mcp-action bridge need --cdp coverage
+#+STATE: TODO
+#+CUSTOM_ID: FUP-139-workbench-gesture-and-action-bridge-cov
+#+PRIORITY: #C
+
+* Summary
+
+FUP-135 covered the workbench's selection→edit path at the projection level: node
+filtering, shared widget resolution, the addressing rail, display-only rows, and
+BUG-151 poll survival. Two links remain uncovered, both of which need a REAL
+mounted workbench rather than the headless V8 backend.
+
+* What is not covered
+
+1. *The two selection GESTURES.* `env.st:383-389` handles a `.mcp-nav-node` click
+   and `env.st:398-405` a DELEGATED `.mcp-stage[data-st-region="stage"]` click on
+   `[data-st-node]`. Both read `$.closest('[data-st-node]').dataset.stNode` and
+   project the same rows. Neither is driven by a test. The canvas case should be
+   clicked on a NESTED target, so the assertion proves the `closest` resolution
+   rather than a direct-element listener.
+
+2. *The `mcp-action` bridge.* `workbench/actions.st:41-57` attaches
+   `@mcp-action(action: "mcp_node_param", targetAttr: "data-param", on: "change")`
+   to node-param controls; bindings use the distinct `mcp_param` rail at `:25-37`.
+   A committed edit should be observed as an `mcp-action` event carrying the action
+   name, the target param, and the snake-case span payload.
+
+* Why it was not done in FUP-135
+
+Both need the workbench mounted with its poll primitive and host bridge live. The
+headless backend has no MCP host to answer that bridge, so the test would assert
+against a stub of the thing under test — a green that proves nothing, which is the
+exact failure mode PLAN-113 exists to remove.
+
+`--cdp` (docs/testing/CDP_BACKEND.md) runs a real Chromium and can mount the
+workbench through the MCP server, so the gestures fire against real DOM and the
+bridge against a real host.
+
+* Also in scope (added 2026-07-25, W3 review)
+
+3. *The dock's one-open-panel policy* (FUP-137). Its behaviour is verified live in
+   Chromium but its automated tests assert on the injected JS constant's TEXT, not
+   on rendered state — they lock the string, not the guarantee. A `--cdp` test
+   should drive the real pills AND their LABELS (the label path is where the first
+   implementation silently failed) and assert exactly one panel carries `.is-open`.
+
+4. *The pick hover outline* (FUP-136). The fix is a CSS selector; `--headless` has
+   no computed styles, so its test asserts the invariant the selector encodes
+   rather than the rendered outline — and stays green if the stylesheet is reverted.
+   A `--cdp` test should read the computed outline on a nested-stamp fixture and
+   assert exactly one element is outlined, and that it is the click target.
+
+* Acceptance
+
+- A `.mcp-nav-node` click and a nested-target `.mcp-stage [data-st-node]` click
+  each select the SAME node id, observed through the rendered editor set.
+- Committing a typed control emits `mcp-action` with `action: "mcp_node_param"`,
+  the target param name, and the span payload; a BINDING commit emits `mcp_param`.
+- A row with a null `source_hash` produces NO action on attempted edit.
+- Each sabotage-verified: break the dataset key read, remove the delegated handler,
+  detach the action macro — the corresponding test must fail while others pass.

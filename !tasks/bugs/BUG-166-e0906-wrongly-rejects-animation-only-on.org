@@ -1,0 +1,110 @@
+#+TITLE: E0906 wrongly rejects animation-only @on bodies inside @template (legal at page level; stdlib doc example fails)
+#+STATE: ITEM
+#+SESSION_ID: 152939d2e5b25e66
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-09T16-24-34-454Z_152939d2e5b25e66.jsonl]]
+#+CUSTOM_ID: BUG-166-e0906-wrongly-rejects-animation-only-on
+
+* Initial Message
+
+can dom-refs (`&my-template(..., ...) { ... }`) contain all of ST? As in, html, CSS, ST syntax through macros, etc. and then it gets its scope solved to be within the template? Or does it have some special case?
+
+The goal is to empower the 'element-ref as function' way of creating Spacetime affordances the most blessed way to build encapsulation and whatnot. I would like to do that for Ora Ventures, whose website we want to rewrite completely to be attractive to Chief AI Officers at big groups in emerging markets, as well as capital-rich SMBs that want to be more dynamic and competitve. That website should be sober, have crisp but minimal copy, and showcase Spacetime features in a way that is unique and helps us convert more (so think of advanced interactions and motions in terms of high-convertion)
+
+Come back with your plan, sources, inspirations, for the copy
+Come back with your analysis for the &... thing
+
+* Found via
+Template-as-function analysis (research/spacetime-template-as-function-analysis.org, GAP-2).
+The =stdlib/macros/template.st= doc-comment "@example with scoped animations" fails E0906
+when compiled verbatim.
+
+* Repro (RED, confirmed 2026-07-09 on main)
+#+begin_src spacetime
+@template &probe-card($item) {
+  <article class="card"><h3>`$item.title`</h3></article>
+  @on visible(300ms) {
+    & { opacity: 0 -> 1; translate-y: 20px -> 0; }
+  }
+}
+<main class="page"></main>
+.page { &probe-card("x"); }
+#+end_src
+
+→ =error[E0906]: no state assignment found in @on body: & { opacity: 0 -> 1; … }=
+(hint: "expected: $var <- expression;")
+
+Same body at PAGE level (=.card { @on visible(300ms) { & { opacity: 0 -> 1 } } }=)
+compiles clean — the page-level path routes through the stdlib
+=on-event-dispatcher= macro (=stdlib/macros/on-event.st=) which accepts a
+=$body:keyframes= capture. Also RED for =@on hover { & { scale: 1 -> 1.05 } }=
+inside a =.sel { }= block in a template body.
+
+* Root cause (traced)
+Template bodies do NOT route =@on= through the stdlib macro system. The
+component-body pipeline classifies an =@on= segment via the
+=stdlib/capture-types/component-body.st::cb_root_on= arm (and =cb_block_item=
+for scoped ones), then the Rust reifier runs it ONLY for diagnostics:
+
+- =src/syntax/events/form_compiler.rs::parse_on_event_block= (~L3081) →
+  =src/syntax/events/form_compiler.rs::validate_on_action= (~L3126).
+- =validate_on_action= requires ≥1 =;=-separated statement containing =<-=,
+  else emits E0906. It has NO concept of a keyframe statement
+  (=prop: a -> b;=) — but the World-A render path that actually executes the
+  =@on= body DOES support animation-only bodies at page level.
+
+∴ the validator's model of "valid @on body" is narrower than the language's.
+The asymmetry breaks "template body = all of Spacetime" and makes the stdlib's
+own documentation a lie.
+
+* Structural fix (chosen)
+Do NOT special-case a regex in the validator. The correct model: an =@on= body
+is valid iff it contains ≥1 ACTION statement, where an action is EITHER a state
+assignment (=$var <- expr=) OR a transition/keyframe declaration
+(=prop: a -> b=, including =& { … }= scoped groups). That definition already
+exists in grammar form — =stdlib/capture-types/on-actions.st= and
+=stdlib/capture-types/keyframes.st= describe exactly these statement shapes.
+
+Implementation:
+1. =src/syntax/events/form_compiler.rs::validate_on_action=: replace the
+   string-scan (=stmt.contains("<-")=) with a classification that ALSO accepts
+   keyframe statements. Preferred mechanism per the metasystem discipline
+   (AGENTS.md "don't write Rust fallbacks for stdlib constructs"): match the
+   body against the existing keyframes capture-type through the engine (the
+   same machinery =cb_*= arms use) rather than adding a second Rust string
+   parser. A body matching NEITHER an assignment NOR keyframes still E0906s.
+2. Verify the RENDER path (World-A =on= match → runtime) actually plays the
+   animation for a template-instance element, not just page-level: the E0906
+   removal must not un-gate a body the runtime then ignores. If the runtime
+   path is missing for template scope, wire it through the same
+   =waapi-event-animate= / =waapi-load-animate= primitives the page path uses
+   (=stdlib/macros/waapi-on-event.st= binds; =stdlib/primitives/= owns the JS)
+   — the fix is only done when the animation OBSERVABLY runs.
+3. Keep E0906 for the genuinely-empty case (=@on click { }=, comments only,
+   or pure-CSS-static declarations with no =->= and no =<-=).
+
+* Acceptance
+1. RED fixture above compiles clean and, mounted in a browser test, the card
+   animates on visibility: use the first-party automation rails
+   (docs/testing/ANIMATION.md =@clock= / =@timeline= for deterministic
+   assertion, or =--cdp= backend for a timing claim; a layout/timing claim must
+   NOT fake-green on =--headless= — fidelity ladder).
+2. =@on hover { & { scale: 1 -> 1.05; } }= inside a template's =.sel { }= block:
+   compiles + hover animates (CDP test).
+3. Mixed body =@on click { $open <- !$open; & { scale: 1 -> 0.95 -> 1; } }=
+   keeps working (assignment + keyframes coexist).
+4. =@on click { }= (empty) still E0906s; =@on click { console.log(1); }= with
+   neither assignment nor keyframe still E0906s (unless that is separately a
+   legal action — preserve current behavior).
+5. The =stdlib/macros/template.st= "@example with scoped animations" block is
+   added verbatim as a compile fixture (doc cannot drift again).
+6. =cargo test --lib= + integration green; the E0906 unit tests in
+   =src/syntax/events/form_compiler.rs= (~L5632 PDC-002 region) updated to the
+   new validity model, not deleted.
+
+* Related
+- research/spacetime-template-as-function-analysis.org (GAP-2)
+- stdlib/capture-types/on-actions.st, stdlib/capture-types/keyframes.st (the
+  grammar that should be the single source of "what is an action")
+
+* Parent
+[[id:PLAN-070-template-as-function-hardening-close-the][PLAN-070]] W2.

@@ -1,0 +1,200 @@
+#+TITLE: Spacetime.review() aesthetic dims (hierarchy + detail) + dev-review.st walkers + review-tab UI rows
+#+STATE: DONE
+#+SESSION_ID: 14cc890346343e2b
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-04-28T16-31-49-016Z_14cc890346343e2b.jsonl]]
+#+CUSTOM_ID: FEAT-032-spacetime-review-aesthetic-dims-hierarch
+#+DEPENDS: AUD-007-spacetime-design-skill-obsolete-content
+#+EFFORT: 5h
+#+LAYER: stdlib
+#+PRIORITY: #A
+
+* Initial Message
+
+what makes huashu design so good? https://github.com/alchaincyf/huashu-design and is the spacetime-design applying that?
+
+* Intention & Purpose
+
+Extend =Spacetime.review()= from 5 dimensions (idiomatic / animation / brand / a11y / compile) to 7 by adding two *aesthetic* dimensions: =hierarchy= and =detail-execution=. The current 5 dims are all *engineering correctness* checks (does it parse, does it animate, are tokens used, is alt-text present, are there console errors). The huashu-design analysis (this session) showed spacetime-design has zero coverage of "does it look good"; this FEAT closes that gap with two heuristics that are runtime-detectable.
+
+* Context & Narrative
+
+Two new dims use heuristics the dev runtime CAN observe (DOM + computed styles), as opposed to philosophy-coherence / innovation which can't be auto-detected:
+
+*hierarchy* dim:
+- h1 → h2 → h3 ordering (no skips; no h2 before h1; no multiple h1 unless explicit landmarks).
+- Font-size monotonicity: each heading level's computed font-size strictly smaller than the previous level.
+- Findings cite violating selector + computed font-sizes.
+
+*detail-execution* dim:
+- =text-wrap: pretty= or =text-wrap: balance= present on display-class headings (heuristic: text > 12 chars, font-size > 24px). Absent → info-severity.
+- =oklch()= color usage on tokens (preferred over rgb/hsl). Warn if =--brand-*= tokens use rgb/hsl/hex without oklch fallback.
+- =var()= coverage on font-family declarations: warn if heading font-family is literal string instead of =var(--brand-display)=.
+
+The 5-dim score formula =clamp(10 - errors*2 - warns, 0, 10)= extends to 7 dims unchanged. Top-level score still = =min(dim scores)=.
+
+The runtime walker lives in =stdlib/__dev__/primitives/dev-review.st= alongside existing =auditIdiomatic / auditBrand / auditAnimation / auditA11y / auditCompile=. Two new functions: =auditHierarchy= and =auditDetail=. Both run on same 250ms cache cycle.
+
+The dev-panel "Review" tab (=stdlib/__dev__/primitives/dev-review-tab.st=) needs 2 new rows in dim-summary table.
+
+The doc-only doctrine (philosophy-coherence + innovation as named-but-not-walked) is documented in =review-rubric.md= as "human-only review dims".
+
+* Scope
+
+In-scope:
+- =stdlib/__dev__/primitives/dev-review.st= — add =auditHierarchy(out)= and =auditDetail(out)= functions; call both from =review()= entry; add =hierarchy= and =detail= keys to =dims= object.
+- =stdlib/__dev__/primitives/dev-review-tab.st= — add 2 rows to dim-summary table.
+- =.claude/skills/spacetime-design/references/review-rubric.md= — extend output-shape JSON to 7 dims; add "## Dimension semantics" sub-sections; add NEW "## Doc-only dims" section.
+- =src/cli/doctor.rs::DoctorReport= — verify untyped JSON flow-through (no struct change needed).
+- =.claude/skills/spacetime-design/SKILL.md= — extend 5-dim summary table (lines 96-102) to 7 dims.
+
+Out-of-scope:
+- Runtime walkers for philosophy-coherence / innovation — stay doc-only.
+- Aesthetic-dim findings driving doctor's pass/fail threshold differently — same threshold (score < 6 = fail) applies; document.
+- Visual UI design beyond consistency with existing rows.
+- Performance optimization (existing 250ms cache sufficient).
+
+* Existing Patterns
+
+- =stdlib/__dev__/primitives/dev-review.st= existing audit functions (=auditIdiomatic= line 50, =auditBrand= 65, =auditAnimation= 103, =auditA11y= 129, =auditCompile= 146): self-contained, take =out= array, push =add(out, dim, severity, message, selector, value)=.
+- =add()= helper at line 46 abstracts finding shape.
+- =sel()= helper at line 38 generates selector strings.
+- =clamp()= at line 33 — dim scoring formula.
+- =stdlib/__dev__/primitives/dev-review-tab.st= — existing dim-summary rows; copy template.
+- =.claude/skills/spacetime-design/references/review-rubric.md= shape (lines 9-23 output JSON, 35-69 dim semantics): mirror.
+
+* Tests
+
+T1 — *Walker behavior (browser-evaluated)*:
+- T1.1 (hierarchy success): fixture =<h1>...<h2>...<h3>...= proper order → no findings.
+- T1.2 (hierarchy skip): fixture =<h1>...<h3>...= → 1 hierarchy warn.
+- T1.3 (hierarchy size monotonicity): fixture h1 (24px) and h2 (32px) → 1 hierarchy warn.
+- T1.4 (detail text-wrap): fixture display-class h1 (60px, 30 chars) without text-wrap → 1 detail info.
+- T1.5 (detail oklch): fixture =--brand-primary: #2563eb= (no oklch) → 1 detail warn.
+- T1.6 (detail var-coverage on font): fixture =font-family: Inter, sans-serif= on h1 → 1 detail warn.
+- T1.7 (overall): all 7 dims present in =review().dims= keys.
+
+T2 — *Top-level score formula*:
+- T2.1: fixture clean on 7 dims → score = 10.
+- T2.2: hierarchy=8, others=10 → score = 8 (=min=).
+
+T3 — *UI integration* (Manual + Playwright):
+- T3.1: =cargo run -- serve <fixture>/ --debug=, dev panel → Review tab → 7 dim rows visible.
+- T3.2: clicking selector chip on hierarchy finding highlights violating element.
+
+T4 — *Doctor end-to-end*:
+- T4.1: =cargo run -- doctor projects/<fixture>/ --format json= contains routes[0].review.dims with 7 keys.
+
+T5 — *Skill content*:
+- T5.1: =grep -c "hierarchy\|detail" .claude/skills/spacetime-design/references/review-rubric.md= ≥ 4.
+- T5.2: SKILL.md 5-dim table → 7-row.
+
+T6 — *Validate baseline*: 0 net new errors.
+
+* Implementation
+
+** ITEM Author auditHierarchy in dev-review.st (TDD: tests first; satisfies T1.1-T1.3, T1.7)
+:PROPERTIES:
+:CUSTOM_ID: FEAT-032-spacetime-review-aesthetic-dims-hierarch::audit-hierarchy
+:END:
+
+File: =stdlib/__dev__/primitives/dev-review.st=
+
+After existing =auditCompile=, insert =auditHierarchy(out)= function:
+1. Collect =document.querySelectorAll('h1, h2, h3, h4, h5, h6')=.
+2. Order check: walk in document order; flag each =hN → hM= jump where =M > N+1= as warn.
+3. Size monotonicity: bucket by level; for each level lvl ≥ 2, ensure max font-size at lvl < max font-size at any preceding level. Flag violations as warn.
+
+** ITEM Author auditDetail in dev-review.st (satisfies T1.4-T1.6)
+:PROPERTIES:
+:CUSTOM_ID: FEAT-032-spacetime-review-aesthetic-dims-hierarch::audit-detail
+:DEPENDS: FEAT-032-spacetime-review-aesthetic-dims-hierarch::audit-hierarchy
+:END:
+
+File: =stdlib/__dev__/primitives/dev-review.st=
+
+After =auditHierarchy=, insert =auditDetail(out)=:
+1. text-wrap check: for h1/h2 with text >12 chars + font-size >24px, flag missing =text-wrap: pretty/balance= as info.
+2. oklch check: walk =:root= computed style for =--brand-*= properties; flag rgb/hsl/hex values without oklch fallback as warn.
+3. var() coverage: for h1/h2/h3 with inline style containing =font-family= but no =var(=, flag as warn.
+
+** ITEM Wire new audits into review() entry + extend dims object (satisfies T1.7, T2.1, T2.2)
+:PROPERTIES:
+:CUSTOM_ID: FEAT-032-spacetime-review-aesthetic-dims-hierarch::wire-review
+:DEPENDS: FEAT-032-spacetime-review-aesthetic-dims-hierarch::audit-detail
+:END:
+
+File: =stdlib/__dev__/primitives/dev-review.st=
+
+In =review()= entry (~line 197), add =auditHierarchy(out); auditDetail(out);=. Extend per-dim score computation to include =hierarchy= and =detail=. Top-level =score= = =min= over dim values; no change.
+
+** ITEM Add 2 dim rows to dev-review-tab.st (satisfies T3.1, T3.2)
+:PROPERTIES:
+:CUSTOM_ID: FEAT-032-spacetime-review-aesthetic-dims-hierarch::review-tab-rows
+:DEPENDS: FEAT-032-spacetime-review-aesthetic-dims-hierarch::wire-review
+:END:
+
+File: =stdlib/__dev__/primitives/dev-review-tab.st=
+
+Existing dim-summary table iterates over dim names list (=['idiomatic','animation','brand','a11y','compile']=). Extend to 7 names. Selector-chip code path is dim-agnostic — same behavior.
+
+** ITEM Update review-rubric.md (satisfies T5.1)
+:PROPERTIES:
+:CUSTOM_ID: FEAT-032-spacetime-review-aesthetic-dims-hierarch::update-rubric-doc
+:DEPENDS: FEAT-032-spacetime-review-aesthetic-dims-hierarch::wire-review
+:END:
+
+File: =.claude/skills/spacetime-design/references/review-rubric.md=
+
+1. Lines 9-23 (output shape JSON): extend =dims= literal with =hierarchy= and =detail= keys.
+2. Insert NEW sub-sections in "## Dimension semantics":
+   - "### `hierarchy`" — heading order + font-size monotonicity. Each violation = warn.
+   - "### `detail`" — text-wrap on display headings (info), oklch on brand tokens (warn), inline font-family literals (warn).
+3. Append NEW Section "## Doc-only dims (human-only review)" — list =philosophy-coherence= and =innovation= with rubric guidance.
+4. Line 79: drop "(FEAT-020)" — DONE. Add: "Threshold applies across all 7 dims; failing any dim < 6 fails doctor."
+
+** ITEM Update SKILL.md 5-dim → 7-dim table (satisfies T5.2)
+:PROPERTIES:
+:CUSTOM_ID: FEAT-032-spacetime-review-aesthetic-dims-hierarch::update-skill-md
+:DEPENDS: FEAT-032-spacetime-review-aesthetic-dims-hierarch::update-rubric-doc
+:END:
+
+File: =.claude/skills/spacetime-design/SKILL.md=
+
+Lines 96-102 (dim-summary table): add 2 rows for =hierarchy= and =detail=. Update framing text on lines 92-94 from "5-dim audit" → "7-dim audit".
+
+** ITEM Verify T1, T2, T3, T4, T5, T6 + capture (satisfies all)
+:PROPERTIES:
+:CUSTOM_ID: FEAT-032-spacetime-review-aesthetic-dims-hierarch::verify
+:DEPENDS: FEAT-032-spacetime-review-aesthetic-dims-hierarch::review-tab-rows FEAT-032-spacetime-review-aesthetic-dims-hierarch::update-skill-md
+:END:
+
+Capture under =!tasks/plans/plan-artifacts/PLAN-020-doctrine-import/feat-032-*=:
+- =feat-032-fixture-review.json= — =Spacetime.review()= output on test fixture, all 7 dims.
+- =feat-032-review-tab.png= — dev panel screenshot with 7 rows.
+- =feat-032-doctor-json.txt= — doctor JSON showing 7-key dims.
+- =feat-032-grep.txt= — T5 output.
+
+* Edge Cases
+
+- *Walker performance regression*: 7 dims at 250ms cache, ~36µs each at p50. Test against =projects/dataiku/= (1.2 MB runtime); fall back to lazy walker if eval thread times out.
+- *getComputedStyle expensive*: cache per heading; bail early on text-length / font-size threshold.
+- *Brand-token enumeration via :root*: only sees applied tokens; scoped tokens missed. Document.
+- *oklch detection naive*: =val.indexOf('oklch') === -1= treats =oklch( ... )= as good. Doesn't catch =oklch(0 0 0)=. Acceptable precision limit.
+- *Text-wrap browser support*: feature-detect; if unsupported, emit single info "text-wrap detection unavailable".
+- *Inline font-family detection captures component libraries with legitimate inline styles*: false positive risk. Mitigation: only flag h1-h3, not all elements.
+- *Dim doctor pass/fail blast radius*: existing projects may now fail on hierarchy/detail. Document findings as project-side debt; not a regression.
+- *Conflict with FEAT-031*: FEAT-031 documents visual rules; this FEAT operationalizes a SUBSET (oklch, inline font-family). Cross-reference FEAT-031 from rubric doc.
+
+* Acceptance Criteria
+
+1. T1.1-T1.7 pass.
+2. T2.1, T2.2 pass.
+3. T3.1, T3.2 pass — manual screenshot evidence.
+4. T4.1 passes — 7 keys in JSON output.
+5. T5.1, T5.2 pass.
+6. T6 — 0 net new errors.
+7. =stdlib/__dev__/primitives/dev-review.st= grows < 200 lines.
+8. =stdlib/__dev__/primitives/dev-review-tab.st= grows < 30 lines.
+9. M1 (manual): walking rubric on =projects/spacetime-showcase/= produces sensible 7-dim report.
+
+NOTE [2026-04-28]: auditHierarchy + auditDetail walkers + review() wired to 7 dims + dev-review-tab DIMS extended + review-rubric.md 7 runtime + 2 doc-only dims + SKILL.md 7-dim table.

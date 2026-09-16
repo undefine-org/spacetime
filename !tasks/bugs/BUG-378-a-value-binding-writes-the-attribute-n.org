@@ -1,0 +1,75 @@
+#+TITLE: A `value <-` binding writes the attribute, not the property, so it stops working once a user types
+#+STATE: DONE
+#+CUSTOM_ID: BUG-378-a-value-binding-writes-the-attribute-n
+
+* Symptom
+
+#+begin_src spacetime
+.composer__input { value <- $draft; }
+.composer__input { @on &.input { $draft <- $.value; } }
+.send            { @on &.click { $send($draft); $draft <- ""; } }
+#+end_src
+
+Type "hello", click send. `$draft` becomes `""`, the attribute becomes `""` —
+and the input still displays "hello".
+
+Measured in the browser at that moment:
+
+| read                    | value           |
+|-------------------------+-----------------|
+| `input.getAttribute("value")` | `""`      |
+| `input.value`                 | `"hello"` |
+
+* Why
+
+For a form control the content attribute and the IDL property are two
+different things. They start mirrored, and the mirror breaks permanently the
+first time the user interacts: after typing, `input.value` is the typed text
+and `setAttribute("value", …)` only moves the DEFAULT (what a form reset would
+restore). Same for `checked` and `selected`.
+
+`%primitive bind-attr` (stdlib/primitives/data/binding.st) only ever called
+`setAttribute`/`removeAttribute`, so a `value <-` binding:
+
+- works on a fresh page (nothing typed yet, mirror intact)
+- silently stops working the moment it MATTERS (after the user typed)
+
+That ordering is what makes it a bug rather than a gap: every casual test
+passes, and the failure is reserved for real use.
+
+* Found by
+
+beam-lisp's `spell`. The chat composer clears its draft after a send. The
+signal cleared, the attribute cleared, the input kept the sent text — so the
+next keystroke wrote the still-visible text back into the signal and message
+two arrived as "first messagesecond". Observed as user bubbles
+`["first message", "first message SECOND"]`.
+
+Note this was the THIRD defect in one composer, after BUG-375 (a keyed
+binding answered every key) and BUG-377 (a string literal did not survive the
+EDN round trip). All three shared one shape: compiles clean, does the wrong
+thing at runtime.
+
+* Fix
+
+`bind-attr` writes the property ALONGSIDE the attribute, for the three
+attributes where the distinction is real (`value`, `checked`, `selected`), and
+only when the element actually has that property (`attrName in el`) — so a
+`value` attribute on a non-control is unaffected.
+
+Both are written, in that order: the attribute keeps the serialized DOM honest
+(and is what an attribute selector sees), the property makes the change
+visible.
+
+The property write is GUARDED by an inequality check. Assigning `value` moves
+the caret to the end of the field, so writing an identical value on every
+`local:updated` would fight a user typing mid-word.
+
+* Gate
+
+`tests/form-value-binding.test.st` — `--cdp`, because "what does the browser
+DISPLAY after a user typed" is not a claim a logic backend can make.
+
+The load-bearing assertion is the one that fails against the old primitive:
+type into the input, clear the signal, and assert the PROPERTY is empty. An
+assertion on `getAttribute` passes either way and proves nothing.

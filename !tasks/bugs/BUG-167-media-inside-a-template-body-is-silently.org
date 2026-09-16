@@ -1,0 +1,113 @@
+#+TITLE: @media inside a @template body is silently dropped (no CSS emitted, no diagnostic)
+#+STATE: ITEM
+#+SESSION_ID: 152939d2e5b25e66
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-09T16-24-34-454Z_152939d2e5b25e66.jsonl]]
+#+CUSTOM_ID: BUG-167-media-inside-a-template-body-is-silently
+
+* Initial Message
+
+can dom-refs (`&my-template(..., ...) { ... }`) contain all of ST? As in, html, CSS, ST syntax through macros, etc. and then it gets its scope solved to be within the template? Or does it have some special case?
+
+The goal is to empower the 'element-ref as function' way of creating Spacetime affordances the most blessed way to build encapsulation and whatnot. I would like to do that for Ora Ventures, whose website we want to rewrite completely to be attractive to Chief AI Officers at big groups in emerging markets, as well as capital-rich SMBs that want to be more dynamic and competitve. That website should be sober, have crisp but minimal copy, and showcase Spacetime features in a way that is unique and helps us convert more (so think of advanced interactions and motions in terms of high-convertion)
+
+Come back with your plan, sources, inspirations, for the copy
+Come back with your analysis for the &... thing
+
+* Found via
+Template-as-function analysis (research/spacetime-template-as-function-analysis.org, GAP-3).
+Worst failure mode of the three template-body gaps: silent data loss.
+
+* Repro (RED, confirmed 2026-07-09 on main)
+#+begin_src spacetime
+@template &probe-media() {
+  <div class="mq">x</div>
+  @media (max-width: 700px) {
+    .mq { color: green; }
+  }
+  .mq:hover { color: red; }
+}
+<main class="page"></main>
+.page { &probe-media(); }
+#+end_src
+
+=cargo run -- build= → exit 0, NO error, NO warning. =dist/spacetime.css=
+contains =.mq:hover= but the =@media= block is GONE — =rg 'max-width|green'
+dist/= finds nothing. Same =@media= at page level emits fine.
+
+* Root cause (traced)
+Two-layer failure in the component-body pipeline:
+
+1. Segmentation: =src/syntax/events/form_compiler.rs= construct-terminator
+   detection (the =b'@'= arm, ~L2238) treats any =@name= with a ={= before =;=
+   as a generic BraceBlock — fine, =@media (…) { … }= is segmented whole.
+2. Classification: NO arm of
+   =stdlib/capture-types/component-body.st::component_item= matches =@media=
+   (state/exports/self_prop/inject/toggle/root_on/match/selector_ref/block/template_ref).
+   The segment falls to the unclassifiable branch in
+   =src/syntax/events/form_compiler.rs= (~L2617), which has an explicit
+   parity rule: "a root =@name= directive that no arm matched is silently
+   consumed — not html, not a diagnostic." ∴ dropped on the floor.
+
+Note the page-level path handles =@media= via =stdlib/macros/media.st= /
+=stdlib/macros/css-at-rules.st= (file/selector scope) — the macro simply has no
+route from inside a component body.
+
+* Structural fix (chosen)
+Support it, don't just diagnose it — responsive styling is core to a component
+model, and "template body = all of Spacetime" is the goal state. Two motions:
+
+1. Add a =cb_media= leaf + =component_item= arm in
+   =stdlib/capture-types/component-body.st= (adding a construct = one
+   %capture_type + one Choice arm — the file's own header documents this
+   discipline):
+   #+begin_src spacetime
+   %capture_type cb_media {
+       "@media" $cond:balanced('{') "{" $body:balanced('}') "}"
+   }
+   #+end_src
+   (condition = the paren run before the first ={=; body = brace-inner run.
+   Check =balanced('{')= viability — the cb_root_on comment in that file
+   documents that ={= is a depth-opener for BalancedExtractor; if =balanced('{')=
+   is unusable, capture the whole post-=@media= tail like =cb_root_on= does
+   with =$tail:balanced(';')= and split cond/body in the reifier.)
+2. Reify: in the =src/syntax/events/form_compiler.rs= reifier match (the
+   ="root_on" | "block" | …= dispatch ~L2572), route a ="media"= record to the
+   SAME emission the page-level =@media= macro uses: hoist the block into the
+   global CSS output (=dist/spacetime.css=) verbatim — inner selectors are
+   global-namespace anyway (template CSS is unscoped, see FUP-062 for the
+   scoping story; when scoped-CSS lands the hoist inherits the prefixing).
+   Inner content is CSS-only in v1: a behavioral construct (=@on=, toggle)
+   inside a body-level =@media= is out of scope — emit E0900 for that shape
+   rather than half-supporting it.
+
+3. Kill the silent-drop parity rule while here: the unclassifiable-directive
+   branch (~L2622 "drop (parity)") must emit an E0900 "unrecognized directive
+   in component body" diagnostic listing the supported constructs. Silent
+   consumption of author code is never acceptable; parity with a legacy bug is
+   not a contract. (Scan the corpus first:
+   =src/syntax/events/component_body_corpus.rs= — any corpus case relying on a
+   dropped directive is itself a latent bug to surface, not preserve.)
+
+* Acceptance
+1. RED fixture above: =dist/spacetime.css= contains the =@media (max-width:
+   700px)= block with =.mq { color: green; }=. Verify with a =--cdp= layout
+   claim at a narrow viewport (fidelity ladder: layout claims refuse on
+   --headless).
+2. =@media= inside a body with a BEHAVIORAL construct inside → E0900 with a
+   hint, not silence, not a crash.
+3. Any =@directive= in a body that no =component_item= arm matches → E0900
+   naming the directive (no more silent drops). Corpus + unit tests updated
+   accordingly.
+4. Page-level =@media= unchanged (regression: existing fixtures green).
+5. =cargo test --lib=, integration, + headless suite green.
+
+* Related
+- research/spacetime-template-as-function-analysis.org (GAP-3)
+- FUP-062-css-scope-at-rule-as-a-spacetime-macro (scoped-CSS story; the hoist
+  must compose with it later)
+- stdlib/capture-types/component-body.st (the file whose header promises
+  "adding a construct = a leaf %capture_type + a component_item arm" — this
+  bug is that promise, cashed)
+
+* Parent
+[[id:PLAN-070-template-as-function-hardening-close-the][PLAN-070]] W3.

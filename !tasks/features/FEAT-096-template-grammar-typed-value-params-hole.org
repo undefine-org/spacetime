@@ -1,0 +1,114 @@
+#+TITLE: Template grammar — typed value params + ...&hole splice holes
+#+STATE: DONE
+#+SESSION_ID: 1503ca05d05c0c62
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-10T14-32-18-497Z_1503ca05d05c0c62.jsonl]]
+#+CUSTOM_ID: FEAT-096-template-grammar-typed-value-params-hole
+#+COMPLETION_HASH: 01df25678f10f497
+
+Parent: [[id:PLAN-031-editable-structured-rich-text-input-mult]] — Wave 0. Blocks @mark/@block (FEAT-097).
+
+EMPIRICAL GROUNDING (2026-06-10, build-verified):
+- Holes have TWO mechanisms: page/@each = backtick (CST HTML_HOLE,
+  parser.rs:1813); @template/component BODIES = bare `$x`/`&param`
+  (src/emit/html_reactive.rs:55 normalize_bare_holes). Proven: a component body
+  `<li>… `$it`</li>` emits backticks AS LITERAL TEXT today.
+- @mark/@block bodies ARE component bodies → today they'd get bare holes; we want
+  backtick `` `...&sel` ``. DECISION (user): ADDITIVE — teach normalize_bare_holes
+  to ALSO honor backtick holes; bare keeps working (legacy). Cleanup → FUP-041.
+- param_list grammar: stdlib/capture-types/param_list.st
+  `( ( $binding:binding | $element:element ) $optional:optmark? ","? )*`
+  reified by src/syntax/events/extractors/custom.rs:368 reify_param_list →
+  ParamList(Vec<TemplateParamDef>) (src/syntax/form_match.rs:148; struct =
+  {name, kind, optional}).
+- TemplateParamDef consumers: src/pipeline/expand.rs:1686 (JSON emit),
+  :348 (element-param filter), src/syntax/visitor.rs:55/142, src/type_system.rs:61.
+  Adding fields = additive; update the JSON-emit + visitor sites.
+
+* Target
+- stdlib/capture-types/param_list.st (typed + default)
+- src/syntax/form_match.rs (TemplateParamDef: + type_ref: Option<String>, + default: Option<String>)
+- src/syntax/events/extractors/custom.rs:368 (reify_param_list reads new keys)
+- src/pipeline/expand.rs:1686 (emit type/default into param JSON)
+- src/emit/html_reactive.rs:55 (normalize_bare_holes: honor backtick holes incl. `...&name` spread)
+- stdlib/macros/template.st (fix stale bare-hole doc comments → backtick)
+- tests: src/syntax/stdlib_registry.rs (typed-param match), html_reactive unit (spread lowering), tests/ headless (round-trip)
+
+* Change
+1. TYPED VALUE PARAMS — author convention = signal-decl SPACE form. Grammar:
+   `( ( $binding:binding | $element:element ) $ptype:ident? $optional:optmark? ( "=" $default:expr )? ","? )*`
+   $ptype OPTIONAL (existing untyped templates unchanged). NOT `$href: url`.
+   reify reads `ptype`/`default` keys → TemplateParamDef.type_ref/default.
+2. BACKTICK HOLES IN COMPONENT BODIES (additive) — normalize_bare_holes scans
+   `` ` `` … `` ` `` runs as holes (same HOLE_OPEN/idx/HOLE_CLOSE sentinel feed
+   into treesink). Inside a backtick run:
+   - `` `$x` `` / `` `expr` `` → single Hole (reactive, like bare today)
+   - `` `&name` `` where name ∈ element_params → element-substitution Hole
+   - `` `...&name` `` → SPREAD hole: inner expr literal `...&name`. Lowering
+     flattens the array/fragment arg into the children list at that position
+     (vs single-node insert). Marker carried in the hole source string;
+     html_reactive emits a spread-append (loop appendChild over arg array).
+   Bare `$x`/`&param` STILL recognized (legacy). Backtick takes precedence when
+   a `` ` `` opens.
+3. SPREAD SEMANTICS — `...&name` only valid in TEXT/children position; in attr
+   value → compile error ("spread is children-only").
+4. Registry retention: %registers template entries already retain body
+   (ComponentBody) + params; ensure new type_ref/default survive into
+   RegistersClause for FEAT-097 schema walk.
+
+* Edge
+- `` `...&sel` `` with sel bound to empty array → zero children (no crash).
+- backtick inside attr value `href="`$href`"` → single reactive attr hole
+  (normalize already handles $ inside quoted attr; extend to backtick).
+- literal backtick in body → `` \` `` escape (already documented,
+  data-and-rendering.md §2). normalize must honor the escape.
+- untyped legacy templates: byte-identical emit (snapshot floor).
+
+* Acceptance
+- @template &x($a url, &kids) { <a href="`$a`">`...&kids`</a> } compiles;
+  array arg of N → N appended children (headless @mount + @then count/text).
+- spread in attr → diagnostic.
+- typed-param @template matches (src/syntax/stdlib_registry.rs new test).
+- existing template snapshots: zero diff (cargo test --lib + integration).
+- cargo run --features headless -- test tests/ --headless green.
+
+* CORRECTION (2026-06-10, user) — NO spread `...&`. `&sel` already flattens.
+emit_element_hole (src/emit/html_reactive.rs) ALREADY handles a multi-node
+selection: an HTML-string value is parsed into a <template> and ALL its
+childNodes are inserted before the anchor; a single Node is inserted directly.
+So an @mark/@block body wraps a whole selection with `` `&sel` `` — there is NO
+need for a `...&` spread form. Spread routing + emit_spread_hole REMOVED.
+Build-verified: `<strong>`&sel`</strong>` lowers to a comment-anchored element
+hole that inserts every node of the selection sequence.
+
+REVISED scope of FEAT-096 (spread dropped):
+1. typed value params `$href url` / `$alt string = ""` (DONE — param_list.st +
+   TemplateParamDef{type_ref,default} + reify + expand.rs JSON emit + tests, 11
+   golden cases pass).
+2. backtick holes recognized in component bodies (additive; bare legacy kept;
+   FUP-041 cleanup). `` `$x` `` reactive text, `` `expr` `` reactive,
+   `` `&name` `` element-substitution (flattens), `href="`$h`"` reactive attr,
+   escaped `` \` `` literal. (DONE — scan_backtick_hole + emit_node already
+   routes &name to emit_element_hole.)
+No new HtmlExpr variant; no `...` token.
+
+NOTE [2026-06-10]: DONE 2026-06-10. Verified:
+- param_list typed params: 11 golden cases pass (custom.rs test), incl `$href url`,
+  `$alt string = ""`, mixed `$sel, $href url`.
+- backtick holes in component bodies: build-verified all forms
+  (`$x` reactive text, `expr` reactive, `&name` element-substitution flatten,
+  `href="`$h`"` reactive attr, escaped `\`` literal).
+- EQUIVALENCE PROVEN (headless): a backtick-hole template body and the bare-hole
+  equivalent render byte-identical text → additive change is behavior-preserving.
+- NO spread `...&` (user): `&sel` element hole already flattens multi-node sel.
+- Regression floor: cargo test --lib 2180 pass (deterministic ×2);
+  integration_tests 170 pass; snapshots — zero diffs attributable to this change
+  (untyped templates emit identically; the 5 modified .snap are concurrent
+  FEAT-092 session, verified by diff content).
+- 251 headless failures are the concurrent FEAT-092 CMS session (PLAN-027
+  "interleaved concurrent CMS session" caveat) — orthogonal domains
+  (signals/state/timeline), zero backticks in failing files.
+Touched: stdlib/capture-types/param_list.st, src/syntax/form_match.rs
+(TemplateParamDef +type_ref +default), src/syntax/events/extractors/custom.rs
+(reify + test), src/pipeline/expand.rs (param JSON type emit),
+src/emit/html_reactive.rs (scan_backtick_hole + backtick branch + escape).
+FUP-041 = bare-hole deprecation cleanup. NOT YET COMMITTED (W0 not gated alone).

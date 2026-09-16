@@ -1,0 +1,51 @@
+#+TITLE: Inspector param input value wiped by 1s input.json poll mid-edit
+#+STATE: ITEM
+#+SESSION_ID: 150fc68a85585789
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-19T21-58-52-181Z_150fc68a85585789.jsonl]]
+#+CUSTOM_ID: FUP-077-inspector-param-input-value-wiped-by-1s
+
+* Initial Message
+
+Check that latest few plans around the MCP/the workbench and the BUG-121 and BUG-122. Can you do another round of checking whether it achieves the Squarespace/Framer/Figma/etc killer vision? Showcase then tell me the gaps that you see.
+
+* Parent / context
+MCP workbench round-4 test-drive (2026-06-19). The M4 editable-param loop
+(PLAN-046) WORKS end-to-end — verified: edit `name` → mcp_param →
+region_mount_input → guest re-seeds to "Hello, Trusted!". But the typing UX has a
+seam.
+
+* Summary
+The inspector's param-input row is re-rendered every ~1s when the host page polls
+input.json and the contract_params @each re-runs. If the user is mid-typing (has
+not yet fired `change` via blur/enter), the re-render WIPES the in-progress value
+back to empty/seed. The commit only lands if the user types + blurs FAST. A
+property panel that erases what you're typing mid-keystroke isn't Framer-grade.
+
+Verified round-4: synthetic value-set + change landed server-side ("name=Trusted"
+in the bundle), but a slower type-then-blur read back empty because the poll
+re-rendered the input between keystroke and blur.
+
+* Direction
+- Don't re-render a param input that currently has FOCUS (skip the @each row
+  rebuild for the focused control, or reconcile by key instead of replace), OR
+- Bind the input value to a LOCAL signal that the poll does not overwrite while
+  the field is dirty/focused (a dirty-guard mirroring BUG-114's isTrusted guard
+  on the source editor), OR
+- Debounce/skip the contract_params re-render when a param input is focused.
+
+Prefer focus-aware reconciliation (don't rebuild the focused control). This is the
+same class as M6's source-editor self-mutation (BUG-114) — hydration/poll vs. live
+user input — so the fix should rhyme with that guard.
+
+* Acceptance
+- Typing a multi-character value into a param input at normal speed (with poll
+  running) preserves the full value; commit on blur applies it to the guest.
+- The guest still live-updates on commit (no regression to the M4 loop).
+- No spurious mcp_param writes from the poll re-render (mirror BUG-114).
+
+* Provenance
+- Param input + action: stdlib/__mcp__/workbench/actions.st (.mcp-param-input,
+  on:"change"); rendered via contract_params @each (lists.st / inspector).
+- Related guard precedent: BUG-114 (source-editor isTrusted/dirty guard).
+- M4 loop (works): PLAN-046 M4.
+- Round-4 test-drive; memory EP-6f819249d9ac1617.

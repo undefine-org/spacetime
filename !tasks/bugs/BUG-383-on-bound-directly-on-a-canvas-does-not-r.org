@@ -1,0 +1,50 @@
+#+TITLE: @on bound directly on a canvas does not receive a score/clip driver
+#+STATE: ITEM
+#+SESSION_ID: 157047c1462c1c38
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-undefine-spacetime/2026-09-02T20-57-35-768Z_157047c1462c1c38.jsonl]]
+#+CUSTOM_ID: BUG-383-on-bound-directly-on-a-canvas-does-not-r
+
+* Initial Message
+
+ok so
+1. what have you actually implemented (syntax) vs. what's left to implement (syntax as well)
+2. what would that allow us to do in general
+3. did you regenerate the Spacetime video
+
+Discovered during PLAN-150 W4 (score-drives-3D).
+
+## Symptom
+`@on &.clip { ... }` (or any driver) bound DIRECTLY on a `<canvas>` element never
+receives the driver signal — the animated properties sit frozen at their initial
+value. The identical `@on` on a `<div>` works. A `<canvas>` as a CHILD of the
+consumer is fine; only the canvas AS the `@on` host is broken.
+
+## Reproduction (--cdp, needs timing)
+```
+.reel { @score &.time(6s) as &f { &stage at 0s for 6s; } }
+canvas.stage { width: 100px; height: 100px; @on &.clip { opacity: 0.2 -> 1; } }
+// fixture: <div class="reel"><canvas class="stage"></canvas></div>
+// after @wait 2500ms: getComputedStyle(canvas).opacity is still ~0.2 (FROZEN)
+```
+Swap `canvas.stage` -> `div.stage` (or nest the canvas inside a div consumer) and
+opacity advances to ~0.7. Isolated in scratch/w4/{final,split}.test.st during W4.
+
+## Impact
+Any film that wants a 3D stage choreographed by a `@score` must put `@on` on a
+WRAPPING element, not the `<canvas>` itself. PLAN-150 W4 worked around it: the
+stage-object resolver (apply-animations.st) descends from the div consumer into
+the hosted canvas to find named objects. The workaround is documented in
+docs/language/film.st.md §5 status and film/w4-score-3d.st.md ("Not yet").
+
+## Likely cause (unverified)
+Either the score entry's element resolution skips/into a `<canvas>` differently,
+or the `@on` scope binding on a replaced element (canvas) resolves the driver
+against the wrong node. Needs tracing of how `@on &.clip` on a canvas emits its
+watchScoped root vs a div. Start from stdlib/macros/on.st scope handling +
+score-window element binding for a canvas entry.
+
+## Fix acceptance
+A `--cdp needs timing` gate: `@on &.clip { opacity: 0.2 -> 1 }` bound directly on
+`canvas.stage` (score on parent) advances opacity > 0.5 by mid-window. RED against
+today's code, GREEN after. Then the W4 resolver's canvas-descent can be simplified
+(the consumer could be the canvas itself).

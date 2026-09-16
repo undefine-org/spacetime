@@ -1,0 +1,62 @@
+#+TITLE: Admin richtext widget broken: @editable inside @template body emitted as literal text
+#+STATE: ITEM
+#+SESSION_ID: 1503ca05d05c0c62
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-10T14-32-18-497Z_1503ca05d05c0c62.jsonl]]
+#+CUSTOM_ID: BUG-103-admin-richtext-widget-broken-editable-in
+
+* Initial Message
+
+(b) -> what would that achieve?
+(c) -> is an FUP filed?
+(d) -> yeah what about integration points with stdlib/__admin__? I'd LOVE so automatic content editing on the website directly. This is a DESIGN investigation, let's think about what's most Spacetimey. At the same time, you may think about showing me how you'd use this to edit blogs and whatnot.
+
+Also, think about how you could set up a default editable flow and leverage Spacetime's introspection to automatically augment the admin side with editable-everything, optionally improvable with something akin to the @cms block
+
+* Problem
+The admin's rich-text widget does not render an editor. In the entry drawer, the
+`&fld-richtext` field shows the LITERAL TEXT:
+  @editable(bind: , marks: ["bold","italic","link"], blocks: ["p","h2","blockquote"]);
+instead of a mounted block editor. No contenteditable, bind: is EMPTY, no ST.Editable
+surface for that field. Every other widget (text, textarea, number, toggle, select, media,
+chips, relation, color) renders correctly — only richtext is broken.
+
+* Repro
+- projects/cms-testbed/index.st with a `body: richtext` field on @type Post (added this turn).
+- cargo run -- serve projects/cms-testbed/ -p 4456 --debug
+- /__spacetime/admin/ → posts → open "First Light" → the drawer's `body` field shows the
+  raw @editable(...) directive as text.
+- Confirmed in the compiled admin runtime: `@editable(bind` appears as a LITERAL STRING (2×),
+  not a compiled editable-surface invocation.
+
+* Root cause (located, not yet fixed)
+`@editable` is a SELECTOR-SCOPE macro. Inside `@template &fld-richtext($f) { … @editable(bind:
+`$f.value`…); }`, the template body's nested directive is NOT expanded by the macro pipeline
+— the template captures its body as HTML/text and emits @editable verbatim. So a nested macro
+inside a @template body never runs. (drawer.st:36-43; admin runtime shows the literal.)
+
+This is the admin analogue of the on-page richtext we DID get working (W1) — on a normal page
+`@richtext`/`@editable` is a top-level selector macro and compiles fine; inside a @template
+body it does not. The drawer is the ONLY place richtext is mounted via a template, which is
+why it slipped.
+
+* Why it matters
+This is THE blocker for "rich text editing in the admin" (the user's explicit ask). The
+whole CMS rich-text story (edit a Post.body block document in the admin drawer) is currently
+non-functional. P1.
+
+* Fix direction (needs design — parser/pipeline, real blast radius)
+@template bodies must EXPAND nested selector-scope macros (at least @editable, ideally any),
+binding their hole args (`$f.value`) per-instantiation. Options:
+  (a) make the template-body compiler recurse into nested macro invocations (general; the
+      right fix, but touches how template bodies are parsed/expanded — pipeline/expand.rs,
+      pipeline/mod.rs template-body capture);
+  (b) a narrower richtext path: the drawer mounts the editable surface imperatively from JS
+      (admin runtime) keyed on [data-widget="richtext"], reading the bound value — bypasses
+      the template-nesting gap but adds an admin-specific mount (less harmonious).
+Prefer (a) if the blast radius is containable; (b) is the pragmatic unblock.
+
+* Provenance
+Found while setting up a rich-text admin test for the user (W2/@cms investigation). The
+testbed change (Post.body/Section.body → richtext) is committed so the repro is permanent.
+
+NOTE [2026-06-13]: Root-caused + designed under PLAN-039 (unify nested constructs in component bodies). This is the SAME class as BUG-085 (@each in template body → literal text). Prototype (3a) confirmed: a generic cb_directive grammar arm classifies a TOP-LEVEL nested @editable, but the drawer nests @editable INSIDE `<div class="ad-richtext">`, so the reactive builder must ALSO lower in-element directives (not just the grammar arm). Fix is PLAN-039 W2 (gate: cms-testbed admin Post body richtext mounts + persists). Repro permanent in projects/cms-testbed (Post.body/Section.body → richtext).

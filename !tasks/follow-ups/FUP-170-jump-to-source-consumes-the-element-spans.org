@@ -1,0 +1,179 @@
+#+TITLE: FUP-170 — element spans exist and nothing consumes them (jump-to-source)
+#+CATEGORY: follow-ups
+
+* ITEM FUP-170 — jump-to-source for element comments
+:PROPERTIES:
+:CUSTOM_ID: FUP-170-jump-to-source-consumes-the-element-spans
+:PARENT:   FUP-171-comments-element-picker-and-resource-notifications
+:END:
+
+** State: the hard half is DONE, the visible half is not
+
+=76b1c2e0= landed exact source mapping: every authored element in a projected
+page now carries a real =invoke_span= (byte offsets) plus its =file=, where
+before the projection hardcoded =invoke_span: null= for Element/Hole nodes.
+
+NOTHING READS IT YET. The comments pill offers "Show on page" (=locate.st=,
+=36a98bf0=), which finds the element in the RENDERED DOM by content. There is
+no "open the source" affordance anywhere, so the spans are currently paid for
+and unused.
+
+This is the remainder of FUP-171 W-e, split out because W-e's other half
+(hover-highlight + scroll) shipped and the section reads as done at a glance.
+
+** Why locate-on-page is not a substitute
+
+They answer different questions and a reviewer needs both:
+
+- "Show on page" answers WHERE IT RENDERS. It fails, correctly, when the
+  element is gone, and refuses to guess when several identical elements match.
+- Jump-to-source answers WHERE IT IS WRITTEN. It still works when the element
+  renders conditionally and is currently absent, when it is emptied of text,
+  and when several identical elements exist — =identical_elements_still_map_to_distinct_source_spans=
+  is precisely the case content matching provably cannot resolve.
+
+A comment saying "this markup is wrong" is actionable only from the source.
+
+** SHIPPED 2026-08-03 — except one half, stated honestly
+
+W-a..W-e all landed. What was built:
+
+- =SourceCandidate= / =SourceResolution= / =resolve_element_source= in
+  =src/comments.rs= — mirrors =resolve_element='s four outcomes on purpose, so
+  a reader who knows one knows the other. Plus =Synthesized=, which the DOM
+  resolver does not need.
+- =GET /__spacetime/comments/source.json?id=<id>= in =src/server.rs=.
+- =st_entry_for_route= EXTRACTED from =try_serve_st_page= so route→file is ONE
+  rule. Found and fixed a hole while extracting: =/= is served by
+  =index_handler=, so the page path never asked about root — but a comment on
+  the home page does, and "no source" for the most-visited route would have
+  been a conspicuous gap.
+- Pill: "Where in source" per record, on the =$comApi= signal rail beside
+  =$comAdd=/=$comReanchor=. Every outcome is renderable.
+- Docs: "Where it was written", with the outcome table.
+
+*** THE REMAINING HALF: spans are template-body-relative, not file-relative
+
+=html_walk= builds =LineOffsets= over ONE template body, so offset 0 is the
+first byte of the BODY, not of the file. =TemplateBundle= carries no offset for
+where its body sits in source, so a file line/column cannot be derived.
+
+The route therefore reports =relative_to: "template-body"= and names the
+template, rather than reporting a body offset as a file offset. That would send
+a reader to the top of the file to look at unrelated markup — a confident wrong
+answer, which this whole feature exists to refuse.
+
+TO FINISH: put a body offset on =TemplateBundle= at bundle-construction time,
+add it to the span, and report a real file line. Small, and it is the last
+thing between this and a clickable editor link.
+
+*** Also found: file-scope markup is not projected at all
+
+=mcp/bundle.rs= is TEMPLATES ONLY — it emits a diagnostic saying "file-scope
+HTML outside @template is ignored in v1". So a page authored at file scope
+(which =project.rs= itself notes is the OVERWHELMING majority) yields zero
+nodes, and every element comment on it resolves =no-source=.
+
+That is honest but thin. Widening it is a bundle-layer change, NOT a comments
+change, and it lifts every consumer of the projection at once (inspector, MCP,
+this route). Worth its own item.
+
+*** Tests
+
+- 8 unit tests on the resolver (=src/comments/tests.rs=), incl. the tie case and
+  the synthesized case.
+- 2 route tests: the edit-above case (insert markup ABOVE the target, assert the
+  answer follows the element and reports =moved=), and the delete case.
+- 2 pill contract tests; 1 doc-accuracy test pinning the outcome table.
+- MUTATION-VERIFIED four ways: trusting the hint blindly fails 2 route tests
+  (one of them showing a deleted button resolving to the paragraph that
+  replaced it — the exact defect); drifting the label rule fails the parity
+  test.
+
+** The work
+
+*** THE JOIN ALREADY EXISTS — this is smaller than it looks
+
+The click ALREADY captures the key. =pick.st:58-62= does
+=target.closest('[data-st-node]')= and reports =stamped.dataset.stNode= as the
+anchor's =selector=, which is persisted on every element anchor. The projection
+keys every node by that SAME id (="id": node.id= in =project.rs=), and as of
+=76b1c2e0= each of those nodes carries a real =invoke_span= + =file=.
+
+Path: stored =anchor.selector= → find the node in the projection → read its
+=invoke_span=. No new capture at click time, no schema change, no re-pick of
+existing comments. The pieces were built at different times and were simply
+never wired together.
+
+*** W-a: resolve the span on read — do NOT store it
+
+The tempting version is to stamp the span onto the anchor at pick time, since
+the click is right there and already has the element. RESIST IT.
+
+A stored byte offset is stale the moment anyone edits the file above it. It
+would then point confidently at the wrong line — reading like data while being
+wrong, which is EXACTLY the positional-anchor failure this feature already
+rejected once and fixed with fingerprinting (=39fbb650=). Storing a span
+reintroduces that bug class in a new field.
+
+Division of labour, unchanged from the existing design:
+- FINGERPRINT = identity. Content-derived, survives edits.
+- =selector= (=data-st-node=) = positional HINT. Already documented as "NOT the
+  identity" in the MCP schema.
+- SPAN = a derived VIEW of the CURRENT file, recomputed per request, never
+  persisted.
+
+The anchor is therefore already complete: nothing needs saving at click time
+that is not saved today.
+
+*** W-b: an affordance that can fail visibly
+
+A row gains "Open source" beside "Show on page". When the anchor no longer
+resolves, the control must LOOK unresolvable rather than doing nothing when
+clicked — the same rule W-e set for locate, and the same orphan rail
+(re-anchor / dismiss), not a parallel one.
+
+*** W-c: what "open" means, per surface
+
+- MCP / =check=: emit =file= + line/column so an agent can read the code the
+  comment is about. This is the higher-value half — an agent currently gets a
+  comment about markup it cannot locate in the source.
+- Pill (browser): it cannot open an editor. Either render the path:line as
+  selectable text (honest, works everywhere) or emit an editor URL scheme.
+  Prefer the former first; a scheme that silently fails on a machine without
+  the handler is worse than text.
+
+*** W-d: prove it survives an edit above the target
+
+The test that matters: insert markup ABOVE a commented element, re-project,
+and assert the jump still points at the SAME element — not at whatever now
+occupies the old offsets. That is the exact failure mode fingerprinting was
+introduced to kill; the span path must not reintroduce it.
+
+NB this test also GUARDS W-a: it passes when the span is resolved on read and
+fails if anyone later "optimizes" it into a stored field. Write it so it fails
+for that reason specifically.
+
+*** W-e: the hint can go stale while the identity holds — handle that
+
+=data-st-node= is positional, so inserting a sibling changes it. The
+fingerprint still identifies the element correctly, but the stored =selector=
+now names a DIFFERENT node — whose span would be the wrong span.
+
+So the lookup MUST NOT trust =selector= alone. Either confirm the
+selector-found node against the fingerprint before using its span (falling back
+to a fingerprint scan on disagreement), or resolve by fingerprint from the
+start and use =selector= only to order candidates. First is faster, second is
+harder to get wrong. Either way an unconfirmed hit is NO hit — the rule
+=resolve_element= already applies.
+
+This is the genuinely subtle part, and why "just read the span off the
+selector" is not sufficient.
+
+** Related
+
+- Spans landed: =76b1c2e0=. Enabler work originally scoped as PLAN-064 B4,
+  which turned out not to be required (=set_current_line= was already being
+  called; the sink just ignored it).
+- Content-based locate: =36a98bf0=.
+- Element identity: =39fbb650=.

@@ -1,0 +1,138 @@
+#+TITLE: The ≤ relation as data — %widens_to rows on %scalar_type
+#+STATE: ITEM
+#+SESSION_ID: 153f5ed0617636c7
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-26T21-12-46-213Z_153f5ed0617636c7.jsonl]]
+#+CUSTOM_ID: FUP-189-the-relation-as-data-widens-to-rows-on-s
+
+* Initial Message
+
+ok so is there any point in keeping the worktree now? verify
+
+* Why
+
+Spacetime's TYPES are already data (`%scalar_type` rows, `%capture_type`
+productions). Its RELATIONS are not: "a length is acceptable where a
+length-percentage is wanted" is knowledge nothing currently writes down, so each
+consumer re-derives it or ignores it.
+
+This is the foundation the other maximalist FUPs (188-191) build on. Do it first
+or they have nothing to query.
+
+* The model
+
+`≤` — "anywhere a B is wanted, an A will do". Reflexive, transitive, NOT
+symmetric. Transitivity is the point: store DIRECT edges as data, derive the
+rest by closure, so 14 rows describe every acceptance.
+
+Paired with `~` (consistency, Siek & Taha): reflexive, symmetric, and
+DELIBERATELY NOT transitive, so `Unknown ~ length` and `Unknown ~ color` never
+license `length ~ color`. Full derivation in
+`research/relational-semantics.typ` (already written, on the reMarkable).
+
+Decision procedure, which is the whole checker:
+
+    O ≤ E  → accept, and CLAIM E downstream
+    O ~ E  → accept, claim NOTHING
+    else   → diagnostic
+
+* CodePath
+
+  stdlib/scalars/types.st::§line[text~="%scalar_type"]
+      add `%widens_to "length_percentage"` to `length` and `percentage`.
+      START WITH TWO EDGES ONLY — see the discipline below.
+
+  src/validation/consistency.rs                              NEW, ~60 LOC
+      fn subtype(a, b) -> bool       transitive closure over the rows
+      fn consistent(a, b) -> bool    reflexive + symmetric + Unknown, NOT transitive
+      fn join(a, b) -> Option<Type>  least upper bound (⊔)
+
+  src/syntax/registry.rs::SyntaxRegistry
+      the closure is computed ONCE at registry load, not per query
+
+  tests/consistency_relation_test.rs                          NEW
+      - `length ≤ length_percentage` holds
+      - the reverse does NOT (a slot wanting exactly a length refuses `50%`)
+      - transitivity: an A→B→C chain gives A≤C without a direct row
+      - `Unknown ~ everything`
+      - NON-transitivity of `~`: assert `length ~ color` is FALSE even though
+        both are consistent with Unknown. THIS IS THE TEST THAT MATTERS — if it
+        ever passes, the type system has become decoration.
+
+* THE DISCIPLINE — read before adding any edge
+
+An edge in `≤` is a claim about the WHOLE LANGUAGE, FOREVER. The cautionary tale
+is measured and in this repo's history: `number ≤ time` is locally reasonable
+(`duration:number = 600` means 600ms) and globally catastrophic — `stagger: 0.05`
+is SECONDS, and a blanket numeric migration once made staggers 1000× too slow
+across twenty files with a green build.
+
+So: an edge must hold UNCONDITIONALLY, in every directive, in every property.
+Anything conditional is a TERNARY relation keyed by the declaration site
+(`accepts_unitless(directive, property, policy)`), or it is not a relation.
+
+Add edges ONE AT A TIME, each with a corpus query proving no existing value
+changes meaning.
+
+* Verification seeds
+
+- Corpus sweep BEFORE and AFTER: `cargo run -- check examples demos tests/fixtures`
+  must be flat (35 / 36 / 6). A new edge that changes a count is a new
+  acceptance — investigate every one.
+- For each edge, grep the corpus for values of the narrower type in slots of the
+  wider one; they should already exist and already work.
+- `cargo test --lib` (baseline 3100 passed / 3 pre-existing failures).
+
+* Deprecation sweep (do not leave the old path)
+
+Once `subtype()` exists, these become its callers or are DELETED:
+  src/syntax/events/form_scoring.rs::§line[text~="score"]   — see FUP-189
+  src/diagnostics/suggestions.rs                            — see FUP-190
+Search `grep -rn "length_percentage" --include=*.rs src/` for hand-written
+acceptance pairs; each is either a row or a bug.
+
+* CORRECTION 2026-08-11 — the carrier moves to %capture_type
+
+Filed with `%widens_to` rows on `%scalar_type`. That is the wrong carrier. See
+`research/syntax-inference.typ` Part IV (on the reMarkable) for the full
+argument; the short form:
+
+`%scalar_type` is ATTRIBUTIVE — 14 rows hanging meaning and widgets onto
+categories that already exist. `%capture_type` is CONSTITUTIVE — a value IS its
+production. The thing that has an EXTENSION, and can therefore be compared, is
+the production.
+
+** What changes
+
+  as filed:     %widens_to on %scalar_type,  14 rows, relation over scalars
+  as corrected: %widens_to on %capture_type,          relation over productions
+
+Scalars still get the relation, because a scalar type NAMES a production. But so
+do references, holes, wide keywords and directive refs — which under the filed
+design sat outside the relation entirely, because they are not scalars.
+
+That is the whole argument: `--ink` has no place in a scalar relation, and
+`--ink` is exactly the value this arc has spent weeks failing to type.
+
+** What it buys in verification
+
+A declared edge over productions can be CHECKED against language inclusion
+(grammar A ≤ B iff everything A matches, B matches — decidable for grammars this
+small). So:
+
+  - declared edges stay honest about INTENT (no accidental widenings from two
+    grammars that happen to overlap)
+  - derivation makes a WRONG claim impossible (assert every declared edge is a
+    real inclusion)
+
+Strictly better than either alone. Add this as a gate:
+`tests/consistency_relation_test.rs::every_declared_edge_is_a_real_inclusion`.
+
+Scalar rows cannot support this check at all — they have no extension to
+compare. That asymmetry is the tell.
+
+** What does NOT change
+
+The `~` relation, its deliberate non-transitivity, the `O ≤ E` / `O ~ E`
+decision procedure, THE DISCIPLINE section above, and every verification seed.
+Those were right. Only the carrier moves, and it moves DOWN onto the thing that
+was already primary.

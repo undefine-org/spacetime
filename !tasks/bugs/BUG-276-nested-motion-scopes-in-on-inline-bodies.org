@@ -1,0 +1,33 @@
+#+TITLE: Nested motion scopes in @on inline bodies flatten: Selector variant dropped in text_of (+ stagger time units)
+#+STATE: DONE
+#+SESSION_ID: 154a974abe45a002
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-08-04T14-22-49-081Z_154a974abe45a002.jsonl]]
+#+CUSTOM_ID: BUG-276-nested-motion-scopes-in-on-inline-bodies
+
+* Initial Message
+
+can you tell me which examples and demos use `@score`? I want to test drive the video creation. And create a catalog that lets us see the new opportunities provided to us by this new feature
+
+* Symptom
+A nested motion scope inside an `@on` inline body —
+
+  .sc1 { @on &.clip {
+    opacity: 0 -> 1 -> 1 -> 0;
+    .fh { blur: 14px -> 0; }
+    .fk { opacity: 0 -> 1; }
+  } }
+
+— emitted a FLAT `anims.properties` list (no `anims.scopes` anywhere in the bundle). Same-named properties collided: the scope's identity `opacity: 0 -> 1` landed last and overwrote the root's four-stop opacity every frame (last writer wins per frame), so sc1's computed opacity tracked the clip progress EXACTLY (identity) instead of its keyframes. Verified by trace: opacity === __clip_sc1 at every sample.
+
+* Root cause
+drivers.rs `text_of()` matched Ident|String|Binding but NOT `CapturedValue::Selector` — which is exactly what a `$sel:selector` capture (stdlib/macros/on.st `on_motion_body`) yields. The selector was dropped at the READ side; the EMIT side (expand.rs BUG-201 grouping into anims.scopes) was already correct and waiting for it.
+
+* Companion fix (same wave)
+Scope-level `stagger: 120ms` emitted `delay: 0`: expand.rs `parse_stagger_value` did a bare f64 parse, silently failing on time literals. calcStagger consumes ms (root rail passes ms; `/1000` normalizes), so `120ms` -> 120, `0.12s` -> 120.
+
+* Fix
+- src/pipeline/drivers.rs text_of: add CapturedValue::Selector.
+- src/pipeline/expand.rs parse_stagger_value: time-unit aware.
+
+* Gate
+tests/score/score-launch-film.test.st test 10 (stagger spread: first word up while last still down, sampled) + the film scene gates (root opacity no longer identity). The .kine demo block was restructured to the correct shape: container consumes its own window, `.wk` nested scope staggers across children.

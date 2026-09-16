@@ -1,0 +1,87 @@
+#+TITLE: Fix CaptureType Properties short-circuit producing empty TypeRegistry fields
+#+STATE: DONE
+#+SESSION_ID: 14a74cedac0c17fa
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-03-30T18-25-30-288Z_14a74cedac0c17fa.jsonl]]
+#+CUSTOM_ID: BUG-010-fix-capturetype-properties-short-circuit
+#+EFFORT: S
+#+PRIORITY: #A
+#+LAYER: parser
+
+NOTE [2026-03-30]: Fix was more complex than planned. Removing Properties from the short-circuit exposed a deeper issue: collect_descendant_tokens produces duplicate tokens (parent + child nodes share tokens). Added a dedicated Properties arm that re-lexes the inner text via cst::Lexer with correct offset adjustment (pointer arithmetic) to produce clean tokens for PropertiesExtractor. Verified: all 5 types have correct fields (Customer:10, CustomerStat:2, Industry:5, Product:9, Resource:8).
+
+* Initial Message
+
+test in the browser with the appropriate stuff
+
+* Scope
+** In Scope
+- Fix ~CaptureType::Properties~ handling in ~src/syntax/events/form_compiler.rs~ so it uses ~PropertiesExtractor~ instead of short-circuiting to ~CapturedValue::String~
+- This bug causes ~TypeRegistry::from_form_matches~ to produce types with zero fields because ~get_properties("fields")~ returns ~None~ when the capture is a String
+** Out of Scope
+- ~CaptureType::HtmlBlock~ — must remain in the short-circuit arm. HtmlBlockExtractor delegates to ExprExtractor which produces ~CapturedValue::Expr~ (not ~String~), changing the downstream codegen semantics for template invocations. Removing it would cause JS syntax errors.
+- TypeRegistry itself — no changes needed, it correctly handles ~CapturedValue::Properties~ already
+- JSON schema generation — no changes needed, ~generate_json_schema~ correctly walks TypeDef fields
+** Boundary Rationale
+The bug is a single incorrect match arm in the form compiler. The PropertiesExtractor exists and works correctly — it's just bypassed. The fix is to remove Properties from the short-circuit so it falls through to the extractor-based path. HtmlBlock must stay because its extractor produces a different CapturedValue variant that would break template invocations.
+
+* Tests
+** Unit Test: type_system.rs
+File: ~src/type_system.rs~ (inline test module)
+
+Scenario 1: @type with fields produces non-empty TypeRegistry
+- Parse ~@type Foo { name: string; age: number; active: boolean; }~ through the full pipeline (parse + form matching)
+- Build ~TypeRegistry::from_form_matches~
+- Assert ~Foo~ type has 3 fields
+- Assert field names are ~["name", "age", "active"]~
+- Assert field type_exprs are ~[string, number, boolean]~
+
+Scenario 2: JSON schema generation includes properties
+- Parse ~@type Customer { id: string; name: string; logo: url; }~
+- Build TypeRegistry, generate JSON schema for ~Customer~
+- Assert schema has ~properties~ with 3 entries
+- Assert ~properties.id.type == "string"~
+
+** Integration test: verify types.json API
+- Start dev server with site/dataiku
+- Fetch ~/__spacetime/dev/types.json~
+- Assert ~Customer~ type has non-empty ~properties~ (at least ~id~, ~name~, ~logo~)
+
+* Implementation
+** File: ~src/syntax/events/form_compiler.rs~
+Line 1013, the match arm:
+
+Current code:
+#+begin_src rust
+CaptureType::Properties | CaptureType::HtmlBlock => {
+    Some(CapturedValue::String(inner.to_string()))
+}
+#+end_src
+
+Change to (remove Properties, keep HtmlBlock):
+#+begin_src rust
+CaptureType::HtmlBlock => {
+    Some(CapturedValue::String(inner.to_string()))
+}
+#+end_src
+
+This makes ~CaptureType::Properties~ fall through to the ~_ =>~ arm at line 1019, which:
+1. Collects descendant tokens from the body node
+2. Filters out braces and EOF tokens
+3. Looks up the extractor: ~extractors.get(&capture_type)~ → finds ~PropertiesExtractor~
+4. PropertiesExtractor parses ~name: type;~ pairs into ~Vec<PropertyDef>~
+5. Returns ~CapturedValue::Properties(props)~
+
+The downstream consumer ~TypeRegistry::from_form_matches~ calls ~fm.get_properties("fields")~ which pattern-matches on ~CapturedValue::Properties~ and extracts fields correctly.
+
+* Edge Cases
+- Empty type body (~@type Empty {}~) — ~inner.is_empty()~ check at line 1000 returns None, which is correct (type with no fields)
+- Type with optional fields (~@type Foo { name?: string; }~) — PropertiesExtractor handles the ~?~ modifier correctly (sets ~optional: true~ on PropertyDef)
+- Type with type references (~@type Bar { customer: Customer; }~) — PropertiesExtractor captures the type_ref as a string, TypeRegistry resolves it via ~parse_type_ref_to_expr~
+- Type with array type (~@type Baz { items: string[]; }~) — PropertiesExtractor captures ~string[]~ as type_ref, TypeRegistry handles it
+
+* Acceptance Criteria
+1. ~cargo test --lib~ passes (1977+ tests, zero failures)
+2. New test: ~@type Foo { name: string; age: number; }~ → TypeRegistry has Foo with 2 fields
+3. ~/__spacetime/dev/types.json~ returns Customer with non-empty ~properties~ in browser
+4. Data editor shows "Schema-driven" label (not "Raw JSON") for typed data sources
+5. Schema-driven form renders field inputs for Customer fields (name, logo, quote, etc.)

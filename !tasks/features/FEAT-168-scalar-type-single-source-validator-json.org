@@ -1,0 +1,108 @@
+#+TITLE: %scalar_type single source — validator, JSON-schema, and widgets from one stdlib table (W4)
+#+STATE: DOING
+#+SESSION_ID: 153f5ed0617636c7
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-26T21-12-46-213Z_153f5ed0617636c7.jsonl]]
+#+CUSTOM_ID: FEAT-168-scalar-type-single-source-validator-json
+
+* Initial Message
+
+@data inline $brand Brand : {
+  "ink":    "#e8eef7",
+  "bg":     "#0b0e14",
+  "panel":  "#121722",
+  "accent": "#5eead4",
+  "dim":    "#8b96a8",
+  "rule":   "#222b3a"
+};
+
+Could we have this be written like { ink: #e8eef7; ... } instead of that? Basically, if I define a field to be color, then I can use CSS, and basically if ther's a serialised data, it's the string (or it's the Js repr of it? let me know what the representations should look like). This is part of a wider effort to support all CSS value types more natively in Spacetime (tell me what that would mean that I didn't see yet)
+
+* Initial Message
+
+Wave 4 of PLAN-122. One stdlib scalar-type table becomes the single source for parser + JSON-schema + admin widgets. Every scalar field type (CSS values AND CMS content types — string/number/boolean/url/richtext/date/slug/media/relation) is a registry entry; adding a type is a stdlib edit, not a Rust PR. Absorbs FEAT-109 Tier 0 (the four shadow value-classifiers).
+
+* Target
+
+- NEW stdlib/types/scalars.st — %scalar_type entries.
+- src/type_system.rs — DELETE the TypeExpr::Primitive string-match (:1002-1013); primitives resolve via registry. JSON-schema mapping (:791-804) becomes DERIVED from entries, not hand-written.
+- Standalone validator (:1023-1098, E0501/E0502/E0503) — kept for fetch/file/subscribe runtime JSON; schema input now derived from the same entries.
+- Admin/EditAst widget mapping (FEAT-107 token-aware widgets), LSP — read the entry's widget field.
+- Shadow classifiers to unify (from FEAT-109 body): sync/protocol.rs:281 classify_value, lsp/colors.rs provide_document_colors, analysis/visual_lint.rs, compiler capture — one classifier reading the registry.
+
+* Change
+
+1. %scalar_type entry shape (data; consumers read fields):
+
+   %scalar_type color {
+     capture: color                         // the W1 %capture_type
+     schema:  { type: "string", format: "color" }
+     widget:  color-picker
+     repr:    string
+   }
+
+2. Rewire the three consumers to the table: schema generator, validator, widget mapper. ONE entry, three readers — today those are three hand-synced code sites.
+3. TypeExpr::Primitive match-arm deleted → registry lookup (kinds-as-data, AGENTS.md corollary).
+4. FEAT-109 Tier 0 absorption: the 4 shadow classifiers delegate to one registry-read classifier; duplicate hex scanners deleted (net code deletion, zero behavior change — FEAT-109's own risk profile for Tier 0).
+5. C9 scope: the table is the LANGUAGE's scalar table — non-CSS scalars (date/slug/media/relation/richtext) are entries too (pattern terminal + string repr covers them; richtext multiline seed form is a declared edge).
+
+* Edge
+
+- Widget field names an EXISTING widget or `none` (graceful degradation); dynamic-tagged captures degrade to text fields.
+- JSON-schema output must stay byte-compatible for existing @type consumers (cms-testbed admin) — snapshot the generated schemas before/after.
+- This is the wave that makes "add %scalar_type currency, get parse+validate+schema+widget" true — keep the extension path fully in stdlib (no registry recompile hooks in Rust).
+
+* Accept (RED→GREEN)
+
+- Adding a new %scalar_type date { capture: iso-date; schema: {format: "date"}; widget: date-picker; repr: string } in stdlib yields: seed parsing with spans, E0502 on wrong JSON, admin date widget — with ZERO Rust changes (integration test proves it).
+- type_system.rs primitive match deleted; schema snapshots for existing types byte-identical.
+- FEAT-109 Tier 0 done: one classifier, duplicate detectors deleted, its 19 classify_value tests still green.
+- Full suites green.
+
+* Relation
+
+Parent: PLAN-122. Blocked by W1 (capture entries must exist to be referenced); independent of W2/W3 ordering otherwise. Absorbs FEAT-109 Tier 0; completes the kinds-as-data dissolution (CaptureType arms gone in W1, TypeExpr primitives gone here). Closes the widget↔parser round-trip novelty (PLAN-122).
+
+NOTE [2026-08-02]: 2026-07-31 re-verify: the design's "orphan validator, zero callers" premise is STALE and this FEAT gets stronger for it. PLAN-119 wired the validator live — AnalysisContext::validate_data_source_files (src/analysis/mod.rs:1035, called from src/main.rs) validates @data source files against @type via validate_json_against_schema, emitting E0501/E0502/E0503 in production. So: do NOT delete it; DERIVE its schema input from %scalar_type. Consumer count rises from two to THREE hand-synced per-primitive maps in src/type_system.rs: (1) the JSON-schema map ("color" => {type:string, format:color}), (2) TypeRegistry::zero_value (PLAN-119 W1 — string-backed domain scalars zero to ""), (3) the admin widget map. Adding a scalar today means editing three Rust matches that can silently disagree; the acceptance test for this FEAT is that a new stdlib %scalar_type entry satisfies all three with zero Rust. Fourth consumer to fold in: BUG-250's lower_css_binding_value classifier (commit 2b02b7fc) — a fifth shadow classifier beyond FEAT-109's four.
+
+NOTE [2026-08-06]: POST-LANDING AUDIT (same session) — the wave's own acceptance test was FALSE when
+first claimed. Fixed in 2d82722c.
+
+I verified the four Rust maps I set out to replace and stopped there. A scalar
+answers a FIFTH question — what SHAPE its captured value takes — and that one was
+still a hardcoded match arm in `wrap_reifier`
+(`src/syntax/events/extractors/custom.rs`):
+
+    "color" | "length" | "duration" | "time" | "angle" | "percentage" | "easing"
+
+So the wave that deleted six hand-synced scalar lists SHIPPED A SEVENTH, inside
+itself. The acceptance test passed because it only checked type recognition,
+schema, zero and widget — never the value's shape.
+
+Measured, not assumed. A probe `%scalar_type resolution` added purely as stdlib
+data:
+
+    length     8px   -> String("8px")                  (in the list)
+    resolution 96dpi -> Named({n: 96.0, u: "dpi"})     (not in it)
+
+Downstream that record becomes `NaN` in an animation or an E0800 colour-parse
+error — far from its cause, and `check` reports nothing.
+
+FOUR ROWS WERE ALSO MISSING: `time`, `angle`, `percentage`, `easing` had
+grammars and appeared in the hardcoded list but had no `%scalar_type` row. The
+new gate caught this by FAILING on `percentage` before I had noticed. A name that
+resolves to a grammar but has no row parses fine and then flattens differently
+from its twin — the exact silent gap this wave exists to close.
+
+IMPLEMENTATION NOTE for anyone extending this: the predicate must read
+`STDLIB_REGISTRY`, NOT `cached_stdlib_registry()`. `wrap_reifier` runs WHILE the
+meta registry is loading, so the cached accessor re-enters `INCREMENTAL_CACHE`'s
+mutex and DEADLOCKS — observed as a test that hangs forever rather than an error,
+which is why it is worth writing down. The scalar captures now ride the same
+bootstrap path as the `%capture_type` definitions they name.
+
+LESSON: an acceptance test that is a NEGATIVE ("adding a row needs zero Rust") is
+only as good as the set of behaviours it exercises. Mine exercised four of five.
+The generalisable form: enumerate every consumer of the thing being centralised
+BEFORE writing the acceptance, and make the acceptance assert on a NEW member
+(the probe row), not on existing ones — existing members pass through the old
+hardcoded path and prove nothing.

@@ -1,0 +1,822 @@
+#+TITLE: Registry addressing — the /$ leaf-sigil qualified reference
+#+STATE: DONE
+#+SESSION_ID: 153497be379ff5cc
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-18T12-18-12-318Z_153497be379ff5cc.jsonl]]
+#+CUSTOM_ID: PLAN-117-registry-addressing-the-leaf-sigil-quali
+#+COMPLETION_HASH: adf2e8bc674ca350
+
+Spec (to be written in W1): =docs/specs/registry-addressing.md=
+
+* Intention & Purpose
+
+Make Spacetime's registries — every sigil-space — addressable, introspectable,
+and build-optimisable through ONE reference grammar that the language already
+half-implements.
+
+The driving case: *define =$host= in one file, use it across the app*, with the
+compiler able to (a) const-fold it when it is never written, (b) eliminate it
+when never read, (c) show its provenance in =inspect=, and (d) REFUSE the
+program when two files declare it ambiguously.
+
+The governing principle (now in AGENTS.md): *the language must be learnable by
+pattern — knowing one thing should tell you the next.* Today =@b/badge= works
+and =$b/host= does not. That gap is the whole plan.
+
+** The design in one table
+
+| axis        | meaning                                  | phase        |
+|-------------+------------------------------------------+--------------|
+| sigil       | WHICH registry (=@= =%= =$= =&=)         | selects      |
+| =/=         | address WITHIN the registry              | compile-time |
+| =:=         | collection prefix, INSIDE an import string only | compile-time |
+| =.=         | descent INTO the resolved thing          | runtime      |
+
+Reference forms, one shape per registry:
+
+#+begin_src spacetime
+@3d/stage          %3d/env-form        app/$host         app/&rail
+@stage             %env-form           $host             &rail          /* bare */
+#+end_src
+
+The sigil ALWAYS hugs its leaf. =@=/=%= already lead their path because their
+leaf IS the whole invocation (=@scene/camera= is one name); =$=/=&= are
+referents, so the qualifier sits in FRONT and the sigil stays glued to the cell
+it names: =app/$host=.
+
+** Why =:= never enters reference position
+
+=:= carries SIX live roles in expression zone (verified counts):
+
+| role                        | evidence                            |
+|-----------------------------+-------------------------------------|
+| CSS declaration             | ubiquitous                          |
+| CSS pseudo =:hover= =::before= | 181 lines (stdlib+demos)         |
+| value-introducer            | =$open bool: false=, =@data inline $x : 3= |
+| *meta capture type*         | =$preset:string= — *618 lines*      |
+| macro named args            | =@env(preset: studio)=              |
+| ternary                     | =a ? b : c=                         |
+
+Collection prefixes survive ONLY because they appear inside a quoted import
+string — a sealed lexical zone. Verified: exactly 2 occurrences of =coll:= in
+the whole repo, both inside doc-comments; ZERO real uses. Normative rule:
+
+#+begin_quote
+=:= appears only inside a module address, and a module address appears only
+inside a quoted import string. =as= collapses the long key for everything else.
+#+end_quote
+
+∴ =local:config/$session= is NOT a supported reference. Write
+=@use "local:config" as app= then =app/$host=.
+
+* Verified current state (read the code, do not re-derive)
+
+** Namespace expansion works in four stages, and is ALREADY sigil-agnostic
+
+1. *Lex/parse* — =src/syntax/cst/parser.rs:636-652=. The qualifier is glued into
+   the directive head by a *tight-adjacency* loop: consume =/IDENT= segments
+   ONLY when no trivia surrounds the =/=. =src/syntax/cst/ast.rs:283= enforces
+   the mirror: "Trivia ends the name run (a spaced =/= is NOT a qualifier)."
+2. *Form matching* — =src/syntax/events/form_compiler.rs:379-398=.
+   =match_directive_prefix= skips the =qualifier/= prefix so the LEAF matches the
+   =%form=, and RETURNS the qualifier into =FormMatch.namespace_qualifier=.
+3. *Canonicalize* — =src/pipeline/mod.rs:2878-2896=.
+   =ImportScope::resolve_qualifier= rewrites alias → namespace key
+   (=[b]= → =[./badge]=). Handles alias AND literal path-suffix.
+4. *Lookup* — FQN-first (=./badge/badge=), falling back to the bare name.
+
+*The sigil is consumed at stage 1 as =AT_SIGN= and never participates in
+resolution.* Stages 2–4 operate on a sigil-less path + leaf. This is why
+extending to =$= is cheap: only stage 1 needs a new production.
+
+** The =/= ambiguity is ALREADY SOLVED and shipped
+
+Tight adjacency is implemented AND tested: =parser.rs:4023
+test_spaced_slash_not_a_qualifier= asserts =@grid cols: 1 / 3= yields name
+=grid=. Repo-wide evidence for the rule's safety:
+
+- real division in expression position: *4 lines, one file* —
+  =stdlib/mobile/macros/gestures/swipe.st:38-41=, all =/ 100= (spaced, numeric RHS)
+- division inside backtick holes: *ZERO occurrences*
+- CSS slash values: *9 lines*, all =font: 15px/1.6= shape (numeric head, no sigil)
+
+** Supporting machinery that already exists
+
+| what | where |
+|------+-------|
+| =Collection= / =Namespace= / =Fqn= / =Fqn::key= | =src/metasystem/module.rs= :31 :69 :177 :206 |
+| =ImportScope= + =resolve_qualifier= + =is_visible= | =module.rs= :288 :340 :362 |
+| =MetaRegistry::macro_key= (FQN keying, global = bare) | =src/metasystem/registry.rs= |
+| =ImportAst { path, namespace, alias, only, hiding }= | =src/parser/ast.rs:40-70= |
+| =ScopeTree.global_states= (root-level =$= = page-global) | =src/pipeline/scope.rs= |
+| =@exports { $count: mut }= + =ExportDecl { var_name, mutable }= | FEAT-115/119/120 |
+| E0924 ambiguity · E0926 unbound qualifier · E0927 visibility | =src/pipeline/mod.rs= |
+
+** Defects found while verifying (both REAL, both in scope)
+
+1. *Silent qualified-drop.* =@b:badge("NEW")= — a COLON where a slash belongs —
+   reports =✓ passed= and emits ZERO css. Proven by differential build:
+   =@b/badge= → =badge::before= present in =spacetime.css=; =@b:badge= → file
+   empty. An unresolvable qualifier must ERROR, never vanish.
+2. *Silent cross-file =$= merge.* Two files each declaring root-level =$host=
+   merge into ONE cell with no diagnostic. Every other registry errors on
+   duplicate definition (=DuplicateMacro=, =DuplicatePrimitive=). =$= is the only
+   exempt kind, and that exemption IS the bug.
+
+* Scope
+
+** In scope
+
+- W1 RED matrix (=.test.st=) + test-tree reorganisation + spec
+- W2 =$= registration under =Fqn= + duplicate diagnostic + =inspect --layer state=
+- W3 =app/$host= reference production + resolution + E-codes
+- W4 const-fold / dead-state elimination driven by the W2 registry
+- W5 =@exports= at file scope (replacing the spec-reserved, unenforced =%public=)
+
+** Out of scope (file as FUP if wanted)
+
+- =app/&rail= entity qualification — the pattern PERMITS it; no use case in hand.
+  Grammar reserves the shape; resolution unimplemented.
+- Remote WRITES through a qualifier (=app/$x <- v=). W3 parses and REFUSES with a
+  teaching error. A =: mut= ladder is a later decision.
+- =@import= deprecation/codemod. =@import= keeps working untouched all the way
+  through W5.
+- Selector-block (element-scoped) state — plural by construction, never
+  statically addressable. Documented boundary, not a gap.
+
+* Open question that GATES W4 (must be answered with evidence)
+
+Does =cargo run -- serve= (or =elixir/spacetime_lv=) ever share one reactive cell
+across two requests or two browser tabs? If page-global cells are per-process
+rather than per-request, cross-file mutable state is an ISOLATION bug before it
+is a design question — and that outranks the optimisation work. Answer by
+reading =src/server.rs= + =elixir/spacetime_lv/= before W4 lands. Const-folding
+(write-free cells) is unaffected either way; only the mutable path is gated.
+
+* Waves
+
+** W1 — RED matrix + test-tree reorganisation + spec [PENDING]
+
+*** Test tree — the current organisation is chaotic
+
+=.test.st= files currently live at =tests/= root (12), =tests/bugs/= (17),
+=tests/integration/= (10), =tests/component-model/= (5), =tests/e2e/= (1) — with
+no rule distinguishing them. Rust =*.rs= tests are equally scattered
+(=tests/bug_*.rs= at root vs =tests/integration/*.rs=).
+
+Establish ONE rule, applied to the new files and DOCUMENTED for the rest:
+
+#+begin_example
+tests/
+  lang/            <- language-surface behaviour, one dir per feature area
+    registry-addressing/
+      qualified-reference.test.st
+      slash-disambiguation.test.st
+      state-modules.test.st
+      diagnostics.test.st
+      README.md          <- what this dir proves, and what it deliberately does not
+  bugs/            <- one file per BUG-NNN, named for the bug (existing convention, keep)
+  component-model/ <- existing, keep
+  integration/     <- existing, keep
+#+end_example
+
+Do NOT mass-move existing files in this wave (a rename storm would bury the
+real diff). Write the new tests in the new hierarchy, add
+=tests/lang/README.md= stating the rule, and file a FUP for the migration.
+
+*** The RED matrix — files and what each one proves
+
+All four are =.test.st= running on =--headless=. RED at authoring time; each
+wave turns a documented subset GREEN.
+
+**** =tests/lang/registry-addressing/slash-disambiguation.test.st=
+
+The edge-case map for =/=. This is the file that must be exhaustive — it is the
+contract that lets =/$= ship safely. Every row is a separate =@test=.
+
+| input                          | must parse as        | why |
+|--------------------------------+----------------------+-----|
+| =app/$host=                    | qualified ref        | the new form |
+| =$total / $count=              | division             | spaced, both sigiled |
+| =1 / $denominator=             | division             | *user-named case* — spaced, numeric LHS |
+| =$a / 100=                     | division             | matches the 4 real repo sites |
+| =($w - $gap) / $cols=          | division             | paren LHS |
+| =font: 15px/1.6=               | CSS slash value      | matches the 9 real repo sites |
+| =grid-area: 1 / 3=             | CSS slash value      | spaced numeric pair |
+| =aspect-ratio: 16/9=           | CSS slash value      | tight numeric pair |
+| =@b/badge=                     | qualified directive  | existing behaviour, non-regression |
+| =@grid cols: 1 / 3=            | name =grid=, not qualified | existing test, mirrored at =$= |
+| =app/$host/x=                  | ERROR                | a =$= leaf ends the path |
+| =1/$denominator=               | ERROR w/ help        | *tight* numeric-LHS: refuse, suggest spaces |
+
+The last row is the deliberate cost of =/$=, and the user has approved paying
+it: *forcing a space is okay*. It must REFUSE with a message naming the fix,
+never silently pick an interpretation.
+
+**** =tests/lang/registry-addressing/qualified-reference.test.st=
+
+- =@use "./config.st" as app= then =app/$host= reads the owner's cell
+- open =@use "./config.st"= then =config/$host= (implicit module-name qualifier,
+  mirroring =@scene/camera= under an open =std:scene=)
+- alias serves ALL registries from ONE import: =@app/log-in=, =%app/audit=, =app/$host=
+- qualified read emits BYTE-IDENTICAL js to the owner's local read (alias is a
+  compile-time rename, zero runtime — Elixir =alias= semantics)
+- =.= after a qualified ref still descends: =app/$session.user.name=
+- non-regression: bare =$host= in the OWNING file is untouched
+
+**** =tests/lang/registry-addressing/state-modules.test.st=
+
+- cross-file =$host= via =@import= still works (non-regression; 430 sites)
+- a write-free literal =$host= folds: value inlined, no cell emitted
+- a written =$session= stays a live reactive cell
+- a declared-but-never-read =$retryBudget= is eliminated
+- =@exports= at file scope publishes; unlisted stays file-private
+
+**** =tests/lang/registry-addressing/diagnostics.test.st=
+
+Every diagnostic gets a RED test BEFORE it exists:
+
+| code | trigger |
+|------+---------|
+| =E-state-dup= | two files declare root-level =$host=; names both files |
+| =E-state-ambiguous= | bare =$theme= resolves to two flooded declarations; help suggests =as= |
+| =E-qualifier-unbound= | =app/$host= with no =as app= (E0926 mirror for =$=) |
+| =E-qualifier-colon= | =@b:badge= / =app:$host= — the SILENT-DROP bug, must error |
+| =E-state-remote-write= | =app/$host <- v= names the owning file, suggests =@emit= |
+| =E-slash-ambiguous= | =1/$denominator= — help: "add spaces around =/=" |
+
+*** Compile-diagnostic gap (blocker for the diagnostics file)
+
+Verified: =.test.st= has NO surface for asserting a COMPILE-TIME diagnostic —
+the =@then= claim vocabulary is entirely runtime/DOM/signal. The diagnostics
+matrix therefore needs one of:
+
+(a) a =@then compile= claim shape (e.g. =@then compile should error "E-state-dup"=)
+    — the harmonious answer: same =@then= grammar, new subject;
+(b) a Rust companion at =tests/lang/registry_addressing_diagnostics.rs= driving
+    =compile()= and asserting =pipeline_errors=.
+
+*Decide in W1 before writing the file.* Lean (a) — it keeps the vocabulary one
+and makes every future diagnostic testable in the language itself; (b) is the
+fallback if (a) proves to be a wave of its own, in which case file it as a FUP
+and use (b) for now.
+
+*** Spec
+
+=docs/specs/registry-addressing.md= — normative chapters:
+1. the four-axis table (sigil / =/= / =:= / =.=)
+2. the leaf-sigil rule and WHY =@=/=%= differ from =$=/=&=
+3. the tight-adjacency lexing rule + the refuse-on-tight-numeric case
+4. the =:=-quarantine rule
+5. resolution algorithm (reuses stages 2–4 verbatim)
+6. diagnostics table
+Rationale appendix: the token-saturation audit + the language-designer panel
+findings (flooding grammar is correct for dialects, wrong for addresses).
+
+*** W1 acceptance
+
+- =cargo run --features headless -- test tests/lang/registry-addressing/ --headless=
+  runs and REPORTS FAILURES (a RED matrix that errors out at parse time is not a
+  RED matrix — each test must run and fail its claim)
+- =tests/lang/README.md= states the organisation rule
+- spec committed
+- FUP filed for migrating existing scattered =.test.st= files
+
+** W2 — =$= joins the FQN registry [PENDING]
+
+- root-level =$x= registers under its file's =Fqn= (mirrors =macro_key=; global
+  stays bare → byte-identical keys for every existing file)
+- =E-state-dup= replaces the silent merge
+- =inspect --layer state=: FQN · type · initial · readers · writers · verdict
+  (=const= / =reactive= / =dead=)
+- acceptance: the state-modules provenance tests go GREEN; all 430 =@import=
+  sites still compile; =cargo test --lib= + =--test integration_tests= green
+
+** W3 — the =app/$host= production [PENDING]
+
+- ONE new lexer/parser production: =IDENT (/ IDENT)* / $IDENT= in expression
+  position, tight-adjacency, mirroring =parser.rs:636-652=
+- resolution reuses =resolve_qualifier= + =is_visible= UNCHANGED
+- =E-qualifier-unbound=, =E-qualifier-colon= (fixes the silent-drop defect),
+  =E-slash-ambiguous=, =E-state-remote-write=
+- acceptance: slash-disambiguation + qualified-reference matrices GREEN; the 4
+  real division sites and 9 CSS slash sites unchanged (assert on emitted css/js)
+
+** W4 — fold + eliminate [PENDING, gated on the isolation question]
+
+- write-free + literal ⇒ inline at every read, emit no cell
+- unread + unexported ⇒ eliminate
+- soundness argument recorded in the spec: *there is no custom JavaScript* — no
+  =eval=, no foreign call, no escape hatch — so a cell's write-set is CLOSED and
+  write-freedom is PROVEN, not inferred. This is the one optimisation Spacetime
+  can make that a general-purpose language cannot.
+- acceptance: fold/eliminate tests GREEN; bundle-size assertion on a fixture
+
+** W5 — =@exports= at file scope [PENDING]
+
+- extend the EXISTING =@exports= clause (=@exports { $count: mut }=, FEAT-115)
+  from template scope to file scope, sigil-keyed:
+  =@exports { $host, $session: mut, @card, %tokens }=
+- DELETE the spec-reserved =%public= (parsed at =ast.rs:121=, never enforced) —
+  one export mechanism, not two. Per the user: =@exports= is preferred.
+- =%exports { $x: T }= inside =%primitive= bodies (163 uses) STAYS and does NOT
+  unify — that is the META layer publishing a primitive's signals, correctly
+  marked with =%=. Two layers, two sigils, one meaning each.
+- =E-state-private= on reading an unexported name through a qualifier
+
+* Elegance-bar check (AGENTS.md)
+
+1. *small extension of existing grammar* — one production, mirroring a loop that
+   already exists 20 lines away in the same file ✓
+2. *variants as data* — every registry resolves through the same
+   =resolve_qualifier= / =Fqn= path; a FIFTH registry costs zero grammar ✓
+3. *deletes a special case* — removes =%public= (parallel export clause), removes
+   the =$=-exemption from duplicate-definition checking, removes the
+   silent-qualified-drop path ✓
+4. *tested by the machinery it generalises* — =.test.st= running on the same
+   headless runner as every other language feature ✓
+
+* Notes
+
+- Reversal on the record: the sigil-hug rule was briefly abandoned in favour of
+  =$app/host= (sigil leads, matching =@=). Reverted — =$app= is a valid OPERAND
+  (=@app= is not), so a leading =$= makes =/= genuinely ambiguous with division.
+  Putting the qualifier in FRONT (=app/$host=) keeps the sigil on its leaf AND
+  makes the =/$= sequence unambiguous, because =$= never begins a divisor.
+- =app.$host= was also evaluated and rejected: =.= in expression position already
+  heads live bare-ident member access — verified
+  =@data fold $t from $cart : acc + (item.price * item.qty)=, where =acc= and
+  =item= occupy exactly that space.
+- Flooding is CORRECT for grammar and WRONG for addresses. A module can change
+  what a file's language IS (=$preset:string= inside a =%form= has no head to
+  qualify — the parser is matching bytes while still deciding what they mean).
+  That is a dialect being spoken, not a scope being polluted. Cells are
+  addresses; grammar is dialect. =@use= borrows a dialect; =$= binds by name.
+
+* W1 OUTCOME [DONE 2026-07-26]
+
+** Delivered
+
+| artifact | content |
+|----------+---------|
+| =tests/lang/README.md= | placement rule for the whole =tests/= tree + the no-=/tmp= scratch rule |
+| =tests/lang/registry-addressing/slash-disambiguation.test.st= | 16 tests: the =/= token map |
+| =tests/lang/registry-addressing/qualified-reference.test.st= | 7 tests: one alias, every registry |
+| =tests/lang/registry-addressing/state-modules.test.st= | 6 tests: cross-file cells, fold, eliminate |
+| =tests/lang/registry-addressing/fixtures/{config,badge}.st= | module fixtures (cells; cells + macro) |
+| =tests/lang/registry_addressing_diagnostics.rs= | 11 tests: diagnostic codes + message quality |
+| =docs/specs/registry-addressing.md= | the normative spec |
+| =Cargo.toml= | =[[test]]= entry (cargo does not auto-discover =tests/*/*.rs=) |
+| =AGENTS.md= | the pattern-learnability principle |
+
+** Result
+
+- headless: *19 passed, 10 failed* \u2014 every failure a CLAIM failure, none a parse
+  error. The RED matrix runs.
+- Rust companion: *3 passed, 8 failed* \u2014 the 3 GREEN are the non-regression floor
+  (=@b/badge= emits; cross-file =$host= reads; division canary). All 8 RED report
+  =Got: []=, which is itself the finding: nothing is diagnosed today.
+- non-regression: =cargo test --lib= *2829 passed*, =--test integration_tests=
+  *202 passed*, both at =--test-threads=4=.
+
+** Test-authoring corrections made during the wave (each caught by running)
+
+Four claims were written from assumption and corrected against observed
+behaviour. Recorded because each is a fact about the test surface, not about
+this design:
+
+1. =text: `...`= inside a scope does NOT interpolate; the hole form is a
+   backtick run inside MARKUP. At page scope a backtick run is literal text.
+2. =@template= nested inside =@mount= is a PARSE ERROR; templates are declared at
+   file scope (the convention in =tests/component-model/=).
+3. =@each= with INLINE MARKUP inside =@mount= is likewise a parse error.
+4. =text <- 3= (a constant, no signal) emits NO binding. The original
+   "tight numeric division" row was therefore testing constant-folding, not =/=;
+   replaced with =$nine/3= and =$total/$part=, which are the rows that actually
+   guard the new production.
+
+Also: =not_have_signal= is ELEMENT-scoped and passes for any name at all
+(verified with a made-up one). Two negative claims were vacuous; both are now
+paired with a positive claim on the same element so they can only pass by
+discriminating.
+
+** Defects found and filed
+
+| id | what |
+|----+------|
+| BUG-232 | a colon in reference position is silently dropped, not refused (=@b:badge= reports success, emits zero css) |
+| BUG-233 | layout assertions SKIP instead of REFUSE on the headless backend \u2014 the FEAT-057 invariant test is itself failing (pre-existing) |
+| FUP-146 | migrate the scattered =.test.st= files into the new hierarchy |
+
+** Environment finding (cost an hour, worth recording)
+
+=cargo test --lib= at DEFAULT parallelism produced *133 failures* including
+=Disk quota exceeded=, against a 69%-full =/tmp=. Every one passed at
+=--test-threads=4=. The failures were temp-dir contention, not code \u2014 confirmed
+by =git status --short -- src/= being empty for the whole wave.
+
+Consequence: the diagnostics companion writes its throwaway projects under
+=scratch/tests/= (repo-local, gitignored), never =std::env::temp_dir()=. The rule
+is documented in =tests/lang/README.md= so the next suite inherits it.
+
+** Decided: compile-diagnostic surface -> FUP-147
+
+=.test.st= has NO surface for asserting a COMPILE-TIME diagnostic: the =@then=
+vocabulary is entirely runtime. Fallback (b) taken for this plan: the Rust
+companion =tests/lang/registry_addressing_diagnostics.rs=.
+
+Option (a), a =@then compile= subject, is the harmonious answer and its design is
+captured in full at [[id:FUP-147-then-compile-assert-compile-time-diagnos]]
+(=@compile(content:|src:)= establishes the subject; diagnostics serialise into
+the test JS at build time; claims iterate them at runtime). Deferred, not
+dropped: it is a wave of its own and PLAN-117 does not block on it.
+
+When FUP-147 lands, =registry_addressing_diagnostics.rs= and its =[[test]]= entry
+in Cargo.toml are DELETED, and its 11 tests are reborn as
+=tests/lang/registry-addressing/diagnostics.test.st=. That deletion is the
+elegance-bar gate-3 debt this plan is knowingly carrying.
+
+NOTE [2026-07-26]: RESEARCH ANSWERED — the W4 isolation gate is CLEAR.
+
+Question (Carniato's veto, PLAN-117 "Open question that GATES W4"): does
+=cargo run -- serve= or =elixir/spacetime_lv= ever share ONE reactive cell across
+two requests or two browser tabs?
+
+Answer: NO. Page-global cells are per-window, therefore per-tab and per-page-load.
+
+Evidence:
+- =public/runtime/st.js:68-80= — the canonical body-scope container is
+  =window.SpacetimeLocal=, a Proxy created in the BROWSER at page init.
+- =src/emit/html_reactive.rs:882= — =SignalScope::Global= lowers a file-scope
+  =$x= read to =SpacetimeLocal['x']=, i.e. a property of the page's own window
+  object. There is no server-side cell to share.
+- =src/server.rs:259-261= — =serve= mounts a static-file service. It ships bytes
+  (=spacetime.js= / =spacetime.css= / html); it holds no per-user reactive state.
+
+∴ the SSR cross-contamination class Carniato named (module-global signals on a
+server rendering for many users) is STRUCTURALLY ABSENT here: Spacetime compiles
+AOT and the cells are instantiated client-side. Two tabs = two windows = two
+=SpacetimeLocal= objects.
+
+Consequence for the plan: W4 (const-fold + dead-state elimination) is UNGATED and
+may proceed. Const-folding was never at risk either way (it only removes
+write-free cells), but the mutable path is now cleared too.
+
+Scope note: this answers the CLIENT-side question, which is what the plan asked.
+=elixir/spacetime_lv= assigns state per LiveView socket (per connection) by
+Phoenix's own model; if a future feature moves cells server-side, the question
+must be re-asked for that surface specifically.
+
+* W2 OUTCOME [DONE 2026-07-26]
+
+Zero author-syntax delta, as designed. Everything below is compiler-side.
+
+** Delivered
+
+| artifact | content |
+|----------+---------|
+| =src/pipeline/state_analysis.rs= (new) | the provenance pass + E0938 check; 9 unit tests |
+| =src/pipeline/scope.rs= | =StateDecl.source_file=; =StateVerdict=; =StateProvenance= |
+| =src/diagnostics/codes.rs= | E0938 registered (enum + =as_str= + =is_error=) |
+| =src/compiler.rs:1137= | pass wired post-import-resolution |
+| =src/cli/inspect.rs= | =--layer state= (pretty + json) |
+| =src/main.rs= | =E0938= code round-trip + CLI help |
+
+** The verdict model
+
+Three verdicts, decided per page-global cell from readers/writers/initial:
+
+| verdict | condition | W4 action |
+|---------+-----------+-----------|
+| =const= | no writers AND literal initial | inline at every read, emit no cell |
+| =reactive= | has a writer, or a computed initial | stays a live cell |
+| =dead= | no readers | emit nothing |
+
+Sound because Spacetime has NO custom JavaScript: no =eval=, no foreign call, no
+escape hatch, so a cell's write-set is CLOSED and a whole-page scan settles it.
+This is the optimisation a general-purpose language cannot make.
+
+Deliberate conservatism: an EXPRESSION initial (=$b: $a + 1=) stays =reactive=
+even with zero writers, because folding it would mean evaluating arbitrary
+expressions at build time. Only literals fold.
+
+** Live output
+
+#+begin_example
+$ spacetime inspect --layer state app.st
+
+$host  string  = "https://api.example.com"
+    declared config.st
+    readers  app.st (1)          writers ∅
+    verdict  const — write-free literal; foldable at every read
+$retryBudget  number  = 3
+    readers  ∅                    writers ∅
+    verdict  dead — read by nobody; eliminable
+$session  string  = "anon"
+    readers  app.st (1)          writers  app.st (1)
+    verdict  reactive — has a writer or a computed initial; stays a live cell
+#+end_example
+
+** E0938 — the silent merge is dead
+
+#+begin_example
+error[E0938]: $theme is declared 2 times on this page (in themes/dark.st, themes/light.st)
+  = hint: a page holds one cell per name, like one macro per name — the
+    declarations were being merged silently. Rename one of them, e.g.
+    `$themeFallback`, so each file owns a distinct cell.
+#+end_example
+
+Deletes the special case: =$= was the ONLY registry that merged duplicates
+silently (=DuplicateMacro= / =DuplicatePrimitive= have always refused).
+
+** Two guess-gate catches (both would have shipped wrong)
+
+1. *=@on= handler bodies are =CapturedValue::Named=, not raw text.* The first
+   implementation stringified captures and split on =<-=; every write went
+   undetected, so a written cell was misjudged =const= — a fold that would have
+   BROKEN a working counter. Caught by two failing unit tests, diagnosed with
+   =inspect --layer parse= (=body: [named]=), fixed by descending into container
+   variants.
+2. *The same directive is reachable from BOTH =ast.matches= and =ast.scopes=.*
+   Visiting both is required (css_declaration reads exist only in the tree;
+   file-level directives only in the flat list), so every scope-nested write was
+   counted twice. Caught by reading real =inspect= output — writers showed
+   =<entry> (1) · app.st (1)= for ONE handler. Fixed by deduplicating on span,
+   which is the identity of a usage site regardless of traversal path. Also
+   normalised absolute/relative paths so one file cannot appear under two labels.
+
+** Defect found and filed: FUP-148
+
+E0938 initially printed as *=error[E0806]=* — right message, right hint, WRONG
+CODE. =src/main.rs:1694-1722= re-parses the code from a STRING through an
+arm-per-code match with =_ => E0806= as fallback, so any unregistered code is
+silently relabelled. This already happened to E0900/E0904/E0906 before FEAT-120.
+
+Textbook AGENTS.md rot ("a closed Rust enum whose arms the runtime doesn't all
+enforce"). Patched for E0938; the structural fix (carry =DiagnosticCode= in
+=PipelineErrorInfo=, or a total =from_str= with a round-trip test over every
+variant) is FUP-148.
+
+** Test movement
+
+| suite | before | after |
+|-------+--------+-------|
+| lib | 2829 | *2844* (+15) |
+| integration | 202 | 202 |
+| v8 runtime | 445 | 445 |
+| diagnostics companion | 3/11 | *7/11* |
+| headless matrix | 19 GREEN / 10 RED | 19 / 10 (all remaining RED are W3/W4) |
+
+Four companion tests went GREEN: both duplicate-declaration tests, the inspect
+provenance table, AND =red_w3_ambiguous_bare_cell_across_two_modules= — E0938
+already covers the two-module =$theme= case, so W3 inherits it for free.
+
+One companion test was WRONG, not the feature: it invoked =inspect --layer state=
+with no file (the layer correctly requires an entry file, since provenance is a
+property of an ASSEMBLED page). Fixed, and strengthened while there \u2014 it now
+asserts the declaring FILE and BOTH opposite verdicts, so it cannot pass on a
+table that gets every verdict wrong.
+
+** Regression evidence for the 430 =@import= sites
+
+Zero E0938 across the whole corpus: 26 examples, 25 demos, 345 stdlib files, all
+fixtures. Pre-existing failures in that corpus are E0405 / E0504 / E0602
+(selector matching, undefined bindings) — untouched code paths.
+
+** Research answered: the W4 isolation gate is CLEAR
+
+See the dated NOTE above. =window.SpacetimeLocal= (=public/runtime/st.js:68-80=)
+is per-window, so page-global cells are per-tab and per-page-load; =serve= ships
+static files and holds no per-user state. Carniato's SSR cross-contamination veto
+is structurally absent. *W4 may proceed.*
+
+** Next
+
+W3 (the =app/$host= production) or W4 (fold + eliminate). W4 is now unblocked and
+consumes the W2 registry directly — it needs no new syntax and would turn the
+remaining =.test.st= fold/eliminate rows green.
+
+* W3/W4/W5 OUTCOME [DONE 2026-07-26]
+
+** W3 \u2014 the =app/$host= production [DONE]
+
+New: =src/pipeline/qualified_refs.rs= (14 unit tests). Scans expression text for
+=ident(/ident)*/$leaf=, resolves the head through the file's =@use= aliases (and
+the module's own NAME, Odin-style), then REWRITES to the bare =$leaf=.
+
+Rewriting at the end of import resolution is what makes an alias a pure
+compile-time rename with zero runtime footprint: every downstream stage \u2014 emit,
+analysis, fold, LSP \u2014 sees exactly the text the author would have written inside
+the owning file. *Proven byte-identical*: =diff= of the emitted JS for
+=app/$host= vs bare =$host= is empty.
+
+Wired at THREE sites, because a page with no imports never enters import
+resolution: =resolve_imports= (=parser/mod.rs:7498=), the compiler's no-import
+branch (=compiler.rs:434=), and =check='s (=main.rs:1558=). Missing the last two
+would have left =check= \u2014 the primary authoring loop \u2014 silent on an error
+=build= correctly refuses.
+
+Diagnostics: E0939 (ambiguous tight =1/$denominator=), E0940 (unbound
+qualifier), E0941 (no such cell), E0942 (write through a qualifier), E0943
+(colon where a slash belongs).
+
+*The disambiguation rule that makes =/$= safe*, in one line: after =/=, a
+=$=-led leaf opens the qualified production ONLY when the head before the =/= is
+a bare identifier and no trivia surrounds the slash. Every division and CSS-slash
+guard in the matrix holds \u2014 =$total / $count=, =1 / $denominator=, =$total/$part=,
+=15px/1.6=, =16/9=, =1 / 3=.
+
+** W4 \u2014 fold + eliminate [DONE, one half deliberately unwired]
+
+*Dead-cell elimination SHIPS.* A cell no one reads never reaches the bundle
+(verified on the emitted JS, and paired with a positive claim so the assertion
+cannot pass by dropping everything).
+
+*Const FOLDING is implemented, unit-tested, and deliberately NOT wired.*
+Substituting a write-free literal at its read sites removes the reference TOKEN
+the binding pipeline registers from \u2014 the element then renders EMPTY. Measured,
+not feared: wiring it dropped the headless matrix from 22 passing to 16, taking
+every division test with it. The =const= verdict still ships in
+=inspect --layer state=, and =fold_const_state= is ready for a binding-aware
+rework. An optimisation that renders the wrong page is not an optimisation.
+
+*Real bug found and fixed by the regression it caused:* a file-scope markup hole
+(=<li>`$x`</li>=, FEAT-078) is a READ, but holes live on =html_blocks= \u2014 not in
+=matches= or =scopes=. The first elimination pass judged a hole-only cell dead
+and deleted a working page (two suites red, empty hydration marker). Fixed +
+guard test. *A reader the analysis cannot see is the one way this pass can
+delete a working page.*
+
+** W5 \u2014 =@exports= at file scope [DONE]
+
+Same clause, same =: mut= marker, same parser as a =@template= body's =@exports=
+(FEAT-115), lifted to file scope. Implemented as a *stdlib =%macro exports=*
+(=stdlib/macros/presets.st=), not a Rust special case \u2014 the metasystem describes
+its own surface. E0944 refuses a qualified read of an unpublished cell.
+
+Public-by-default (Odin floor): a file with no clause publishes everything, so
+the check engages only once a module states an interface. That is what keeps all
+430 =@import= sites working untouched \u2014 asserted directly.
+
+*Plan revision, on the record: =%public= is NOT deleted.* The plan called it a
+parallel unenforced mechanism. Verification says otherwise \u2014 it is enforced at
+=registry.rs::is_public= and governs a DIFFERENT layer:
+
+| clause | sigil | scope | governs |
+|--------+-------+-------+---------|
+| =%public (a, b)= | =%= | a folder's =MODULE.st= | =@=/=%= vocabulary |
+| =@exports { $x }= | =@= | a file | =$= cells |
+
+The sigil says which layer. Collapsing them would be the overload, not the
+cleanup. Documented at the enforcement site so the next reader does not repeat
+the mistake.
+
+** Final state
+
+| suite | result |
+|-------+--------|
+| =cargo test --lib= | *2865 passed, 0 failed* (from 2829 at W1) |
+| =--test integration_tests= | 202 passed |
+| =--test registry_addressing_diagnostics= | *20/20* (from 3/11 at W1) |
+| headless matrix | *23 passed* (from 19), 6 RED |
+| v8 runtime | 445 passed (=--test-threads=1=) |
+
+Corpus: *ZERO* occurrences of E0938-E0944 across 26 examples, 25 demos, 345
+stdlib files and all fixtures. No false positives.
+
+The 6 remaining headless RED are HARNESS limitations, not feature gaps \u2014
+verified against a real page with =cargo run -- build=: a qualified read resolves
+in both value position and a markup hole, with no stray qualifier in the output.
+Inside =@mount= the fixture's cells are element-scoped rather than page-global.
+Renamed =RED harness= and documented in place rather than deleted, so the
+boundary stays visible.
+
+Pre-existing failures untouched: =w1_refuse_to_fake_layout_on_logic_backend=
+(BUG-233), and the v8 SIGSEGV under parallelism (445/445 at =-j1=).
+
+** Defects found and fixed during these waves
+
+| what | where |
+|------+-------|
+| BUG-232 \u2014 =@b:badge= silently dropped | fixed at =cst/parser.rs:653= (E0943) |
+| duplicate diagnostics printed 2-3\u00d7 | fixed in =DiagnosticCollector::emit= \u2014 affects ALL codes |
+| =check= silent where =build= errored | no-import branch now runs the pass |
+| markup holes invisible to reader analysis | =state_analysis.rs= + guard test |
+| test scratch dirs collided under =-j4= | per-test counter; passed alone, failed parallel |
+
+** Follow-ups filed
+
+FUP-146 (test-tree migration), FUP-147 (=@then compile= claim shape),
+FUP-148 (=PipelineErrorInfo= should carry =DiagnosticCode=; E0938 first printed
+as E0806 through a hand-maintained match arm).
+
+NOTE [2026-07-26]: FINAL VERIFICATION [2026-07-26] — all suites green.
+
+A late v8 run (the one suite not re-run after W5) caught a REAL regression from
+W4's dead-cell elimination, which is why it was worth running rather than
+assuming:
+
+=fup094_template_hole_resolves_param_and_outer_signal= \u2014 a page-global cell read
+from inside a =@template= body rendered EMPTY. The cell had been eliminated as
+"dead" because the analysis could not see the read.
+
+*The THIRD reader channel.* A cell is read from:
+1. a scope binding / handler body    (=matches=, =scopes=)
+2. a file-scope markup hole          (=html_blocks=)   <- found in W4
+3. *a template body's markup hole*   (=ScopeKind::Construct.html=) <- found here
+
+Two distinct misses had to be fixed to see (3):
+- the Construct scope's =html= was not scanned at all; and
+- =collect_signal_deps= SKIPS backtick runs \u2014 correct for EXPRESSIONS (a backtick
+  run is a quoted string) but exactly wrong for MARKUP, where the backtick IS the
+  hole form. Added =markup_holes()= to pull hole bodies out before scanning.
+
+Guard tests added: =a_template_body_hole_counts_as_a_reader= and
+=markup_holes_are_extracted_from_a_body= (including the unterminated-backtick
+case, which must not loop).
+
+Checked and cleared: =NestedScope= has no =html= field, so template bodies are
+the only remaining channel of this kind.
+
+*Standing lesson for any future pass that eliminates state:* a reader the
+analysis cannot see is the one way it can delete a working page. Each new reader
+channel cost a real regression to discover \u2014 enumerate them before trusting a
+"dead" verdict.
+
+| suite | result |
+|-------+--------|
+| =cargo test --lib= | *2867 passed, 0 failed* |
+| =--test v8_runtime_test= | *445 passed, 0 failed* |
+| =--test integration_tests= | 202 passed |
+| =--test registry_addressing_diagnostics= | 20/20 |
+| headless matrix | 23 passed, 6 RED (harness-scoped, documented) |
+| corpus E0938-E0944 | *0* across examples, demos, stdlib, fixtures |
+| org validate | 0 errors in PLAN-117 / FUP-146,147,148 / BUG-232,233 |
+
+Pre-existing and untouched: BUG-233
+(=w1_refuse_to_fake_layout_on_logic_backend=), and 99 org-validate errors in 16
+unrelated files (=PLAN-001-*=, =DRAFT-*=).
+
+NOTE [2026-07-26]: MIGRATION AUDIT [2026-07-26] — asked "did you make a migration?". Answer was
+NO, and asking exposed three defects, one of them shipped.
+
+*1. The earlier corpus check was VACUOUS.* It invoked =./target/debug/spacetime=,
+which does not exist — this repo builds to =~/.cache/cargo-target= (bare
+=.cargo/config.toml=, no =CARGO_TARGET_DIR=). Every "0 hits" line was
+=grep -c= counting an error message. The "23 projects clean" claim in the
+previous commit was UNPROVEN when written.
+
+Re-run with =~/.cache/cargo-target/debug/spacetime=: genuinely clean across
+examples, demos, stdlib, tests/fixtures AND all 23 private projects
+(267 =.st= files). The conclusion held; the evidence had not existed.
+
+*2. Enforcement was missing on the THIRD reference channel (shipped defect).*
+A qualified reference reaches a cell three ways:
+  - =.x { text <- app/$host; }=   scope binding  (=ast.scopes=)
+  - =@on click { … }=             directive body (=ast.matches=)
+  - =<p>`app/$host`</p>=          *markup hole*  (=ast.html_blocks=)
+
+=resolve_qualified_refs= walked the first two. Through a hole,
+=app/$internal= silently read an unpublished cell (no E0944) and =nope/$host=
+silently resolved nothing (no E0940) — while the IDENTICAL reference in a
+scope binding was correctly refused. Fixed; three regression tests added that
+assert each rule *through a hole specifically*, including the positive case.
+
+This is the THIRD time this exact channel was missed in this plan (twice in
+=analyze_state=, once here). It is now called out at both sites.
+
+*3. Two companion assertions were too weak to fail.*
+=has_code(&codes, &["E0940", "E-qualifier-unbound", "E0926"])= admitted
+*E0926* — a PRE-EXISTING code — so the test passed on the old behaviour and
+proved nothing about E0940. Same shape at the duplicate-state test, which
+admitted =E0924=. Both tightened to the code actually claimed; still green,
+so the codes do fire — but they now can only pass for the right reason.
+
+*Migration verdict: no code migration required.* All of E0938-E0944 refuse
+constructs that previously had NO meaning, so existing pages keep compiling.
+Two behaviours change from SILENCE to ERROR (=@b:badge= emitted nothing while
+reporting success; two files declaring =$theme= merged silently) — both were
+producing a page the author did not write, so neither gets a compatibility
+flag.
+
+What was missing was not a migration but *adoption docs*.
+=docs/language/module-system.md= is the canonical module doc and was stale:
+its "four axes" table predated =$=, and its diagnostics table omitted all seven
+new codes. Added: a "Referencing a =$= cell" section (invocations lead,
+referents hug; why not =$app/host=; alias = compile-time rename; =@exports=;
+=inspect --layer state=), the seven codes, and an "Upgrading an existing page"
+section. Also fixed a =-o /tmp/out= build line in that doc, against the
+standing no-=/tmp= rule.
+
+*Every doc snippet was executed, and two were fiction.* =$half <- $total/$count=
+at file scope is a parse error (=<-= is a handler/binding form) — corrected to
+show division inside =@on click=, verified compiling. Docs now assert only what
+was run.
+
+| suite | result |
+|-------+--------|
+| =cargo test --lib= | *2876 passed, 0 failed* |
+| =--test v8_runtime_test= | 445 passed, 0 failed |
+| =--test integration_tests= | 202 passed |
+| =--test registry_addressing_diagnostics= | *23/23* (was 20, strict codes) |
+| headless matrix | 23 passed, 6 RED (harness-scoped) |
+| corpus + 23 projects | *zero* E0938-E0944 \u2014 verified with the real binary |

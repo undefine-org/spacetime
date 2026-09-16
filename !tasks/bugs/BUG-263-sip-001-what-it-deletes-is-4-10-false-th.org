@@ -1,0 +1,101 @@
+#+TITLE: SIP-001 "What it deletes" is 4/10 false — the gate now proves it
+#+STATE: DONE
+#+SESSION_ID: 1534a2eae1903af0
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-18T13-07-01-638Z_1534a2eae1903af0.jsonl]]
+#+CUSTOM_ID: BUG-263-sip-001-what-it-deletes-is-4-10-false-th
+#+COMPLETION_HASH: 6c4ffd1d05216596
+
+* Initial Message
+
+ok please explain everything that is next and that got carried forward. What would be your plan for achieving it all?
+
+#+STATE: ITEM
+
+* What happened
+
+P23 promised a gate proving SIP-001's deletion list real. It was never written,
+so the family's central elegance claim was unfalsifiable. It is written now
+(`tests/sip001_deletion_gate_test.rs`, commit 323fdc53) and it comes back
+**6 passed / 4 FAILED**.
+
+The gate is deliberately left RED. Weakening it to green would restore exactly
+the situation it was written to end.
+
+* PASSING — these deletions are real
+
+- retired macro heads exist only in the migration capsule
+- `@after` + the `@on` event dispatcher, likewise
+- the `ST.timelines` string registry is gone
+- no dedicated freeze/ramp/reverse macro heads (they are `rate` \u2014 W4/R3)
+- no shipped named clip-degrade special case
+
+The capsule matcher carries its own discrimination self-check
+(`retired_head_matcher_rejects_a_non_capsule_control`), so "everything is in
+the capsule" cannot pass vacuously.
+
+* FAILING — these deletions are CLAIMED BUT NOT DONE
+
+1. **`@effect` is not deleted.** `stdlib/primitives/effect.st` still exists,
+   macro and runner both. Already known as "P5 debt": W3.3 promised the
+   deletion and W3.3 shipped without it. Independently confirmed.
+
+2. **0 of 28 easing curves are forms.** The README says "28 curves \u2192 forms" and
+   `stdlib/macros/form.st:7` documents `@form easing --ease-out-expo` as the
+   shape \u2014 but the actual definitions in `stdlib/macros/presets.st:85` are
+   still `%preset easing ~ease-out-expo: cubic-bezier(...)`. The DOCUMENTATION
+   was migrated and the DATA was not.
+
+3. **The `~` PRESET_REF path is not deleted.** Present across
+   `src/syntax/cst/{ast,mod,parser}.rs`. Directly connected to (2): the presets
+   still use `~`, so the parser path cannot go until they are forms.
+
+4. **`@pose-track objectIndex` remains.**
+
+* Why this matters more than four line items
+
+AGENTS.md sets the elegance bar: a new mechanism earns its place only if it
+DELETES an existing special case. SIP-001's deletion list is how the family
+argues it clears that bar. Four of its claims being false means the argument is
+overstated \u2014 not fatally, since six are true and the big ones (nine heads to
+one, the timelines registry) are among them, but the README currently reads as
+finished work where a third of it is intent.
+
+Items 2 and 3 are ONE task: migrate the 28 presets to forms, then the `~`
+parser path can go. That is the highest-value of the four because it deletes a
+whole token kind from the parser.
+
+* Not in scope for a mechanical gate
+
+"multicam's state-machine workaround" and "copy-paste style mixins" are
+semantic designs, not greppable tokens. The test file lists them as explicitly
+out of scope with reasons, rather than faking an assertion.
+
+* UPDATE 2026-08-03 — items 1+4 are NOT deletions; gate stays RED deliberately
+
+Agent 48 probed both and STOPPED with zero repo changes (correct call):
+
+** @effect (item 1): the premise was false. The W3 cutover did NOT replace
+@effect — PLAN-124 line 178 lists it under "Remaining for W3.4b", the W3
+implementation report says it was "left current". ~15 LIVE consumers
+(stdlib/__admin__ x11, __host__, __inspector__, app-shell, 2 test files) need
+immediate:true mount-seeding and arbitrary mutation bodies, which the @on
+signal rail cannot carry: mutation bodies under `@on $sig.change` silently
+fall to the DOM event dispatcher (-> BUG-265) and change-driver has no
+immediate:/debounce:. Unblock: fix BUG-265, extend change-driver, migrate the
+15, THEN delete.
+
+** objectIndex (item 4): no shipped replacement exists. It is the ONLY
+mechanism targeting a specific object in a multi-object @stage (compiler
+groups sibling inits by TYPE not source order, PLAN-062 W5). The spec
+replacement is W6.3 named entities — a %hint, not an implementation.
+demos/3d/exploded-parts has 5 real @object+@pose-track(objectIndex:) pairs.
+Unblock: source-order emit interleaving OR named entities, rewrite
+pose-track-multi + exploded-parts, THEN strip.
+
+Items 2+3 (easings->forms, PRESET_REF) are unaffected and in flight (agent 47).
+
+NOTE [2026-08-03]: 2026-08-03 — Items 2 & 3 RESOLVED (W5 easing-forms track). stdlib/macros/presets.st now declares 28 `@form easing --ease-*` forms (public names unchanged: `--ease-out-expo` = old `~ease-out-expo`), plus `--linear`, `--ease`, and the four `--spring-*` curves. The whole `~` preset mechanism (`%preset`/`@preset`, `@apply`, `~name` refs) is retired: the PRESET_REF token kind + `parse_preset_ref` are deleted from src/syntax/cst/{ast,mod,parser}.rs, the events grammar preset_ref fn, and the `~`-in-value parser arms now emit a LOUD "preset references are retired" parse error. Discrimination proven: `easing: --ease-out-expo` reaches the emitted JS as `defaultEasing = "ease-out-expo"` (D12 strips `--`); `easing: ~ease-out-expo` now fails loudly (was a silent fallback to linear). Gate: 8/10 (items 2&3 pass; items 1 & 4 — @effect, @pose-track objectIndex — remain siblings').
+
+NOTE [2026-08-04]: NOTE [2026-08-04]: Item 4 (@pose-track objectIndex) RESOLVED. Implemented source-order emit interleaving for the @object/@pose-track PAIR and stripped objectIndex. Mechanism (scoped, NO global reorder — removing `+ bind_index` from resolve_via_binds broke landing_pages' cleanup const-dedup, so that approach was reverted as load-bearing): reordered `@pose-track`'s %binds so `three-pose-track` is the FIRST bind (order 500000 = the object's slot) and `three-pose` (a `%emit prelude-js` primitive, emitted ONCE before every init IIFE) is the second (500001, position-irrelevant). Sibling primitives now interleave in author order, so each track resolves `canvas._stObject` = its PRECEDING @object. Stripped `objectIndex` from three-pose-track.st (primitive) + macros/pose.st (%form + %binds), dropped it from demos/3d/exploded-parts (5 pairs) and rewritten stdlib/3d/tests/pose-track-multi.test.st (3-pair source-order scene). New behavioral gate tests/gate_pt_interleave.rs: (a) gate_pt_interleaving asserts emitted page JS interleaves object/track init blocks so each track binds its preceding object — RED pre-fix, GREEN now; (b) gate_pt_object_index_is_a_dead_noop proves an inverted objectIndex cannot override source-order binding. Deletion gate pose_track_object_index_is_deleted flips GREEN → gate now 9/10 (only @effect, item 1, remains — blocked on BUG-265). CDP pose-track.test.st (3 passed) + pose-track-multi.test.st (2 passed) green; demo compiles clean and emits 5 interleaved pairs identical to old objectIndex 0..4. KNOWN GAP: `objectIndex:` does not ERROR loudly — the compiler has NO general unknown-parameter diagnostic (verified: even @stage(banana:42) compiles silently; the parser drops unknown form params before resolve). It is a dead no-op, not a loud error. A general unknown-param diagnostic is a compiler feature for a future wave (silent-drop class, aligned with AGENTS.md philosophy), out of scope for this deletion.
+
+NOTE [2026-08-04]: Item 1 (@effect) RESOLVED (0000c27d). Blocker BUG-265 shipped mutation bodies + immediate:/debounce: on the @on signal rail (0df17865). Migrated all ~15 consumers onto `@on $sig.change(immediate:|debounce:)` (same ST.watchChanges subscription, immediate mount-seeding, debounce coalescing — verified by diffing emitted JS for one consumer): stdlib/__admin__/app/{list,rail,graph,media,drawer,tools}.st, stdlib/__host__/index.st, stdlib/__inspector__/index.st, demos/app-shell/index.st, plus the two test files (effect-dotted-path + effect-change-semantics renamed to on-sig-change-head / on-sig-change-semantics). Deleted stdlib/macros/effect.st + stdlib/primitives/effect.st. The bare `ST.watch` carried by effect-runner closes the S3 watch-scope audit row. Deletion gate sip001_deletion_gate_test now 10/10 — the item flips green, gate fully green. Every consumer project compiles (check admin/host/inspector; app-shell builds as a full page — its `body`-scope demo can't pass standalone `check`, a check-only limitation, but `build` is clean). Mount-seeding proven in real Chromium via CDP (immediate:true seeds initial state before any signal change; admin page loads with change-drivers registered, shell renders, no init errors). Both migrated test files green headless. `grep -rn '@effect\|effect.st' stdlib/ demos/ tests/ --include='*.st'` → prose/historical only.

@@ -1,0 +1,53 @@
+#+TITLE: bare relative measure under an own-clock score leaks a raw fraction into ms
+#+STATE: DONE
+#+PRIORITY: #A
+
+* The bug
+W5a/D2 made fragment percentages scale to their SPLICE FRAME — but a bare
+splice (no `for` frame) under an own-clock `.time`/`.loop` score still leaks:
+`for 50%` lowers to span=0.5 against total=6000 — a half-millisecond window
+that makes the map jump to its end at parent progress 0.125.
+
+Root: src/pipeline/score.rs's relative flag only scales during FRAME-splicing;
+the bare-splice path (documented intent: "keeps the parent's scale, behaves
+like the body written inline") never applies it.
+
+* Evidence
+- demos/score-launch §3 by-time pole: head jumped to 1 at parent progress
+  0.125; the demo emits _swSpan=0.5, _swTotal=6000.
+- The existing test `the_same_body_compiles_under_both_projections` asserts
+  only len>baseline — production-shaped, structurally blind to this (the
+  banned gate shape).
+- Found by agent 51 (LaunchDemoReverify), 2026-08-03.
+
+* Fix shape
+A bare splice under an absolute-domain score must scale its relative measures
+by the PARENT'S total (the "behaves like inline" reading the D2 commit
+message promised). Gate by SAMPLING the map (D3's discipline), not by
+comparing emitted constants — and the gate must discriminate: raw 0.5 in the
+ms domain must fail it.
+
+
+* Fix landed (W5b)
+
+- src/pipeline/score.rs: `expand_fragments`/`expand_fragments_guarded` now take
+  the score's `total` and a `current_frame`. A fragment's relative measures
+  scale to the frame THIS SPLICE SITS IN: its own `for` span, else the
+  enclosing frame a parent splice established (threaded down the recursion),
+  else — for a bare top-level splice — the SCORE'S TOTAL. This is the "keeps
+  the parent's scale, behaves like inline" reading the D2 commit promised but
+  only the framed path implemented. Under a normalized domain (`.clip`,
+  `.scroll`, `.steps`) total is 1.0, so a fraction stays a fraction — the D2
+  promise preserved. A relative measure scaled once is marked absolute so a
+  nested splice cannot scale it twice.
+- tests/score_window_map_test.rs: `the_same_body_compiles_under_both_projections`
+  was structurally blind (len > baseline). It is now `…_samples_the_same_map_…`:
+  it SAMPLES the emitted `_swMap` under `&.time` and `&.clip` (D3) and asserts
+  both are "half the parent". New `a_bare_splice_scales_relative_measures_to_…`
+  samples a bare `--story;` under `.loop(6s)` → map(0.25) = 0.5 (half the
+  6s span). Both discriminate: disabling the scaling fails them.
+- CDP gates in tests/score/: bare-splice.test.st (website pole alone) and
+  two-pole.test.st (both poles) prove a bare `for 50%` splice samples to half
+  the parent's span at 1500ms (opacity ≈ 0.5, not the leak's 1.0).
+
+Verified: tests/score --cdp 18/18 · score_window_map 18/18 · clip_driver 4/4.

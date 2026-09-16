@@ -1,0 +1,83 @@
+#+TITLE: Reference UI: search, filter chips, grouped cards, detail expand
+#+STATE: DONE
+#+SESSION_ID: 14f94e45c6c3f247
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-02T11-06-49-499Z_14f94e45c6c3f247.jsonl]]
+#+CUSTOM_ID: FEAT-090-reference-ui-search-filter-chips-grouped
+#+COMPLETION_HASH: 8ec304c3e2ed6975
+
+* Initial Message
+
+what's next to make this super usable? especially for e.g. multiple dispatch and making it useful as an actual browser. also, could you create a basic Markdown parser in pure Spacetime (only scoped to spacetime-docs for now, if needed), that you would use to integrate Markdown files already written about testing? How hard would that be?
+
+* Parent
+[[id:PLAN-033-world-class-spacetime-macro-dispatch-ref]]. The VISIBLE reference. Dep: FEAT-089. Soft-dep: FEAT-085.
+
+* Goal
+A delightful, traversable macro reference in demos/spacetime-docs — pure .st, zero
+custom site JS. Search-as-you-type, filter chips, directive-grouped cards with
+chip-styled form signatures, and a click-to-expand detail with rendered @doc.
+
+* Target files
+- ~demos/spacetime-docs/reference.st~ (new page; served at /reference via
+  convention {name}.st → {name}.html) OR a new section in index.st. Prefer a
+  SEPARATE page (reference.st) so the reader stays focused and the reference can be
+  heavy.
+- ~demos/spacetime-docs/README.md~ — document the reference page.
+- Add a nav link from index.st's sidebar to /reference.
+
+* UX spec (the delight)
+1. SEARCH: ~@data inline $q : ""~ + ~<input class="ref__search">~ with two-way
+   bind ~value <- $q; @on input { $q <- value }~ (verified pattern, stdlib/macros/data.st:30).
+2. FILTER CHIPS: ~@data inline $kind : "all"~; a chip row (all/data/events/scene/
+   text/test/animation…) each ~@on click { $kind <- "data" }~; active chip styled
+   via the signal.
+3. GROUPED CARDS: ~@data dispatch $macros from …~ (FEAT-089) →
+   ~@each-filtered($macros as $m, when match($q,$kind,$m))~ → ~&macro-card($m)~.
+   @each-filtered reactively display:none's non-matches as $q/$kind change
+   (stdlib/macros/each.st:103) — LIVE SEARCH/FILTER, ZERO CUSTOM JS.
+   The ~when~ expr: ~($kind == "all" || $m.kind == $kind) && ($q == "" ||
+   $m.name.includes($q) || $m.directive.includes($q))~ (expr is JS-evaluated).
+4. CARD: directive chip + signature rendered from ~$m.tokens~ (one styled <span>
+   per token by role: $binding teal · :type dim · literal bright · ? ghosted ·
+   delim faint). One-line doc. Hover lift (@on hover).
+5. DETAIL EXPAND: ~@on click~ on a card toggles a per-card open signal (or a single
+   ~$openMacro~ holding the active name) → reveals full signature + rendered
+   ~@doc(content: $m.doc)~ (FEAT-086 md module) + scopes + %binds target + (if
+   FEAT-091 landed) the dispatch probe. @scroll / transition for delight.
+
+* Form-signature chip rendering (the scannability win)
+Render ~$m.tokens~ (FEAT-089 structured tokens) with @each into per-token spans:
+~@each($m.tokens as $t) { <span class="sig sig--$t.role">$t.text</span> }~.
+CSS classes sig--directive/binding/type/literal/optional/param/delim carry the
+palette. A signature becomes a row of colored chips, not a string.
+
+* Edge cases / known deps
+- FEAT-085 (SSG-unroll &template-call @each bodies) is OPEN: today @each over a
+  &template-call body hydrates client-side only → cards absent from static HTML.
+  ACCEPTABLE here (reference is an interactive app, JS-on). Note it; if FEAT-085
+  lands, cards become SEO/no-JS-correct for free.
+- ~$m.tokens~ nested-array @each inside a &template body: verify the nested @each
+  hydrates (it may hit FEAT-085 too). FALLBACK: render the flat ~$m.signature~
+  string in a <code> if nested token @each doesn't hydrate; FILE a BUG and keep the
+  flat string so the page still ships. Do NOT block the whole page on chip styling.
+- BUG-073 (block comment <tag>+backtick) — keep reference.st comments free of
+  <tag>+backtick before markup (known parser desync; worked around in index.st).
+- Search over a large catalog (~300 macros): @each-filtered display:none is O(n)
+  per keystroke but fine at this scale; no virtualization needed.
+
+* Acceptance
+- ~cargo run -- serve demos/spacetime-docs/~ → /reference renders directive-grouped
+  cards from the real registry (count > 100).
+- Typing in search live-filters cards (CDP: set input value, dispatch input, assert
+  hidden-card count rises). Clicking a kind chip filters by kind.
+- Clicking a card reveals its detail with rendered @doc prose + signature chips.
+- Verified over CDP (fresh browser session; @scene gotcha → domcontentloaded+sleep).
+- New screenshot; AGENTS.md / README mention the reference.
+
+* Notes
+- "Make it slap": dark glass, neon accents, the chip-styled signatures are the
+  signature visual. Keep typography legible (reuse the reader's .doc__body scale).
+- One source of truth: cards come from @data dispatch (the compiler's own forms),
+  so the reference cannot drift from the macros.
+
+NOTE [2026-06-10]: DONE. demos/spacetime-docs/reference.st: a .st-only macro reference served at /reference (FEAT-093). @data dispatch $macros -> 266 cards, each card's signature rendered as per-token colored chips via nested @each($m.tokens as $t) { <span class="tok tok--`$t.role`">`$t.text`</span> } (BUG-081 nested-each fix). Live search (two-way @on input { $q <- $.value }) + 8 kind chips (@on click { $kind <- $.dataset.kind }) reactively filter via each-inline-filtered (FEAT-094). Proven live over CDP: search "scene" 266->1, chip "data" -> 8 data cards; chip signatures colored by dispatch role (@directive purple, $binding teal, :type dim, literal pink, param blue). Hero @balance + @scene backdrop. Nav link added from index.st. Screenshot reference-screenshot.png. Depended on + drove: BUG-081 (nested each), FEAT-093 (st-page route), FEAT-094 (inline each filter).

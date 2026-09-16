@@ -1,0 +1,72 @@
+#+TITLE: each-inline (the inline-HTML-body @each sibling) has the same dotted-path silent-render bug as BUG-155
+#+STATE: ITEM
+#+SESSION_ID: 15251010f7982b56
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-06T10-48-12-510Z_15251010f7982b56.jsonl]]
+#+CUSTOM_ID: BUG-160-each-inline-the-inline-html-body-each-si
+
+* Initial Message
+
+push the capabilities of the 3d module + the workbench mcp through a concrete idea of a user interface that talks directly to this very agent using the mcp tools. This is a pressure test against both the host apis and the 3d apis. Design the 3d mockups using generate_image and then implement whatever surfaces you need using the blender mcp. commit as you go
+
+* Found via
+Round-2 pressure test (post FEAT-151/BUG-155 fix wave) — deliberately probed
+`each-inline.st` (stdlib/primitives/data/each-inline.st), the inline-HTML-body
+sibling of `each-with-templates` (backs `@each($x as $i) { <li>raw html</li> }`,
+as opposed to `@each($x as $i) { &template($i); }`). BUG-155's fix only
+touched `each-with-templates` — this is a SEPARATE primitive file that never
+got the fix, and reproduces the identical failure class.
+
+* Repro (isolated, confirmed RED on the pre-fix code, GREEN after)
+#+begin_src
+<div data-st-instance>
+  <ul class="inline-each"></ul>
+</div>
+@data inline $wrap : { "items": ["x", "y"] };
+.inline-each {
+  @each($wrap.items as $item) {
+    <li>`$item`</li>
+  }
+}
+#+end_src
+Rendered EMPTY (`.inline-each` innerHTML = `""`) before the fix; renders
+`<li>x</li><li>y</li>` after.
+
+* Root cause (same shape as BUG-155, traced independently)
+`each-inline`'s reactive channels + initial-paint lookup were ALL keyed by
+the literal `sourceName` string (`"wrap.items"`), never split into head +
+path:
+- `document.addEventListener(\`data:${sourceName}:loaded\`, ...)` — never
+  fires (ST.setData registers under the HEAD name only).
+- `document.addEventListener(\`local:${sourceName}:updated\`, ...)` — same.
+- `window.SpacetimeLocal[sourceName]` (initial paint) — a dotted string is
+  never a real property key on SpacetimeLocal.
+
+* Fix (mirrors each-with-templates' BUG-155 fix exactly)
+`stdlib/primitives/data/each-inline.st`: derive `headName =
+sourceName.split('.')[0]`, `isDotted = sourceName !== headName`; key both
+event-channel subscriptions off `headName`; add a `resolveSourceData()`
+helper trying, in order: `ST.resolvePath(containerEl, sourceName)` (scoped
+resolve + dotted walk), then the `ST._dataRegistry` fallback (also walking
+the dotted path from the HEAD entry), then `window.SpacetimeLocal[headName]`
+walked the same way. For a plain (non-dotted) source, channel payloads
+(`e.detail`) are still trusted DIRECTLY (unchanged behavior, no regression
+risk) — only a dotted source re-derives via `resolveSourceData()`.
+
+* Verification
+- Isolated repro: RED on `git show HEAD:stdlib/primitives/data/each-inline.st`
+  (confirmed by temporarily reverting, re-testing, restoring), GREEN with the
+  fix.
+- Regression tests: `tests/unit/templates/each-inline-dotted-path.test.st`
+  (2 tests: initial dotted-path render + re-render on head-signal
+  reassignment via the real `ST.set`/`ST._bridgeExport` path, mirroring
+  BUG-156's bridging requirement).
+- Full suite green: `cargo test --lib` (2564), `cargo test --test
+  integration_tests` (181), `cargo run --features headless -- test tests/
+  --headless` (605, +2 new).
+
+* Note
+Confirmed `each-filtered` (the `when $filter` variant of the TEMPLATE-invocation
+form) is NOT independently affected — it shares `each-with-templates` under
+the hood (already fixed by BUG-155), verified live. Only the
+INLINE-HTML-body primitive needed its own copy of the fix, since it's a
+wholly separate `.st` file with its own hand-rolled channel-key logic.

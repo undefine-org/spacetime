@@ -1,0 +1,64 @@
+#+TITLE: COLOR promotion misses ~6% of real colours — every hex in a `border: 1px solid #hex` shorthand is invisible to COLOR consumers
+#+STATE: ITEM
+#+SESSION_ID: 153f5ed0617636c7
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-26T21-12-46-213Z_153f5ed0617636c7.jsonl]]
+#+CUSTOM_ID: BUG-257-color-promotion-misses-6-of-real-colours
+
+* Initial Message
+
+explain the remaining waves for what we were doing for FEAT-165 and W1 and what's next
+
+* Symptom
+
+`is_color_value_position` (src/syntax/cst/lexer.rs) promotes `#hex` to a `COLOR` token in four syntactic neighbourhoods only: directly after a `COLON`, after a value-function `L_PAREN`, after a value `COMMA`, or following another value token mid-declaration. A hex colour in a SHORTHAND, after a keyword, is not promoted — it stays `HASH` + `IDENT`.
+
+The dominant real-world case is the border shorthand:
+
+#+BEGIN_SRC css
+border-right: 1px solid #232634;   /* prev significant token is `solid` → NOT promoted */
+color: #232634;                     /* prev significant token is `:`     → promoted    */
+#+END_SRC
+
+Same colour, same file, two different token streams.
+
+* Measured (probe over the corpus, 420 `.st` files in stdlib/demos/examples/tests-fixtures, 2026-07-31)
+
+- `COLOR` tokens emitted: **777**
+- `HASH` + adjacent legal-length hex run (3/4/6/8 digits) NOT promoted: **46**
+- ⇒ **~6% of real hex colours are invisible to every COLOR consumer**, and the miss is not random: EVERY one of the 46 sits in a `border: <width> solid #hex` shorthand.
+
+Sample (12 of 46): demos/app-shell/index.st (×4, `solid #232634`, `solid #2a2e3e`), demos/spacetime-docs/index.st (`solid #a78bfa`), demos/ssg-list/index.st (`solid #eee`), stdlib/__admin__/app/styles.st (×6, `solid #E6E6E6`, `solid #FF0020`, `solid #f0f0f0`, …).
+
+NB an earlier cruder grep counted 1096 `#hex`-looking runs in source; the gap to 777 is mostly hex inside string literals and JS blocks, which correctly do not lex as colours. The honest figure is the 46 above — real colours in real declarations that the token stream does not label.
+
+* Why it matters (three consumers, three different degradations)
+
+1. **`src/lsp/colors.rs`** — does NOT use the token at all. `provide_document_colors` byte-scans for `#` followed by hex digits, independently of the lexer. So the editor swatch is CORRECT here, but only because it reimplements colour detection. That is the tell: a private scanner exists precisely because the COLOR token could not be relied on. (This is the shadow-classifier class FEAT-109 Tier 0 / FEAT-168 W4 are chartered to unify; count it as evidence, not as a separate defect.)
+
+2. **Grammar consumers** — `src/syntax/events/grammar/properties.rs:97` and `src/syntax/cst/parser.rs` (752, 1033, 1491, 3614) accept `SyntaxKind::COLOR` in value positions. A shorthand colour arrives as HASH+IDENT and takes a different path through the same grammar. Nothing observably breaks today (the text is preserved either way), but any future rule keyed on "is this token a colour" inherits the blind spot silently.
+
+3. **`src/syntax/events/extractors/reference.rs:121,157`** — treats COLOR as a possible `#id` selector reference, with the comment "`#id` looks like color token". So the SAME token kind means two different things depending on position, and the promotion rule is what keeps them apart.
+
+* Root cause
+
+The promotion is a positional heuristic standing in for a grammar. `is_color_value_position` asks "what came before?" because the lexer has no notion of a declaration's VALUE — that is grammatical knowledge, and the lexer is the wrong layer to hold it. `solid` was simply never added to the list of things a colour may follow, and no list of that kind can be complete: CSS shorthands admit colours after arbitrary keyword sequences (`border`, `outline`, `text-decoration`, `box-shadow`, `background`).
+
+Extending the heuristic to cover `solid` would be the WRONG fix — it treats the sixth special case by adding a seventh.
+
+* Fix of record: PLAN-122 W1 (FEAT-165), not a patch here
+
+The tier-2 promotion is deleted, and value grammars in stdlib own colour recognition. A grammar knows it is at a value position because it IS the value production — the context-sensitivity dissolves instead of being enumerated. W1.0 has already landed the demotion behind `LexTier::Kernel` (tests/lexer_tier_parity_test.rs), where `#232634` and `#e8eef7` lex identically regardless of what precedes them.
+
+This item exists to make the defect COUNTABLE and to carry one consequence into W1.3's consumer migration:
+
+**Migrating a COLOR consumer is not "swap the token for a grammar result" — it is "start seeing the ~6% of colours the lexer was silently missing".** A migration that produces identical behaviour on the corpus has probably re-implemented the blind spot. Expect the diff to show MORE colours recognized, and check those 46 sites specifically.
+
+* Acceptance (satisfied by W1, verified here)
+
+- A hex colour in `border: 1px solid #232634` is recognized by the same machinery as `color: #232634` — one rule, not two paths.
+- The 46 corpus sites are recognized after the cutover; a test asserts the count of recognized colours in a shorthand fixture is non-zero.
+- `src/lsp/colors.rs`'s private byte scanner is deleted in favour of the shared registry-read classifier (FEAT-168 W4 / FUP-164), removing the reason it existed.
+
+* Relation
+
+Found by `tests/lexer_tier_parity_test.rs` on its first run — the gate flagged a tier divergence at `1px solid #232634`, which turned out to be a Domain-tier inconsistency rather than a demotion bug. Parent: PLAN-122. Fix lands in FEAT-165 (W1); consumer consequence lands in W1.3. Related: FEAT-109 Tier 0 (shadow classifiers), FEAT-168 (W4, one classifier from the registry), FUP-164 (value-position LSP, deletes src/lsp/colors.rs).

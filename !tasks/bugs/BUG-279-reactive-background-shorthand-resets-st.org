@@ -1,0 +1,161 @@
+#+TITLE: BUG-279 reactive background: shorthand resets static longhands
+#+TODO: TODO DOING | DONE CANCELLED
+#+STARTUP: overview
+
+* DONE [#B] reactive `background:` shorthand resets static longhands via setProperty
+:PROPERTIES:
+:CUSTOM_ID: BUG-279
+:PRIORITY: #B
+:LAYER: pipeline
+:DISCOVERED: 2026-08-04
+:END
+
+** Symptom
+A declaration with a `$`-reference value — `background: linear-gradient(... $brand.ink ...);` —
+is intentionally NOT emitted to spacetime.css. Per BUG-091 it becomes a runtime
+`node.style.setProperty("background", value)` (verified in dist/spacetime.js).
+
+But `background` is a SHORTHAND: setting it resets every background longhand
+(background-clip, background-size, background-position, …) to initial *at inline
+specificity*, which beats the static stylesheet. So:
+
+#+begin_src st
+.fs {
+  background: linear-gradient(100deg, $brand.ink 42%, $brand.accent 50%, $brand.ink 58%);
+  background-size: 260% 100%;        /* static stylesheet */
+  -webkit-background-clip: text;     /* static stylesheet */
+  color: transparent;
+}
+#+end_src
+
+renders as a solid white slab: the gradient paints the whole border-box and the
+text is invisible, because the inline shorthand reset `background-clip: text`
+back to `border-box`. Seen live in demos/score-launch scene 4 (film frame 660)
+and the §5 shimmer specimen before the workaround.
+
+** Workaround (applied in demos/score-launch)
+Write the longhand: `background-image: linear-gradient(...)`. The reactive path
+emits `setProperty("background-image", …)`, which resets nothing. Verified:
+scene 4 renders the shimmer clipped to the glyphs.
+
+** Root cause / candidate fix
+src/pipeline (BUG-091 emission, reactive_properties.rs tests pin the contract):
+the reactive emitter treats `background` as an opaque property name. A principled
+fix: when the reactive value parses as an <image> (gradient/url) emit
+`background-image`; when it parses as a <color> emit `background-color`; else keep
+the shorthand. Tests: tests/integration/reactive_properties.rs (BUG-091 block) —
+extend with a shorthand-vs-longhand case; behavior gate: a --cdp test asserting
+getComputedStyle(el).webkitBackgroundClip === "text" after the reactive set.
+
+** Evidence
+- repro: scratch/cssref/index.st (background vs background-image variants)
+- pre-fix render frame: white slab where SPACETIME should be; post-fix: shimmer
+  clipped to glyphs (scratch/score-launch.mp4, frame 660)
+
+** Resolution [2026-08-07]
+
+Fixed by making the ROUTING TABLE A GRAMMAR, not a Rust match arm.
+
+*** The shape
+
+Which longhand a reactive value belongs to is a question about the value's
+KIND, and the language already declares value kinds as grammars
+(=stdlib/capture-types/css-values.st=, PLAN-122 W1.2: "a scalar is a grammar,
+and a new one is a paragraph in this file"). So the fix adds paragraphs there
+and ONE seam in the compiler.
+
+1. =stdlib/capture-types/css-values.st= (data)
+   - =%capture_type image_fn_name= / =image_core= / =image= — the =<image>=
+     scalar the file was missing (gradients, =url()=, =image-set()=, …), written
+     with =balanced(')')= args on exactly the rail =color_fn= already used, and
+     ordered longest-first like =easing_keyword= so =repeating-linear-gradient=
+     is not eaten by =linear-gradient=.
+   - =%capture_type color_core= — =color= minus =css_wide= minus =binding=.
+     Split because two different questions were being asked of one grammar:
+     =color= answers "legal in a colour position?" (where =inherit= and =$sig=
+     both are), =color_core= answers "IS this a colour?" (where neither is).
+   - =%capture_type background_route= — THE TABLE:
+
+     #+begin_src st
+     %capture_type background_route {
+         ( $background_image:image_core ) | ( $background_color:color_core )
+     }
+     #+end_src
+
+     Each arm is a kind; the arm's capture NAME is the longhand to apply.
+     =_= → =-= at the consumer (a capture name is an identifier).
+
+2. =src/syntax/events/mod.rs= — =capture_type_matched_arm()=, a sibling of the
+   existing =capture_type_accepts()=. Both now run through ONE private
+   =match_capture_type()=: one grammar asked two questions ("does it match?" /
+   "which arm?"), never two matchers. =defs= is a parameter rather than read
+   from =STDLIB_REGISTRY= because that global is cwd-relative (BUG-326) while
+   the compiler resolves its own registry — a router reading the other one would
+   answer about a stdlib the page was not compiled against.
+
+3. =src/compiler.rs= — =route_reactive_shorthand()=: look up
+   ={property}_route=, match, read the arm name. ~10 lines, knows nothing about
+   backgrounds. =font_route= / =border_route= need NO Rust change.
+
+*** Falls through (unrouted, identical to pre-fix behavior)
+
+| value | why |
+|-------+-----|
+| =background: inherit= | inherits ALL longhands; routing to one silently narrows the author's instruction |
+| =background: $sig= | kind unknowable until it renders — routing on a NAME would be a guess |
+| =#fff url(a) no-repeat= | genuinely a shorthand |
+| =url(a), linear-gradient(…)= | multi-layer; not claimed by the grammar yet |
+| any property with no ={p}_route= | every longhand, every undescribed shorthand |
+
+The router only ever NARROWS a shorthand it can positively identify, so nothing
+that worked before can break.
+
+*** Gates
+
+- BEHAVIOR (=--cdp=, real Chromium):
+  =tests/bugs/BUG-279-reactive-background-shorthand-resets-longhands.test.st=
+  4 claims, all =needs layout= — the defect lives in the CASCADE (inline
+  shorthand vs stylesheet longhand) and =getComputedStyle= is the only place
+  that resolution is real. WATCHED FAIL FIRST: 2 passed / 2 failed pre-fix
+  (=backgroundClip= read =border-box=, =backgroundSize= read =auto=), 4/4 after,
+  reproduced across three separate runs. Tests 3+4 are the negatives: the
+  gradient must STILL apply (else the longhands survive for the wrong reason)
+  and the =background-image= workaround path must be unaffected.
+- CONTRACT (Rust): 6 cases appended to
+  =tests/integration/reactive_properties.rs= — gradient→=background-image=,
+  =rgb()=→=background-color=, bare =$sig= stays shorthand, =inherit= stays
+  shorthand, longhand untouched, unrouted property untouched.
+
+*** Verification notes (honest)
+
+- =cargo test --lib= at the time of the fix: 3139 passed / 9 failed. NONE are
+  this change — 5× snapshot + =there_is_no_second_runtime_filter_table= come
+  from the uncommitted GH-11 =public/runtime/st.js= work in the tree;
+  =signal_emits_policy_and_lifecycle= is BUG-308/BUG-314;
+  2 parser/form_compiler failures come from an in-flight BUG-328 edit in
+  =src/syntax/events/extractors/simple.rs=. The 3 =reactive_properties=
+  failures (=cart_demo=, =killed_bind=, =on_event_space_selector=) were A-B
+  tested: they fail IDENTICALLY with the router disabled.
+- =.st= suite A-B: 639 passed / 27 failed with routing ON and with routing OFF —
+  byte-identical counts, so this change causes zero =.st= regressions.
+- =cargo run -- check demos/score-launch/= clean.
+
+*** Follow-up (not done here)
+
+The demos/score-launch WORKAROUND (authoring =background-image:= by hand) is now
+unnecessary but harmless — left in place rather than reverted, since a longhand
+is the more explicit spelling either way.
+
+Multi-layer values (=url(a), linear-gradient(…)=) are not claimed by
+=background_route=. Adding them is an =image_list= production (=image (","
+image)*=) in the same file — a paragraph, no Rust. Deliberately deferred: no
+corpus page writes one, and a grammar earns its arm by a real value existing.
+Filed as [[file:../follow-ups/FUP-184-multi-layer-background-values-are-not-cla.org][FUP-184]], with the exact production, the two
+hazards (commas inside functions; layer-count parity) and the =--cdp= gate.
+
+Also filed while here: [[file:BUG-332-a-poisoned-stdlib-cache-kills-every-st-test.org][BUG-332]] — the corrupt
+=stdlib/.cache/registry.bin= that cost this session a phantom =E0956= regression,
+and the fact that a fully-skipped =--headless= run exits 0 (measured: =0 passed,
+0 failed, 4 skipped= on this bug's own gate file). Not caused by this fix, but
+discovered by it.
+

@@ -1,0 +1,108 @@
+#+TITLE: PLAN: Spatial-ECS — build waves for &-entity scene anchors (FEAT-142)
+#+STATE: ITEM
+#+SESSION_ID: 151c02da5be0d720
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-29T10-04-08-943Z_151c02da5be0d720.jsonl]]
+#+CUSTOM_ID: PLAN-060-plan-spatial-ecs-build-waves-for-entity
+#+PARENT: FEAT-142-spatial-ecs-scene-entities-as-named-sele
+
+* Initial Message
+
+my dude, the everswap clone thing is not leveraging the spacetime scope resolution and language extensibility as much as it could.
+
+only the 'EverSwap' font is visually on top of the first peak, but the rest of the copy still feels like a 2d scroll thing. what would the API that lets us naturally put text on top of peaks look like? like all text, and it feels natural and lets the rest of the code reads naturally?
+
+* Parent
+FEAT-142-spatial-ecs-scene-entities-as-named-sele — the design + law + R1 proof.
+This PLAN is the execution DAG. Wave-1 spike is DONE (see FEAT-142 notes); this plans W2→W4.
+
+* Status snapshot (what's already true)
+- DESIGN locked + recorded (FEAT-142): scene = ECS; entity = &name{} block (grammar.js:429, already parses);
+  component = @directive; facets = &name.<comp>.signal (scroll-spy precedent); camera maps world↔page frames.
+- R1 RESOLVED (runtime-verified): per-frame %yield→ST.set is skip-if-unchanged + direct Set<fn> dispatch;
+  three-scroll already does this at 60Hz in prod. Lens-A `translate: &x.screen` is safe.
+- WAVE-1 SPIKE LANDED (browser-proven): three-anchor.st + anchor.st in projects/everswap-clone/lib/.
+  A `.peak-label` DOM div tracks a hardcoded world point across scroll (dx=60,dy=65; live sx/sy/vis signals;
+  crisp real DOM). Gap: hardcoded `at` floats in sky — resolved by W2 @peak via hf.summitTop().
+
+* Layering (north star — keep mountains OUT of the mechanism)
+  L0 stdlib/3d            — @stage/@object/@light/camera         — general, UNTOUCHED
+  L1 spatial-ECS (general)— three-anchor + .world/.screen/.depth/.visible facets + @anchor(&ref) constraint
+                            — NO mountain vocabulary; any 3D site (globe/scatter/product) reuses it
+  L2 vocabulary (project) — @peak/@terrain/@river/@textrole       — mountains live HERE, pure macros+data
+
+* ────────────────────────────────────────────────────────────────────────────
+* WAVE 2 — make the facet path real + add vocabulary (no deep compiler change)
+* ────────────────────────────────────────────────────────────────────────────
+DAG: W2.1 (anchor-by-ref) and W2.2 (@peak position) are independent → parallel.
+     W2.3 (@textrole) independent → parallel. W2.4 (anchor &ref reads facet) blockers: W2.1.
+
+** W2.1 — @anchor reads a scene-entity facet (not a raw `at`)
+- Promote three-anchor so the world point can come from a NAMED scene entity's published facet
+  instead of a hardcoded triple. Two sub-capabilities:
+  (a) a scene entity (&name{}) carrying a transform component publishes &name.<comp>.world (vec3).
+  (b) @anchor(&ref) reads &ref's world facet each frame, projects, positions self.
+- Verify: a DOM element with @anchor(&summit) tracks &summit's published world point (round-trip in everswap).
+- Files: projects/everswap-clone/lib/three-anchor.st, anchor.st (+ a scene-entity facet publisher).
+- Accept: removing the hardcoded `at` and pointing @anchor at &summit reproduces the spike's tracking.
+
+** W2.2 — @peak resolves DISPLACED summit from the terrain height field
+- Rewrite peak.st/three-peak so @peak publishes its world position from hf.summitTop(name) (the displaced
+  top after fbm + valley threading), not the declared base+rise. Fixes the spike's "floats in sky".
+- Files: projects/everswap-clone/lib/peak.st, three-peak.st (+ read canvas._stWorld/hf from three-terrain).
+- Accept: a label anchored to &summit sits ON the rendered ridge at scroll 0 and tracks it through the fly.
+
+
+- SPIKE FINDING (FEAT-142 spike v2): summitTop() resolution alone is NECESSARY BUT NOT SUFFICIENT for visual
+  seating. The displaced summit projects HIGH in the viewport because the camera frames a given peak low on
+  its leg, so a label at the exact summit floats ABOVE the visible apex. W2.2 must ALSO supply a
+  camera-framing-aware vertical offset (e.g. seat the label a few px below the projected apex, or bias by the
+  camera's pitch on this leg) — this tuning lives in the L2 @peak/@anchor vocabulary, NOT in three-anchor (L1),
+  to keep the general primitive camera-agnostic. Tightened acceptance: label sits ON the rendered ridge across
+  the leg where its peak is the camera's focus, not merely resolves to summitTop.
+- Spike already added `peak:`/`lift:` params to three-anchor + anchor (lazy per-frame summitTop resolution,
+  raw-`at` fallback). W2.2 reuses these; the new work is the framing offset + binding @peak's name through.
+** W2.3 — @textrole typography registry (kinds-as-data; recon agent://1-RegistryPattern)
+- Author `@textrole NAME { size,weight,lift,color,face,tracking }` once (macro + %registers, @type precedent),
+  consumed by ONE @words(role:) macro; @title/@kicker/@body/@hero are role rows, not 4 macros.
+- Files: projects/everswap-clone/lib/textrole.st (registry), words.st (consumer macro).
+- Accept: `@title "Flows"` renders with the title role's params; adding a @quote role needs only a data row.
+
+** W2.4 — @anchor(&ref, place, gap) sugar desugars to Lens-A facet reads  [blockers: W2.1]
+- The thin convenience: @anchor(&summit, place: above, gap: 16) ≡ translate: &summit.screen + offset,
+  opacity: &summit.visible | bool. Confirm both Lens-A explicit and Lens-B sugar produce identical wiring.
+- Accept: a section authored either way tracks identically (diff the emitted bind).
+
+* ────────────────────────────────────────────────────────────────────────────
+* WAVE 3 — everswap migration (proof the API reads naturally end-to-end)  [blockers: W2.1,W2.2,W2.3,W2.4]
+* ────────────────────────────────────────────────────────────────────────────
+- Rewrite index.st: peaks as `&name { @peak(...) }` entities; each section's copy as projected DOM via
+  @anchor(&peak) or `@words` roles; derive reveal windows from camera legs (delete hand-tuned when:).
+- DELETE: index.html <main> 7 <section> block; @pinned + three-pin (−2 primitives); 2 of 3 repeated
+  coordinate systems. @worldtext shrinks to hero-only (the one rippling-on-water mesh moment).
+- Files: index.st, index.html, lib/pin.st, lib/three-pin.st (delete), lib/worldtext.st (shrink).
+- Accept (CDP test, projects/everswap-clone/tests/): a section's screen pos tracks its peak's projected
+  summit across two scroll positions (test ≡ automation). `serve` shows copy ON the peaks, real selectable DOM.
+
+* ────────────────────────────────────────────────────────────────────────────
+* WAVE 4 — DEFERRED: %provides ambient nesting (separate FEAT; deep compiler)
+* ────────────────────────────────────────────────────────────────────────────
+- Goal: `&summit { @peak(...) }` publishes &self so nested @approach/@title default their target to the
+  enclosing entity (no repeated &ref). Ergonomic elegance, NOT required for the win.
+- BLOCKED ON (recon agent://0-MacroSectionPipeline): ExpandContext is bottom-up only (no parent-scope-chain);
+  %iterates is USED by stdlib/macros/each.st but NOT YET PARSED. Start: src/parser/mod.rs:3200-3330
+  (section-keyword dispatcher), meta_ast.rs:277 (MacroDefAst), :709 (MacroBodyItem enum).
+- ACTION: file as its own FEAT when W3 proves the &-reference path; do NOT fold into this PLAN.
+
+* Cross-cutting risks (carry from FEAT-142)
+- R2 occlusion: .visible = frustum/behind-camera only; label behind geometry (globe far side / peak behind
+  peak) needs depth-buffer/raycast .occluded — separate, expensive, OPT-IN; out of W2-3 scope.
+- R3 perf: many anchors = many registerFrame cbs; batch into one projection-manager tick if it bites.
+- R4 depth: NDC z non-linear in world distance; for perceptual fade use camera.distanceTo(anchor).
+- L1-promotion: spike files are project-local; promote three-anchor toward stdlib/3d only AFTER @peak proves
+  the facet-read path generalizes (don't pre-abstract).
+
+* Definition of done (this PLAN)
+- W2+W3 complete: everswap section copy sits ON peaks as real DOM, tracks the camera, no @pinned, no <main>.
+- The mechanism (three-anchor + facets + @anchor) contains ZERO mountain vocabulary.
+- CDP test green; cargo check/build green; serve visually correct.
+- W4 filed as a separate FEAT (not done here).

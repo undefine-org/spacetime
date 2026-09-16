@@ -1,0 +1,150 @@
+#+TITLE: KILL_LEGACY_CODEGEN
+#+STATE: DONE
+#+CUSTOM_ID: PLAN-001-kill-legacy-codegen
+
+NOTE [2026-03-14]: Fully executed. %states ported to pipeline, compile.rs + expand_macro deleted. -5858 lines, all 2534 tests green.
+
+* Initial Message
+
+- ExpandedDirectives and compile_macro_call/DeclarationGraph still exist for metasystem tests that exercise %states/%for through the old path.
+ These can be deleted when test coverage for those constructs is added through the pipeline path.
+
+
+and this?
+
+* Problem
+
+Three legacy types/functions survive in src/metasystem/ after PLAN-001 unified the pipeline:
+
+- =compile_macro_call()= + =DeclarationGraph= (compile.rs) — zero production callers, 6 test-only call sites
+- =ExpandedDirectives= + =expand_macro()= (expand.rs) — zero production callers, test-only usage
+- The pipeline Resolve layer returns =Ok(vec![])= for macros with =%states=, silently dropping their CSS+JS
+
+These are dead code with live tests. The work is: port the missing =%states= codegen to the pipeline, add integration tests, delete the old paths.
+
+* Key Findings
+
+** What =compile_macro_call= generates for =%states=
+
+Both CSS and JS:
+- CSS: =selector[data-st-state="name"] { prop: val; }= via =generate_state_css()= (emit/metasystem_codegen.rs:805)
+- JS: =ST.bindState(el, 'signal', 'state_name')= — hardcoded in compile.rs:812-815
+- Pattern-match states also generate =generate_pattern_match_css()= and =generate_pattern_match_js()=
+
+** Pipeline state
+
+- =EvaluatedMatch.states= is already populated by Evaluate layer (evaluate.rs:136)
+- =resolve_evaluated()= in resolve.rs never reads =ev.states= — it short-circuits to =Ok(vec![])= for states-only macros (resolve.rs:204)
+- The Expand layer (pipeline/expand.rs) operates on =ResolvedPrimitive= — it has no concept of states
+
+** Test-only callers to delete
+
+| File | Function | Tests |
+| src/metasystem/tests.rs | compile_macro_call | test_drag_macro_expansion, test_drag_macro_axis_constraint (x3), test_locale_macro_compilation |
+| src/metasystem/tests.rs | expand_macro | test_expand_macro_with_args, test_expand_macro_with_default, test_resolves_clause_generates_transform, test_nested_macro_expansion, test_event_binding_comparison, test_template_invoke_binds_container, test_html_block_capture_with_real_parser_body |
+| tests/e2e_drag_browser.rs | compile_macro_call | generate_drag_e2e_html |
+| src/metasystem/expand.rs | expand_macro | inline #[cfg(test)] tests |
+
+** Functions to preserve in expand.rs
+
+- =convert_properties_to_keyframes_js()= (line 1831) — called by syntax/form_match.rs:886
+- =substitute_params()= (line 2280) — used internally; check if pipeline's =substitute_params_simple= covers all cases
+- =MacroContext= — check if still imported after deleting expand_macro
+
+* Approach
+
+Port =%states= → pipeline, gate with tests, then delete.
+
+** Phase 1: Port =%states= codegen to pipeline
+
+*** ITEM Wire states CSS+JS generation into compile_verbose
+:PROPERTIES:
+:EFFORT: 2h
+:END:
+
+In =pipeline/mod.rs::compile_verbose()=, after the Evaluate step:
+
+1. Iterate =evaluated= matches. For each with =ev.states.is_some()= AND =ev.form_match.selector.is_some()=:
+   - Extract each =MetaStateDecl= from =ev.states.states=
+   - Generate CSS via =generate_state_css(selector, &state.name, &state.properties)= from emit/metasystem_codegen.rs
+   - Generate JS: =ST.bindState(el, '{condition}', '{state_name}')= — wrap in JsFragment with appropriate scope
+   - Push CssFragment (Raw) and JsFragment into the output collectors
+
+2. For macros that have BOTH =%binds= and =%states= (like @drag), the resolve_evaluated path handles binds already; states CSS/JS is additive.
+
+3. Remove the =Ok(vec![])= short-circuit in resolve.rs:204 for states-only macros — those macros may still have =%binds= or other primitives after evaluation.
+
+Key decisions:
+- States CSS/JS goes into =compile_verbose= directly (not a new layer) — it's a simple map from =MetaStatesClause= to fragments
+- Use =generate_state_css()= from emit/metasystem_codegen.rs (already exists, tested)
+- Pattern-match states (=condition.starts_with("match:")=) need =generate_pattern_match_css/js= too
+
+*** ITEM Add pipeline integration tests for @drag with states
+:PROPERTIES:
+:EFFORT: 1h
+:END:
+
+In =pipeline/integration_tests.rs=:
+
+1. Test that compiling =.draggable { @drag }= through the pipeline produces CSS containing =data-st-state= and JS containing =ST.bindState=
+2. Test =@drag axis:x= variant
+3. Compare output against what compile_macro_call produced (use existing test expectations)
+
+Also add a simpler test for a custom macro with =%states= to verify the pipeline path without stdlib complexity.
+
+*** ITEM Gate: full test suite
+:PROPERTIES:
+:EFFORT: 30m
+:END:
+
+Run =cargo test --lib=, =cargo test --test integration_tests=, =cargo run --features headless -- test tests/ --headless=.
+
+** Phase 2: Delete legacy paths
+
+*** ITEM Delete src/metasystem/compile.rs
+:PROPERTIES:
+:EFFORT: 30m
+:END:
+
+1. Delete =src/metasystem/compile.rs= entirely
+2. Remove =mod compile;= and re-exports from =metasystem/mod.rs= (=compile_macro_call=, =CompiledOutput=, =PrimitiveBinding=, =DerivedSignal=, =StateDefinition=, =AnimationBinding=, =EventHandler=)
+3. Delete =tests/e2e_drag_browser.rs=
+4. Delete the =e2e_codegen= test module from =metasystem/tests.rs= (tests that called =compile_macro_call=)
+5. Fix any resulting compile errors
+
+*** ITEM Delete expand_macro and ExpandedDirectives from expand.rs
+:PROPERTIES:
+:EFFORT: 1h
+:END:
+
+1. Delete: =ExpandedDirectives= struct, =expand_macro()=, =expand_macro_body()=, =expand_body_item()=, =generate_state_css_from_captures()=, =generate_pattern_match_css_from_register()=, =process_bind()=, =process_derive()=
+2. Delete inline =#[cfg(test)]= tests in expand.rs that use expand_macro
+3. Delete expansion test modules from =metasystem/tests.rs= that call =expand_macro=
+4. Preserve: =convert_properties_to_keyframes_js()=, =substitute_params()=, any types still imported elsewhere
+5. Remove stale re-exports from =metasystem/mod.rs= (=expand_macro=, =MacroContext=, =MacroExpansionError= — check if pipeline uses them first)
+6. If =MacroContext= has no remaining consumers, delete it too
+
+*** ITEM Final cleanup and gate
+:PROPERTIES:
+:EFFORT: 30m
+:END:
+
+1. Remove stale comment in resolve.rs:190 about expand_macro
+2. Remove any unused imports across touched files
+3. Run full test suite
+4. Commit
+
+* Verification
+
+- =cargo test --lib= — all pass
+- =cargo test --test integration_tests= — all pass
+- =cargo run --features headless -- test tests/ --headless= — all pass, including any headless tests for @drag or @state-machine
+- =grep -r 'compile_macro_call\|ExpandedDirectives\|DeclarationGraph' src/= — zero matches
+- New pipeline integration test for @drag asserts state CSS+JS output
+
+* Risks
+
+1. =%states= with pattern-match conditions (=match:signal=) need =generate_pattern_match_css/js= — verify these functions are available and correct
+2. =ST.bindState= JS needs the right scope (=JsScope::Init= with selector wrapper) — match the compile_macro_call output format
+3. Some macros may have ONLY =%states= and no =%binds= — the resolve short-circuit removal must not regress these
+4. =substitute_params()= in expand.rs may be called by surviving code — verify before deleting

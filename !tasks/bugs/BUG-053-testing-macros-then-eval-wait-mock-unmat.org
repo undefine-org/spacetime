@@ -1,0 +1,108 @@
+#+TITLE: Testing macros @then/@eval/@wait/@mock unmatchable; @assert swaps condition/message
+#+STATE: ITEM
+#+SESSION_ID: 14f94e45c6c3f247
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-02T11-06-49-499Z_14f94e45c6c3f247.jsonl]]
+#+CUSTOM_ID: BUG-053-testing-macros-then-eval-wait-mock-unmat
+#+LAYER: compiler
+
+* Initial Message
+
+let's think about how we'll extend the stdlib for Spacetime using this as a philosophical underpinning: https://www.gingerbill.org/article/2025/09/08/package-managers-are-evil/
+
+
+In the context of integrating pretext to make text layout much simpler in Spacetime, especially in ora-ventures.com's hero section (projects/ora-ventures.com/ has some older syntax which the implementation agent will have to fix).
+
+Gather your thoughts and come up with your own understanding of the nuances of going that way for this project. Remember that the stdlib/ folder is going to go from having `macros/` and `primitives/` to a modular architecture for folders, which is how we are going to make the pretext macros btw.
+
+This is pretext: https://github.com/chenglou/pretext
+
+Also think about stuff we could put in the demos/ folder to showcase the integration with pretext and the latest Spacetime features. Let's not do ora-ventures.com just yet, let's first think about a nice framework for making the stdlib library both lean and "fusion-engine-included", and showcase that with pretext. Consider all angles
+
+* Severity
+HIGH. Even after PLAN-026 W1 (commit 97723e7c) makes =:block= test bodies
+COMPILE, =.test.st= assertions still do not GATE because the testing macros
+themselves have form/capture defects. A deliberately-false test still "passes".
+
+* Context / how surfaced
+PLAN-026 fixed the foundational bug (BUG-051): =@test= / =@fixture= bodies were
+emitted as a dead string literal (=\"@assert...\".js=). That fix WORKS \u2014 verified
+by snapshot (=src/snapshots/...test_and_fixture_js.snap=: the fixture now emits
+=document.createElement= + =innerHTML= + =appendChild= instead of the literal).
+But compiling the body exposed THIS cluster: the assertion macros do not produce
+working assertion code.
+
+* Findings (each reproduced, see repro)
+
+** F1 \u2014 @assert swaps condition and message (capture defect)
+=@assert $condition:expr $message:string? = \"\"= (stdlib/testing/test.st:959-973).
+Input =@assert (false) \"MYMSG\"= captures:
+- =condition = Expr(\"\\\"MYMSG\\\"\")=  \u2190 the MESSAGE string
+- =message  = String(\"\")=           \u2190 empty
+So emitted JS is =const __cond = \"MYMSG\"; if (!__cond) throw\u2026= \u2014 a truthy string,
+never throws. The =:expr= capture skips the parenthesized =(false)= and grabs the
+trailing string. Same FAMILY as BUG-052 / BUG-047 (greedy inline value capture).
+Repro:
+#+BEGIN_SRC
+.x { @assert (false) "MYMSG" }   // -> cond=Expr("\"MYMSG\""), message=String("")
+#+END_SRC
+
+** F2 \u2014 @then / @eval / @wait / @mock unmatchable in isolation
+When a block body is compiled in isolation (PLAN-026 nested compile), these forms
+produce ZERO matches even after registering all 23 testing macros into the
+augmented SyntaxRegistry:
+- =@then .foo should exist=        -> 0 matches
+- =@eval (window.y = 1)=           -> 0 matches
+- =@assert (false)=                -> 0 matches too when bare? (matched in body, see note)
+Whereas a normal stdlib macro (=@reveal(split:\"chars\")=) DOES match against the
+same registry. So =RegisteredForm::new= / =extract_prefix= / form-compilation
+rejects or mis-keys these testing forms. Confirmed: =STDLIB_REGISTRY= (parse-time
+SyntaxRegistry, 312 forms) does NOT contain the testing macros at all \u2014 they live
+only in the test_runner's PREPENDED source. They register (form_count 312->335)
+but still don't match. Suspect: their =%form= shapes (e.g. =@then $target:selector
+should $assertion:ident $expected:expr?= with the bare keyword =should=, and
+=@eval $expr:expr= with only a parenthesized expr) hit a gap in the events
+form-matcher or prefix indexing.
+
+** F3 \u2014 testing macros absent from the parse-time registry by design
+=stdlib/testing= IS loaded into the expand-time MetaRegistry (compiler.rs:92) but
+NOT into the parse-time =STDLIB_REGISTRY= (src/syntax/stdlib_registry.rs). The
+test_runner works around this by PREPENDING stdlib/testing/test.st as source so
+the outer parse sees the =%macro= defs and rematches. The PLAN-026 nested compile
+adds =parser::rematch_with_registry= to re-derive matches from the live registry;
+F2 shows that rematch path does not match @then/@eval even though it matches
+@assert. Decide: either (a) include stdlib/testing in the parse-time registry, or
+(b) fix the form-matcher so these forms register+match via rematch.
+
+* Why the negative gate still fails (the acceptance for "assertions gate")
+Because of F1+F2, NONE of @assert / @then currently emit a throwing check in a way
+that fires. A test with =@assert (1===2)= or =@then .missing should exist= still
+reports passed. The gate is: such a test MUST report FAILED.
+
+* Fix plan (suggested order)
+1. F2/F3 first: make @then/@eval/@wait/@mock MATCH (audit RegisteredForm::new +
+   extract_prefix for the =should= keyword form and bare-expr forms; or load
+   stdlib/testing into the parse registry). Without matching, nothing else matters.
+2. F1: fix @assert =$condition:expr $message:string?= so =(expr) "msg"= captures
+   condition=(expr), message="msg". Likely the :expr extractor greediness; may
+   share a fix with BUG-052.
+3. Re-run the negative gate: =@assert (1===2)= and =@then .x should exist= (on a
+   missing element) MUST fail.
+4. AUDIT every existing .test.st: with assertions now live, triage real failures
+   (genuine product bugs that were hidden) vs bad tests. This audit is part of the
+   deliverable \u2014 expect some currently-"green" tests to fail for real.
+
+* Repro commands
+#+BEGIN_SRC sh
+# F1/negative-gate (currently wrongly passes):
+printf '@import "stdlib/testing/test"
+@test "f" { @assert (1 === 2) "x" }
+' > /tmp/g.test.st
+cargo run --features headless -- test /tmp/g.test.st --headless   # prints "1 passed" (WRONG)
+# inspect emitted body (now compiles, but __cond gets the message):
+cargo run -- inspect --layer emit /tmp/g.test.st
+#+END_SRC
+
+* Parent
+[[id:PLAN-026-fix-block-body-capture-so-test-st-assert]] (the :block core fix landed; this is the remaining blocker for real gating).
+
+NOTE [2026-06-03]: SUPERSEDED-IN-PLACE by PLAN-027 W0 (FEAT-056). The diagnosis here is corrected by emit-proven ground truth (see EP episode 2026-06-03): real defects are (a) @assert paren eaten as arglist → condition/message swap; (b) @then/@eval/@let DROPPED in block-body compile (CST DOT-break + bare-expr rematch), NOT "unregistered". @then DOES match in some contexts. Fix tracked in FEAT-056. Keep this BUG as the diagnosis record; execution lives in FEAT-056.

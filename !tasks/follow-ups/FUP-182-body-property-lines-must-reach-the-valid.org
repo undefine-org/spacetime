@@ -1,0 +1,75 @@
+#+TITLE: Body property lines must reach the validator from a real parse
+#+STATE: ITEM
+#+SESSION_ID: 153f5ed0617636c7
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-26T21-12-46-213Z_153f5ed0617636c7.jsonl]]
+#+CUSTOM_ID: FUP-182-body-property-lines-must-reach-the-valid
+
+* Initial Message
+
+focus on where you still stopped short. I want the structural solution that lets us support all of CSS and make our own extensions with full rich type support. please go through what's left and present it in one coherent report, capability- and feature-oriented
+
+* The last mile of FUP-181
+
+PLAN-136 W4c landed the RULE that a body property is checked against the type
+its form declares, with gates proving the rule works
+(tests/body_property_test.rs, 4/4). What it did NOT land is the connection: a
+real `.st` file still compiles clean.
+
+    @on &.hover(name: h) {
+      easing: not-a-curve;      <- still PASSES end to end
+    }
+
+** Why
+
+A body is captured as ONE value:
+
+    %capture_type motion_line { $prop:ident ":" $value:balanced(';') ";"? }
+    %capture_type on_motion_body { ( … | $line:motion_line )* }
+
+so by the time a `FormMatch` exists, the body is a single balanced run (or a
+structural `CapturedValue::Keyframes`), not a list of `(property, value)` pairs.
+`directive_property_match_diagnostics` walks `fm.captures` and only understands
+`String`/`Expr`, so a body capture hits `_ => continue`.
+
+`body_property_diagnostics` is therefore currently called only by its own tests
+— which is exactly the shape the repo warns about: a green gate over a rule
+nothing invokes.
+
+** What is needed
+
+Extract `(property, value, span)` triples from a matched body and route them
+through the existing `directive_property_diagnostics`. Do NOT write a second
+rule — the whole point of W4c was that a body property and a param property are
+the same question, and two implementations would drift into two answers.
+
+Two candidate seams, both worth measuring before choosing:
+  1. reify `motion_line` into a structured `CapturedValue` (a list of pairs)
+     rather than a flat balanced run, so the pairs exist in the match; or
+  2. re-scan the captured body text at validation time, reusing
+     `scan_declarations` (src/validation/css.rs) which already does exactly this
+     for raw CSS blocks and is gated for comments, strings and malformed input.
+
+(2) is smaller and reuses gated code; (1) is more honest and would also give the
+LSP something to complete against. Measure the reifier's blast radius first —
+PLAN-122 recorded that a sub-capture wrapper once starved the body token flow
+(stdlib/macros/on.st:158, "measured: body: []").
+
+** Acceptance
+
+RED first, and it must be an END-TO-END gate, not a helper call: a `.st` file
+containing `@on &.hover(name: h) { easing: not-a-curve; }` compiled through
+`cargo run -- check` must report E0963 with the caret on `not-a-curve`. A
+source-string assertion is not a behaviour assertion (AGENTS, BUG-252).
+
+Then the corpus must stay clean: 1,010 `easing` declarations exist today, and
+`easing: --token` / `easing: cubic-bezier(…)` / compound `stagger` values must
+all still pass. Run the dry run BEFORE enforcing, as PLAN-136 W4 did — that step
+is what caught 25 false refusals last time.
+
+** Note on @fade-in
+
+`@fade-in` declares `easing: $easing:ident` (stdlib/macros/fade-in.st:25) while
+its sibling `@fade-in-up` declares `:easing` (:54). Once body properties are
+enforced, the weak declarations are worth tightening — but only after this wave,
+since tightening without enforcement changes nothing and enforcement without
+tightening is what makes the weakness visible.

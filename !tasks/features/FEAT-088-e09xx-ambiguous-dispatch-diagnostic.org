@@ -1,0 +1,65 @@
+#+TITLE: E09xx ambiguous-dispatch diagnostic
+#+STATE: DONE
+#+SESSION_ID: 14f94e45c6c3f247
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-02T11-06-49-499Z_14f94e45c6c3f247.jsonl]]
+#+CUSTOM_ID: FEAT-088-e09xx-ambiguous-dispatch-diagnostic
+#+COMPLETION_HASH: a1d9bb6bfca73297
+
+* Initial Message
+
+what's next to make this super usable? especially for e.g. multiple dispatch and making it useful as an actual browser. also, could you create a basic Markdown parser in pure Spacetime (only scoped to spacetime-docs for now, if needed), that you would use to integrate Markdown files already written about testing? How hard would that be?
+
+* Parent
+[[id:PLAN-033-world-class-spacetime-macro-dispatch-ref]]. Rides on FEAT-087's scoring exposure. The real CORRECTNESS payback.
+
+* Goal
+When ~find_macro_for_match~ resolves a call and the top TWO viable candidates have
+EQUAL score, the winner is currently silent first-wins (~max_by_key~ is stable but
+arbitrary). Emit a diagnostic ~E09xx ambiguous dispatch: @X resolves to A and B
+(both score N); add a disambiguating literal/type~ so shadow bugs surface.
+
+* Target files
+- ~src/metasystem/registry.rs~ — ~find_macro_for_match~ (line ~381). Detect the tie
+  at the ~max_by_key~ site; surface via a returned diagnostic channel (NOT a panic).
+- ~src/diagnostics/codes.rs~ — register the new ~E09xx~ code (see the existing
+  E0810-E0812 stdlib block at codes.rs:300 for the pattern).
+- Wherever ~find_macro_for_match~ is consumed in the compile pipeline — thread the
+  warning into the diagnostics vec (Warning severity, NOT Error: an ambiguous call
+  still compiles to the first match; we WARN, we don't break the build).
+
+* Design
+~find_macro_for_match~ today returns ~Option<&MacroDefAst>~. Adding a diagnostic
+out-channel without churning every caller: either
+(a) a sibling ~find_macro_for_match_explained(...) -> (Option<&MacroDefAst>, Option<DispatchAmbiguity>)~
+    used by the pipeline, with the old fn delegating and dropping the ambiguity; or
+(b) collect ambiguities into a ~&mut Vec<Diagnostic>~ passed by the pipeline call site.
+Prefer (a) — keeps the hot ~Option~ API for the non-diagnostic callers (parser fast
+path) and gives the pipeline the richer return. DispatchAmbiguity carries
+{directive, winner_name, rival_name, score, span}.
+
+* Edge cases
+- Ties are EXPECTED for some intentional overload sets where a later literal/scope
+  disambiguates at a deeper step — only warn when the tie is UNRESOLVED after
+  ~macro_scope_matches~ filtering (i.e. both survive scope + share top score). The
+  existing BUG-037 comment (registry.rs ~line 388) documents a name-vs-form
+  collision that scope already resolves; do NOT re-warn those.
+- A tie of score 0 (two formless macros) → warn (genuinely ambiguous).
+- Make it suppressible: respect an allowlist or a ~%dispatch-priority~ later if
+  needed, but v1 just warns.
+
+* Acceptance
+- A crafted stdlib-style fixture with two ~%macro~ sharing a directive + identical
+  scoring form → compile emits exactly one E09xx warning naming both macros.
+- MUTATION PROOF: add a disambiguating literal to one form → warning disappears
+  (no false-positive on resolved overloads).
+- Existing stdlib compiles with ZERO new E09xx warnings (run a full
+  ~inspect --layer dispatch~ sweep / compile of demos+examples; if real ambiguities
+  exist in stdlib, FILE them as BUGs — that is the feature working, not a failure).
+- Full lib + integration green.
+
+* Notes
+- This is the load-bearing reason the whole reference is worth building: it makes
+  multiple dispatch DEBUGGABLE for every macro author, docs site or not.
+- Severity = Warning. An ambiguous call is not a hard error; first-match still wins.
+
+NOTE [2026-06-10]: DONE as E0923 (Warning). registry.dispatch_ambiguity(directive, captures, selector) -> Some((winner, rival, score)) when top-two viable candidates tie after scope filtering; None for clear winner / <2 viable / direct-name fast path (BUG-037-safe). CompileAnalysis::analyze_dispatch pass wired into run_check via cached_stdlib_registry. Severity Warning (first-match still resolves). Mutation-proof tests: identical forms tie → E0923; a discriminating required capture clears it. Real stdlib files (docs reader, examples) emit ZERO E0923 (no false positives). lib 2170/0, integration 168/0.

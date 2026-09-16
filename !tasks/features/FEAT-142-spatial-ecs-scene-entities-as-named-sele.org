@@ -1,0 +1,400 @@
+#+TITLE: Spatial ECS: scene entities as &-named selector-scopes with world↔page facets
+#+STATE: ITEM
+#+SESSION_ID: 151c02da5be0d720
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-29T10-04-08-943Z_151c02da5be0d720.jsonl]]
+#+CUSTOM_ID: FEAT-142-spatial-ecs-scene-entities-as-named-sele
+
+* Initial Message
+
+my dude, the everswap clone thing is not leveraging the spacetime scope resolution and language extensibility as much as it could.
+
+only the 'EverSwap' font is visually on top of the first peak, but the rest of the copy still feels like a 2d scroll thing. what would the API that lets us naturally put text on top of peaks look like? like all text, and it feels natural and lets the rest of the code reads naturally?
+
+* Intent
+
+Make Spacetime feel **3D-native** by recognizing that a 3D scene is the SAME ECS the
+page already is — not a bolted-on module. Concretely: let page content sit on 3D
+points (the everswap "text on peaks" need) via ONE general mechanism that works for
+ANY scene (mountain, globe, sneaker, scatter plot, character), with mountains living
+purely in a project-local vocabulary layer.
+
+Motivating symptom (projects/everswap-clone): only the `EverSwap` wordmark (`@worldtext`
+mesh crowning a peak) reads as 3D. All section copy is screen-fixed DOM faded by scroll
+index (`@pinned`) — a "2D scroll thing." The peak name is a stringly foreign-key repeated
+across `@peak`/`@worldtext`/`@viewpoint`, and reveal windows (`when: "0 0.2"`) are
+hand-tuned to match camera legs by eye.
+
+* The Law (mechanism — no mountains in it)
+
+An ENTITY is a named selector-scope. COMPONENTS (`@directives`) attach data/behavior/
+per-frame ticks. Every entity exposes its transform as FACETS. Page-frame and world-frame
+are two coordinate spaces for the same entity model; the camera is the component mapping
+world→page. "DOM on a 3D point" = one entity whose page-transform reads another entity's
+world-projection facet.
+
+This is NOT new — it is the existing `@scroll-spy` pattern pointed at the world frame:
+  .work-section {            // ENTITY (selector-scope)
+    @scroll-spy              // COMPONENT (directive binding a primitive)
+    @when &self.scrollSpy.isActive { … }   // READ component state back as a FACET
+  }
+Verified mechanism (repo facts):
+- `nested_scope: seq(choice(selector_list, element_ref), block)` — tree-sitter-spacetime/grammar.js:429.
+  `&name { }` ALREADY parses as a scoped block and lowers via the same NestedScope path as
+  `.selector { }` (src/parser/mod.rs:596-604). Entity blocks need NO grammar change.
+- `Value::ElementRef { name, facet: String, property: String }` — src/parser/ast.rs:611.
+  Facet is a STRING; facet→signal table is DATA (src/analysis/signals.rs:319), not Rust arms.
+- A directive that binds a primitive exporting signals makes them readable as
+  `&ref.<directive>.<signal>` (scroll-spy.st macro → primitive yields `$isActive` →
+  `&self.scrollSpy.isActive`). This is ECS state read-back, CSS-native.
+
+Lineage that confirms the altitude:
+- A-Frame (aframe.io): `<a-entity>` + component attributes (`position`/`rotation`), built-in
+  transform, `tick()`, query-selector references. Our entity = selector; components = directives;
+  every entity inherently exposes `.world/.screen/.depth/.visible` (their built-in transform).
+- KAPLAY: `add([pos(), text()])` composition; `@anchor(&x)` is `pos()` reading another object
+  (a constraint component). Composition over inheritance.
+
+* Author surface (LOCKED decisions)
+
+- Entity declaration: **block-scope** `&summit { @peak(at:"0 -350", rise:86) }` (most CSS-native;
+  already-grammar; natural home for child-entity nesting). [user-locked]
+- Two read surfaces, ONE mechanism: [user-locked]
+  - Lens A (truth, fully composable): `translate: &summit.screen; opacity: &summit.visible | bool`
+  - Lens B (thin sugar): `@anchor(&summit, place: above, gap: 16)` — desugars to Lens-A facet reads.
+- Facet fidelity: **per-frame reactive** — `&x.screen` updates every rAF tick via the 3D frame
+  loop, wired into the same reactive sink as scroll/pointer facets. MUST verify the reactive path
+  sinks an rAF-driven value without churn (see Risks). [user-locked]
+- Layering: L0 stdlib/3d (general, untouched) · L1 spatial-ECS (general: &anchor + facets +
+  projection, NO mountains) · L2 vocabulary (project-local: @peak/@terrain/@river/@geo/@textrole).
+
+* Pressure-test battery (the general thing must carry all of these)
+
+| scene            | entity + component        | DOM bridge                              | new cap? |
+| everswap summit  | &s { @peak(at,rise) }     | @anchor(&s, above)                      | —        |
+| sneaker callout  | &heel { @vertex(1820) }   | @anchor(&heel)                          | —        |
+| globe city       | &paris { @geo(lat,lon) }  | @anchor(&paris) + @when !&paris.visible | .occluded|
+| 3D scatter       | @each{ &p { @at($.xyz) } }| @anchor(&p)                             | —        |
+| character bubble | &head { @bone("Head") }   | @anchor(&head)                          | —        |
+| exploded engine  | &part { @at(...) }        | @anchor + leader line &part.screen→&self.rect | occlusion |
+
+Invariants surviving all: (1) named positioned scene point (position SOURCE varies:
+static/vertex/bone/geo/computed/data-row); (2) live world→screen projection; (3) depth+visibility;
+(4) bidirectional reference (DOM↔scene). NOT invariant: peak/summit/rise/geo/bone — all vocabulary.
+
+* Build sequence (layered; L1 needs NO deep compiler change)
+
+** Wave 1 — L1 general spatial-ECS primitive (the spine)
+- `three-anchor` primitive: reads `canvas._stThree` ctx, takes a world-position SOURCE, registers a
+  per-frame cb that does `vec3.project(camera)` → NDC → screen px, hides on `ndc.z>1`, computes
+  depth; yields `$world,$screen,$depth,$visible`. (recon: agent://2-Stdlib3dProjection PROJECTION_SKETCH)
+- Expose those as facets `&name.anchor.{world,screen,depth,visible}` via the scroll-spy macro pattern
+  (macro `%binds three-anchor(&self,…) -> {…}`). Confirm facet read-back works for a scene entity.
+- VERIFY the per-frame facet does not churn the reactive sink (Risk R1). If it does, fall back to the
+  primitive writing `element.style.transform` directly while still exposing read-only facets.
+
+** Wave 2 — L2 vocabulary as data/macros (mountains live here)
+- `@peak(at,rise,radius,sharp)` macro → binds three-anchor with position from terrain height field
+  (canvas._stWorld.byName / hf.summitTop already populated by three-peak/three-terrain).
+- `@textrole NAME { size,weight,lift,color,face,tracking }` registry (recon agent://1-RegistryPattern:
+  @type/%registers precedent) + `@title/@kicker/@body` consume it (one `@words` keyed by role = data,
+  not 4 macros).
+- `@anchor(&x, place, gap)` constraint-component sugar → desugars to Lens-A facet reads.
+
+** Wave 3 — everswap-clone migration (proof the API reads naturally)
+- Rewrite index.st: peaks as `&name { @peak … }` entities; section copy as projected DOM via @anchor;
+  derive reveal windows from camera legs (delete `when:` hand-tuning).
+- DELETE: index.html `<main>` 7 `<section>` block, `@pinned`/`three-pin` (−2 primitives), 2 of 3
+  repeated coordinate systems. `@worldtext` shrinks to hero-only (the one rippling-on-water mesh moment).
+
+** Wave 4 (DEFER — additive elegance, deep compiler) — `%provides` ambient nesting
+- Let `&summit { @peak … }` publish `&self` so nested `@approach/@title` default their target to the
+  enclosing entity. BLOCKED ON: ExpandContext is bottom-up only (no parent-scope-chain) AND `%iterates`
+  is used by stdlib/macros/each.st but NOT YET PARSED (recon agent://0-MacroSectionPipeline, start_here
+  src/parser/mod.rs:3200-3330). File as its own feature; the &-reference path delivers ~80% without it.
+
+* Risks / unknowns to verify before/while building
+
+- R1 (BLOCKING for Lens A purity): can the reactive value path sink an rAF-driven (~60Hz) facet without
+  churn? Today `&hero.rect.top` reads on layout/scroll, not every frame. If churn → Wave-1 fallback
+  (primitive writes style; facets read-only). Verify with a 1-entity spike before committing the surface.
+- R2: `.occluded` (label behind geometry, e.g. globe far side / peak behind peak) needs depth-buffer or
+  raycast read — separate, expensive, OPT-IN facet. Cheap `.visible` = frustum/behind-camera only; be
+  honest it won't catch occlusion. Out of scope for Wave 1-3; vocabulary can add `@when !&x.visible`.
+- R3: many anchors = many registerFrame cbs. Batch into one projection-manager tick if perf bites.
+- R4: NDC z is non-linear in world distance; for perceptual depth fade use camera.distanceTo(anchor).
+
+* Acceptance
+
+- `cargo run -- serve projects/everswap-clone` — section copy sits ON the peaks, tracks as the camera
+  flies, is REAL DOM (selectable, accessible, crisp at any DPI), not a CanvasTexture.
+- The mechanism (three-anchor + facets + @anchor) contains ZERO mountain vocabulary; a globe/scatter demo
+  could reuse L1 unchanged.
+- Net deletion: `@pinned`/`three-pin` gone; `index.html` `<main>` gone; `when:` hand-tuning gone.
+- Tests: a CDP test (projects/everswap-clone/tests/) asserts a section's screen position tracks its peak's
+  projected summit across two scroll positions (test ≡ automation, docs/testing/AUTOMATION.md).
+
+NOTE [2026-06-30]: R1 RESOLVED (verified against runtime, not assumed) — per-frame reactive facets are safe; Lens A pure surface (`translate: &x.screen`) is committable, Wave-1 style-write fallback NOT needed.
+
+Evidence chain:
+1. `%yield x -> $sig` lowers to `ST.set(el,'sig',x)` — src/emit/metasystem_codegen.rs:12, test-confirmed :1105.
+2. ST.set short-circuits unchanged values — public/runtime/st.js:325 `else if (s[name].v === value) { return; }`. Screen-stationary label ⇒ zero downstream work; churn structurally impossible.
+3. Notify = direct Set<fn> dispatch (s[name].d), st.js:513 watch / :305 set. ST.bindTransform.recompute (st.js:1172) is the sink fn → el.style.transform. No diff/vdom/forced-layout on hot path.
+4. PRECEDENT ALREADY 60Hz IN PROD: three-scroll.st:62 calls `%yield cur -> $progress` INSIDE registerFrame every frame, driving camera reactively. Per-frame &x.screen is identical pattern, not a new risk class.
+5. One coordinated loop ST._raf (public/runtime/raf-coordinator.js) with virtual-clock mode (ST._clock.virtual) ⇒ facet is deterministically testable; the Acceptance CDP test can drive frames via the virtual clock.
+
+Wave-1 mechanism confirmed end-to-end: three-anchor does vec3.project(camera) in registerFrame cb → %yield screen -> $screen → ST.set (skip-if-equal) → bindTransform recompute → style.transform. Facet read-back as `&name.<comp>.screen` rides the existing scroll-spy macro pattern (macro %binds primitive yielding signals → &ref.<directive>.<signal>), verified via stdlib/macros/scroll-spy.st + &self.scrollSpy.isActive usage in projects/ora-ventures.com.
+
+NOTE [2026-06-30]: WAVE-1 SPIKE LANDED & PROVEN END-TO-END (browser-verified, FEAT-142).
+
+Built (project-local, no compiler change, no vocabulary):
+- projects/everswap-clone/lib/three-anchor.st — primitive: querySelector('canvas.world')._stThree → registerFrame → THREE.Vector3.copy(world).project(camera) → NDC→page px → writes el.style.transform AND %yields $screenX/$screenY/$visible (forward-compat for the &name.anchor.screen facet).
+- projects/everswap-clone/lib/anchor.st — @anchor(at,align) macro: %scope selector, %binds three-anchor(&self,…) -> {$screenX,$screenY,$visible}.
+- index.st: imports + `.peak-label { … @anchor(at:"0 86 -350", align:"bottom") }`.
+- index.html: one `<div class="peak-label">Summit</div>`.
+
+Verification (cargo check ✓ all 22; build ✓; serve on :3344; puppeteer/Chromium):
+- Emitted JS chain confirmed: dist/spacetime.js:12154 querySelector → :12175 v.copy(world).project(camera) → :12192 ST.set(el,'screenX',sx) → :12200 ST.registerSelectorInit('.peak-label', init). Writes style.transform in the registerFrame cb.
+- Live measurement: scroll 0 vs 0.92 → transformChanged:true, dx=60 dy=65 (label tracks the world point as camera flies); live signals sx≈815 sy≈51 vis:true; opacity driven by visibility (off-screen point ⇒ hidden at top, visible deep). Screenshots scratch/spike-summit-scroll{0,92}.png.
+- HEADLINE WIN proven: "Summit" is crisp REAL DOM (Cormorant Garamond, selectable, DPI-crisp), glued to a world coordinate — NOT a CanvasTexture, NOT screen-fixed.
+
+Honest gap (deliberate, deferred to L2 vocabulary — NOT a mechanism flaw): hardcoded at:"0 86 -350" = peak declared base+rise, but the DISPLACED summit (after terrain fbm + camera framing) is elsewhere, so the label floats in sky rather than on the ridge. Wave-2 @peak resolves position from hf.summitTop("summit") (recon agent://2: canvas._stWorld.byName / hf.summitTop already computed by three-terrain). This is exactly why mountains belong at L2 and the mechanism (three-anchor) stays vocabulary-free.
+
+R1 reconfirmed in practice: per-frame ST.set drove reactive transform with no churn/jank in Chromium. Lens-A facet surface is safe to build on.
+
+NEXT (per user: write a PLAN with the wave DAG before continuing): author tasks/plans PLAN for FEAT-142 — W2 (@peak resolving hf.summitTop + @textrole registry + @anchor(&ref) reading the facet), W3 (everswap migration: peaks as &name{@peak}, section copy via projected DOM, delete @pinned/three-pin + index.html <main>, worldtext→hero-only), W4 deferred (%provides ambient nesting, blocked on ExpandContext bottom-up + %iterates unparsed). Spike files (three-anchor/anchor) are the seed of the L1 general primitive — will promote toward stdlib once @peak proves the facet-read path.
+
+NOTE [2026-06-30]: SPIKE v2 — name-resolution path proven (anchor-by-name, not raw coords).
+
+Change: three-anchor.st + anchor.st gained `peak:"<name>"` + `lift` params. Primitive now resolves the
+world point LAZILY EACH FRAME from canvas._stHeightField.summitTop(name) (the DISPLACED ridge top after fbm)
++ lift, falling back to raw `at` when no peak/height-field. index.st: `.peak-label { @anchor(peak:"summit", lift:8, align:"bottom") }`.
+
+Verified (build ✓; emitted JS dist/spacetime.js:12171 resolveWorld → hf.summitTop("summit"); Chromium):
+- Resolves the REAL summit y=55.2 (NOT the hardcoded 86 — fbm displacement), proving it reads the live height field.
+- Tracks across full scroll: x 665→797→674→153, y -20→16→49→83, enters viewport mid-journey, opacity follows visibility.
+- Screenshot scratch/spike-summit-onridge-75.png: label near the snowy apex (vs floating in random sky before).
+
+This proves the L1↔L2 seam: mechanism (three-anchor) takes a NAME; vocabulary (summitTop) supplies POSITION.
+The general primitive stays mountain-free; "summit" is just a string key into the height-field registry.
+
+HONEST RESIDUAL (deferred, NOT spike scope — recorded so W2/W3 address it):
+1. Vertical seating gap: label sits ~above the visible apex, not seated ON it. Cause = camera frames that peak
+   low in viewport on this leg ⇒ needs camera-framing-aware vertical offset. Belongs to L2 @peak/@anchor vocab
+   tuning (W2.2/W2.4), NOT the general primitive (would bake camera hacks into L1 = breaks purity).
+2. Occlusion: summit (z:-350, farthest) is partly behind a nearer peak here ⇒ R2 .occluded facet (opt-in,
+   depth-buffer/raycast), explicitly out of W1-3 scope.
+Decision: do NOT over-iterate the spike to chase pixel-perfect seating; that's W2/W3 with full vocabulary.
+Spike's two jobs (prove mechanism + prove name-resolution) are BOTH DONE.
+
+PLAN-060 W2.2 acceptance should be tightened: "label anchored to &summit sits ON the rendered ridge" requires
+the camera-framing offset (item 1), not just summitTop resolution. Note that when executing W2.
+
+NOTE [2026-06-30]: W2.2 DIAGNOSIS COMPLETE (exhaustive, evidence-based) — the "float" was NOT a bug. Three compounding causes, all proven via in-browser instrumentation:
+
+1. CONTENT: `summit` entity (x:0,z:-350) sits in a SADDLE / is the farthest peak. The visually-dramatic peaks are relayers/evernet. Proven by 5-dot overlay (scratch/dbg-all-peaks-50.png): relayers(orange)+everyone(blue) landed ON mountains; summit(magenta) floated in sky between peaks.
+2. FRAMING: each peak is well-framed (sx≈center, sy≈45%) ONLY on its own scroll leg — evernet@f0.475, everyone@0.725, relayers@0.925, summit@1.0 (the flightpath @viewpoints already visit each). Anchoring summit + viewing mid-journey shows it small/high/distant. Proven by 40-step framing scan.
+3. OFFSET: lift(+8) + bottom-align(full text-height ~66px) stacked the label ~76px above the (correct) projected point.
+
+VERIFIED NON-BUGS (ruled out by instrumentation, don't re-chase):
+- Projection math correct: label live signal sy=273 ≈ manual projection sy=276 in same frame.
+- Height field correct: mesh displaces local-Z then rotX=-90 (three-terrain.st:166,232) ⇒ mesh world-Y == hf.height() exactly. Raycast of actual 271k-vert terrain hits summit at sy=384 == hf.summitTop projection. summitTop is authoritative.
+- Footprint true-crest (h≈62) vs center (h≈55): minor; declared rise:86 is attenuated by fbm — terrain is genuinely lower than declared. Not the cause.
+- Flightpath ENDS on a wide high overview (f=1.0): summit tiny at center. The journey doesn't close on a peak close-up.
+
+REFRAME OF W2.2: the WOW is NOT an anchor-offset nudge. It is that copy must be anchored PER-PEAK and REVEALED ON THAT PEAK'S LEG (the framing window). That is the W3 migration pattern, and the missing MECHANISM piece is: @anchor needs a `when:`/reveal-window tied to scroll so each label is opaque only near its peak's best-framed fraction, faded otherwise (exactly like three-worldtext's `when`, generalized). This makes EVERY label feel intentional regardless of peak prominence.
+
+DECISION: W2.2 deliverable = add scroll reveal-window + clean offset semantics to @anchor (vocabulary-agnostic). Then W3 anchors each section to its well-framed peak with its leg's window. The per-peak framing fractions (evernet 0.47 / everyone 0.72 / relayers 0.92) are the reveal centers W3 will use. Artifacts: scratch/dbg-all-peaks-50.png, preview-relayers-clean-74.png, summit-at-final-leg.png.
+
+NOTE [2026-06-30]: W2.3 (@textrole registry) CUT — elegance-bar decision (AGENTS.md "one need, one implementation").
+
+Rationale: @textrole was designed when section text was 3D MESHES (@worldtext), where each role needs size/face/lift/ripple as 3D params best stored as data. We PIVOTED: section copy is now projected DOM. DOM typography = CSS, and Spacetime styles DOM with CSS classes natively. The 3D params (lift/offY/when) live on @anchor per-PLACEMENT (which peak/leg), not per-ROLE. So a "role" collapses to pure typography = a CSS class (.kicker/.title/.body). A @textrole registry would be a PARALLEL styling system alongside CSS — deletes no special-case, adds one. Fails the elegance bar (must REDUCE net complexity + DELETE a special-case). 
+
+Decision: use CSS classes for typography (native/harmonious); keep all 3D behavior on @anchor. This is "doing it right" = NOT adding a parallel system. PLAN-060 W2.3 abandoned; W3 acceptance unchanged (copy styled by CSS, positioned by @anchor).
+
+NOTE [2026-06-30]: W2+W3 COMPLETE & REVIEWED — the spatial-ECS is built, the everswap clone migrated, text now lives in the world.
+
+Shipped (commits 08c9391..3cb37fc on projects/everswap-clone):
+- W2.1: three-anchor is vocabulary-agnostic L1 — reads entity.worldPos() from canvas._stWorld.byName; three-peak (L2) supplies the resolver via terrain height field. Param peak:→to: (anchor TO an entity, ECS-correct).
+- W2.2: @anchor gained when: scroll reveal-window (smoothstep fade) + offY: screen seating. Reveal opacity 0→1→0 per leg verified.
+- W2.3: CUT (elegance bar) — DOM typography = CSS classes, not a parallel @textrole registry.
+- W3: 7 pinned <section>s → 5 <article.peak-copy data-peak=X> anchored to peaks; @flightpath rewritten so each @viewpoint looks at its OWN peak (was always look:summit) → each peak frames centre on its leg; @pinned + lib/pin.st + lib/three-pin.st DELETED; @worldtext kept hero-only. offY tuned all 5 legs: op=1, fully on-screen, cy 331-453px. Composition verified beautiful (scratch/w3-hero.png, w3-final-everyone.png, tune-evernet-check.png).
+- Tests: tests/anchor.cdp.test.st asserts 5 entities + worldPos() facet on all + 5 blocks + the BLOCK tracks its peak's projection (gap<140px, fails if @anchor removed).
+
+Reviewer swarms (3 reviewers total, 6 findings, ALL fixed):
+- W2 swarm (2 reviewers): L1 ent.rise leak removed; zero-span + half-validated when: NaN guards.
+- W3 swarm (1 reviewer): CTA pointer-events:auto (links were unclickable); CDP test strengthened (was asserting only camera motion); ReDeFined beat restored into relayers; hero <h1> added (a11y).
+
+KEY LEARNINGS recorded for the codebase:
+- puppeteer window.scrollTo does NOT fire scroll events → timeline camera won't advance; must dispatchEvent(new Event('scroll')). Camera ease 0.055 needs ~5.5s settle before measuring. (Baked into anchor.cdp.test.st.)
+- The "float" was never a projection/height bug (summitTop authoritative, raycast-confirmed); it was content (summit in a saddle) + camera framing (viewpoints looked at summit not own-peak) + offset stacking. Fixed by co-designing camera path WITH anchored copy.
+
+REMAINING (follow-ups, not blockers):
+- offY values are px-absolute (tuned for ~1365x768); responsive/vh-relative seating is a polish FUP.
+- W4 (%provides ambient nesting for &peak{...} authoring) still deferred — separate FEAT, blocked on ExpandContext bottom-up + %iterates unparsed.
+- The deleted @text3d reference in the OLD tests/scene.cdp.test.st is now stale (predates this work).
+
+The original ask is answered IN RUNNING CODE: section copy is real, selectable, DPI-crisp DOM that lives ON the peaks and tracks them as the camera flies — via one vocabulary-agnostic mechanism (entity worldPos() facet + @anchor constraint), with mountains living purely in project vocabulary.
+
+NOTE [2026-06-30]: W4 SCOPE LOCKED (3rd recon, agent://3-EntityBlockLowering, confirms shipped architecture).
+
+Confirmed: `&summit { @peak(...) }` as AUTHORING syntax is a DEAD-LETTER today — element_ref + block (no CSS selector) lowers (src/parser/mod.rs convert_cst_nested_scope ~2350) to a NestedScope whose selector is the raw text '&name'; at runtime ST.registerSelectorInit('&name', init) → querySelectorAll('&name') (invalid CSS) → ZERO matches → init never runs. A scene entity has no DOM element, so the form silently no-ops. This is WHY the shipped design correctly uses the canvas._stWorld.byName sidecar registry + @anchor(to:NAME) imperative read, NOT a &name{} DOM scope.
+
+∴ The &-reference SUGAR (`&summit { @peak }` authoring; `translate: &summit.screen` facet reads) is a real compiler project with TWO precise fronts, both recon-mapped:
+1. Make &name{} element_ref scopes (no selector) INIT AGAINST THE ENTITY REGISTRY instead of querySelectorAll — i.e. a virtual/non-DOM scope kind. Touch points: src/parser/mod.rs convert_cst_nested_scope (selector='&name' detection), the registerSelectorInit/_flushInit runtime path (public/runtime/st.js ~175-250).
+2. Wire cross-element reactive facet reads (consumer != producer); today only &self works (agent://4-CrossRefFacetResolution: src/emit/js.rs:820-850 Marker::Element emits a bare var, no ST.watch subscription).
+Plus the W4 nesting piece (%provides + %iterates) from agent://0-MacroSectionPipeline.
+
+IMPORTANT: this is SUGAR, not capability. The shipped mechanism (entity registry + @anchor constraint) delivers the full win — text living on the peaks, vocabulary-agnostic — WITHOUT any of it. File W4 as its own FEAT when/if the nested authoring ergonomics are wanted; do not block on it.
+
+* REVISED CANONICAL SURFACE (2026-06-30) -- supersedes "Author surface (LOCKED)" above
+
+  Two oracles (game-engine ECS: Godot/Unity/Bevy/A-Frame; declarative formats:
+  QML/USD/glTF/SVG) converged INDEPENDENTLY on this surface. Primary precedent:
+  A-Frame <a-entity> expressed in Spacetime sigils, backed by QML id:+property-binding
+  and USD relationship semantics. It DELETES the 3 hacks (stringly FK, name-interp,
+  data-in-strings) rather than adding mechanism. Net complexity: negative.
+
+** The entity is its &name. Nothing else.
+   - Identity  = the &name{} scope. NO kind-word (@entity peak REJECTED -- adds a slot,
+     deletes nothing; @peak stacked inside already says "peak"). NO type slot on the entity.
+   - Behavior  = the components stacked inside (Bevy implicit archetype; A-Frame composition).
+   - A "type" in @data's sense (@type Peak{}) belongs to the DATA driving the entity,
+     annotated on the row var (@each($peaks as $p Peak)), NEVER on the &entity.
+   - kind (the @data inline/fetch %macro discriminator) is ORTHOGONAL to type and is
+     simply not used for entities.
+
+** Facet paths: "." is member-access all the way down (4 layers)
+   &evernet . peak . summit . y
+   |ENTITY |  |COMP| |FACET | |VAL|
+   - ENTITY   &evernet   -> world registry _stWorld.byName   (precedent: element-ref.st
+              &name selector; + current three-anchor _stWorld.byName)
+   - COMPONENT .peak      -> which stacked @component published it. LAW: component namespace
+              = the directive name (@peak -> .peak.*). Promotes scroll-spy's "scrollSpy."
+              doc-prefix (when-guard.st) to a resolution law. Collision-proof.
+   - FACET    .summit     -> a published signal declared via %exports { $summit: worldpos }
+              (precedent: element-ref.st %exports { $width: length }). TYPED.
+   - VALUE    .y          -> runtime member access on the facet's value (vec3 -> scalar).
+   STRUCTURAL vs VALUE split: the ENTITY.COMPONENT.FACET prefix is resolved at COMPILE time
+   against the registry+%exports (this is where a typo/type-mismatch becomes a compile error);
+   any further .segment is RUNTIME reactive value access. Same syntax, two phases; the type
+   of each segment decides which.
+
+** Base vs derived facets (where the reactivity lives)
+   - .peak.summit  BASE    worldpos, from the terrain height field.
+   - .peak.screen  DERIVED screenpos = project(summit, camera). depends on summit + camera.
+   - .peak.visible DERIVED bool = inFrustum(summit, camera).
+   @anchor(to:&e) reads derived .screen/.visible, which reactively depend on base .summit +
+   the camera signal. Terrain displaces -> summit updates -> screen recomputes -> DOM moves.
+   Precedent: scroll-spy already publishes derived signals via %yields/%derives -- same machinery.
+
+** Facets are TYPED; the type drives resolution (this is what REALLY kills the string hack)
+   - %exports { $summit: worldpos; $screen: screenpos; $visible: bool } declares facet types.
+   - @anchor declares it WANTS a worldpos: @anchor(to: $target:worldpos, ...).
+   - to: &evernet.peak.summit  -> OK (summit is worldpos).
+   - to: &evernet.peak.visible -> COMPILE ERROR (bool is not worldpos).
+   - to: "evernet"             -> COMPILE ERROR + fix-it: use &evernet.
+   New L1 types: worldpos, screenpos (GENERAL spatial types, NOT mountain vocab).
+
+** Default facet (SEQUENCED LATER, not wave 1): bare &evernet == its %default facet
+   - %exports { $summit: worldpos %default; ... } marks one facet default.
+   - @anchor(to: &evernet) then resolves &evernet.peak.summit. Precedent: QML default property.
+   - DECISION: wave 1 REQUIRES the explicit &e.peak.summit (smaller, provable). %default bare-ref
+     is a later wave. Same end-state, de-risked path.
+
+** Data-driven collections: delegate-local &node, NO name interpolation
+   @each($peaks as $p, key: $p.id) {
+     &node { @peak(at: $p.at, rise: $p.rise) }   // &node delegate-local, like $p
+     .copy { @anchor(to: &node.peak.summit) }     // resolves THIS row's entity
+   }
+   - &node does not collide across N rows for the SAME reason $p does not: lexically scoped to
+     the @each body, one fresh registration per iteration, keyed by $p.id.
+   - Precedent: QML Repeater delegate id:. Rejected: &`$id` name-interp (cannot be lexically
+     validated), &points[$i] (not grammar; unstable-index identity). USD docs explicitly contrast
+     instancing-arrays vs useless Leaf_000001 generated names.
+
+** Structured values: arrays, not tuples or strings
+   - at: [40, 0, -130]  (array literal -- PARSES today) and when: [0.22, 0.46].
+   - REJECTED at:"40 -130" (A-Frame vec3-string: parse-late, untyped, silent-fail on typo -- the
+     exact stringly idiom USD/glTF/QML avoid). Tuples (40,0,-130) do NOT parse (research task 14).
+
+** REVISED author surface (canonical)
+   // L1 general (worldpos/screenpos general, zero mountain vocab)
+   &evernet { @peak(at: [40, 0, -130], rise: 60) }
+   .peak-copy { @anchor(to: &evernet.peak.summit, when: [0.22, 0.46]) }
+   // data-driven, delegate-local ref
+   @each($peaks as $p, key: $p.id) {
+     &node { @peak(at: $p.at, rise: $p.rise) }
+     .copy { @anchor(to: &node.peak.summit) `$p.title` }
+   }
+
+* .st-vs-RUST BOUNDARY (research-verified, agent://12/13/14-*)
+
+  CORRECTION to earlier vision: &self.scrollSpy.isActive is NOT a working facet path -- research
+  (task 12) shows scrollSpy.isActive is a flat SIGNAL-NAME STRING, resolved only because it is on
+  &self. We are NOT extending a working path system; we are BUILDING the real cross-entity one and
+  retrofitting &self as its trivial same-entity case. More work than "it already parses" implied,
+  but the difference between a typed checked graph and another stringly fake.
+
+  | layer                         | .st? | Rust seam (file:line)                                          |
+  |-------------------------------|------|----------------------------------------------------------------|
+  | facet decl %exports {}         | YES  | reuse as-is (element-ref.st)                                    |
+  | structured value [40,0,-130]   | YES  | existing array literal; tuples do NOT parse (task 14)          |
+  | entity scope &name{ @c }        | macro| parser fork: parser.rs ~2361 + is_ampersand_scope_block ~2473  |
+  |                               |      | route &name{@directive} to entity scope BEFORE element-ref path |
+  | component namespace law        | conv | emit: namespace %exports by directive-name into entity registry |
+  | facet path parse &e.c.f        | ~    | grammar: element_ref bare-ident only (grammar.js:606); accept   |
+  |                               |      | trailing .ident* in value position                              |
+  | facet resolution (typed)       | NO   | resolver: validate path vs registry+%exports types; diagnostics |
+  | reactive cross-entity read     | NO   | emit+runtime: signal ref into _stWorld.byName, not &self ST.get |
+  | row-scoped &node               | NO   | each-with-templates: per-iteration ref namespace                |
+
+  Dead-letter confirmed: &name{} (no CSS selector) lowers via convert_cst_nested_scope
+  (src/parser/mod.rs ~2342: selector_node.selector()? returns None for element_ref -> None ->
+  never added to AST). template-inline (stdlib/macros/template.st:114) claims &name(params){body}
+  first. The parser fork at parser.rs:2361 decides &name{}'s fate BEFORE macros run.
+
+  Tally: ~1 general capture-type + %exports reuse on .st side; 4 focused Rust seams (parser fork,
+  dotted-path parse, typed resolver, cross-entity emit) + each-scoping. All GENERAL (zero mountain
+  vocab), all DELETE a hack.
+
+* Q1 default-facet / Q2 structured-value: DECIDED
+  - Q2 -> arrays [40,0,-130] (parse today; zero grammar work).
+  - Q1 -> typed facets are CORE (in spec); bare-&evernet %default facet SEQUENCED to a later wave
+    (wave 1 requires explicit &e.peak.summit). Both reversible.
+
+NOTE [2026-07-02]: Text-selection fix + anchor interactivity made a proper facet (2026-07-02).
+
+SYMPTOM: user couldn't select the .peak-copy text in everswap-clone. ROOT CAUSE: three-anchor
+(lib/three-anchor.st) wrote `el.style.pointerEvents='none'` STATICALLY in setup so the anchored
+block never intercepted scroll/clicks meant for the 3D canvas. Side effect: text unselectable.
+index.st fought back with a hand-maintained child carve-out (`.peak-copy a,.kicker,h2,p {pointer-events:auto}`)
+— which (a) rots when markup changes and (b) is wrong: a faded (opacity 0) block still stole
+pointer/selection from siblings/canvas beneath it.
+
+FIX (the Spacetime-native design): pointer-events is a PROJECTION FACET, not setup. three-anchor
+now derives it per-frame from the SAME `visible` signal it already computes for opacity:
+`el.style.pointerEvents = visible ? 'auto' : 'none'`. A revealed block is interactive (text
+selectable, links clickable — WHOLE block, pointer-events inherits so no child enumeration); a
+faded/out-of-frustum block is inert (never blocks canvas scroll or a sibling beneath). ONE reactive
+rule replaces BOTH the static none AND the project's per-child CSS carve-out (deleted from index.st).
+Meets elegance bar: derived from an existing signal, deletes a special-case, no new subsystem.
+Verified live via puppeteer: summit block at scroll 0.92 → pointer-events:auto, real
+window.getSelection() returns "One Pool, Everyone"; everblade (faded) → none, opacity 0.
+
+TEST: tests/anchor.cdp.test.st §3 added (interactivity tracks visibility). Regression-gated: reverting
+the primitive to static 'none' turns §3 RED (verified), restoring turns it GREEN. Test: 1 passed.
+
+HARNESS FINDINGS (blocked full coverage; worked around, filed as follow-up):
+- BUG-058 deeper than noted: inside a @drive body an ARROW @eval's INTERNAL writes
+  (`(()=>{window.__x=…})()`) do NOT persist to the next directive — the re-injection isolates them.
+  Only a BARE-ASSIGNMENT @eval (`@eval (window.__x = <expr>)`) survives. Sections 1-2 of the ORIGINAL
+  anchor.cdp.test.st used the arrow-stash pattern → were silently non-functional under CDP (first CDP
+  run failed identically BEFORE any edit). Rewrote all 3 sections to bare-assignment scalars.
+- NEW parser bug: an @eval arrow that returns an OBJECT LITERAL with a call-expression property value
+  (`… => ({ a: Math.round(x) })`, or multi-stmt `return { a: … }`) is TRUNCATED at emit (`({ a;;`),
+  breaking test registration (tests:0). Worked around by assigning one SCALAR per window.__* global
+  (no object literals in @eval arrows). Both constraints documented in the test header.
+- scene.cdp.test.st still uses the broken arrow-stash pattern → also silently non-functional under CDP.
+
+Files: lib/three-anchor.st (reactive pointer-events + doc), index.st (deleted carve-out + comment),
+tests/anchor.cdp.test.st (rewritten, §3 added). `cargo run -- check projects/everswap-clone/` = 21 pass.

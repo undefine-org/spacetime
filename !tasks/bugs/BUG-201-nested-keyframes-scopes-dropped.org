@@ -1,0 +1,52 @@
+#+TITLE: Nested selector scopes inside a keyframes body (`.child { ... }` in @scroll/@mouse) are silently dropped at capture
+#+STATE: DONE
+#+SESSION_ID: 153497c78a510229
+#+CUSTOM_ID: BUG-201-nested-keyframes-scopes-dropped
+#+COMPLETION_HASH: 4490293609bc2781
+
+* Found by
+Suite unvacuation triage (PLAN-078, 2026-07-18): the rewritten
+tests/unit/animations/mouse-tilt.test.st originally animated NESTED child
+selectors (`.tN-parent { @mouse ... { .tN-child { rotate-x: ... } } }`) --
+the child keyframes never applied.
+
+* Symptom (verified via inspect)
+  .parent {
+    @scroll d(start: 0, end: 1) {
+      opacity: 0 -> 1;
+      .child { rotate-x: -10deg -> 0 -> 10deg; }
+    }
+  }
+`inspect --layer keyframes` shows only `opacity`; the `.child` scope is
+gone. With a NESTED-ONLY body (@mouse probe) the capture is
+`properties: []` and the emitted apply-animations init receives an empty
+`anims` -- nothing animates, no diagnostic.
+
+* Why this is a bug (not a missing feature)
+The RUNTIME fully supports nested scopes: apply-animations.st iterates
+`anims.scopes` with per-scope selector resolution + stagger. The lenient
+expand.rs keyframes converter (try_parse_scope_block) parses scoped blocks.
+The drop happens in the CAPTURE path (stdlib %capture_type keyframes
+grammar in stdlib/capture-types/keyframes.st and/or its reify in
+src/syntax/events/form_compiler.rs): root-level `prop: a -> b;` lines are
+captured, nested `sel { ... }` blocks are not reified into the capture
+value. Only the capture/reify layer needs the fix -- the downstream
+machinery already handles scopes.
+
+* Impact
+Parallax/tilt choreography (parent drives, children animate at different
+rates) -- the exact shape mouse-tilt.test.st was written to verify --
+silently no-ops. The suite currently works around it by animating the
+driver element directly (flattened), so this bug has NO suite coverage
+right now.
+
+* Expected RED test (to add when fixed)
+A .test.st with a nested-scope @scroll/@mouse asserting the CHILD element's
+transform changes (file-scope driver + @fixture markup + @wait + rect shim
+per the BUG-195 pattern). Must not regress root-level properties.
+
+* Related
+BUG-194 (masked it), BUG-195 (nested-selector note), mouse-tilt.test.st
+git history (the flattening workaround).
+
+NOTE [2026-07-19]: FIXED (PLAN-078): %capture_type keyframes grammar gained a recursive scope arm ($selector:selector "{" $scope:keyframes "}", tried FIRST so element selectors aren't eaten by the property arm's balanced run); reify_keyframes tags scope entries (new KeyframeDef.selector field); the CapturedValue::Keyframes serializer (pipeline/expand.rs) groups them into anims.scopes (the apply-animations runtime already consumed scopes). field_text gained CapturedValue::Selector coverage. Pin: tests/bugs/BUG-201-nested-keyframes-scopes-animate-children.test.st (2/2 green: child animates via @scroll AND @mouse). var-resolution scoped-selector test passes on CDP (6/6). Emit-verified: mixed bodies now produce BOTH properties and scopes.

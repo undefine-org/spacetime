@@ -1,0 +1,118 @@
+#+TITLE: Forge Deck — agent-driven MCP+3D control surface (host compose + Blender pipeline)
+#+STATE: ITEM
+#+SESSION_ID: 15251010f7982b56
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-06T10-48-12-510Z_15251010f7982b56.jsonl]]
+#+CUSTOM_ID: FEAT-151-forge-deck-agent-driven-mcp3d-control-su
+
+* Initial Message
+
+push the capabilities of the 3d module + the workbench mcp through a concrete idea of a user interface that talks directly to this very agent using the mcp tools. This is a pressure test against both the host apis and the 3d apis. Design the 3d mockups using generate_image and then implement whatever surfaces you need using the blender mcp. commit as you go
+
+* Goal
+Pressure-test the `spacetime/st_*` MCP host APIs (env/fn/mount/await, host-compose region hot-swap) TOGETHER with `stdlib/3d` (vendored three.js @stage surface) AND the headless Blender MCP (`tools/blender-mcp`) by building ONE concrete, working UI: a live "Forge Deck" the human clicks, whose clicks route to the agent via `st_await` (agent_control:true), which drives real Blender geometry ops, exports a fresh .glb, and hot-swaps it into the SAME live 3D stage via `st_mount { host, region }` recomposition — no page reload, no bespoke route.
+
+* Design
+- Mockups via `generate_image`/`generate_ui_screen` first (control panel layout + forged-object material study) to fix palette/typography before implementation (AGENTS.md: Spacetime sites carry no custom JS — design must resolve entirely to `@`-surface CSS/macros).
+- Two Spacetime functions:
+  - `demos/mcp-forge/mission-control.st` — HOST shell. Agent-control page (`agent_control:true`). Left rail: directive buttons (`@mcp-action`, action="forge-directive", value=<step id>) + a feed reading `$mcpInput.log`. Right: `<div data-st-region="stage">` composed by...
+  - `demos/mcp-forge/forge-preview.st` — GUEST. `@stage`+`@env`+`@light`+`@gltf(src: $mcpInput.glbPath)`+`@orbit`. Recomposed after every directive with a fresh glb + cache-busted path.
+- Blender pipeline: reuse the `extrude_polygon`/`boolean_op`/`assign_material`/`export_glb` tool surface (see `tools/blender-mcp/bootstrap.py`, driven via `python3 tools/blender-mcp/drive.py`). Steps mapped 1:1 to UI directives: Blank Disc -> Cut Facet (boolean difference) -> Raise Boss (union) -> Bronze Finish (material) -> Export & Preview.
+
+* Build waves
+1. Mockups (generate_image x2-3) — control deck layout + forged object material study.
+2. `demos/mcp-forge/` Spacetime functions (mission-control.st host shell, forge-preview.st guest stage) + README.
+3. Blender build script(s) under `demos/mcp-forge/models/` driven step-by-step via drive.py, exporting into `demos/mcp-forge/models/*.glb`.
+4. Wire via MCP tools: st_fn_put x2, st_mount host standalone (agent_control), st_mount guest with host+region compose, st_await loop driving directive->Blender->re-export->re-mount.
+5. Verify end-to-end in the puppeteer browser (screenshot the live composed page after at least 2 directive round-trips) + record findings.
+6. Commit incrementally per wave.
+
+* Acceptance
+- `cargo run -- serve demos/mcp-forge/` (or MCP-mounted instance) renders the control deck; a directive click is observed via `st_await` in this session (not simulated).
+- At least 2 distinct forge stages produce visibly different geometry/material hot-swapped into the SAME composed stage region (screenshot evidence).
+- No hand-authored page JavaScript (`@`-surface only) per repo AGENTS.md.
+- Work committed incrementally; this org item updated with final findings + links to commits.
+
+* Findings (2026-07-06) — pivoted from "ship the demo" to "surface the limits" per user redirect
+
+User correction mid-build: the POINT of this task is to find stdlib/MCP limits
+via a real pressure test, not to patch around them until something ships. Work
+below reflects that — the Forge Deck files stay in their CORRECT, blocked
+state (annotated, not silently worked around); the actual deliverable of this
+task is the four filed tickets.
+
+** What got built (waves 1-3, all committed)
+- Mockups (generate_ui_screen + generate_image) — critiqued properly (see
+  session transcript): rail 2-state (active/done) is missing a 3rd
+  "building" state the real system needs; log lines showed fictional Blender
+  tool names (mesh_create/viewport_update) that don't exist in
+  tools/blender-mcp/bootstrap.py — real names are
+  create_primitive/extrude_polygon/boolean_op/assign_material/export_glb;
+  ground-plane/contact-shadow in the mock has no @stage/@object primitive
+  backing it (no ground-plane primitive in stdlib/3d today).
+- demos/mcp-forge/mission-control.st + forge-preview.st — compile clean,
+  verified live via spacetime/st_mount + puppeteer (region-compose across
+  TWO instances confirmed working end-to-end, including the canvas actually
+  rendering the composed @stage).
+- 5 real headless-Blender build-step scripts + exported .glb assets (commit
+  1f3105a1), each verified via a REAL Blender 5.1.2 --background run through
+  tools/blender-mcp/drive.py (not simulated) — required installing the mcp
+  Python SDK into an isolated deps dir since Blender's bundled Python ignores
+  PYTHONPATH (see BLENDER_MCP_DEPS_DIR usage, gitignored under .ancillary/).
+
+** What's blocked, and why (the actual finding)
+The directive rail (`@each($mcpInput.steps as $step)`) — the CORRECT, most
+idiomatic syntax for this data shape — silently renders nothing due to TWO
+independent, precisely-isolated runtime bugs, not a design mistake on this
+demo's part:
+- BUG-155: `@each` with a dotted-path source (`$sig.field`) never resolves —
+  `each-with-templates`'s `resolveSourceData()` calls `ST.resolve` (exact
+  name match) instead of the ALREADY-EXISTING `ST.resolvePath` (which
+  correctly handles this, confirmed live: `ST.resolve(el,'wrap.items')` ->
+  undefined; `ST.resolvePath(el,'wrap.items')` -> the array).
+- BUG-156: a `@data derive` off an `@mcp-input`-sourced signal only works if
+  some UNRELATED markup elsewhere on the page happens to interpolate that
+  same signal directly first (accidental `ST._bridgeExport` triggering) —
+  confirmed by bisection: removing one unrelated `<p>` line broke an
+  otherwise-untouched derive+each chain.
+Both have surgical fixes identified (reusing EXISTING runtime functions —
+`ST.resolvePath`, unconditional `ST._bridgeExport` from `@mcp-input`'s
+`setSource`) — filed, not left vague.
+
+Two 3D-module gaps (the ones explicitly asked about) also confirmed by full
+source survey (grep across every stdlib/3d/primitives file, zero exceptions):
+- FEAT-152: zero pointer-pick/raycast affordance anywhere in stdlib/3d — a
+  rendered mesh cannot be clicked/hovered without hand-written page JS
+  (forbidden by repo AGENTS.md). Elegant target: `@on click`/`@on hover`
+  valid INSIDE an `@object(...)  { }` / `@gltf(...) { }` body — reuses the
+  existing `@on` event vocabulary + the `$children*` slot `@object` already
+  has, backed by ONE shared raycaster registered once per `@stage` against
+  the already-populated `canvas._stObjects`.
+- FEAT-153: every 3D primitive param is write-once at mount — confirmed
+  `@gltf(src: $modelPath)` never reloads when `$modelPath` changes (isolated
+  repro, compiles clean, silently static at runtime); zero
+  `ST.watch`/`ST.watchScoped` calls anywhere in stdlib/3d/primitives.
+  Elegant target: a generic `ctx.onParamChange(names[], rebuildFn)` added
+  ONCE to three-stage.st's shared engine-boundary `ctx`, opted into per
+  primitive (start with @gltf src + @object color/roughness/metalness).
+
+Plus a small Blender-tooling papercut (BUG-157, #C) hit while building the
+step scripts: `set_face_material` crashes on a stray empty material slot left
+by a boolean union (non-fatal — export still succeeded).
+
+** Current repo state
+- demos/mcp-forge/ left in its CORRECT, blocked-but-annotated state — the
+  `.forge-steps`/`.forge-log` @each blocks use the idiomatic direct
+  dotted-path form and carry an explicit comment pointing at BUG-155/BUG-156,
+  NOT a derive workaround (one was tried, confirmed it doesn't actually fix
+  anything cleanly given BUG-156, and was reverted deliberately).
+- All scratch repro files live under scratch/repro-each-dotted/ (gitignored,
+  kept for whoever picks up BUG-155/156 as ready-made regression seeds).
+- All spacetime/st_mount test instances unmounted; env-1 (demos/mcp-forge)
+  and env-2 (scratch/repro-each-dotted) left open for continuation.
+
+** Follow-on work (tracked separately, not blocking this item's closure)
+BUG-155, BUG-156, FEAT-152, FEAT-153, BUG-157 — all filed with precise repros,
+root causes traced to source (not guessed), and concrete fix directions.
+This item can close once demos/mcp-forge's current (correct, blocked) state
+is committed; the rail/log will render automatically once BUG-155 lands, no
+further changes to this demo needed.

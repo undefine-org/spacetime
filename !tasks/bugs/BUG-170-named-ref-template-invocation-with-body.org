@@ -1,0 +1,88 @@
+#+TITLE: named-ref template invocation with body-slot never fills the &element param (bare invocation works; the &name hole comment marker is left in the DOM either way)
+#+STATE: ITEM
+#+SESSION_ID: 152939d2e5b25e66
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-09T16-24-34-454Z_152939d2e5b25e66.jsonl]]
+#+CUSTOM_ID: BUG-170-named-ref-template-invocation-with-body
+
+* Initial Message
+
+can dom-refs (`&my-template(..., ...) { ... }`) contain all of ST? As in, html, CSS, ST syntax through macros, etc. and then it gets its scope solved to be within the template? Or does it have some special case?
+
+The goal is to empower the 'element-ref as function' way of creating Spacetime affordances the most blessed way to build encapsulation and whatnot. I would like to do that for Ora Ventures, whose website we want to rewrite completely to be attractive to Chief AI Officers at big groups in emerging markets, as well as capital-rich SMBs that want to be more dynamic and competitve. That website should be sober, have crisp but minimal copy, and showcase Spacetime features in a way that is unique and helps us convert more (so think of advanced interactions and motions in terms of high-convertion)
+
+Come back with your plan, sources, inspirations, for the copy
+Come back with your analysis for the &... thing
+
+* Found via
+PLAN-071 (ora-ventures.com rewrite) \u2014 the nav template's =&links= slot never
+rendered its content when invoked with a named ref
+(=#ora-nav-slot { &nav &ora-nav("Ora Ventures") { <a>...</a> } }=).
+
+* Repro (RED, confirmed 2026-07-09 on main, dev server + puppeteer)
+#+begin_src spacetime
+@template &nav-tpl($brand, &links) {
+  <nav>
+    <span>`$brand`</span>
+    <div class="links">`&links`</div>
+  </nav>
+}
+<main class="page">
+  <div id="nav-slot"></div>
+</main>
+#nav-slot {
+  &navinst &nav-tpl("Test") {
+    <a href="#a">OnlyOne</a>
+  }
+}
+#+end_src
+Rendered DOM: =<div class="links"><!--&links--></div>= \u2014 the =<a>= never
+appears. Removing ONLY the =&navinst= named ref (bare form:
+=&nav-tpl("Test") { <a>...</a> }=) makes the link render correctly:
+=<div class="links"><a href="#a">OnlyOne</a><!--&links--></div>=.
+
+* Secondary finding (both forms): leftover comment marker
+Even the WORKING bare-invocation case leaves the =<!--&links-->= HTML
+comment marker sitting in the DOM alongside the correctly-inserted content
+(=<a>...</a><!--&links-->=, not just =<a>...</a>=). This is a cosmetic/DOM-
+cleanliness bug independent of the named-ref issue \u2014 the anchor comment
+used for insertion-position tracking should presumably be removed (or kept
+invisible/non-conflicting) once its content resolves, not persisted forever
+next to the real content.
+
+* Scope note vs BUG-169
+This is DIFFERENT from BUG-169 (=@mount= test-harness bare-vs-named-ref
+=$param= hole resolution): BUG-169 was about VALUE params (=`$label`=) inside
+the =@mount= test harness specifically, and found NAMED-ref FIXES the bug
+there. THIS bug is about an ELEMENT param (=&links=) body-SLOT, reproduced
+in a REAL served page (dev server, not =@mount=), and found the OPPOSITE
+polarity: named-ref BREAKS it, bare WORKS (with the marker leftover). Two
+distinct bugs in the same invocation-form space \u2014 do not conflate fixes.
+
+* Impact on PLAN-071
+The nav/footer templates in projects/ora-ventures.com/index.st originally
+used named-ref invocations (=&nav &ora-nav(...)=, =&footer &ora-footer(...)=)
+to give the runtime-rendered element a stable ref handle. Switched to BARE
+invocations as a workaround (this bug) \u2014 losing the =&nav=/=&footer= ref
+handles, which were unused elsewhere anyway so no functional loss for this
+site, but a real API-usability loss in general (named refs are how a page
+reaches into a template instance from outside, e.g. for a controlling
+script or a sibling selector).
+
+* Acceptance (for whoever picks this up)
+1. RED fixture above (named-ref + body-slot) renders the slot content
+   correctly, matching the bare-invocation behavior.
+2. The =<!--&links-->= (or equivalent anchor) marker is removed from the DOM
+   once resolved, in BOTH the bare and named-ref forms \u2014 the served/
+   hydrated DOM must not carry a permanent stray comment node next to real
+   content.
+3. Named-ref's OWN behavior (=ST.set(container, refName, element)=ing the
+   created element) still works after the fix \u2014 regression guard.
+4. Add a regression fixture under tests/fixtures/native-template/ covering
+   both bare and named-ref body-slot invocations with an assertion on BOTH
+   the rendered content AND the absence of the stray comment marker.
+
+* Workaround applied in this session
+projects/ora-ventures.com/index.st and for-ai-officers/index.st use bare
+invocations (=&ora-nav(...) { ... }=, =&ora-footer(...) { ... }=) instead of
+named refs, to route around this bug. Revert to named-ref form once fixed
+if a future feature needs the ref handle (currently unused).

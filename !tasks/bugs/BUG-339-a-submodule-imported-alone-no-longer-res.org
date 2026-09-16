@@ -1,0 +1,115 @@
+#+TITLE: A submodule imported alone no longer resolves its own macros (E0956 across 3d, md, scripting)
+#+STATE: DONE
+#+SESSION_ID: 154d0baaa942d918
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-08-06T12-08-13-733Z_154d0baaa942d918.jsonl]]
+#+CUSTOM_ID: BUG-339-a-submodule-imported-alone-no-longer-res
+
+* Initial Message
+
+exlpain #30, and for #14 and #11, does the new @on's text-change facet solve this?
+
+#+STATE: ITEM
+#+PRIORITY: A
+
+* Symptom
+
+Importing a stdlib SUBMODULE without also importing `stdlib` fails:
+
+#+begin_src spacetime
+@import "stdlib/3d";
+body { margin: 0; }
+canvas.hero { @stage(camZ: 5) {} }
+#+end_src
+
+  error[E0956]: unknown primitive: stage
+
+Adding `@import "stdlib"` first makes it pass. So the submodule does not resolve its own macros
+when imported alone — every macro it declares falls through to a primitive lookup by the
+directive's own name.
+
+Affects at least three modules, all with the same signature:
+
+| import                              | directive | result |
+|-------------------------------------+-----------+--------|
+| `@import "stdlib/3d"`               | `@stage`  | E0956 unknown primitive: stage |
+| `@import "stdlib/md"`               | `@doc`    | E0956 unknown primitive: doc   |
+| `@import "stdlib/scripting/script"` | `@script` | E0956 unknown primitive: script |
+
+* Blast radius
+
+29 `cargo test --lib` failures and 6 integration failures, including:
+- all 9 `three_*` snapshot tests (`@stage should demand-inject the vendored three.js engine`)
+- `doc_*` and `bug220_literate_export_tests::*` — every literate `.st.md` document
+  (previously filed as BUG-338, which is almost certainly THIS bug, not a separate one)
+- `bug218_clean_path_export_tests::doc_src_resolves_against_the_site_dir`
+
+The tests are CORRECT and are catching a real regression. They write
+`@import "stdlib/3d";` alone, which is the documented spelling — `stdlib/3d/index.st`'s own doc
+comment says `@import "stdlib/3d"` brings in the 3D surface.
+
+* Not caused by the PLAN-141 work (checked, not assumed)
+
+- `src/lsp/workspace/import_resolver.rs` (changed in W5) is LSP-ONLY: grepping for its use
+  outside `src/lsp` returns nothing, so it cannot affect `check`/`build`.
+- `stdlib/3d/index.st` has not been touched in months (last commits 0d29a51e, 6fae395a).
+- W2's scoped-unknown-directive check emits W0714 warnings; none of the 29 failures mentions
+  W0714.
+
+Most likely a recent change to module/registry loading — the same family as BUG-336 (`@script`)
+and BUG-338 (literate `@doc`). All three are "a macro exists, the directive resolves to a
+nonexistent primitive of the same name, E0956", which strongly suggests ONE underlying cause:
+a submodule's `%macro` definitions are not registered when the module is loaded on its own.
+
+Fixing that one mechanism likely closes BUG-336, BUG-338 and this item together.
+
+* Fix direction
+
+Trace what registers a module's `%macro` set at import time, and why it only happens when
+`stdlib/index.st` is the entry. A submodule should be self-sufficient: importing it must register
+everything it declares, exactly as its own doc comment promises.
+
+* Gate
+
+A test per module asserting the documented single-import spelling compiles:
+`@import "stdlib/3d"` + `@stage`, `@import "stdlib/md"` + `@doc`, and a minimal literate `.st.md`
+(which exercises the md path through the tangler). The 14 existing snapshot tests already gate
+the 3D half — they are currently RED and should be treated as the acceptance criteria.
+
+
+* Repro-gate impact (measured 2026-08-07)
+
+Of 17 `tests/repro/*/check-contract.sh` gates, 15 GREEN / 2 RED — and BOTH reds are this bug:
+
+- `gh-12-stage-non-canvas` — `check` on its index.st emits `error[E0956]: unknown primitive:
+  stage` instead of the E0963 element-scope diagnostic the gate asserts. The gate is correct;
+  its subject cannot compile.
+- `bug-333-undeclared-element-ref` — hits the E0952 dead-bundle path instead of E0965, for the
+  same reason: the module declaring the element-ref machinery is not registering its macros.
+
+So this bug is currently masking two landed fixes (GH-12's `%scope element(<tag>)` and BUG-333's
+E0965). Neither is regressed — both gates were GREEN when they landed, and the code is untouched.
+When this is fixed, re-run both before assuming anything about them.
+
+NB both gates go RED *without* any diagnostic about the import itself, which is its own small
+lesson: an unresolvable module produces a downstream primitive error rather than naming the
+module that failed to load. Worth a diagnostic of its own once the loading bug is fixed.
+
+
+* RESOLVED (verified 2026-08-07, commit 28d7cd3b)
+
+Root cause was ONE mechanism, shared with BUG-336/338/340: `resolve_stdlib` consulted the
+EMBEDDED module index BEFORE the filesystem. `build_stdlib_index` indexes every .st under
+stdlib/ by bare name, so `stdlib/md/index.st` registered the name "md"; the embedded branch
+matched and returned `ResolvedImport::Stdlib`, which `resolve_imports` skips as "handled by
+MetaRegistry" — and MetaRegistry only loads STDLIB_DIRS. So an opt-in module's file on disk was
+never read and its %macro set never registered. Fix: filesystem first, embedded name as fallback.
+No module-name special-casing in Rust.
+
+Independently re-verified by the orchestrator (not taken on the agent's word):
+- tests/repro/bug-339-submodule-alone/check-contract.sh — GREEN (RED against 1b24e320^).
+- The two gates this bug MASKED are both GREEN again: gh-12-stage-non-canvas,
+  bug-333-undeclared-element-ref. Neither was ever regressed.
+- `cargo test --lib snapshot_tests` 14 failures -> 5; `cargo test --lib bug220` 6/0.
+- The 5 residual snapshot failures are the CONCURRENT session's runtime-JS change
+  (semicolon-joined mutation-body splitting) — 4 of the 5 diffs literally contain that comment.
+  Their snapshots to accept, not ours.

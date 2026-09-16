@@ -1,0 +1,50 @@
+#+TITLE: Backtick-hole @each `@each(`$x` as `$i`)` silently emits nothing (sigil-harmony gap)
+#+STATE: ITEM
+#+SESSION_ID: 150ccb99745d347e
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-17T14-25-31-601Z_150ccb99745d347e.jsonl]]
+#+CUSTOM_ID: FUP-067-backtick-hole-each-eachx-as-i-silently-e
+
+* Initial Message
+
+Dig into the FUPs and explain to me
+1. what got done
+2. what you can do with it
+3. what we should do next
+
+treat this as an overall report to explain things to me from scratch
+
+#+DEPENDS: PLAN-039-unify-nested-constructs-in-component-bod
+
+* Parent
+Surfaced during PLAN-042 / FUP-064 investigation. Related to PLAN-039 (nested-construct unification) and the AGENTS "one sigil, one meaning" harmony rule.
+
+* Summary
+Writing an `@each` header with BACKTICK-WRAPPED holes — `@each(`$crefItems` as `$item`)` and a backtick template-ref invocation `&cref-card(`$item`)` — compiles WITHOUT error but emits NO @each primitive: the loop is silently dropped, so nothing renders on any backend. The PLAIN-sigil form `@each($crefItems as $item) { &cref-card($item) }` compiles correctly and renders.
+
+* Evidence (cargo run -- inspect --layer emit)
+- `.sel { @each($x as $i) { &row($i) } }`            → emits `const sourceName = "x"` + the each primitive → renders. ✓
+- `.sel { @each(`$x` as `$i`) { &row(`$i`) } }`        → NO `sourceName` line, no each primitive → silently dropped. ✗
+Reproduced standalone (no template, no collection-ref) so it is the BACKTICK HOLE form in the @each header specifically, isolated from the collection-ref builder gap (that is PLAN-039 / BUG-085).
+
+This was the original (wrong) syntax in tests/unit/templates/collection-ref-each.test.st; fixing it to plain sigils removed THIS failure mode (the residual failure there is the orthogonal collection-ref builder gap).
+
+* Why this is a harmony issue
+AGENTS.md "one sigil, one meaning": the backtick `` ` `` is THE hole form in HTML/text bodies. But an `@each(... as ...)` HEADER is a binding DECLARATION (it NAMES the source signal and the loop variable), not a hole to be filled — exactly like `$price number` declares, it does not interpolate. So `@each($x as $i)` should be the one true form, and `@each(`$x` as `$i`)` should EITHER:
+  (a) be rejected at parse time with a clear diagnostic ("@each binds names; drop the backticks — `@each($x as $i)`"), OR
+  (b) be accepted as an alias that desugars to the plain form.
+Silently emitting NOTHING is the worst outcome (the keystone silent-drop anti-pattern PLAN-039 is removing). A loud error is the minimum; a desugar-or-reject decision is the design question.
+
+* Research / design questions
+- Is the backtick @each header an accidental match against the hole grammar, or an unhandled branch in the each macro's binding capture (stdlib/macros/each.st + the %capture_type that reifies it)?
+- Where does the drop happen — parse (header not recognized), expand (each macro not matched), or emit (primitive not generated)? The inspect evidence says "no primitive emitted", pointing at expand/match.
+- Should the fix be a parse-time diagnostic (cheapest, honest) or a grammar alias? Per the elegance bar: a diagnostic that names the fix is a small, data-driven win; an alias risks blessing two spellings of one construct (anti-harmony). Lean toward REJECT-with-hint.
+- Are there sibling header constructs with the same hole-vs-declaration confusion (`@match`, `@view`, `@on`)? Audit them for the same silent-drop.
+
+* Acceptance
+- `@each(`$x` as `$i`)` either parses to the SAME IR as `@each($x as $i)` (alias) OR produces a clear parse/expand diagnostic naming the plain form — NEVER a silent no-op.
+- A test pins the chosen behavior (RED→GREEN): the backtick form renders identically (alias) OR fails compilation with the hint (reject).
+- docs/language note on @each header sigils (declaration, not hole) if reject is chosen.
+
+* Out of scope
+- The collection-ref builder gap (`&cards[] .sel { @each }` dropping the loop) — that is PLAN-039 / BUG-085.
+- Runtime @each render logic (correct; proven by each-data-drive.test.st).

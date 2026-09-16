@@ -1,0 +1,86 @@
+#+TITLE: @mark / @block macros + editable registries + schema emission
+#+STATE: DONE
+#+SESSION_ID: 1503ca05d05c0c62
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-10T14-32-18-497Z_1503ca05d05c0c62.jsonl]]
+#+CUSTOM_ID: FEAT-097-mark-block-macros-editable-registries-sc
+#+COMPLETION_HASH: 56aa4bf8952f744d
+
+* Initial Message
+
+PLAN-031 -> read it, show me the boldest version of implementing @editable, and how you'd integrate it to the current admin
+
+Parent: [[id:PLAN-031-editable-structured-rich-text-input-mult]] — Wave 1. Depends: FEAT-096.
+
+* Target
+- stdlib/editable/macros/mark.st, block.st (new)
+- stdlib/runtime/registries.st (+%runtime-registry editable-marks, editable-blocks)
+- stdlib/editable/marks/{bold,italic,code,link}.st, blocks/{heading,paragraph,quote,list,figure}.st (new)
+- src/ compiler pass: editable-schema.json emission (hook beside types.json path; registry query via MetaRegistry.get_macro()/iter_macros(), src/metasystem/registry.rs:230-280)
+
+* Change — final syntax (round-3 lens model, typed params from FEAT-096)
+CORRECTED 2026-06-10: holes are backticks (HTML_HOLE grammar). Locked surface:
+#+begin_src spacetime
+@mark &bold(&sel) { <strong>`&sel`</strong> }
+@mark &link(&sel, $href url) {
+  shortcut: "mod+k";
+  <a href="`$href`">`&sel`</a>
+}
+@block &h2(&sel) { shortcut: "mod+2"; <h2>`&sel`</h2> }
+@block &figure(&sel, $src url, $alt string = "") {
+  <figure><img src="`$src`" alt="`$alt`"><figcaption>`&sel`</figcaption></figure>
+}
+#+end_src
+- %macro mark/block ≡ template macro + %registers mark($name)/block($name)
+  {params, body} + %resolves { $name -> editable-marks|editable-blocks }
+- body = component_body (markup + meta lines shortcut:/toolbar{} mix via
+  component_item Choice, stdlib/capture-types/component-body.st)
+- `&sel` = element-substitution hole (FEAT-096): the selection value (a node or
+  HTML-string fragment) is inserted whole; emit_element_hole already flattens a
+  multi-node sequence. Exactly-one-`&sel` invariant checked (the selection has
+  one insertion point per mark/block).
+- INVERTIBILITY CHECK (compile): single root; attrs literal or single typed
+  hole (AttrPart::Lit | single AttrPart::Hole); exactly one `&sel`. Pass →
+  paste lift + schema; fail → compile NOTE, render-only.
+- SCHEMA EMISSION: walk registered bodies' HtmlExpr (src/ir/code.rs:302) →
+  editable-schema.json {marks:{link:{tag:"a",attrs:{href:"url"},sel:"children"}},
+  blocks:{...}}. Free typed params = content attrs; url-typed attrs get scheme
+  validation server-side. NB ordering: load stdlib → register all macros → THEN emit.
+* Acceptance (headless)
+- @test: define custom &highlight mark in a test project; appears in emitted
+  editable-schema.json; ST.editable.marks.highlight exists (@then $signal claims)
+- @test: invalid mark (two `&sel` / computed attr) → compile diagnostic
+- marks:/blocks: list referencing unregistered name → compile error
+- cargo test --lib; cargo run --features headless -- test tests/ --headless
+
+NOTE [2026-06-10]: DONE 2026-06-10. Renamed @mark/@block → @editable-mark/@editable-block (user).
+Built (main-thread, delegation unavailable):
+- stdlib/macros/editable.st: @editable-mark / @editable-block macros. A mark IS a
+  template — %binds register-template (reuses factory: backtick holes + &sel
+  flatten + typed params) + %registers editable-mark/editable-block($name){params,body}
+  (compiler-visible for schema). Build-verified: bold/link/figure factories emit;
+  custom &highlight composes; module import works.
+- stdlib/runtime/registries.st: %runtime-registry editable-marks/editable-blocks
+  (ST.editable.marks/blocks, %init/%register/%access).
+- stdlib/editable/{builtins,index,MODULE}.st: built-in marks (bold/italic/underline/
+  strike/code/link) + blocks (p/h2/h3/blockquote/figure), open-model declarations.
+- src/editable/{mod,schema}.rs: extract_editable_schema (params+body → {tag,attrs:{name:
+  {param,type}},sel,invertible}) + invertibility check (single root · literal-or-
+  single-typed-hole attrs · exactly one &sel) + collect_schemas_from_matches +
+  schemas_to_json. 8 unit tests incl END-TO-END (real source → parse → FormMatches →
+  schema JSON, marks/blocks split, typed href, invertibility) all green.
+- src/syntax/form_match.rs: get_param_list + get_component_body accessors.
+- src/stdlib_embedded.rs: editable.st embedded for library mode.
+
+Tests: cargo test --lib 2191 pass; integration 170 pass.
+
+BOUNDARIES (honest):
+- shortcut: head-line NOT captured — %form optional-metadata-before-component_body
+  limitation → FEAT-103. Marks render+register+schema-emit without it; editor
+  supplies default keymaps (FEAT-098). schema.shortcut = None for now.
+- ST.editable.* runtime registry is DECLARED + wired but NOT yet populated at runtime
+  (macros %binds register-template, not %resolves editable-marks). Compiler-side
+  editable-schema.json (collect_schemas_from_matches) is the editor's source of truth;
+  FEAT-099 serves it. The engine (FEAT-098) %resolves to ST.editable.* to populate it
+  live. This split mirrors types.json (AST-scan) vs runtime — intentional.
+- figure: src/alt typed attrs sit on nested <img>, not root; root-attr schema sees
+  none (sel=Nested). Nested-attr paste-lift mapping = W3 (FEAT-101).

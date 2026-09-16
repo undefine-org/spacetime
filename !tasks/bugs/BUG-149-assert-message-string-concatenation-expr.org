@@ -1,0 +1,127 @@
+#+TITLE: @assert message string-concatenation expression silently drops entire enclosing @test body
+#+STATE: ITEM
+#+SESSION_ID: 15219c677c4613e6
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-03T18-27-25-809Z_15219c677c4613e6.jsonl]]
+#+CUSTOM_ID: BUG-149-assert-message-string-concatenation-expr
+
+* Initial Message
+
+ok now let's think about this failure and look at it in the context of IMPROVING SYNTAX just like we did with the Spacetime ECS. Take this example and add more to pressure test the options we come up with. Let's come up with a syntax that feels natural and lets us easily explain everything we just talked about
+
+* Initial Message
+
+Discovered while debugging PLAN-062 Wave 3 (`@pose-track` CDP test) — a genuine
+assertion failure was masked as a vacuous PASS for an entire debugging session
+because of this bug, which cost significant time before being isolated.
+
+* Symptom
+
+`@assert`'s message argument is documented/declared as `$message:string?` — a
+bare string literal. When the author instead writes a string-CONCATENATION
+expression (`"value: " + x`), the compiler SILENTLY DROPS THE ENTIRE ENCLOSING
+`@test` BODY (not just the message, not just the assert — everything inside
+the `{ }`), with ZERO diagnostic. The test then reports as passing (`try {}`
+— an empty try block never throws) regardless of what it was actually meant
+to assert.
+
+* Repro (minimal, verified)
+
+#+begin_src st
+@import "stdlib/testing/test"
+
+@test "sanity: string concat message" {
+  @let (x = 5)
+  @assert (false)
+    "value is: " + x
+}
+#+end_src
+
+`cargo run -- inspect --layer emit` on this file shows:
+
+#+begin_src js
+window.__spacetime_register_test("sanity: string concat message", async () => {
+      const __ctx = { startTime: Date.now() };
+      try {
+
+      } finally {
+        ...
+      }
+    });
+#+end_src
+
+The body is COMPLETELY EMPTY — `@let (x = 5)` and `@assert (false) "value is: " + x`
+are both gone. No diagnostic anywhere. The test reports as passing.
+
+Changing the message to a bare string literal (`"value is: x"`, no `+`) makes
+the body compile correctly:
+
+#+begin_src js
+window.__spacetime_register_test("sanity: plain string message works", async () => {
+      const __ctx = { startTime: Date.now() };
+      try {
+        (x = 5);;
+        {
+    const __cond = (false);
+    const __msg = "plain string, no concat" || 'Assertion failed';
+    if (!__cond) { throw new Error(__msg); }
+    }
+      } finally { ... }
+    });
+#+end_src
+
+* Impact
+
+- SEVERE: silently converts a real, intended assertion failure into a vacuous
+  pass — the exact opposite of what a test suite must never do. Any test
+  author who reaches for string interpolation in an assertion message (a very
+  natural thing to do, e.g. to include an actual observed value for debugging)
+  gets a test that ALWAYS passes, with no warning.
+- Confirmed the trigger is specifically `$message:string?`'s capture-type
+  boundary matching against a `balanced` run that CONTAINS a `+` operator —
+  likely the SAME class of defect as BUG-042/BUG-140/BUG-063 (silently-dropped
+  constructs due to a PEG/capture-type boundary mismatch), not something new
+  in kind, just a new instance.
+
+* Root cause (not yet located precisely — filed for someone to dig in)
+
+Likely in the `%capture_type` grammar/reifier for `@assert`'s form
+(`stdlib/testing/test.st` `%macro assert`, `$condition:expr $message:string?`)
+or in the shared `component_body`/test-body segmentation that classifies each
+`@test` body's constructs. The `string?` capture probably fails to bound
+correctly against `"literal" + expr`, and that FAILURE cascades into dropping
+the entire enclosing capture (matching the historical pattern where a failed
+sub-capture silently empties its parent rather than surfacing a diagnostic —
+see BUG-042's "inline object-literal breaks directive value parser",
+BUG-140's "nested project-local macro dropped inside stdlib macro body").
+
+* Suggested fix direction
+
+1. Minimal: `$message:string?` should accept a full `:expr` capture instead of
+   (or in addition to) `:string` — a message is USED as a JS expression at
+   runtime already (`%$message || 'Assertion failed'`), so there's no
+   correctness reason to restrict it to a literal; widening the capture type
+   fixes both the crash AND lets authors write richer debug messages.
+2. Necessary regardless: whatever component-body/test-body segmentation logic
+   currently silently drops the WHOLE test body on a sub-capture mismatch
+   should instead surface a diagnostic (E09xx-style) naming the exact
+   construct that failed to parse — matching this repo's own stated
+   discipline (BUG-042/BUG-140 fixes) that silent data loss is categorically
+   unacceptable in this compiler.
+
+* Acceptance
+
+- The repro above compiles the FULL test body (both `@let` and `@assert`),
+  either because `:string?` is widened to accept the concatenation
+  expression, or because a clear compile error is raised instead of silent
+  drop.
+- A regression test in the compiler's own test suite (not just a `.test.st`
+  fixture, since THIS bug's nature means a fixture could silently no-op)
+  asserting the emitted JS for this exact repro is non-empty.
+
+* Provenance
+
+Filed 2026-07-04 from PLAN-062 Wave 3 (FEAT-149), during CDP test debugging for
+`stdlib/3d/tests/pose-track.test.st`. This bug masked a REAL, separate issue
+(BUG-150: `@wait_until`/timer scheduling under `--cdp`) as a false pass for
+multiple debugging iterations before being isolated via a from-scratch minimal
+repro methodology (bisecting every piece of the failing test individually).

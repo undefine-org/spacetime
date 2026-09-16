@@ -1,0 +1,92 @@
+#+TITLE: Fix :block body capture so .test.st assertions execute
+#+STATE: DOING
+#+SESSION_ID: 14f94e45c6c3f247
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-02T11-06-49-499Z_14f94e45c6c3f247.jsonl]]
+#+CUSTOM_ID: PLAN-026-fix-block-body-capture-so-test-st-assert
+
+* Initial Message
+
+let's think about how we'll extend the stdlib for Spacetime using this as a philosophical underpinning: https://www.gingerbill.org/article/2025/09/08/package-managers-are-evil/
+
+
+In the context of integrating pretext to make text layout much simpler in Spacetime, especially in ora-ventures.com's hero section (projects/ora-ventures.com/ has some older syntax which the implementation agent will have to fix).
+
+Gather your thoughts and come up with your own understanding of the nuances of going that way for this project. Remember that the stdlib/ folder is going to go from having `macros/` and `primitives/` to a modular architecture for folders, which is how we are going to make the pretext macros btw.
+
+This is pretext: https://github.com/chenglou/pretext
+
+Also think about stuff we could put in the demos/ folder to showcase the integration with pretext and the latest Spacetime features. Let's not do ora-ventures.com just yet, let's first think about a nice framework for making the stdlib library both lean and "fusion-engine-included", and showcase that with pretext. Consider all angles
+
+Fix the foundational test-framework bug [[id:BUG-051-test-st-assertions-never-execute-block-b]]:
+=$body:block= / =$content:block= capture as a raw =String=, so =%$body.js= emits
+the test body as a dead string literal and nested directives (fixtures, asserts)
+never compile. Every =.test.st= assertion is currently vacuous.
+
+* Goal
+=:block= yields a structured capture exposing:
+- =.html= -> raw inner text (fixture innerHTML)
+- =.js=   -> COMPILED nested directives (matched_children lowered to JS)
+so =@test=/=@fixture=/=@assert=/=@then= execute and gate correctly.
+
+* Approach (sketch)
+1. Map ="block"= to a dedicated capture type (not HtmlBlock) that retains BOTH the
+   raw inner text AND =body_node.matched_children= (compiled FormMatches).
+2. Make the =.js= / =.html= field accessor in the macro emit substitution
+   (=substitute_params_simple= / =captured_value_to_emit_string=, evaluate.rs)
+   route =.js= through the nested-compile path (resolve.rs nested_form_matches /
+   resolve_child_with_parent_scope) instead of stringifying. The simple path's own
+   doc-comment says nested .js expansion "is handled during Expand" — wire that.
+3. Preserve =.html= raw-text behavior for fixtures.
+
+* Verification (MUST)
+- =@assert (1 === 2)= FAILS; =@then .missing should exist= FAILS (negative gating).
+- A known-good test still passes; mutation (42 -> 999) now FAILS.
+- AUDIT every existing =.test.st=: re-run the full playwright_st + headless suites
+  and triage any tests that were passing vacuously and now fail (real regressions
+  vs bad tests). This audit is part of the deliverable.
+- Then PLAN-024 W4's =stdlib/text/tests/*.test.st= gate for real.
+
+* Origin
+Discovered during PLAN-024 W4 (pretext text-module playwright tests appeared to
+pass with deliberately-false assertions). Deferred here to avoid destabilizing the
+compiler mid-feature.
+
+* Status update (this session)
+
+W1 CORE FIX LANDED (commit 97723e7c). =:block= bodies now COMPILE:
+- EmitContext gains =Option<Arc<MetaRegistry>>= (cheap clone).
+- =resolve_var_ref= routes field access through =apply_param_field_accessor=
+  (unifies Marker::VarRef + Marker::Param) \u2014 the load-bearing change.
+- =.js= compiles the block's nested directives; =.html= yields raw markup.
+- =compile_block_body_to_js= rematches the body fragment against the LIVE
+  registry (new =parser::rematch_with_registry=) then compiles w/o runtime wrapper.
+- =Arc<MetaRegistry>= threaded once per expand pass via
+  =generate_primitive_ir_with_registry=.
+Proof: snapshot =test_and_fixture_js= now emits the fixture
+(createElement/innerHTML/appendChild) instead of the dead literal. lib 2093 green.
+
+REMAINING BLOCKER: assertions STILL don't gate \u2014 the testing MACROS have defects
+(uncovered once bodies compiled). Tracked as a dedicated bug:
+- [[id:BUG-053-testing-macros-then-eval-wait-mock-unmat]] \u2014 @then/@eval/@wait/@mock
+  don't match; @assert swaps condition/message. The negative gate
+  (deliberately-false test must FAIL) cannot pass until this lands.
+
+* Remaining work (FEATs)
+
+** FEAT (blocked on BUG-053): make .test.st assertions actually gate
+Fix the testing-macro cluster (BUG-053), then prove the negative gate:
+=@assert (1===2)= and =@then .missing should exist= MUST report FAILED. Then AUDIT
+every existing .test.st (real failures vs bad tests) \u2014 expect some hidden product
+bugs to surface. See [[id:FEAT-054-make-test-st-assertions-gate-via-testin]].
+
+** FEAT (blocked on the above): gate the text module .test.st
+Register =stdlib/text/tests/{measure,reveal-lines}.test.st= in the playwright
+harness (=tests/playwright_st_test.rs=) once assertions gate, replacing the
+emit-level interim checks in =tests/text_module_test.rs= with real-DOM gating.
+See [[id:FEAT-055-gate-stdlib-text-module-test-st-in-playw]].
+
+* DECISION (this session)
+Land W1 core (done), STOP. Do NOT register text .test.st yet \u2014 they would be
+false-green until BUG-053 / FEAT-054 land. The interim emit-level tests
+(tests/text_module_test.rs, 8 mutation-proven) keep the text module verified
+meanwhile.

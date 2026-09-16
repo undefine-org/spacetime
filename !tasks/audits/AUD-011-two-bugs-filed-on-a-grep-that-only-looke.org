@@ -1,0 +1,81 @@
+#+TITLE: Two bugs filed on a grep that only looked in src/ — the readers were in stdlib
+#+STATE: ITEM
+#+SESSION_ID: 153497be379ff5cc
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-18T12-18-12-318Z_153497be379ff5cc.jsonl]]
+#+CUSTOM_ID: AUD-011-two-bugs-filed-on-a-grep-that-only-looke
+
+* Initial Message
+
+please review the failures now and tell me what is left open that will fix it, and let's plan the corresponding PLN
+
+* What happened
+
+During PLAN-142 I filed BUG-348 (`@signal timeout`/`retry` never emit) and
+BUG-349 (`@data signal ephemeral` never emits, plus `transport`). Both were
+WRONG, and both have been retracted. A reviewer caught it.
+
+The reasoning was: the field is threaded through =stdlib/macros/data-kind.st=,
+and `grep -rc "\"<name>\"" src/ --include=*.rs` finds no reader, therefore
+nothing consumes it, therefore the feature is dead.
+
+The premise is false. In a self-describing metasystem the consumer of a macro
+field is NOT Rust \u2014 it is the stdlib primitive that the `%binds` names. All three
+fields have live readers:
+
+| field       | reader                                                     |
+|-------------+------------------------------------------------------------|
+| `timeout`   | =stdlib/primitives/signal.st:145= `var timeoutMs = parseMs(%timeout)` |
+| `retry`     | =stdlib/primitives/signal.st:146= + `runWithRetry` at :470  |
+| `ephemeral` | =stdlib/primitives/signal.st:403= `doLiveEphemeral` -> `bridge.pushEphemeral` |
+| `transport` | =stdlib/primitives/data/collection.st= (documented seam)   |
+
+I even asserted `pushEphemeral` appears "ONLY in generated artifacts under
+elixir/spacetime_lv/priv/static/". It is in =stdlib/primitives/signal.st= and in
+=elixir/spacetime_lv/assets/js/app.js=; the reviewer found no match under
+priv/static at all. That claim is in a commit message (e161b628) and is simply
+false.
+
+* The real causes, once looked for properly
+
+Both failing tests were WRONG FIXTURES, not dead features:
+
+1. =data_kind_dispatch= \u00d72 \u2014 the fixture wrote `@data signal $cursor(x number)`.
+   `param_list` requires a BINDING, so it must be `($x number)`. The directive
+   failed E0946 and never reached the primitive. With `$x`, the page compiles and
+   `pushEphemeral` emits twice. FIXED.
+
+2. =signal_emits_policy_and_lifecycle= \u2014 asserted
+   `var timeoutMs = parseMs(3000)`, i.e. that the COMPILER pre-converts `3s`. It
+   does not and should not: `%timeout` is substituted verbatim and
+   `parseMs("3s")` normalizes at runtime (signal.st:134 handles ms/s/m). The
+   emitted code is `parseMs("3s")` and is correct. Assertion FIXED.
+
+Net: lib 3172 passed / 0 failed, integration 217 / 0.
+
+* The lesson, which is the point of this record
+
+**A "nothing reads this" claim scoped to one language in a two-language system is
+not evidence.** The Spacetime compiler is Rust + an `.st` stdlib, and the stdlib
+is where behavior lives by design \u2014 that is the whole thesis of the metasystem.
+Grepping only `src/**/*.rs` structurally cannot see the layer that does the work.
+
+Worse, I ran the sweep MECHANICALLY over 31 fields and reported "exactly three
+have no reader" with a reproducible method, which made a wrong result look
+rigorous. The method was precise and the premise was wrong; precision on a false
+premise reads as authority.
+
+What I should have done, and what the next person should do:
+
+1. Before claiming a field is unconsumed, search `stdlib/` and `public/runtime/`
+   as well \u2014 the `%binds` target names the primitive; go READ that primitive.
+2. Before filing "feature never emits", BUILD a minimal page that uses it and
+   grep the emitted JS. That is one command and it settles the question. Both
+   retractions came from finally doing this.
+3. Treat a failing test's FIXTURE as a suspect equal to the feature. Three of the
+   failures in this plan (2 here, 2 in W3) were wrong fixtures, and in every case
+   the fixture was older than the grammar it was written against.
+
+* Status
+
+BUG-348 and BUG-349 deleted (never real). BUG-350 (`@editable(bind:)`) stands \u2014
+it was verified by reading the emitted JS, not by a src-only grep.

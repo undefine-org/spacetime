@@ -1,0 +1,66 @@
+#+TITLE: %emit JS transpiler mangles 3-way if/else-if/else into dangling else
+#+STATE: ITEM
+#+SESSION_ID: 151314b62976ac5e
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-22T11-35-50-693Z_151314b62976ac5e.jsonl]]
+#+CUSTOM_ID: BUG-142-emit-js-transpiler-mangles-3-way-if-else
+
+* Initial Message
+
+[Image #1] bro the results are shoddy af. Can't you make this look super high-res? Also the river doesn't work and the only text I ever see is the EverSwap title, and the ripples don't work, and the flow animation is fucked up
+
+* Symptom
+A `%emit js` block containing a three-way `if / else if / else` chain is
+transpiled into invalid JavaScript: the middle `else if` is rewritten as a
+nested `else { if (...) {} }` but the trailing `else` is left dangling, so the
+emitted runtime.js fails `node --check` with `SyntaxError: Unexpected token
+'else'`. Because all primitive emits are concatenated into one runtime bundle,
+this ONE malformed block takes down the ENTIRE page (every @stage / primitive
+silently fails to initialize — the canvas stays 300x150 and _stThree is never
+set).
+
+A TWO-way `if / else if` (no final else) transpiles fine — so the bug is
+specific to the 3-way chain's final `else`.
+
+* Repro (from projects/everswap-clone, before the workaround)
+lib/three-reveal.st had:
+
+    if (splitMode === 'char') {
+      ...
+    } else if (splitMode === 'word') {
+      ...
+    } else {
+      ...
+    }
+
+Emitted runtime.js (curl /__spacetime/runtime.js?entry=index.st) became:
+
+    if (splitMode === 'char') { ... }
+    else {
+      if (splitMode === 'word') { ... }
+    }
+    else {            <-- dangling: previous if already closed by the else above
+      ...
+    }
+
+  node --check rt.js -> SyntaxError: Unexpected token 'else'
+
+* Why it hid for so long
+In the everswap-clone the project's @reveal directive was shadowed by stdlib's
+@reveal (separate bug / naming collision), so this broken three-reveal JS was
+never actually emitted into the served bundle until the directive was renamed to
+@unveil. The moment it loaded, the syntax error killed the whole scene.
+
+* Workaround applied
+Rewrote the split as a builders-map + single append loop (no else-if). Functional
+but the transpiler should handle a normal else-if chain.
+
+* Fix direction
+Find the JS emit lowering that special-cases `else if` (likely treating `else`
+followed by `if` by opening a new block) and ensure it preserves a following
+`else` correctly — or stop rewriting `else if` at all (it is already valid JS).
+Add a transpiler test: an emit block with if/else-if/else round-trips to
+node --check-clean JS.
+
+* Source
+projects/everswap-clone/lib/three-reveal.st (commit 8a05558 has the workaround);
+investigation in this session.

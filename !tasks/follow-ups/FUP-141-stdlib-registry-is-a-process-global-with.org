@@ -1,0 +1,63 @@
+#+TITLE: STDLIB_REGISTRY is a process-global with no site context — the embedded fallback can be stale
+#+STATE: ITEM
+#+SESSION_ID: 153d8ede25f7aff7
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-25T11-25-45-495Z_153d8ede25f7aff7.jsonl]]
+#+CUSTOM_ID: FUP-141-stdlib-registry-is-a-process-global-with
+
+* Initial Message
+
+https://ys2olone710qdtvpcgfny.preview.spacetime.undefine.org/brand isn't owkring but it is there in local. Why?
+
+* Why
+BUG-227 fixed the common cases (a site inside a checkout, a build launched
+from inside one). One case remains: building a site that lives OUTSIDE any
+toolchain checkout, from a CWD that is also outside one. There
+`workspace_root_for` correctly returns None, the registry falls back to the
+EMBEDDED grammar, and the embedded grammar is whatever was baked in at the
+last `cargo build` of the binary.
+
+MEASURED during BUG-227: 346 forms on disk vs 200 embedded. A 146-form gap
+means the fallback is not a graceful degrade — it is a different language.
+The user sees phantom parse errors on files that compile cleanly elsewhere,
+and (because a failed route compile degrades to a warning) an empty bundle
+with an exit code of 0.
+
+* Why it was not fixed in BUG-227
+`STDLIB_REGISTRY` is a `LazyLock<SyntaxRegistry>`: resolved once, on first
+touch, with no argument. Export cannot pass it the site dir.
+
+The obvious workaround — have `export::emit::run` set `SPACETIME_STDLIB_DIR`
+before the first parse — was implemented and REVERTED. Two reasons, both
+observed rather than predicted: (1) that variable is the MCP workbench's
+`__mcp__` overlay switch, a narrower question than "which toolchain am I";
+(2) a process-global write leaks — `mcp::stdlib_source`'s own tests point the
+variable at a grammar-less temp dir, and because the registry is one-shot the
+first such test poisoned every later parse in the process (7 failures, all
+green in isolation).
+
+* Two candidate fixes
+A. Thread the stdlib root as a PARAMETER. Replace the global with a
+   per-compile registry (or a `OnceCell` keyed by root) so the site dir
+   reaches it honestly. Correct, and removes a global; the cost is touching
+   every `STDLIB_REGISTRY` consumer (~10 sites in parser/mod.rs and friends).
+B. Regenerate the embedded stdlib in `build.rs` from the on-disk `stdlib/`,
+   so the fallback can never drift from the source tree. Much smaller, and it
+   makes the failure mode disappear rather than be routed around — but it only
+   holds for binaries built FROM a checkout.
+
+A and B are complementary, not alternatives: B removes the staleness, A
+removes the ambiguity about which stdlib a given compile used. Recommend B
+first (cheap, high value), then A when the global next gets in the way.
+
+* Acceptance
+- `stdlib_form_count()` from a binary built out of a checkout equals the count
+  from the on-disk stdlib (proves the embedded copy is not stale).
+- A test builds a site from a CWD outside any checkout and asserts zero parse
+  warnings and a non-empty bundle.
+- No test mutates a process-global env var to achieve either.
+
+* Related
+BUG-227 — the incident; its residual section points here.
+FUP-138 — a failed build-time read should reach the build's warning channel.
+Together these two are the same lesson: the export's failure modes are too
+quiet, and quiet failures ship.

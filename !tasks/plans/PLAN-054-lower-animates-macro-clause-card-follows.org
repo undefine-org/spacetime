@@ -1,0 +1,87 @@
+#+TITLE: Lower %animates macro clause (card-follows-cursor + reactive transform binding)
+#+STATE: DONE
+#+SESSION_ID: 1511009590860ad7
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-20T20-50-56-706Z_1511009590860ad7.jsonl]]
+#+CUSTOM_ID: PLAN-054-lower-animates-macro-clause-card-follows
+
+* Initial Message
+
+why is drag and drop not even being triggered in @demos/liveview-kanban/
+
+* Follow-up from PLAN-053
+
+PLAN-053 fixed `%on $var -> value` lowering (the @drag on-drop trigger). The
+sibling macro-body clause `%animates { prop: $var }` is STILL dropped at
+src/pipeline/evaluate.rs (the no-op arm now covers only Mutate/Trigger/Animates/
+Applies).
+
+** What %animates should do
+`stdlib/macros/drag.st` declares:
+  %animates { translate-x: $x; translate-y: $y }
+This should reactively bind the element's transform to the gesture's derived
+$x/$y so the card VISUALLY FOLLOWS the cursor during a drag. Today it does not —
+the card stays put while dragging (only the cursor-glow + dragging state show).
+
+** Why deferred from PLAN-053
+%animates depends on %derives being lowered to real reactive signals. In the
+Evaluate layer, %derives are currently bound to placeholder 0 (see
+evaluate_match: "For now, bind a placeholder"). A correct %animates needs the
+derive→reactive-signal subsystem (clamp/axis math from $deltaX/$deltaY), which
+is a larger mechanism than the on-drop fix. Per the AGENTS elegance bar, deferred
+rather than folded in.
+
+** Approach (mirror PLAN-053's %on lowering)
+- Add an EvaluatedAnimate collection to EvaluatedMatch (like on_clauses).
+- generate_animate_fragments (sibling to generate_on_fragments / state) emits
+  `ST.bindStyle(el, var, property, transform)` for each prop, with transform
+  props (translate-x/y/scale/rotate) composed into a single `transform`.
+- Lower %derives to reactive ST.derive(el, name, deps, compute) so $x/$y track
+  $deltaX/$deltaY with the axis/bounds clamps from the macro.
+
+** Tests
+- .test.st: dragging a @drag element updates its transform (CDP for real layout,
+  or assert the bound CSS var on --headless).
+- .rs: evaluate-layer test that %animates produces an EvaluatedAnimate; compiler
+  test that drag.st emits ST.bindStyle for translate.
+
+Files: src/pipeline/evaluate.rs, src/pipeline/mod.rs, public/runtime/st.js
+(bindStyle already exists), stdlib/macros/drag.st.
+
+* RESOLUTION (DONE)
+
+Lowered %animates + reactive %derives so a @drag element visually follows the
+cursor. Four gaps fixed:
+
+** Parser gaps
+- %animates was NEVER constructed: convert_cst_directive_to_macro_body_item had
+  no "animates" arm, so MacroBodyItem::Animates was unreachable. Added an arm
+  parsing `property: $variable` from raw body text.
+- %derives truncated multi-line ternary declarations (a `$x: a ? b : c` spanning
+  lines swallowed the next `$y:` decl) and the CST property walker dropped
+  hyphenated keys. Both now parse via a shared raw-text splitter parse_clause_decls
+  (depth-aware, multi-line, comment-skipping) in src/parser/mod.rs.
+
+** Evaluate lowering (src/pipeline/evaluate.rs)
+- %derives that feed an %animates channel are lowered to reactive computed
+  signals (only when the macro animates; each/repeat compile-time derives are
+  untouched). translate_derive_expr maps `$sig`->v.sig (deps), inlines captures
+  as literals, clamp->ST.clamp, &self.rect->ST.rectOf(el), &$bounds.rect->
+  ST.rectOf(SpacetimeLocal.bounds), none->null. lower_derive_chain emits derives
+  deps-first, de-duplicated.
+
+** Codegen (src/pipeline/mod.rs)
+- generate_animate_fragments emits ST.derive(el, name, [deps], compute) per
+  derive + one ST.bindTransform composing transform channels (translate-x/y/z,
+  scale, rotate); non-transform props fall back to ST.bindStyle.
+
+** Runtime (public/runtime/st.js)
+- Added ST.rectOf (null-safe getBoundingClientRect), ST.clamp, ST.bindTransform
+  (composes channels into one transform). ST.derive/watchAll already existed.
+
+** Verification
+- Live demo: dragging a card updates transform live
+  (translateX(916.5px) translateY(114.59px) tracks the cursor).
+- Tests: drag-animates.test.st (2, headless: x/y derive + transform tracking),
+  compiler drag_animates_* (2), evaluate translate_derive/lower_derive_chain (4),
+  parser derives_and_animates_parse_from_drag (1). Full lib (2465) + integration
+  (179) green; snapshots updated (additive runtime only).

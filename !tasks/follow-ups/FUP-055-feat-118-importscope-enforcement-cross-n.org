@@ -1,0 +1,53 @@
+#+TITLE: FEAT-118: ImportScope enforcement + cross-namespace ambiguity error
+#+STATE: ITEM
+#+SESSION_ID: 1508cbf54b12d2b0
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-14T11-53-10-188Z_1508cbf54b12d2b0.jsonl]]
+#+CUSTOM_ID: FUP-055-feat-118-importscope-enforcement-cross-n
+
+* Initial Message
+
+look at ~/code/ora/verse and how it generates tree-sitter from the meta-compiler language.
+
+your goal is to look at how pi-* crates manage dynamic language profiles. Consider runtime/kdl/some other addition (also consider something specific to Spacetime. Weigh in all the options and show me your reasoning).
+
+Please understand the nuances of the work here. You are also free to propose improvements to the tree sitter generator and to the Spacetime LSP to make it world-class, as it hasn't been touched in a while and could benefit from some love. Since I am the creator of both Spell and Spacetime, I would LOVE to make the two seamlessly work with each other (also look at the Spacetime MCP btw).
+
+Deep architecture dive first, then come back with your insights, revelations, challenges (to me and to you), questions, and overall state of things
+
+Parent: FEAT-118. The correctness/safety polish on FUP-053's working qualified-addressing mechanic (committed af070676/40d2deb8/cac1c08e/7f8b6381). The ADDRESSING works (@scene/camera parses + dispatches); this adds VALIDATION.
+
+1. ImportScope enforcement: ImportAst now carries alias/only/hiding (captured, FUP-053 part 2) but dispatch SKIPS the qualifier without validating it. Build per-file ImportScope{open[ns], aliased{alias->ns}, only{}, hidden{}} in resolve_imports; thread into dispatch so: @alias/x errors if `alias` not bound by an @use...as; @ns/x errors if ns not imported; only(...)/hiding(...) filter which names are visible. Resolver entry: find_macro_for_match (registry.rs:400) + callers (pipeline/resolve.rs:52/115, evaluate.rs:117) need the scope (keyed by FormMatch.source_file).
+2. Cross-namespace ambiguity: two open @use modules both exporting @camera -> bare @camera is ambiguous -> require qualification. Extend FEAT-088 dispatch_ambiguity (registry.rs:445, already detects capture-score ties) to also detect cross-namespace name collisions among in-scope modules. Emit a diagnostic suggesting @alias/camera.
+
+NB without this, qualified addressing still WORKS (the mechanic is sound) — these add the disambiguation errors + scope validation that make collisions a compile error rather than a silent first-match. Unblocks full M2 (%public hiding enforcement) + M3 (%using scoped capture-types).
+
+NOTE [2026-06-15]: CORE DONE (commit 0c18c72a, 2264 lib green): the qualified-namespace DATA FLOW is now complete + proven. FormMatch gained namespace_qualifier:Vec<String>; match_directive_prefix RETURNS the qualifier it used to discard (FUP-053 3b discarded it); resolve_single resolves a qualified call against the FQN registry (qualifier+leaf -> scene/camera key) before bare fallback. E2e test: @scene/camera FormMatch resolves to scene/camera not bare camera. This realizes the self-hosted vision's 'COMPILED to native tables' step \u2014 .st @use/manifest data now drives FQN dispatch instead of being discarded.
+
+REMAINING (the VALIDATION layer, the rest of FUP-055):
+1. Build per-file ImportScope{open[ns], aliased{alias->ns}, only{}, hidden{}} in resolve_imports from ImportAst.{namespace,alias,only,hiding} (all captured already, M1+FUP-053).
+2. Thread ImportScope to resolve_single (keyed by FormMatch.source_file \u2014 NOTE source_file is currently None on most matches; populating it is a prerequisite sub-task).
+3. VALIDATE: @alias/x errors if alias unbound; @ns/x errors if ns not @use'd; only(...)/hiding(...) filter visible names.
+4. Cross-namespace AMBIGUITY: 2 open @use modules exporting same @name -> bare @name ambiguous -> error suggesting @s/name. Extend FEAT-088 dispatch_ambiguity.
+
+CO-TENANCY NOTE: the other agent is actively COLLABORATING \u2014 they committed a8369390 'fix(build): complete namespace_qualifier FormMatch initializer (FUP-055)' fixing FormMatch literals for MY field. They also added ScopeBlock.html (FEAT-119) concurrently. Shared files (resolve.rs, parser/mod.rs, ast.rs) need careful staging; build stayed green throughout.
+
+NOTE [2026-06-15]: AMBIGUITY CHECK (E0924) written but UNCOMMITTED + UNVERIFIED due to co-tenancy block. State:
+- src/diagnostics/codes.rs: E0924 variant + as_str arm added (PURELY MINE, isolated, committable alone).
+- src/pipeline/mod.rs: check_namespace_ambiguity(matches, registry) fn + call site added. BUT this file ALSO has the other agent's UNCOMMITTED FEAT-119 W3 changes (scopes_by_name map, expand_typed sig change) interleaved \u2014 CANNOT git-add it without sweeping their work. 
+- BLOCKED: whole-crate build fails on THEIR uncommitted ScopeBlock literals missing `states` field (parser/mod.rs:540,2635 \u2014 FEAT-119 W3 template-scope construction, not mine). Cannot verify my code green until their sweep lands.
+
+check_namespace_ambiguity logic (complete, correct by inspection): for each BARE match (empty namespace_qualifier), get_all_macros_by_form_directive; collect DISTINCT non-global namespaces among candidates; if >=2 -> E0924 warning suggesting @ns/name. Reuses existing get_all_macros_by_form_directive. Skips qualified calls (already disambiguated).
+
+RESUME WHEN their FEAT-119 W3 parser/mod.rs sweep is committed + build green: (1) verify check_namespace_ambiguity compiles + add a test (2 namespaced macros same directive -> E0924 on bare call, none on qualified); (2) commit codes.rs + my pipeline/mod.rs hunks once separable. 
+
+REMAINING FUP-055 after ambiguity: per-file ImportScope build + alias-bound/ns-imported/only-hiding validation (needs file.imports threaded to the check; CompileContext lacks imports \u2014 add it, or validate in parse pass where file.imports+file.matches coexist).
+
+CO-TENANCY: shared files parser/mod.rs + pipeline/mod.rs are HOT (both agents). Their FEAT-119 (ScopeBlock html/states/refs/exports World-A migration) churns ScopeBlock literals repeatedly, transiently breaking the build.
+
+NOTE [2026-06-15]: AMBIGUITY CHECK DONE + VERIFIED (this session). check_namespace_ambiguity(matches, registry) emits E0924 warning when a BARE directive resolves to the same name across 2+ distinct non-global namespaces; skips qualified calls. Test test_e0924_cross_namespace_ambiguity PASSES (bare @camera across scene+ui -> 1 E0924; qualified @scene/camera -> none). 
+
+COMMIT STATE: E0924 enum variant committed solo (e9b99326, src/diagnostics/codes.rs). The detector fn + call-site + test live in src/pipeline/mod.rs which carries the OTHER AGENT's uncommitted FEAT-119 W3 work (scopes_by_name, expand_typed sig change) interleaved with mine \u2014 cannot git-add the file without sweeping theirs. My 3 hunks (@1023 call, @1396 fn, @2778 test) are ADDITIVE + isolated; they will land with that file's next commit. Verified green in a build window between their edits (build thrashes: states-missing then states-duplicate as they sweep ScopeBlock literals).
+
+FUP-055 PROGRESS: core (qualified dispatch, 0c18c72a) DONE + ambiguity (E0924) DONE/verified. REMAINING: per-file ImportScope validation (alias-bound / ns-imported / only-hiding). Plan: do it in the PARSE pass where file.imports + file.matches coexist (NOT CompileContext, which lacks imports + is co-mingled). A check over file.imports building {open,aliased,only,hidden} then validating each match's namespace_qualifier against it. This is lower-value (qualified addressing + ambiguity already work) and the hot files are contended \u2014 good candidate to do when contention clears.
+
+CO-TENANCY: pipeline/mod.rs + parser/mod.rs THRASHING from other agent's FEAT-119 W3 ScopeBlock migration. Build oscillates green/broken. Commit only solely-owned files; let shared-file hunks ride their commits.

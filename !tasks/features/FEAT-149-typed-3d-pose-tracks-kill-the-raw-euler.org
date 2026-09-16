@@ -1,0 +1,271 @@
+#+TITLE: Typed 3D pose tracks — kill the "raw Euler/vec3 in %emit js" bug class (zellijist-2 postmortem)
+#+STATE: DONE
+#+SESSION_ID: 15219c677c4613e6
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-03T18-27-25-809Z_15219c677c4613e6.jsonl]]
+#+CUSTOM_ID: FEAT-149-typed-3d-pose-tracks-kill-the-raw-euler
+
+* Initial Message
+
+ok now let's think about this failure and look at it in the context of IMPROVING SYNTAX just like we did with the Spacetime ECS. Take this example and add more to pressure test the options we come up with. Let's come up with a syntax that feels natural and lets us easily explain everything we just talked about
+
+* Initial Message
+
+Another language model produced a summary of its thinking process (zellijist-2 build:
+three sequential user-caught bugs — disconnected ribbon topology, off-frame scatter,
+tilted-not-flat orientation — each fixed reactively, one at a time, in raw
+`THREE.Vector3`/`Quaternion` JS inside a project-local `%emit js` primitive). The user's
+follow-up: "let's think about this failure and look at it in the context of IMPROVING
+SYNTAX just like we did with the Spacetime ECS [FEAT-142]. Take this example and add more
+to pressure test the options we come up with. Let's come up with a syntax that feels
+natural and lets us easily explain everything we just talked about."
+
+* Diagnosis — one root cause, three symptoms
+
+All three zellijist-2 bugs are the SAME defect wearing different clothes: 3D pose
+choreography lives as raw, untyped arithmetic in hand-written JS, so nothing in the
+authoring surface can express or check the INTENT behind a number.
+
+| bug | what broke | why the surface let it happen |
+|---|---|---|
+| disconnected ribbon (2 zigzag strips, not 1) | `colY = colTop - (i*H + built.cy)` double-subtracted a triangle's local centroid; the X-axis sibling line correctly *added* it | X and Y are two independently hand-typed lines with no shared shape forcing symmetry — a sign flip in one has nothing to fail against |
+| off-frame scatter | `scatterHalfW = tan(fov/2) * camZ * aspect` hand-derived, then a guessed `CELLS*W*0.6` spread constant blew past it | camera-visible-bounds is trig the author must re-derive from `camera.fov`/`camera.position.z`/`aspect` by hand every time — no typed value publishes "how wide is the frame here" |
+| tilted-not-flat | SCATTER kept `rr(-0.22,0.22)` Euler X/Y (pitch/roll) inherited from LIFT's tumble code | "flat" is 6 raw Euler numbers; nothing NAMES the invariant "pitch/roll == 0, yaw free" — a copy-paste leaves the wrong axes non-zero and nothing objects |
+
+Fixing each bug reactively (as both sessions did) is necessary but insufficient — it
+patches an instance, not the class. The class is: **no typed value for "a 3D pose,"
+so pose arithmetic is unchecked prose in JS.**
+
+Precedent for the pattern of the fix: `docs/testing/GUIDE.md`'s claim grammar and the
+`memory` concept `CON-quaternion-w-is-not-a-flatness-check` saved this session — "assert
+on the axis-specific quantity that encodes the claim, not a composite" — applies equally
+to AUTHORING, not just testing: don't author 6 raw Euler numbers when the actual intent
+is "flat, yaw free."
+
+* Precedent audit (what already exists — this proposal must reuse it, not duplicate it)
+
+1. `%capture_type keyframes` (`stdlib/capture-types/keyframes.st`) — ALREADY the general
+   mechanism for "named/ordered stops interpolated by a 0..1 driver": `property: v1 -> v2
+   -> v3`. `apply-animations` (`stdlib/primitives/animation/apply-animations.st`)
+   interpolates via typed value-kind dispatch (color / numeric-with-unit / function-value
+   `fn(args)` / string-snap) and already carries `stagger`/`staggerFrom`/`easing`/`range`.
+   Zellijist's FLUSH→SEPARATE→LIFT→SCATTER arc is EXACTLY this shape, just for a 3D
+   target instead of a DOM element's CSS.
+2. FEAT-142 (Spatial ECS, shipped) — the entity/facet law: `&entity.component.facet`,
+   BASE vs DERIVED typed facets (`worldpos`, `screenpos`), verified end-to-end (reactive
+   per-frame facet reads with zero churn, `%exports { $summit: worldpos }` typed
+   declaration, `&summit.peak.summit.y` member-access-all-the-way-down). This is the
+   general mechanism a stage's camera bounds should publish THROUGH, not around.
+3. `@preset` (`stdlib/macros/presets.st`) — open, string-keyed (`category:name`) value
+   registry, not a closed Rust enum (`register_preset` takes a free `category: String` —
+   confirmed in `src/metasystem/registry.rs:199`). Proves new named-value vocabularies
+   (like an orientation vocabulary) don't need Rust changes to be extensible.
+4. `@each(range($start,$end) as $item)` (`stdlib/macros/each.st:186`) — ALREADY the
+   mechanism for "procedurally generate N entities from an index range," confirmed
+   existing (not proposed). Zellijist's per-tile loop needs no new iteration construct.
+5. `apply-animations`'s function-value branch (`stdlib/primitives/animation/apply-animations.st`
+   "Handle function values (blur, etc.)") ALREADY parses/interpolates `fn(args)`-shaped
+   values generically. An orientation keyword like `tumble(axis: …, angle: …)` is THE
+   SAME shape as `translateX(10px)` today — no new grammar, a new interpreter branch.
+6. `docs/testing/ANIMATION.md`'s virtual `@clock` — determinism is already a first-class
+   testing concern; any new `rand()` value must be seedable/deterministic to fit this
+   ethos, not `Math.random()`.
+
+* Proposed surface (additive — reuses 1-6 above, adds 3 small things)
+
+** (a) `pos`/`face` as recognized keyframe PROPERTIES, unchanged `keyframes` grammar
+   No grammar change. `pos` and `face` become two more property names inside the EXISTING
+   `property: v1 -> v2 -> v3` chain — exactly how `translate-y`/`opacity` work today.
+   ```
+   @scroll tile-pose(scrub: true) {
+     pos:  (0, $colTop, 0) -> (0, $colTop - $i*0.09*H, 0.02)
+                            -> ($dir*(0.1+rand(0,.25))*W, $colTop+rand(-.3,.3)*H, .9+rand(0,1.1))
+                            -> (rand(-1,1)*&stage.camera.bounds(0).halfW*0.7, $colY*1.9+rand(-.25,.25)*H, rand(-.02,.04))
+     face: flat -> flat -> tumble(axis: rand, angle: 55deg..86deg) -> flat
+     stagger: 0.14   // reuses the EXISTING stagger vocabulary, unchanged
+   }
+   ```
+   `@scroll` is the SAME macro (`stdlib/macros/timeline.st scroll-timeline`) authors
+   already use for DOM. When its scope is a 3D entity (inside `@stage`, target is a
+   `THREE.Object3D`) it dispatches to a 3D-aware sibling of `apply-animations`
+   (`apply-pose-animations`) instead of the DOM one — same author surface, different
+   primitive underneath, chosen by scope (mirrors how `@light` already disambiguates
+   scene-light vs responsive light-mode by scope — BUG-037's fix, not a new mechanism).
+
+** (b) Two NEW value-grammar leaves (not new subsystems — new leaves in the existing
+   value-kind dispatch that `apply-animations`'s interpolator already does per-property)
+   - `vec3` tuple literal `(x, y, z)` — bare comma-separated exprs, each component using
+     the SAME numeric-with-unit grammar `keyframes` already parses per value. Interpolated
+     component-wise (`lerp` per axis), exactly like today's color interpolation is
+     component-wise per RGBA channel.
+   - `orientation` keyword vocabulary — `flat` | `tilt(x: ±deg, y: ±deg)` |
+     `tumble(axis: vec3 | rand, angle: deg..deg)`. Parses via the SAME `fn(args)` shape
+     `apply-animations` already recognizes for `translateX(10px)`. This is the fix for bug
+     #3: `flat` is a KEYWORD the interpolator enforces as "pitch/roll ≡ 0, yaw free" —
+     not a comment reminding a human to zero 2 of 3 numbers. A future author literally
+     cannot regress bug #3 by copy-pasting a `tumble(...)` value into a `flat` slot,
+     because `flat` has no axis args to copy stray numbers into.
+   - `rand(min, max)` / `min..max` range value — resolved ONCE per entity instance at
+     scene-build time (not per-frame), seeded deterministically from the entity's index
+     (mirrors zellijist's own `mulberry32(seed)`, but promoted from ad-hoc project code to
+     a shared, testable stdlib RNG). This directly answers docs/testing/ANIMATION.md's
+     determinism bar and replaces the ad-hoc `rr()` helper duplicated in every 3D project.
+
+** (c) `&stage.camera.bounds(z)` — a parametric DERIVED facet on the (built-in) stage entity
+   FEAT-142 established BASE vs DERIVED facets (`.peak.summit` base, `.peak.screen`
+   derived from summit+camera). This proposal's one genuinely NEW mechanism: a facet that
+   takes an ARGUMENT (`z`, the depth to measure visible extent at) — every prior facet was
+   0-arg. Scoped narrowly: `@stage` becomes the FIRST built-in (not user-authored) entity;
+   its camera is a component; `.camera.bounds(z): { halfW, halfH }` is computed once from
+   `camera.fov`/`camera.position.z`/`aspect` (the exact trig zellijist hand-rolled) and
+   published as a typed, reusable value. This is the fix for bug #2: the frustum math
+   moves from "re-derived by hand in every project that needs it" to "computed once,
+   correctly, in stdlib" — and validates FEAT-142's entity/facet law generalizes to a
+   SECOND real consumer (its stated design goal), not just the anchor case it shipped with.
+
+* Fixing the three actual bugs, in the new surface
+
+1. *Disconnected ribbon*: X and Y are now the SAME `pos: (x, y, z)` tuple — one expression,
+   both axes composed identically (`built.cx`/`built.cy` offsets added the same way on
+   both components by construction, not two hand-typed lines that can silently diverge).
+   Doesn't make the bug IMPOSSIBLE, but removes the asymmetry that let it hide — the two
+   axes are now one written expression, not two.
+2. *Off-frame scatter*: `&stage.camera.bounds(0).halfW` replaces the hand-derived
+   `tan(fov/2)*camZ*aspect` — correct by construction, reusable across every 3D project
+   that needs "stay in frame," computed once in stdlib instead of re-derived per-project.
+3. *Tilted-not-flat*: `face: flat` is categorically incapable of carrying stray pitch/roll
+   — the bug's entire failure mode (leftover non-zero Euler X/Y) has no slot to hide in.
+
+* Pressure-test battery (mirrors FEAT-142's format — the surface must carry ALL of these,
+  not just zellijist)
+
+| scene | pos/face authoring | new cap needed? |
+|---|---|---|
+| zellijist tile choreography (12 tiles, 4 named stops, per-tile stagger) | `@each(range(0,12) as $i) { &tile($i); @scroll tile-pose { pos: ...; face: ... } }` | — (motivating case) |
+| sneaker exploded-parts callout (parts fly out radially, must stay in frame) | `pos: (0,0,0) -> ($dir * &stage.camera.bounds(0).halfW * 0.6, ...)`, `face: flat` throughout | — (bounds facet reused, zero new mechanism) |
+| globe city labels (FEAT-142, already shipped) | untouched — pose tracks are orthogonal to the anchor/facet DOM-bridge mechanism, no overlap | — |
+| card-deck shuffle (N cards, per-card stagger, brief tumble mid-shuffle, land flat fanned out) | `face: flat -> tumble(axis:(0,0,1), angle: 8deg..20deg) -> flat`, `pos.x: $i * fanSpacing` | — |
+| character rig joint pose (bone rotation, not a free mesh) | OUT OF SCOPE — bones compose via skeleton hierarchy, not world-space pose tracks; flag, don't force-fit | yes, deferred |
+| particle-like scatter of 1000s of instances | `@each(range(...))` per-mesh doesn't scale to instancing (FUP-102 gap #5, unrelated, still open) | yes, deferred (instancing) |
+
+Invariants surviving all in-scope rows: (1) a NAMED sequence of pose stops driven by one
+continuous 0..1 progress; (2) position and orientation are STRUCTURED typed values, not
+raw numbers; (3) "stay within the visible frame" is a published camera facet, never
+re-derived; (4) "flat" (or any other named orientation intent) is enforced by the value's
+shape, not by author discipline. NOT invariant, and correctly out of scope: bone/skeleton
+posing, GPU instancing at scale — both flagged as separate future work, not force-fit here.
+
+* Elegance-bar scorecard (AGENTS.md — must pass all 4 to earn inclusion)
+
+1. Small extension of EXISTING grammar/registry? YES — `keyframes` capture type
+   unchanged; `pos`/`face` are two more recognized property names; `tumble(...)` reuses
+   the existing fn-value grammar; `@scroll` is the existing macro, dispatch-by-scope like
+   `@light` already does.
+2. Variants are DATA, not a Rust match-arm per case? YES — orientation kinds
+   (flat/tilt/tumble) are JS-interpreter branches inside one new pose-interpolator module,
+   analogous to today's color/numeric/fn-value branches in `apply-animations.js` — same
+   shape as an EXISTING dispatch, not a new one. `&stage.camera.bounds` reuses the
+   `%exports`-typed-facet registry FEAT-142 already built (data-keyed, not enum-keyed).
+3. DELETES at least one existing special-case? YES, three: (i) the entire hand-rolled
+   lerp/slerp choreography loop in `three-tile-field.st`'s `apply()` function collapses
+   into the shared 3D-keyframe interpolator; (ii) the project-local `rr()` ad-hoc RNG
+   helper (duplicated per-project) is replaced by one shared, seeded, testable `rand()`;
+   (iii) the hand-derived camera-frustum trig (duplicated per-project — zellijist AND any
+   future scatter/exploded-view scene) collapses into one stdlib facet.
+4. Testable by the SAME machinery it generalizes (a RED→GREEN test, no bespoke harness)?
+   YES — `apply-animations` already has unit/differential tests
+   (`keyframes_via_stdlib_matches_rust_extractor` etc.); the 3D sibling gets the same
+   treatment. The CDP fidelity ladder (docs/testing/FIDELITY_LADDER.md) already covers
+   layout/paint assertions; a pose-track test asserts mesh `.position`/`.quaternion` at
+   given scroll fractions — same `@drive`/`@clock` machinery as any other timing test, not
+   a bespoke 3D harness.
+
+If any of these had failed, the right move per AGENTS.md would be to file a follow-up
+and NOT build it now — all four pass, so this earns a build sequence (below), not just a
+"someday" backlog note.
+
+* Build sequence (sketch — NOT yet scheduled/estimated; a PLAN would sequence real waves)
+
+** Wave 1 — camera bounds facet (the narrowest, most novel piece: parametric derived facets)
+   `@stage` publishes `.camera.bounds(z): {halfW, halfH}` computed from
+   fov/position.z/aspect. Prove the PARAMETRIC facet shape works end-to-end (this is new;
+   every prior FEAT-142 facet was 0-arg) with one spike, mirroring FEAT-142's own R1 spike
+   discipline (verify against the runtime, don't assume it composes).
+
+** Wave 2 — vec3/orientation/rand value-kinds in the keyframe interpolator
+   Add `pos`/`face` as recognized properties; add vec3-tuple, `flat`/`tilt`/`tumble`,
+   `rand()`/`..` value-kind branches to a new `apply-pose-animations` primitive (sibling
+   of `apply-animations`, not a rewrite of it — DOM keyframes must stay untouched).
+   Deterministic seeded RNG keyed by entity index (testable, matches ANIMATION.md ethos).
+
+** Wave 3 — `@scroll` scope-dispatch to the 3D primitive when the target is a 3D entity
+   Mirrors BUG-037's `@light` disambiguation-by-scope fix — same author-facing macro name,
+   different bound primitive, chosen by whether the enclosing scope is inside `@stage`.
+
+** Wave 4 — zellijist-2 migration (the proof)
+   Rewrite `lib/three-tile-field.st`'s choreography using the new surface; DELETE the
+   hand-rolled `apply()` lerp/slerp loop, the `rr()` helper, and the hand-derived
+   `scatterHalfW`/`scatterHalfH` trig. Net deletion, like FEAT-142's W3 everswap
+   migration. Re-run `tests/zellijist.cdp.test.st` (already hardened this session to check
+   axis-specific quaternion components, not composite `w`) as the acceptance gate.
+
+* Risks / open questions (honest, not hidden)
+
+- R1 (BLOCKING for author safety): BUG-145 (out-of-order named macro args silently bind to
+  the wrong param, no error) makes ANY new multi-param macro call — including
+  `@scroll tile-pose(scrub: true)` and `tumble(axis:, angle:)` — dangerous to author against
+  until fixed. This is a hard PREREQUISITE for Wave 2/3, not a footnote; do not build the
+  pose surface on top of a param-binding defect that silently drops/misroutes arguments.
+- R2: vec3 tuple literal `(x, y, z)` risks lexical collision with existing paren-list
+  grammar (function-call args, param lists) at the same position. Needs a disambiguation
+  rule in the capture-type grammar (a tuple is bare comma-separated exprs with NO
+  leading `ident:` pairs and no preceding bare identifier, vs a fn-value `tumble(...)` which
+  always has a leading ident). Flagged as a real grammar design question, not assumed free.
+- R3: parametric facets (`&stage.camera.bounds(z)`) are a new shape — prior facets were
+  0-arg. Needs its own small spike (Wave 1) verifying the reactive-facet machinery (R1 of
+  FEAT-142) still holds with an argument in the read path, before committing the surface.
+- R4: `rand()`'s seed must be stable across rebuilds for CDP test determinism — needs a
+  concrete seeding rule (e.g., seeded from the entity's `$_index` + a scene-level seed
+  param), not left to chance.
+- R5: bone/skeleton posing and GPU instancing are explicitly OUT of this proposal's scope
+  (see pressure-test battery) — do not scope-creep this into a general "3D everything"
+  redesign; file them as their own FEATs if/when a scene needs them.
+
+* Acceptance (if/when a PLAN schedules the build waves above)
+
+- `lib/three-tile-field.st`'s hand-rolled `apply()` choreography function, `rr()` helper,
+  and hand-derived frustum trig are DELETED, replaced by `@scroll` + `pos`/`face` keyframes
+  + `&stage.camera.bounds(z)`.
+- A CDP test asserts, via the new surface's own typed values (not composite reads): FLUSH
+  tiles have `face: flat` (pitch/roll ≈ 0) at scroll 0; SCATTER tiles have `face: flat` AND
+  `pos.x` within `&stage.camera.bounds(0).halfW` at scroll 1; LIFT tiles show `tumble`
+  rotation magnitude in the measured 55-86° range at scroll ~0.45.
+- The `&stage.camera.bounds(z)` facet is exercised by a SECOND consumer beyond zellijist
+  (e.g. the sneaker exploded-parts pressure-test scene) before being declared stable —
+  proving it's general, not zellijist-shaped.
+- Net deletion of project-local special-cases across every 3D project that needed
+  hand-derived frustum bounds or ad-hoc pose lerp/slerp code.
+
+* Provenance
+
+Filed from the zellijist-2 build (FEAT-146) postmortem, at the user's explicit request to
+treat the failure as a SYNTAX-DESIGN input, not just a bug-by-bug fix — same treatment
+FEAT-142 gave the "text on peaks" 2D-scroll-thing symptom. Builds directly on FEAT-142's
+entity/facet law (extends it to a second consumer + first parametric facet) and the
+existing `keyframes`/`apply-animations` machinery (extends it to a 3D value-kind, not a
+new subsystem). Companion follow-up: FUP-102 (stdlib/3d gaps 1/2/3/4 surfaced by
+zellijist) — this proposal specifically targets gap 3 (per-object scroll keyframes) plus
+the newly-observed "typed pose" need; gaps 1/2/4 (extrude geometry, multi-material,
+shadow control) are unrelated and remain separately tracked there. Related compiler
+defect: BUG-145 (named-arg binding order) — a hard prerequisite, see R1.
+
+* DELIVERED [2026-07-04] — see PLAN-062 for the full build-wave record.
+
+Shipped: BUG-145 fix (prerequisite), `ctx.bounds(z)` (Wave 1),
+`window.__stPose` shared pose-interpolation module (Wave 2), `@pose-track`
++ `objectIndex` (Wave 3+5 combined finding), zellijist-2 migration (Wave 4),
+`demos/3d/exploded-parts` second-consumer proof (Wave 5). 7 bugs found and
+fixed across the build (BUG-145, tilted-camera frustum, non-unit quaternion
+x2, LIFT RNG draw-order, multi-object binding), 2 more filed as genuine
+out-of-scope infra gaps (BUG-149 compiler, BUG-150 CDP test infra), 2
+follow-ups filed for deferred author-sugar (FUP-105, FUP-106). Every wave
+gated by an independent reviewer swarm before advancing.

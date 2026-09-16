@@ -1,0 +1,198 @@
+#+TITLE: The function-call validator has never run on a real file
+#+STATE: DONE
+#+PRIORITY: #B
+#+CUSTOM_ID: BUG-367-function-call-validator-never-runs
+
+* Summary
+
+`src/validator/functions.rs::validate_function_calls` walks `ast.presets` and
+nothing else. Measured this session: `ast.presets` is EMPTY for every `.st` file
+in the corpus, including files that plainly contain `@preset` blocks. So the
+arity check, the unknown-function check and the "did you mean?" suggestions have
+never fired on any real source.
+
+* Measurement (tests/probe_val.rs, since deleted)
+
+  files containing @preset/@easing/@animation text : 4+ (examples, stdlib)
+  of those, parsed ok                              : 4
+  TOTAL PresetDef produced                          : 0
+
+Verbatim from the corpus, `examples/data-binding/styles.st:226`:
+
+    @preset quick-reveal {
+        opacity: 0 -> 1;
+        translate-y: 40px -> 0;
+        duration: 600ms;
+        easing: --ease-out;
+    }
+
+`spacetime::parse` on that whole file yields `presets=0`, `diags=0`.
+
+* Where it breaks
+
+`src/parser/mod.rs:1199` routes `"preset" | "easing" | "scroll" | "animation"`
+to `convert_cst_directive_to_preset`, and pushes only when it returns `Some`.
+The function returns `None` here \u2014 that is the thing to find. Candidates, in the
+order worth checking:
+
+  1. `directive.body()` is `None` for a `@preset` with a `{ ... }` block, so the
+     `PresetValue::AnimationBlock` arm at `src/parser/mod.rs:4081` is never
+     reached (the CST may hang the body elsewhere for this directive shape).
+  2. `name.is_empty()` returns `None` early (`:4061`) because the name is being
+     read from a part of the directive that is empty for this spelling.
+  3. Presets are consumed by the METASYSTEM instead (`%preset` in the registry,
+     `src/metasystem/registry.rs:183` holds a separate `presets` map) and the
+     parser-level `PresetDef` is vestigial \u2014 in which case the answer is to
+     DELETE `src/validator/functions.rs` rather than fix it.
+
+Determine which before writing any code. If (3), this is not a bug but a
+deletion, and the arity/name checks should either move to the live surface or go
+away with it.
+
+* Why it matters
+
+Beyond the dead checks: it is the reason FEAT-109 W4 (argument TYPE checking)
+cannot land where it was planned. Type-checking arguments inside a validator
+that never runs would produce a gate incapable of failing \u2014 exactly the
+BUG-252 trap. Type checking must attach to whatever surface actually carries
+function calls today.
+
+* Reproduce
+
+    let src = std::fs::read_to_string("examples/data-binding/styles.st").unwrap();
+    let ast = spacetime::parse(&src).unwrap();
+    assert_eq!(ast.presets.len(), 0);   // passes today; should be 2
+
+* Relations
+
+- Blocks FEAT-109 W4 as originally planned.
+- `src/validator/mod.rs:27` `validate()` is called from `main.rs`, `cli/doctor.rs`
+  and `analysis/diagnostics.rs`, so the entry point IS live \u2014 only its walk is
+  empty.
+
+* 2026-08-11 — RESOLVED. It was candidate (3), and worse.
+
+** Which candidate it was
+
+Candidate (3): the parser-level `PresetDef` is vestigial. `@preset` is RETIRED
+(SIP-001c / BUG-263) and the retirement is COMPLETE — measured, every spelling
+produces nothing:
+
+    tilde (RETIRED)  @preset easing ~smooth: ...     -> PARSE ERROR (correct)
+    amp inline       @preset duration &quick: 200ms; -> presets=0 diags=0
+    amp block        @preset animation &fade { ... } -> presets=0 diags=0
+    bare block       @preset quick-reveal { ... }    -> presets=0 diags=0
+    scroll amp       @preset scroll &through: (...)  -> presets=0 diags=0
+    examples/data-binding/styles.st (2 @preset blocks) -> presets=0 diags=0
+
+So the answer was DELETE, exactly as the item predicted. The named work is now
+`@form style --name` + `--name;` splices, which DOES validate: an undeclared
+splice is E0947, verified live through the CLI.
+
+** The worse finding, which the item did not predict
+
+`src/validator/functions.rs` matched on `Value::FunctionCall(name, args)`.
+Measured: **`Value::FunctionCall` is NEVER CONSTRUCTED ANYWHERE in the
+codebase** — four mentions total, all of them the enum declaration or a
+`match` arm. So the walk was dead TWICE: an always-empty list, iterated for a
+variant nothing ever builds. Even had `ast.presets` been populated, not one
+check could have fired.
+
+Third layer, and this one was mine: FEAT-109 W4's `check_param_types` in
+`src/metasystem/validate.rs` had NO CALLER outside its own unit test — the
+exact defect this bug is about, reproduced by the fix for it. A gate that calls
+the checker directly cannot tell "checks correctly" from "checks correctly and
+never runs".
+
+Fourth: `src/metasystem/validate.rs::validate_scope_form_matches` is also
+uncalled (only re-exported). Left in place — out of scope here, noted for
+whoever touches that module next.
+
+** Why reviving the checks was NOT the answer (measured)
+
+    corpus: 954 .st files, 25,160 declaration lines
+    calls whose name the registry KNOWS   :   780
+    calls whose name it does NOT know     : 5,915  (132 distinct names)
+      var 4187 · clamp 459 · calc 209 · translateY 158 · repeat 94
+      linear-gradient 69 · cubic-bezier 66 · minmax 65 · blur 60 ...
+
+Turning E150 on would emit **5,915 false "unknown function" warnings** on a
+corpus that compiles and works. The arity half is no better: **189 of 1,200**
+calls to registry-known names would warn, almost all in JS-space
+(`Math.random()`, `Date.now()`, `arr.slice()`) or from `oklch(0.9 0 0)` —
+space-separated CSS syntax the comma-counting arity check cannot read.
+
+** And the registry was stale where it overlapped stdlib
+
+Every one of the 5 functions declared in BOTH `src/functions/builtins.rs` and a
+stdlib `%primitive` DISAGREED about its own arity:
+
+    noise      RUST 2..2  STDLIB 0..2   parallax  RUST 1..2  STDLIB 0..2
+    random     RUST 2..2  STDLIB 0..3   wave      RUST 1..4  STDLIB 0..4
+
+The remaining 6 (`rgb`, `rgba`, `hsl`, `hsla`, `oklch`, `oklcha`, `velocity`)
+have no `%primitive` at all — they are CSS colour functions, and the GRAMMAR
+already owns them (FEAT-109 W1 taught `color_fn_name` about `color-mix`,
+`light-dark`, `device-cmyk` there). A second Rust spelling of a stdlib
+declaration is the hand-synced-list defect this arc exists to delete.
+
+** What shipped
+
+DELETED (dead, provably unreachable):
+  - src/validator/           (mod.rs, functions.rs, tests.rs)
+  - src/functions/           (mod.rs, registry.rs, builtins.rs, tests.rs)
+  - 3 live call sites of `validate()` (main.rs, cli/doctor.rs,
+    analysis/diagnostics.rs) that ran a walk over an always-empty list
+  - metasystem::validate::check_param_types + tests/tier3_arg_type_check_test.rs
+    (the uncalled W4 duplicate; `pub mod validate` reverted to private)
+  - net -1,183 lines
+
+ADDED, on the surface that genuinely runs:
+  - `src/pipeline/drivers.rs::declared_param_type` — the TYPE half of the
+    registry read `declared_primitive_params` already does for the NAME
+    (BUG-352). Deliberately adjacent: same question, same declaration, and
+    splitting them is how the type half ended up somewhere that never ran.
+  - `param_type_error` — E173, wired into the same argument loop, one step
+    after the name check.
+
+    error[E173]: argument `duration` of driver `time` is declared `number`,
+                 but `#FF0020` is a color
+      = hint: pass a number value, or change the parameter's declared type
+
+** Gates (tests/bug367_param_type_check_test.rs, 12)
+
+Written RED-first, and asserted through `collect_document_diagnostics` — the
+same path `cargo run -- check` uses — never by calling the checker directly.
+That choice IS the fix for the class of bug this item is about.
+
+  3 keystone   the refusal fires, names param/expected/found, and is
+               registry-general (verified across `time`, `loop`, `hover`)
+  6 silence    correct args · references · string params · duration literal in
+               a numeric time slot · unmodelled values · THE WHOLE SHIPPED
+               CORPUS
+  3 dead-layer @preset produces no defs (pinned so nobody "fixes" the walk) ·
+               `~name` still fails loudly · unknown directives still reported
+
+Mutation-proved twice:
+  - disable the call            -> exactly the 3 keystone gates fail
+  - drop the duration exemption -> the CORPUS gate fails, with 16 false
+    refusals across examples/tutorial/tutorial.st and two others. That is the
+    stagger lesson at the call site: `duration: number = 1000` is declared
+    numeric and authors write `600ms`; both mean the same milliseconds.
+
+** Verification
+
+  lib 3203/0 (3214 − the 11 tests that lived in the deleted src/functions/tests.rs)
+  integration 217/0
+  corpus check: examples 12, demos 8, tests/fixtures 6 — byte-identical to a
+  clean-HEAD worktree measured the same way
+
+Isolated in `git worktree /tmp/verse-iso` throughout, because a concurrent
+agent holds uncommitted edits in `src/edn/read.rs` (which does not currently
+compile). Its failures are not attributable to this diff, and it is excluded
+from the commit.
+
+** Follow-up left open
+
+`validate_scope_form_matches` is uncalled (re-exported only). Same class,
+different module; not fixed here to keep this change reviewable.

@@ -1,0 +1,181 @@
+#+TITLE: A :string/:color-typed macro param silently fails to bind at all when passed a $signal (not just non-reactive — never matches)
+#+STATE: DONE
+#+SESSION_ID: 15251010f7982b56
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-06T10-48-12-510Z_15251010f7982b56.jsonl]]
+#+CUSTOM_ID: BUG-159-a-string-color-typed-macro-param-silentl
+
+* Initial Message
+
+push the capabilities of the 3d module + the workbench mcp through a concrete idea of a user interface that talks directly to this very agent using the mcp tools. This is a pressure test against both the host apis and the 3d apis. Design the 3d mockups using generate_image and then implement whatever surfaces you need using the blender mcp. commit as you go
+
+* Found via
+FEAT-153 investigation (stdlib/3d param reactivity). Before even reaching
+"is it reactive", discovered `@gltf(src: $modelPath, ...)` and
+`@object(color: $liveColor)` don't bind AT ALL when the param is a signal
+reference — no compile error, no diagnostic, the whole directive is silently
+dropped (its `%binds` primitive never invoked, its `%exports` signals never
+appear in the compile report). Confirmed this is CROSS-MODULE, not
+3D-specific: `@cursor(color: $liveColor)` (stdlib/macros/cursor.st, a
+`:string`-typed param, nothing to do with 3D) exhibits the identical silent
+drop.
+
+* Repro (isolated, --verbose compile report makes the absence visible)
+#+begin_src
+@import "stdlib/3d";
+<canvas class="stage"></canvas>
+canvas.stage {
+  @stage {
+    @light(type: "ambient", intensity: 1)
+    @gltf(src: "/models/a.glb", size: 2)   // literal -> $loaded/$progress/$error ALL present
+  }
+}
+#+end_src
+vs
+#+begin_src
+@import "stdlib/3d";
+@data inline $modelPath : "/models/a.glb";
+<canvas class="stage"></canvas>
+canvas.stage {
+  @stage {
+    @light(type: "ambient", intensity: 1)
+    @gltf(src: $modelPath, size: 2)         // signal -> NO $loaded/$progress/$error at all
+  }
+}
+#+end_src
+`cargo run -- check <file> -v`'s "Signals:" section shows `$loaded`/
+`$progress`/`$error` (from `@gltf`) present in the FIRST case, absent
+entirely in the SECOND — the macro never bound, not "bound but static."
+Same shape confirmed independently with `@object(color: $liveColor)`
+(`$added` missing) and `@cursor(color: $liveColor)` (its own progress-style
+exports missing) — three unrelated modules, same failure.
+
+* Root cause (traced to source, not guessed)
+`src/syntax/events/extractors/simple.rs::StringExtractor` (backing
+`CaptureType::String`, i.e. every `$x:string` param declaration) only
+accepts a `SyntaxKind::STRING` token OR a bare `SyntaxKind::IDENT`/keyword
+token (FUP-079's enum-ish bare-identifier rule, e.g. `tone: aces`). It never
+accepts a `SyntaxKind::DOLLAR` token (a `$signal` reference) — so
+`src: $modelPath` fails to extract, the whole named-arg fails to parse
+against the `%form`'s pattern, the form match fails, and (since there is no
+alternate/fallback `%form` for most of these macros) the directive is
+DROPPED with no diagnostic at all. This is NOT specific to `@gltf`/`@object`
+— it's the universal behavior of `CaptureType::String`, so it silently
+affects EVERY macro param typed `:string` (or `:color`, likely the same
+extractor family) across the entire stdlib whenever an author reasonably
+tries to bind it to reactive state.
+
+Contrast: `CaptureType::Expr` (`ExprExtractor`) DOES accept a `$name` token
+(it's the generic "any expression" capture, used by `@each`'s source,
+`@data derive`'s value, filter expressions, etc.) — and once captured as
+`Expr`, `captured_to_js`/`captured_to_js_with_registry`
+(`src/pipeline/expand.rs`) emit the raw expression text unchanged (relying on
+the SAME `$sig` -> `SpacetimeLocal['sig']` rewrite `derived-signal.st` does
+its OWN copy of, in JS, at runtime -- NOT at Rust compile time for a bare
+`Expr` capture). This needs a closer look before the fix ships: simply
+retyping `src: $src:string` to `src: $src:expr` would fix the FORM-MATCH gap,
+but the EMITTED JS for a raw `Expr` capture is the captured text VERBATIM
+(`e.clone()`) with NO signal-name rewrite applied at the Rust layer — so
+`%src` would emit literally `$modelPath` (invalid JS, `$` is not a magic
+sigil in emitted output) unless something downstream ALSO rewrites `$name` ->
+a real JS reference for a primitive's raw `%emit js` block (need to verify
+whether `%emit js` param substitution has its OWN `$sig`-rewrite pass separate
+from `derived-signal.st`'s hand-rolled one, or whether primitives are simply
+never meant to receive a live signal through a typed param at all today).
+
+* Investigate before fixing (this is the real design question)
+1. Does `%emit js`'s param substitution (the `%src` -> JS token replacement
+   inside a `%primitive`'s body) have ANY existing mechanism to rewrite a
+   captured `$name` into a live signal read (`SpacetimeLocal['name']` or
+   `ST.resolve(el, 'name')`), for ANY capture type? Search
+   `src/emit/js_emit.rs` / wherever `%param` substitution actually happens
+   (not just `captured_to_js`, which produces the STATIC-time JS text baked
+   at compile time — a primitive's `%emit js` may have a SEPARATE runtime
+   parameter-binding layer that already handles this for SOME primitives,
+   e.g. ones using `&self` + `ST.watchScoped`).
+2. If no such mechanism exists ANYWHERE, this is actually the SAME
+   observation as FEAT-153 restated at the correct layer: primitives
+   fundamentally don't support reactive typed params at all yet — not a
+   parser bug, a MISSING primitive-layer capability. In that case this
+   ticket and FEAT-153 should MERGE into one FEAT (the elegant fix is a
+   single mechanism: typed params gain optional reactivity via the metasystem,
+   not two independent patches).
+3. If SOME primitives DO support this (grep for a working precedent — e.g.
+   does `@class` / `text:` binding's underlying primitive receive its bound
+   expression as a raw signal read?), then the fix is narrower: extend
+   `:string`/`:color` capture types to ALSO accept a `$binding` token (mirror
+   `StringExtractor`'s existing bare-IDENT acceptance, adding a DOLLAR
+   branch), route it through the SAME rewrite path already used for whatever
+   binding surface currently works, and this is a small, well-scoped parser
+   fix.
+
+* Acceptance
+- Resolve the investigation above FIRST (a `plan`-mode or `oracle` pass, not
+  more guessing) — this determines whether the fix is a small parser
+  extension or a new primitive-layer reactivity mechanism.
+- Whichever fix: `@gltf(src: $modelPath, ...)`, `@object(color: $liveColor)`,
+  and `@cursor(color: $liveColor)` must all show their FULL yielded signal
+  set in `cargo run -- check -v`'s report (proving the macro bound), and (per
+  FEAT-153) the underlying THREE.js state should update when the referenced
+  signal changes.
+- No new sigil, no per-capture-type special case in the extractor unless
+  unavoidable — reuse whatever binding-read mechanism the working precedent
+  (if one exists) already established.
+
+* Fixed (2026-07-06), investigation resolved
+Resolved the investigation questions this ticket posed:
+
+1. YES, an existing mechanism for reactive typed params already exists and is
+   TESTED: `ctx.param_types` (populated from the `%primitive`'s OWN declared
+   param type, `src/emit/metasystem_codegen.rs`) drives `Marker::Param`
+   resolution (`src/emit/js.rs::resolve_marker`) — a param whose PRIMITIVE
+   type is `expr` gets its captured text PARSED AS JS (handling a bare
+   `$sig`/`$sig.field` reference via the runtime's own resolution, NOT a
+   Rust-compile-time rewrite), while a `string`-typed param quotes it as a
+   literal regardless of a `$` prefix. `resolve_expr_param_resolves_dollar_var_as_signal`
+   (src/emit/js.rs test) already pins this exact contract.
+2. The GENUINE gap was narrower than first framed: the FORM MATCH itself
+   never reached the primitive at all, because the MACRO's OWN capture type
+   (`@gltf`'s `%form { src: $src:string }`) used `:string`
+   (`StringExtractor`, which only accepts a `STRING`/bare-`IDENT` token, never
+   `DOLLAR`) — so `src: $modelPath` failed to PARSE the whole directive,
+   silently dropping it before the primitive-param-type question was ever
+   reached. Fix: change the MACRO-level capture type from `:string` to
+   `:expr` (`ExprExtractor` accepts both a literal AND a `$`-prefixed
+   reference, capturing either as raw text) — NOT the primitive's declared
+   param type, which for `@gltf`'s `src` correctly STAYS `string` (mirroring
+   `derived-signal.st`'s established `expr: string` pattern: the primitive
+   receives the raw text, either a literal path or `"$modelPath"`, and
+   resolves `$`-prefixed values itself at runtime via the new shared
+   `ctx.resolveReactive` — see FEAT-153).
+3. Merge decision: did NOT merge with FEAT-153 — they compose but are
+   genuinely separable. This ticket = "the macro form can capture a $signal
+   at all" (parser-level, one macro capture-type change per param that needs
+   it). FEAT-153 = "the primitive re-runs / hot-swaps when that signal
+   changes" (the NEW three-stage.st `resolveReactive` runtime mechanism).
+   Both landed together for `@gltf`'s `src` since one motivated the other,
+   but a future macro needing signal-acceptance WITHOUT hot-swap reactivity
+   (e.g. a param that's read once but should just ACCEPT a $ref without
+   erroring) only needs this ticket's fix.
+
+Verified: `@gltf(src: $modelPath, ...)` now binds correctly (confirmed via
+`cargo run -- check -v`'s compile report showing `$loaded`/`$progress`/
+`$error` present) AND resolves the signal's live value at runtime (verified
+in a real browser: model loads from the signal-referenced path). Literal
+`@gltf(src: "/models/a.glb")` unaffected (regression-tested).
+
+Regression tests: `src/compiler.rs::three_gltf_literal_src_emits_quoted_url`
++ `::three_gltf_signal_src_binds_and_carries_raw_reference` (Rust snapshot
+tests, mirroring the existing `three_*_emits_*` convention). Full suite
+green (see FEAT-153's record for exact counts — landed in the same commit).
+
+* Follow-up scope note
+`@object`'s `color`/`emissive` params have a DEEPER version of this same
+gap (a compile-time `.rgba` field accessor that needs a literal hex/named
+color at compile time, incompatible with a runtime signal value without
+further design) — explicitly deferred, NOT silently dropped. `@object`'s
+`roughness`/`metalness` (plain numbers, same `:number`-capture-type gap)
+are straightforward candidates for the identical fix but were left for a
+follow-up pass to keep this session's scope to the concrete `@gltf` need
+FEAT-151 surfaced, per the elegance-bar discipline (ship the proven
+mechanism for the case that needed it, don't scope-creep the same session
+into every applicable macro).

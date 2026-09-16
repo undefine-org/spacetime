@@ -1,0 +1,527 @@
+#+TITLE: Native CSS value types — executable-grammar types, kernel lexer, one scalar table
+#+STATE: DOING
+#+SESSION_ID: 153f5ed0617636c7
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-26T21-12-46-213Z_153f5ed0617636c7.jsonl]]
+#+CUSTOM_ID: PLAN-122-native-css-value-types-executable-gramma
+
+* Initial Message
+
+@data inline $brand Brand : {
+  "ink":    "#e8eef7",
+  "bg":     "#0b0e14",
+  "panel":  "#121722",
+  "accent": "#5eead4",
+  "dim":    "#8b96a8",
+  "rule":   "#222b3a"
+};
+
+Could we have this be written like { ink: #e8eef7; ... } instead of that? Basically, if I define a field to be color, then I can use CSS, and basically if ther's a serialised data, it's the string (or it's the Js repr of it? let me know what the representations should look like). This is part of a wider effort to support all CSS value types more natively in Spacetime (tell me what that would mean that I didn't see yet)
+
+* Initial Message
+
+Design arc from 2026-07-26 session: the user wants `@data inline $brand Brand : { ink: #e8eef7; ... }` — CSS-native values in typed data seeds — and asked what "supporting all CSS value types natively" means, whether %capture_type can absorb it, whether the lexer's domain tier could be .st-expressed, and a full pressure-test of the approach. This PLAN records the resulting design. FEAT sub-items W0–W4 to be linked below.
+
+* Goal
+
+CSS values become citizens of the language — parsed, typed, folded, fuzzed, edited by the same grammar that defines them — while serializing to the plain strings the browser wants. `@type` declarations become EXECUTABLE: a type is the grammar for its own literals. The lexer's domain tier (COLOR regex, unit merge, value-position promotion) dissolves into .st capture grammars over a frozen universal kernel lexer. One stdlib scalar-type table drives parser + JSON-schema + admin widgets.
+
+* The five decisions (settled in design; do not relitigate without new evidence)
+
+1. REPR = STRING, everywhere. `#e8eef7` → `"#e8eef7"`, `8px` → `"8px"`, `600ms` → `"600ms"`. Reasons: (a) runtime consumer is style.setProperty which needs CSS strings; (b) EditAst structural editing (cms-testbed Brand pane) rewrites literals in place — source↔runtime 1:1, no normalization drift; (c) JSON-schema mapping already string+format (src/type_system.rs:791-804); (d) color algebra (FEAT-108 darken/mix/alpha) already parses from string at compute time (src/color/mod.rs). NOT {r,g,b} objects. No compile-time unit normalization. Duration: string in storage; ms-conversion at the animation boundary ONLY (settles BUG-138/FUP-099 by decision, then by fix).
+2. VALIDATION-BY-CONSTRUCTION. A typed seed parses only if each field matches its capture type → the orphan standalone validator (E0501/E0502/E0503, src/type_system.rs:1023-1098, zero callers from @data inline) is DELETED for the inline path; kept (registry-derived) for fetch/file/subscribe runtime JSON. Type mismatches become parse errors with spans (kills the BUG-159 silent-non-binding class).
+3. THREE-TIER CSS HONESTY. (a) Native leaf: color/length/percentage/angle/time/resolution/flex/number/integer/ratio/keyword-sets — full %capture_type grammars. (b) Dynamic-recognized: calc()/min/max/clamp, var()/env()/attr(), gradients/image-set/paint, color-mix()/light-dark()/color(), filter lists, basic-shape — balanced-args production tagged `dynamic`; lightningcss validates; editor widgets degrade. (c) Deferred: property-contextual grammars (width: length|%|auto), grid template sublanguage. Capture layer RECOGNIZES and spans; a separate evaluator (future) evaluates.
+4. SHORTHANDS DECOMPOSE INTO RECORDS. font/transition/border/background shorthands get NO field types — a nested @type (e.g. Motion { duration; easing; delay? }) is strictly better for widgets and spans. Exception: box/text-shadow is a VALUE (comma-list, positional optionality) → needs a real grammar (expressible in PEG).
+5. ONE %scalar_type TABLE, THREE CONSUMERS. stdlib declares each scalar {capture, schema, widget, repr}; validator, JSON-schema gen, and admin widgets (FEAT-107) read the same entry. Deletes the TypeExpr::Primitive string-match (src/type_system.rs:1002-1013) and the CaptureType::{Color,Length,Time,Duration,Easing} Rust arms + their extractors (src/syntax/events/extractors/simple.rs:150-172, 426-474; form_compiler.rs:1935-1988). Kinds-as-data per AGENTS.md corollary.
+
+* Mechanism chain (each wave deletes more than it adds)
+
+W0 pattern terminal → W1 CSS scalars as %capture_type → W2 typeref-directed record capture (typed seeds) → W3 kernel-lexer cutover → W4 %scalar_type consumers. Wave details + acceptance live in the linked FEAT items.
+
+* Pressure-test cracks (C1–C9) and dispositions
+
+- C1 balanced scanning is NOT string-aware ("a;b", "}" inside strings corrupt captures) — live class: BUG-225, BUG-040, BUG-041. W0 BLOCKER, fix with the pattern terminal.
+- C2 kernel <number> completeness unverified (sign, .5, e-notation) — W0 audit before any cutover; golden baseline must not enshrine wrong tokenization.
+- C3 url() unquoted interior is not kernel-tokenizable (data: URIs) — rule: quoted urls in typed seeds + lint; documented limitation.
+- C4 seed values aren't only literals (refs/pipes) — v1 boundary: typed record seeds accept literals + bare $refs (type-checked via registry; PLAN-117 addressing helps); expressions stay on the untyped $value:expr surface. Rule: typeref present ⇒ record literal.
+- C5 record semantics: extra field = error + did-you-mean; missing required = E0501; optional via existing optmark; defaults via new @type field syntax `radius: length = 8px;` (mirrors param_list `= default`).
+- C6 arrays recurse with element-type context: `palette: color[]` → `[#fff, #000]`.
+- C7 unit-bag fossils: current global merge list (src/syntax/cst/lexer.rs:252-264) includes `m` — CSS has no `m`; Spacetime-ism or bug. W0 audit: grep fixtures for bare-`m` durations before %unit_set time { s ms us fps } is frozen.
+- C8 pattern terminal must be REGULAR-ONLY (char classes + counted reps + literals; no backrefs) → linear time; stdlib authors cannot write catastrophic-backtracking lexers.
+- C9 field_type ⊋ CSS: richtext/date/slug/media/relation ride the same machinery — the stdlib table is the LANGUAGE's scalar table, not a CSS table. Case-fold: CSS units/functions/keywords are ASCII case-insensitive → keyword sets + patterns carry a case-fold flag.
+
+* Grammar/surface notes
+
+- Typed record seed shape `{ ink: #e8eef7; radius: 8px }` IS the existing properties %capture_type (stdlib/capture-types/properties.st) with `$value:balanced(';')` upgraded to per-field typed leaves. `:` = value, `;` = declaration terminator — harmony preserved; learnable as "a typed record literal reads like a style block."
+- Selector ambiguity (`#fff` in `.a #fff {}`) disappears STRUCTURALLY: the selector grammar has no color leaf; the value-position promotion pass (lexer.rs:405-420) is deleted, not replicated.
+- %char_class / %unit_set / %capture_type bodies parse under kernel-only tokens — bootstrap honesty test: stdlib must parse with the frozen kernel.
+
+* What this makes possible (novelty record, from design discussion)
+
+1. Widget↔parser round-trip by construction: the %scalar_type entry generates BOTH the grammar and the EditAst color picker — admin output cannot fail to parse. No token pipeline needed; the .st file is program + database + admin-editable document.
+2. Inversion of CSS's silent-failure contract: `#e8ef` becomes a spanned compile error ("expected 3/4/6/8 hex digits") instead of a browser-silent dropped declaration — including the reactive path ($brand.ink → setProperty), today silently dead on bad values.
+3. Compile-time token algebra: typed literal seeds + FEAT-108 derives ⇒ constant folding (darken($brand.scarlet,0.12) folds at compile); animation endpoints check interpolability at compile (BUG-202 class becomes compile error).
+4. Type-directed fuzzing from the grammar (GENERATIVE.md @property/@fuzz): valid colors + near-miss negatives generated from the same registry entry.
+5. Language extension with UI consequences: a project's `%scalar_type currency` immediately gets parsing + spanned errors + fetch validation + admin form field, zero Rust.
+6. Self-describing docs: value-type reference rendered FROM the grammar (FEAT-084 gallery) cannot drift.
+
+* Relations
+
+- Supersedes PLAN-120's framing FOR TYPED SEEDS: BUG-228 dies by deletion on the typed-seed surface (W2 bypasses the bespoke seed-expr parser). PLAN-120 remains the fallback fix for UNTYPED expr seeds (@data inline without typeref, @data fetch/derive/subscribe seeds).
+- FEAT-109 (implicit type inference): this plan is the substrate for its Tier-4 north star (self-describing literal shapes = W1). CONFLICT TO RESOLVE at W3: FEAT-109 Tier 1 infers from lexer token kinds (Color/NUMBER_WITH_UNIT) which W3 dissolves — inference must migrate to reading grammar/capture results instead. FEAT-109 Tier 0 (unify 4 shadow classifiers: sync/protocol.rs classify_value, lsp/colors.rs, analysis/visual_lint.rs, compiler capture) is absorbed into W4's single registry-read classifier.
+- Duration repr decision (string; ms at boundary) is the fix-of-record for BUG-138 and FUP-099.
+- BUG-192 (oklch drift), BUG-159 (silent :color param non-binding), BUG-202 (ST.lerpColor missing) — die or convert to compile errors under W1/W2.
+- PLAN-117 (registry addressing /$ leaf-sigil) supports $ref type-checking in seeds (C4).
+
+* Acceptance (whole-plan)
+
+- cms-testbed Brand seed rewritten `{ scarlet: #FF0020; ink: #0a0a0a; surface: #ffffff; radius: 8px; reveal: 600ms }` compiles to BYTE-IDENTICAL emitted JS.
+- `radius: red` in a typed seed → parse error pointing at the field; `{ accnet: … }` → unknown-field error with did-you-mean.
+- CaptureType enum contains only engine terminals; TypeExpr::Primitive string-match deleted; lexer tier-2 (COLOR regex, unit merge, promotion) deleted.
+- Golden token-stream parity harness passed and deleted; full suites green at every wave gate (cargo test --lib · --test integration_tests · --test v8_runtime_test · headless tests/).
+
+* Waves → FEATs (blocked in order)
+
+- W0 = FEAT-164 — PEG pattern terminal + string-aware scanning (+ number audit C2, unit-fossil audit C7). Adopts BUG-225/040/041 as regression tests.
+- W1 = FEAT-165 — CSS scalars as stdlib %capture_type (color/length/duration/angle/easing + css_wide + dynamic production). Deletes 5 CaptureType arms + Rust extractors. Fixes BUG-138/FUP-099/BUG-192. Blocked by FEAT-164.
+- W2 = FEAT-166 — typeref-directed record capture: the user-facing typed-seed feature. Kills BUG-228 (typed surface) + BUG-159 class. Blocked by FEAT-165.
+- W3 = FEAT-167 — kernel lexer cutover with golden parity (P0–P4). Blocked by FEAT-165; reconcile with FEAT-109 Tier 1 before P2.
+- W4 = FEAT-168 — %scalar_type single source (validator/schema/widgets). Deletes TypeExpr::Primitive match. Absorbs FEAT-109 Tier 0. Blocked by FEAT-165.
+
+Deferred (file as follow-ups when W2 lands): calc() unit algebra · property-contextual grammars (width: length|%|auto) · grid-template + basic-shape native grammars · gradient/shadow editor widgets · richtext multiline seed form.
+
+* RELEVANCE REASSESSMENT (2026-07-31, +176 commits since design)
+
+Re-verified against HEAD a4475e66. Three facts moved; the thesis got STRONGER, not weaker.
+
+** Corrections to the design record (stale facts — cite these instead)
+
+1. "E0501-3 validator has ZERO callers" is NO LONGER TRUE. PLAN-119 Wave A/W2
+   wired it: `AnalysisContext::validate_data_source_files` (src/analysis/mod.rs:1035,
+   called from main.rs) now validates @data source FILES against @type via
+   `validate_json_against_schema`. W4's framing updates: the validator is not an
+   orphan to delete — it is a LIVE consumer whose schema input must come from
+   %scalar_type. The delete-target narrows to the hand-written primitive match
+   (type_system.rs `"color" => json!({type:"string", format:"color"})`), which is
+   now demonstrably a THREE-way hand-sync (schema map · zero_value map · widget map).
+2. BUG-225 resolved (both items of that number), BUG-138 DONE, BUG-192 DONE.
+   FEAT-164 must re-source its RED gates: the live string-awareness repros are
+   BUG-040 (%emit js body capture breaks on JS regex char-classes containing
+   quotes) and BUG-041 (backtick inside regex char class breaks stdlib parse) —
+   both still ITEM, both exactly the "delimiter scan is not string-aware" class.
+   BUG-228 still ITEM (unchanged). BUG-202 still ITEM.
+3. PLAN-119 W1 shipped `TypeRegistry::zero_value` — a THIRD per-primitive mapping
+   next to the schema map and the widget map. Same table, third hand-sync site.
+   W4's acceptance should now name three consumers, not two.
+
+** What got MORE relevant (evidence from the intervening work)
+
+A. THE TAX IS NOW MEASURED, NOT PREDICTED. PLAN-121 W1.3 added ONE capture type
+   (`dashed_ident`, commit 05da65fe) and it cost FOURTEEN Rust sites: meta_ast
+   enum arm, parser/mod.rs string→variant, form_compiler (×2), extractors
+   (custom dispatch + mod registry ×2 + simple impl), metasystem/validate,
+   lsp/{completion,hover ×2,form_registry}, treesitter_gen/capture_map (×2).
+   That is the per-type cost W1 exists to abolish — no longer a hypothetical.
+B. STDLIB NOW DEPENDS ON THE SCALARS BY NAME. Uncommitted stdlib/macros/score.st
+   (PLAN-128 W4) writes `%capture_type score_measure { ($len:length) | ($time:duration) }`
+   — a stdlib grammar composing Rust-implemented scalar terminals. The metasystem
+   has begun consuming the very leaves W1 moves into stdlib. If W1 lands, score
+   inherits sign/e-notation/case-fold correctness for free; if it doesn't, `at 2s`
+   parses through the hardcoded unit bag (which still contains the fossil `m`, C7)
+   and PLAN-128's R1 domain check inherits that bag as its vocabulary.
+C. THE HEURISTIC CLASSIFIER ARRIVED — as predicted, in Rust. BUG-250 (commit
+   2b02b7fc) fixed `border: 1px solid $brand.rule;` emitting invalid JS by adding
+   `lower_css_binding_value`, which DISCRIMINATES CSS-template vs JS-expression by
+   heuristic ("strip quoted strings and $ident reads; letters remaining ⇒ CSS
+   template"). That is a FIFTH shadow value-classifier (FEAT-109 named four) and
+   it is a text heuristic standing exactly where a grammar belongs: with W1's
+   typed value grammars, "is this value CSS or an expression" is answered by the
+   parse, not by scanning for letters. Its own bug note is the tell — "no repo
+   usage existed before the launch article; the article exposed it at RUNTIME".
+D. THE ARTICLE MADE VALUE-LAYER BUGS PRODUCTION-CRITICAL. PLAN-119's launch
+   article + PLAN-124/126/128 (@on, signal facets, @score) all lower to CSS values
+   under signals. Every one of them is downstream of "a CSS value is opaque text".
+
+** Amendments to the waves (no re-scoping, three sharpenings)
+
+- FEAT-164: re-source RED gates to BUG-040/041 (BUG-225 is DONE). Add a fourth
+  audit: the `lower_css_binding_value` heuristic's discrimination table becomes a
+  regression corpus for W1's grammar (each case it classifies must classify
+  identically by parse).
+- FEAT-165: add `score_measure` (score.st) as a first CONSUMER-side proof —
+  landing W1 must leave PLAN-128's gates green, and should let score.st delete
+  nothing but inherit correctness. Coordinate: score.st is uncommitted; if it
+  lands first, W1 is a substitution under a live grammar, which is the honest test.
+- FEAT-168: name THREE consumers (schema map · zero_value · widget), not two, and
+  keep the standalone validator LIVE (it gained a real caller) — the deliverable
+  is "its schema input is derived", not "it is deleted".
+- FEAT-167: unchanged, but note the growing consumer surface (score_measure,
+  BUG-250's classifier) makes the P0 golden baseline MORE valuable and the cutover
+  LARGER the longer it waits.
+
+** Standing conflict, now dated
+
+FEAT-109 (still ITEM) Tier 1 infers from lexer token kinds that W3 deletes. Nothing
+has changed to resolve it; the two must be sequenced, and this plan's W1 is the
+substrate for FEAT-109's Tier-4 north star. FEAT-109 named four shadow classifiers;
+BUG-250 makes five.
+
+* WHAT THIS UNLOCKS ACROSS SPACETIME (2026-07-31 — downstream capability map)
+
+Once a CSS value is a TYPED VALUE rather than opaque text, capabilities open that
+are currently blocked for the same single reason. Grouped by which are already
+half-built in the repo (⚑ = a live consumer is waiting on it today).
+
+** ⚑ 1. The timeline editor (@score P4) is blocked on typed literals
+stdlib/macros/score.st states the design intent outright: "the trailing words are
+exactly the surface a timeline editor drags, so dragging a clip's edge rewrites
+`in 4s` to `in 5.2s` in the source. The editor is a second view of the language,
+not a layer over it." That rewrite IS EditAst over a typed literal — the same
+mechanism as the Brand color picker (W2's demo). Without typed measures, a drag
+must regex the source. With them, `at`/`for`/`in`/`out` are structurally editable
+spans. ONE mechanism serves the color picker, the spacing stepper, and the
+timeline scrubber — because all three edit a typed literal in place.
+
+** ⚑ 2. Interpolation dispatched by TYPE, not by primitive name (kills BUG-202)
+BUG-202 is live: animate-color calls ST.lerpColor, which does not exist → TypeError
+on tick. The root shape is that the animation layer learns "this is a color" from
+the primitive's NAME. Give %scalar_type an `interpolate:` column and the runtime
+picks the lerp from the registry: color→oklch-space blend, length→numeric+unit
+check, angle→shortest-arc, integer→stepped, keyword→discrete snap. Adding a new
+animatable type stops meaning "write a new primitive". Compile-time bonus: two
+keyframe endpoints of DIFFERENT types (or a non-interpolable pair) become an
+error at the keyframe, not a snap at runtime — the BUG-192 class by construction.
+
+** 3. Compile-time accessibility + design-system conformance
+Contrast ratio is computable from two typed colors; it is NOT computable from two
+opaque strings. So `@type Brand { ink: color; bg: color }` + a lint yields WCAG
+contrast as a COMPILE ERROR ("ink on bg is 3.1:1, below 4.5:1"). Same shape for
+the rest of the design system, which src/analysis/visual_lint.rs already gestures
+at with its own shadow classifier: off-grid spacing (13px on an 8px scale),
+colors outside the token set, font sizes off the ramp. Design-system violations
+become diagnostics with spans — the thing every other stack needs a linter+config
+for, Spacetime gets from its type table.
+
+** 4. Derived tokens become STATIC CSS (a no-JS win, AGENTS-aligned)
+FEAT-108 derives ($hover : $brand.scarlet | darken(0.12)) currently compute at
+runtime because the input is a string parsed at compute time. With typed literals
+these constant-fold at BUILD: the page emits plain CSS custom properties and ships
+NO JS for token derivation. Pages get smaller and more static — directly serving
+the house rule that a Spacetime site relies on Spacetime, not on shipped script.
+
+** 5. Type-directed generative testing of the whole style layer
+docs/testing/GENERATIVE.md's @property/@fuzz generate + shrink FROM A TYPE. Today
+they cannot generate a color, because `color` has no generator — only a Rust
+extractor. A %capture_type grammar IS a generator (and its near-misses are the
+negative corpus). Result: property tests over every value type, plus shrinking
+that reports the minimal failing literal.
+
+** 6. LSP quality that no CSS tooling gives for free
+With grammars as data, the language server answers value-position questions
+structurally: completion offers exactly the legal units/keywords AT THE CURSOR
+(inside `duration` → s/ms; inside `color` → named colors + functions), hover
+renders the grammar, and the color swatch comes from the same entry that parses.
+src/lsp/colors.rs stops being a private hex scanner (one of the five shadow
+classifiers) and becomes a registry read.
+
+** 7. Build-time asset validation via the same table
+`media`/`url` scalars (C9 — the table is the LANGUAGE's scalar table) can carry a
+build-time check: does the file exist, what are its dimensions, is there a poster
+frame. @score clips (`&broll(src: "city.mp4") in 4s out 9s`) then fail at COMPILE
+for a missing or too-short source instead of rendering a black frame — trim
+bounds are checkable against real media duration.
+
+** 8. THE BOLD ONE — values become RETARGETABLE beyond CSS
+This is the capability that only exists if values are typed. PLAN-128 wants a
+score to render as a FILM, not just drive a page. A renderer (canvas/WebGL/ffmpeg/
+PDF) cannot reliably consume "8px"/"oklch(…)" text, but it can consume a typed
+length or color. Let %scalar_type carry a repr MAP rather than a single string:
+
+    %scalar_type color { capture: color, repr: { css: hex-or-fn, canvas: rgba-tuple,
+                                                 render: linear-float4 } }
+
+and one authored value serves the browser, the canvas compositor, and the film
+render — each backend reading its own column. Same for length (css px · canvas
+device px · render frame-relative). That makes "a website and a video differ only
+in WHICH SIGNAL DRIVES THE TIMELINE" (score.st's stated bet) true at the VALUE
+layer too, which is where it would otherwise break. Nothing else in the repo makes
+non-CSS backends tractable; the value layer is the last text-shaped seam.
+
+** 9. Cross-language seam (spacetime_lv)
+The Elixir side validates payloads against the contract sidecar. Scalars-as-data
+means the seam can share value types (a `color` field arriving from a LiveView is
+checkable server-side by the same declaration) rather than degrading to "string".
+
+** Sequencing implication
+Items 1, 2 and 8 all sit downstream of PLAN-128/@score, which is being built NOW.
+Every week the value layer stays text-shaped, @score accretes more text-shaped
+workarounds that item 8 would later have to unpick.
+
+NOTE [2026-08-02]: WAVE ORDER CORRECTED [2026-07-31, after W0 shipped] — W1 and W3 merge; the stated dependency was circular and the circularity is real.
+
+* The finding
+
+Probed at HEAD (bc2941ee), then removed the probes. In every position where a colour is actually WRITTEN — after a `:`, inside a value function's parens, after a value comma — the lexer emits ONE ATOMIC `COLOR` token. A stdlib grammar `"#" [0-9a-fA-F]{3|4|6|8}` returns None on it: both the literal `"#"` and the counted class fail, because `ExtractResult` returns tokens-CONSUMED (a whole number of tokens) and there is no half-token in the protocol. The W0 terminal scans bytes and crosses token boundaries, but only from a token START; it cannot begin INSIDE one.
+
+Net: the terminal works where nobody writes colours (bare `#e8eef7` at statement level → HASH+IDENT) and fails everywhere they do. Identical shape for `NUMBER_WITH_UNIT` — `8px` is one token, so `$n:number $u:unit(length)` can never match it.
+
+FEAT-165 said "blocked by W0"; FEAT-167 said "blocked by W1 (grammars must own the domains before the lexer stops pre-committing them)". That mutual block is not a stylistic preference — the lexer pre-commits the domain by MERGING, and a merged token is opaque to any grammar. **A grammar cannot own a domain the lexer has already fused.** The demotion of the tier-2 passes and the grammars that replace them are ONE cutover.
+
+Revised sequence (detail on FEAT-165): W1.0 demote behind a flag (default-on old path) → W1.1 golden token baseline, C2 e-notation settled first → W1.2 grammars against demoted tokens → W1.3 flip default, migrate ~13 consumer files, delete merge passes + harness.
+
+REJECTED alternative: sub-token consumption in the extractor protocol (byte offsets instead of token counts). Would avoid touching the lexer, but changes `ExtractResult` for every extractor, keeps domain knowledge in the lexer permanently, and leaves two mechanisms for "what is a colour" — the parallel-implementation failure this arc exists to remove.
+
+* The wave got a user-visible justification it did not have
+
+There is NO hex validation anywhere in the pipeline. Verified end to end: `.probe { color: #e8ee1; background: #zzz; }` passes `cargo run -- check` with ✓ and lands verbatim in the emitted `spacetime.css`. `#e8ee1` is a 5-digit hex (illegal in every CSS spelling); `#zzz` is not hex at all. The browser drops both declarations and the author sees an element rendering wrong with no diagnostic anywhere. lightningcss validates at stylesheet level and misses this path.
+
+So W1 is not a refactor that relocates behaviour — it is the first thing in the system that would ever REJECT a malformed colour. That reframes the arc's pitch: PLAN-122 has been justified as complexity-removal (five Rust arms → data). It also BUYS a diagnostic class that does not exist today. `{3|4|6|8}` makes `#e8ee1` a spanned parse error, and the 4/8-digit alpha forms keep working — which is precisely why the count set is DATA and not a hardcoded "3 or 6".
+
+* Answering the standing ASK — "prioritize FUP-166's repr-map to unblock video rendering?"
+
+Not yet, and the finding above is why. FUP-166 (values retargetable beyond CSS — a `repr` map with css/canvas/render columns) reads its columns off `%scalar_type` entries, which are W4, which reference W1 capture types, which now require the lexer demotion. Prioritizing FUP-166 today means building a table with no rows.
+
+The honest ordering, given that the three ASK options collapse onto one prerequisite:
+
+1. **Expanded grammar scope** (the ASK's third option) — but specifically the W1.0/W1.1 demotion+baseline, NOT more terminals. W0's terminal is already sufficient for every W1 grammar; what blocks is the lexer, not the pattern language. Adding more grammar surface now would add unmatched grammars.
+2. **Pattern-driven validation** (second option) — falls out of (1) at near-zero extra cost, and is the first user-visible win in the whole arc: `#e8ee1` becomes an error instead of a silently broken page. This is the wave's demo.
+3. **Dynamic colour theming** (first option) — needs W1 grammars (colour recognition) plus W4 (`interpolate:`/repr columns). Downstream of both. FUP-160's runtime half already landed with BUG-202, so the live break is fixed; the registry half waits.
+
+∴ the three options are one road, and its first stretch is the demotion. Recommend W1.0+W1.1 as the next executable unit, with the `#e8ee1` diagnostic as its acceptance demo — it proves the machinery on a defect a user can see, rather than on an internal refactor whose success looks like "nothing changed".
+* ARC STATE AT SESSION END (153f5ed0)
+
+** Shipped
+
+| wave           | item     | state                                              |
+|----------------+----------+----------------------------------------------------|
+| W0             | FEAT-164 | DONE (counted repetition, earlier session)         |
+| W1.0/W1.1      | FEAT-165 | DONE (demotion + parity gate, earlier session)     |
+| W1.2 + W3      | FEAT-165/167 | DONE this session — ONE atomic cutover         |
+| W4             | FEAT-168 | DONE this session — %scalar_type single source     |
+| W2             | FEAT-166 | SCOPED, not started (spike backed out, see item)   |
+
+Nine commits: ea4cbdff, f125a65f, f4126fe5, f731c963, 6b94985f, 0f2b292c,
+735c6d5f, 62cea51a, f0099c1c, 24f757db, b2f6f33f, cb3b820a.
+
+** The thesis, measured
+
+Net **-487 lines of Rust** in the tier-2 deletion alone. The CSS value domain
+now lives in `stdlib/capture-types/css-values.st` (what a value IS) and
+`stdlib/scalars/types.st` (what it MEANS), and nowhere else.
+
+FEAT-168's acceptance is a NEGATIVE and it passes: a new `%scalar_type date` row
+lights up recognition, JSON schema, zero value and admin widget with ZERO Rust
+changes. Verified in both directions — deleting the row makes the test fail, so
+it is the only source rather than one of two agreeing sources.
+
+** The five shadow classifiers
+
+Counted at plan time as four; a fifth and sixth surfaced during the work.
+
+1. `lexer.rs:854 is_color_value_position` — DELETED with tier-2, along with the
+   whole dead helper subtree it anchored (9 fns).
+2. `server.rs:7055 infer_token_type` — REROUTED through the grammars, and its
+   candidate list now comes from the table's `%capture` column rather than a
+   hardcoded array (which would have been the same rot one level up).
+3. `form_compiler.rs parse_capture_type_name` — a SECOND copy of the capture-type
+   name table (FUP-151). Migrating one and not the other fails SILENTLY, and this
+   wave walked into exactly that.
+4. `utils.rs parse_time_to_ms` — a SIXTH duration parser knowing only `ms`/`s`.
+   Now delegates to `syntax::conversions`.
+5. `compiler.rs:2227 lower_css_binding_value` — NOT a classifier on inspection; it
+   scans for BINDINGS in CSS values. Wrong seam, left alone.
+6. `lsp/colors.rs:133 parse_hex_color` — deferred to FUP-164 by design: a LIVE
+   feature (colour swatches) that needs rerouting, not deleting.
+
+** What review swarms caught that the suite did not
+
+Eleven defects across three swarms, every one found while tests were green:
+`time` unregistered (69 sites silently accepting anything), scalars reifying to
+records, missing binding arms, `#e8eef7z` accepted, `40 px` accepted, `50%`
+refused (clip_driver 0/4, a suite I had not run), `RGB(...)` refused, `%capture`
+decorative, and BUG-294's `refresh: 5m` emitting a quoted string.
+
+**The pattern: a grammar that accepts every valid value is half a grammar.** The
+wave's gates now live in `tests/css_scalar_acceptance_test.rs` and are mostly
+NEGATIVE. Two were verified to FAIL when their fix is reverted.
+
+** Verified final state
+
+- lib 3062 passed / 10 failed; integration 188 / 15 — the 25 triaged to a
+  concurrent agent (BUG-271 snapshots) and pre-existing SIP-001c failures, by
+  flipping the lexer tier and measuring rather than assuming.
+- v8_runtime 454 / 1 (was 452 / 3 before BUG-294's fix).
+- css_scalar_acceptance 7/7, clip_driver 4/4, lexer 116/116, extractors 101/101.
+- Corpus **20/30** example+demo projects clean, up from 18; `demos/3d` 16 -> 0.
+
+** Filed, not fixed
+
+- FUP-176 — a malformed value in a plain CSS DECLARATION still reaches the
+  stylesheet. Directive args are guarded; declarations need spans threaded
+  through `StatePropertyAst`, which is a subsystem, not a leaf. Includes the
+  source-verified finding that lightningcss CANNOT report it (`Property::parse`
+  deliberately downgrades a failed typed parse to `Ok(Unparsed)`).
+- BUG-285 — nested `%rewrite` resolution inside `@print`/`@reduced-motion`.
+- BUG-294 — FIXED same session.
+- FEAT-166 — scoped from a spike; both its prerequisites landed this session.
+
+** Process note
+
+BUG-294 was caught only because final verification added
+`cargo test --test v8_runtime_test`, which had not been in my per-wave gate set.
+AGENTS lists four suites; running three of them is how a silent regression ships.
+
+* INTEGRATION AUDIT (post-close-out)
+
+Asked: what is left to fully integrate this arc with the rest of the codebase.
+Three gaps found by measurement; two fixed, the rest are the filed items.
+
+** Fixed: the seventh scalar list (2d82722c)
+
+FEAT-168 centralised four Rust maps and shipped a FIFTH consumer un-migrated —
+`wrap_reifier`'s hardcoded `"color" | "length" | "duration" | ...` arm deciding
+which productions flatten to source text. The wave's acceptance passed anyway,
+because it tested type recognition, schema, zero and widget, and never the
+value's SHAPE.
+
+Proven false by probe: a `%scalar_type resolution` added purely as stdlib data
+gave `Named({n: 96.0, u: "dpi"})` where `length` gave `String("8px")`. Now the
+`%capture` column is the join, and the probe flattens correctly with zero Rust.
+
+The gate also caught FOUR MISSING ROWS — `time`, `angle`, `percentage`, `easing`
+had grammars and were in the hardcoded list but had no `%scalar_type` row.
+
+Deadlock note for future work: the predicate reads `STDLIB_REGISTRY`, never
+`cached_stdlib_registry()`. `wrap_reifier` runs while the meta registry loads, so
+the cached accessor re-enters `INCREMENTAL_CACHE`'s mutex and hangs.
+
+** Fixed: the docs asserted the opposite of the truth (33e5c4a8)
+
+`docs/language/capture-types.md` listed `color`/`length`/`time`/`easing` as
+"Primitive Capture Types — Hardcoded in Rust" and closed with "**These must stay
+in Rust**". Split into KERNEL types (which genuinely do) and CSS VALUE types, with
+the `resolution` worked example. Both examples verified by running `check`.
+
+** Verified clean
+
+- Zero hardcoded scalar-name lists remain in LIVE Rust (the two survivors are
+  deliberate TEST gates asserting the names resolve to stdlib).
+- Unknown `%widget` values degrade to a text field in the admin client
+  (`ST.adFieldTemplate`: "anything else falls back"), so a new scalar row cannot
+  break the CMS UI even before a widget template exists for it.
+- `stdlib/scalars` is in `STDLIB_DIRS`; both bootstrap paths (disk + embedded)
+  register scalar captures.
+
+** Remaining, by design
+
+| item | what it is | why not now |
+|------+------------+-------------|
+| FUP-176 | malformed value in a PLAIN CSS declaration still reaches the stylesheet | needs spans threaded through `StatePropertyAst` (a subsystem); lightningcss verified unable to report it |
+| FEAT-166 | CSS-native typed seeds `{ ink: #e8eef7 }` | both prerequisites now landed; needs the record grammar + reifier, not just the brace gate |
+| FUP-164 | value-position LSP; deletes `src/lsp/colors.rs`'s byte-scanner | a LIVE feature needing rerouting, not deletion |
+| FUP-160/166 | interpolation by type; repr map | unlocked, cheap now |
+
+The two shadow classifiers still live (`parse_hex_color`, `infer_token_type`) are
+both FUP-164's scope — `infer_token_type` already reads the table for its
+candidates, so only its hex scanner remains.
+
+* FULL CUTOVER — no deferrals (session 153f5ed0, second half)
+
+The three items previously deferred were all completed. Two of the three
+deferral RATIONALES turned out to be wrong, and both were mine.
+
+** FUP-176 — declaration validation — DONE (5f27f9ac, 960270e1)
+
+Deferred as "needs spans threaded through a subsystem". FALSE: I had measured
+`StatePropertyAst`, which is not the CSS declaration path (4 refs, one file,
+`@state`/`@transition` only). The real path is `CssDeclaration`, which ALREADY
+carries `span: SourceSpan` covering exactly the value's range. A leaf change.
+
+Deferred also as "needs a stdlib property -> type table". CANCELLED, and this is
+the better outcome: lightningcss can be ASKED rather than mirrored — probe
+whether `<property>: <known-good sentinel>` parses cleanly. Complete for every
+property the crate knows, zero rows, improves when the dependency is bumped, and
+no seventh hand-synced list. The user's instinct ("can you ride lightningcss?")
+deleted the largest piece of the plan.
+
+The naive form of this rule flags 45 VALID corpus declarations (`color: inherit`,
+`box-shadow: none`, `text-rendering: optimizeLegibility`), because lightningcss
+reports CSS-wide keywords and its own gaps as `Unparsed`. The rule is therefore
+RELATIVE: a value is wrong only when a sentinel of the same type succeeds on the
+same property. 45 -> 1, and the 1 was a regex misreading a `@type` field.
+
+** FUP-164 — shadow classifiers — DONE (2edbeca4)
+
+`lsp/colors.rs` had THREE hand-written parsers behind a byte scanner; `hsl()`,
+`oklch()`, `color-mix()` and every named colour got no swatch at all.
+`visual_lint.rs` (the SIXTH classifier, found in recon — the original count of
+four was wrong) knew 8 named colours out of 148, and the contrast lint SKIPS a
+colour it cannot read, so pages with unreadable text in the other 140 were never
+linted while the suite stayed green. It also returned `transparent` as opaque
+BLACK — a wrong answer, worse than none.
+
+Both now use the same parser as the declaration validator. The gates were
+verified to FAIL against the old cascade before being kept.
+
+** FEAT-166 — CSS-native typed seeds — DONE (db6de850, f13a9783)
+
+    @data inline $brand Brand : { ink: #e8eef7, radius: 8px, reveal: 600ms };
+
+Byte-identical JS to the quoted form, asserted as an EQUIVALENCE rather than a
+compile — two surfaces that merely both compile are two features that will drift.
+
+The discriminator is POSITION: the `{` follows the COLON that introduces a VALUE,
+and a body never does. The first attempt used `last_was_value_colon` and was
+wrong — `@type Brand { ink: color }` sets that flag from the type's OWN field
+colons, so it swallowed every `@type` body.
+
+Separator is `,` not `;`, settled by sigil harmony: a record is a VALUE and `,`
+separates value elements; `;` TERMINATES a declaration. With `;` the value
+greedily swallowed the rest of the record.
+
+** What the fourth review swarm found (all with the suite green)
+
+| defect | why it mattered |
+|--------+-----------------|
+| `color: INHERIT` refused | CSS keywords are case-insensitive — broken build over letter case |
+| `url("a(b.png")` refused | a paren inside a STRING is content, not structure |
+| `300 ms` ACCEPTED | the silent one: trivia was filtered before matching, so `40 px` became NUMBER IDENT — the exact shape of a valid dimension — and `AdjacentExtractor` had nothing left to refuse |
+| escaped quotes | `{ a: "x\"y" }` split into nonsense |
+| no-colon fragment | `{ ink #e8eef7 }` reported nothing at all |
+| missing required field | a seed omitting a field still claimed to BE that type |
+
+Plus one found by VERIFYING a filed finding instead of trusting it:
+`css-values.st` and four sibling grammars were NOT in the embedded stdlib while
+`scalars/types.st` WAS — so a distributed binary carried the scalar table and
+none of its productions, and accepted anything. Same class as BUG-227: a binary
+that behaves differently from the repo it was built from cannot be reproduced
+where it is debugged. Now gated by `every_capture_type_file_on_disk_is_embedded`,
+verified to fail when re-broken.
+
+** Verified final state
+
+- css_declaration_validation 13/13 · typed_seed 10/10 · css_scalar_acceptance 7/7
+  · lsp::colors 8/8 · colour_coverage 4/4 · embedded_parity 1/1.
+- integration 192/15 and v8_runtime 455/1 — both unchanged from session start.
+- lib 3100/8: the 3 pre-existing plus 5 `compiler::snapshot_tests` that reproduce
+  with my files reverted to HEAD (a concurrent agent's in-flight work).
+- headless 624/32 — no failure in the colour/length/duration/seed domain.
+- CORPUS: zero E0958/E0961 across stdlib, demos, examples, fixtures AND the
+  private `projects/` tree. The user chose the strictest option; it was checked
+  against the tree a corpus report cannot see before agreeing to it.
+
+** Filed, not fixed (with evidence, not intentions)
+
+- BUG-295 — three `radial-gradient` "eyes" in `projects/unkn` that have never
+  rendered. `circle` takes a `<length>`; a lone `<percentage>` is invalid,
+  confirmed against MDN and the W3C spec rather than inferred. Found by the new
+  validator on its first run over the private tree.
+- FUP-177 — function values are checked only for paren balance, because
+  alpha-67 refuses `cross-fade()`, `paint()` and `-webkit-` gradients which ARE
+  valid CSS. A false positive that blocks a build is worse than a missed
+  diagnostic. The exemption is GATED so nobody removes it by accident.
+- FUP-178 — a project `_prelude.st` `%scalar_type` is invisible to
+  `is_scalar_capture`. The obvious fix DEADLOCKS (wrap_reifier runs during
+  registry load and re-enters the cache mutex); the honest fix threads the
+  active registry through extractor compilation.
+- BUG-296 — a `@type` ALONE in a file reports a spurious E0946 from the losing
+  `type-sum` form. Bisected to b84ff8c7, 95 commits before this session.

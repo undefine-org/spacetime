@@ -1,0 +1,477 @@
+#+TITLE: @editable — structured rich-text input (multi-phase)
+#+STATE: ITEM
+#+SESSION_ID: 14fc108ed3772fa8
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-04T14-32-37-965Z_14fc108ed3772fa8.jsonl]]
+#+CUSTOM_ID: PLAN-031-editable-structured-rich-text-input-mult
+
+* Initial Message
+
+hey what would it look like if the admin app were done multi-file? what reactive primitives and modular programming principles (and other missing constructs that you find) do you need to make this an amazing DX for developing this kind of app?
+
+* Parent
+[[id:PLAN-030-spacetime-app-platform-declarative-schem]] — #10, runs in parallel; the
+admin's richtext widget consumes Phase 1.
+Design ref: [[file:../../@research/spacetime-editable-spec.org]] (full spec).
+
+* Thesis
+Rich text is a missing INPUT primitive — the analogue of =@input= for =<input>=. Today
+the admin uses =contenteditable= + deprecated =document.execCommand=. The Spacetime
+version must be declarative, compositional, and AST-true (the editor edits a constrained
+document AST; HTML is a projection; the server sanitizes against the registered
+mark/block set, which IS the allowlist).
+
+* Key design move (user-directed 2026-06-06)
+Marks and blocks are ELEMENT-REF FUNCTIONS, not an opaque enum:
+=&bold(&sel)= wraps the selection; =&link(&sel, &href)= wraps it AND takes an extra
+EDITABLE argument (=&href=) surfaced as an inline editing affordance. A mark/block is
+"a named transform over a selection that declares an AST node + a toolbar affordance +
+an HTML projection" — i.e. a =&template= with a selection parameter. So @editable
+composes from the same primitive everything else does; no special-case registry; the
+sanitization allowlist falls out of the registered set for free (self-describing
+metasystem discipline, AGENTS.md).
+
+* Author surface
+#+begin_src spacetime
+@editable(bind: $body) {
+  marks: &bold &italic &code &link(&href);
+  blocks: &h2 &p &quote &list;
+}
+
+@mark &bold(&sel)        { node: "strong"; toolbar: <b>B</b>; shortcut: "mod+b"; wrap &sel; }
+@mark &link(&sel, &href) { node: "a"; toolbar: 🔗; shortcut: "mod+k"; attr href <- &href; wrap &sel; }
+@block &h2()             { node: "h2"; toolbar: H; shortcut: "mod+2"; set-block; }
+@block &list()           { node: "ul"; item: "li"; toolbar: •; set-block; }
+#+end_src
+
+* Document AST (wire format = source of truth; HTML is a projection)
+ProseMirror-style node/mark shape (proven): doc → block nodes → inline text nodes with
+=marks[]=; attrs on nodes (e.g. =a.href=). =bind: $body= holds this object; @effect /
+@data collection persists it. Server sanitize = "every node.type ∈ registered
+marks∪blocks; every attr ∈ that node's declared attrs."
+
+* Phases (each its own FEAT, created when the phase begins)
+** Phase 1 — primitive + flat built-in marks (MVP)  [consumed by FEAT-076 admin]
+=@editable(bind:)= with fixed built-ins =&bold &italic &p=. AST model + contenteditable
+surface + selection↔AST mapping; replace execCommand with Range-based AST mutation;
+server sanitize against built-ins. GATE: admin richtext runs on Phase 1, no execCommand.
+** Phase 2 — ref-fn marks/blocks (the real model)
+=@mark= / =@block= macros; =marks:= / =blocks:= lists resolve to registered ref-fns;
+=node:/toolbar:/shortcut:/wrap/set-block= surface. GATE: a project defines a custom
+=&highlight= mark; it round-trips.
+** Phase 3 — multi-argument marks (=&link(&href)=)
+Marks with extra editable args + inline popover; =attr x <- &arg= projection into AST
+node attrs. GATE: =&link= edits href inline; persists; sanitizes.
+** Phase 4 — composition & nesting
+Nested blocks (list>item, quote>p); mark combinations; paste sanitization (HTML→AST
+through the allowlist); optional position-stable ops for =via dev-ws=. GATE: paste
+arbitrary HTML → only allowed nodes survive.
+
+* File hierarchy
+#+begin_example
+stdlib/editable/
+  MODULE.st  index.st
+  primitives/ editable-surface.st  ast-model.st  sanitize.st
+  macros/     editable.st  mark.st  block.st
+  marks/  bold.st italic.st code.st link.st
+  blocks/ heading.st paragraph.st quote.st list.st
+  tests/  ast-roundtrip.st selection.st sanitize.st link-args.st
+#+end_example
+
+* Open questions (resolve in Phase 1 design)
+- =&sel= type: first-class Selection/Range capture, or sugar over a hidden param?
+- shortcuts: global on the editable, or per-mark via a key primitive?
+- =set-block= vs =wrap=: two verbs, or one =apply= disambiguated by node kind?
+- AST schema: adopt ProseMirror node/mark shape, or a leaner Spacetime one?
+
+* Test plan (per phase)
+AST round-trip (parse→AST→HTML→AST stable), selection→mark mapping, sanitize rejects
+unregistered nodes, link-arg inline edit persists. Emitted-JS + headless DOM asserted.
+
+* Bold design review (2026-06-10)
+Repo-grounded "boldest cut" presented. Three inversions, all riding existing rails:
+1. PHASES COLLAPSE — build @mark/@block macros FIRST (%macro + %capture_type, same
+   rail as on-actions.st); built-ins (&bold &italic &p &h2 &link) are expressed IN
+   the open model, not a throwaway enum. Phases 1+2+3 → wave 1; Phase 4 → wave 2.
+2. DOM = RENDER TARGET ONLY — beforeinput (Input Events L2) interception: keystroke
+   → AST op → re-project changed block. contenteditable demoted to input capture.
+   Zero innerHTML reads. Hard kernel = selection↔AST position map (ProseMirror-style
+   integer positions; adopt the scheme, not the code). IME: composition buffer + diff.
+3. SANITIZE = SCHEMA VALIDATION — compiler emits editable-schema.json from the
+   registered mark/block set; server validates AST structurally
+   (src/sync/handlers.rs: validate_richtext_ast). richtext.rs lol_html path demoted
+   to paste-gate + legacy HTML-string lift (lazy one-way migration HTML→AST).
+
+Open questions resolved: &sel = hidden param surfaced as yielded $sel signal
+{from,to,marks[],blockType}; shortcuts per-mark decl compiled to one keymap;
+wrap/set-block → single verb `apply` (node kind disambiguates); AST = ProseMirror shape.
+Multi-arg marks: &link popover IS a nested @editable bound to the node attr.
+
+Registration: new %runtime-registry editable in stdlib/runtime/registries.st
+(ST.editable.marks/blocks) — same mechanism as functions/timelines.
+
+Admin integration touch list:
+- stdlib/__admin__/index.st: @import "../editable"
+- drawer.st: &fld-richtext template mounting @editable(bind: $f.value), dispatched
+  via existing &$f.tpl dynamic dispatch
+- public/runtime/st.js: adFormFields richtext FALLBACK→KNOWN (tpl fld-richtext,
+  value stays AST object); adFieldInput coerces AST object
+- persistence: zero new plumbing — $doc yield → data-path → ST.adFieldInput → dev-ws
+- src/server.rs: serve editable-schema.json next to types.json
+- DELETE stdlib/__dev__/primitives/dev-rich-toolbar.st (execCommand + 200ms poll);
+  dev-editable content-edit branch mounts editable-surface → one engine, two hosts
+  (admin drawer + on-page dev edit)
+
+Gates: wave 1 — admin richtext round-trips AST via dev-ws, &link href inline-edits,
+rg execCommand stdlib/ clean, custom &highlight round-trips. wave 2 — paste arbitrary
+HTML → only registered nodes survive. CDP (--cdp) tests for selection/IME per
+fidelity ladder; headless for AST round-trip.
+
+* Design round 2 (2026-06-10) — user decisions + surface detail
+USER DECISION: remove lol_html everywhere, settle on html5ever (streaming
+irrelevant; html5ever already parses .st markup via src/html/treesink.rs).
+Consequences:
+- hot save path = validate_richtext_ast() vs editable-schema.json — NO HTML
+  parser involved (AST is the wire format)
+- cold paths (paste gate, legacy HTML→AST lift) reuse treesink.rs
+  parse_html_skeleton machinery → HtmlExpr → lift through registered set
+- richtext.rs mXSS residue defenses obsolete (no tokenizer ambiguity in typed AST)
+- port remaining lol_html sites: export/html.rs, server.rs element-content
+  update (~2293-2501), html/parser.rs → treesink walk; drop lol_html from Cargo.toml
+
+Surface refinement: DROP the wrap/set-block/apply verb entirely — @mark means
+"transform selection", @block means "retag current block"; body is pure decl
+(node:/toolbar:/shortcut:/attr x <- &arg). Engine owns behavior.
+
+Parse rail: %capture_type attr_projection { "attr" $attr:ident "<-" "&" $arg:ident }
++ %form with $toolbar:template + $params:param_list. Registration rail:
+%registers mark($name){…} + %resolves { $name -> editable-marks } + new
+%runtime-registry editable-marks/editable-blocks (ST.editable.*).
+KEY: %registers makes the mark/block set compiler-visible → compiler EMITS
+editable-schema.json as a build product; served next to types.json.
+
+@editable %binds editable-surface(&self, doc, marks, blocks) yields:
+$doc $sel{from,to} $activeMarks[] $blockType $empty — editor interior state as
+signals; toolbars/status/popovers are ordinary bindings (.active:
+$activeMarks.includes("bold")). Default toolbar = @each over resolved marks'
+toolbar: templates. &link popover = nested single-line @editable bound to node
+attr, mounted when $activeMarks has link, via @portal.
+
+Engine = 2 primitives: ast-model.st (positions, ops, AST→DOM projection,
+selection map) + editable-surface.st (beforeinput→preventDefault→op→apply→
+re-project dirty block→restore selection; selectionchange→$sel; compiled keymap;
+IME composition buffering). DOM never read back.
+
+Admin diff: index.st @import "../editable" · drawer.st &fld-richtext mounting
+@editable (existing &$f.tpl dispatch) · st.js richtext FALLBACK→KNOWN + AST
+object value + adFieldInput richtext branch · server.rs serve
+editable-schema.json · handlers.rs validate_richtext_ast · DELETE
+dev-rich-toolbar.st (dev-editable content branch mounts editable-surface).
+server-side widget mapping already done (test_w3_richtext_type_emits_flag_and_widget).
+
+* Design round 3 (2026-06-10) — marks ARE partially-applicable templates
+USER CHALLENGE upheld: the round-2 decl-record body (node:/toolbar:/attr x <- &arg)
+was a closed vocabulary one level up — re-encoded what a template body already
+states, and the attr-projection DSL couldn't even say where children go.
+
+NEW MODEL: a mark/block IS a template whose first param is the selection; the
+template BODY is the projection. No projection DSL at all:
+  @mark &bold(&sel) { <strong>&sel</strong> }
+  @mark &link(&sel, $href: url) { shortcut: "mod+k"; <a href="$href">&sel</a> }
+  @block &figure(&sel, $src: url, $alt: string) {
+    <figure><img src="$src" alt="$alt"><figcaption>&sel</figcaption></figure> }
+
+Two load-bearing principles:
+1. TEMPLATE BODY = BIDIRECTIONAL LENS. Forward = render (invoke template).
+   Backward = pattern-match (paste lift: html5ever tree matched against mark
+   bodies). Compiler derives editable-schema.json from the body's HtmlExpr —
+   which it ALREADY parses via treesink.rs. Invertibility statically checked:
+   single root, attrs literal-or-single-hole, one &sel hole; non-invertible →
+   excluded from paste lift (wave 2: explicit match clause).
+2. CURRYING BOUNDARY = DATA/CONFIG BOUNDARY. At the @editable site,
+   marks: &mention(source: $teammates) — bound params are projection-time
+   CONTEXT (never persisted); FREE params are CONTENT attrs (persisted into the
+   AST node, schema-validated, typed). Partial application decides what is data
+   vs config.
+
+Affordances from types: free param's TYPE dispatches its inline editing widget —
+$href: url → url input; $ref: relation<Author> → admin's relation picker; same
+type→widget mapping as the drawer (widget_for). `url` type makes javascript:
+rejection a TYPE ERROR server-side (replaces richtext.rs scheme sniffing).
+Template params gain type annotations (param_list already parses them for @fn —
+small grammar extension).
+
+Metadata shrinks to 2 optional meta lines in body head: shortcut: + toolbar {}.
+@mark ≡ @template with a different registry (+ sel convention + invertibility
+check + schema emission). @block same but multi-hole allowed: each &hole = a
+nested editable region (figure caption, columns). Editor commands = signal
+methods riding the existing signal_call capture: $doc.apply("bold"),
+$doc.setBlock("h2") — custom toolbars are plain @each + @on click anywhere.
+
+Advanced edge cases recorded: live-data marks (price/sku — AST stores sku,
+projection binds live signal), animated marks (:entering in body, free from
+template rail), &mention with reactive relation source, mark-combination render
+order = registration priority over flat marks[] set.
+
+* FINAL DESIGN (round 4, 2026-06-10) — syntax locked, plan decomposed
+** Syntax decisions (grounded in grammar study, agent://0-GrammarAstStudy)
+1. TYPED PARAMS — `$href url` (SPACE form), NOT `$href: url`. Rationale: the
+   author-level convention is the signal declaration `$count number: 0`
+   (cb_state, stdlib/capture-types/component-body.st; stdlib/__admin__/app/app.st:20-25)
+   where `:` introduces the VALUE and the type sits between name and colon.
+   `$href: url` would make `:` mean "type" here and "value" everywhere else.
+   @fn's `name: type` (params.st) is the divergent surface → FUP-040.
+   param_list extension (FEAT-096):
+     ( ( $binding:binding | $element:element ) $ptype:ident? $optional:optmark? ( "=" $default:expr )? ","? )*
+2. HOLES — `...&sel` splice form REQUIRED for selection holes (user direction).
+   `&name` = single-node hole (existing, HtmlExpr::Hole, treesink sentinel
+   \u{E000}idx\u{E001}); `...&name` = NEW HtmlExpr::SpliceHole — flattens a
+   SEQUENCE of inline nodes into the children list. Selection content is always
+   a sequence ∴ mark/block bodies use `...&sel`. Grammar study confirms no
+   existing `...` token — clean addition; sentinel encoding extended w/ splice marker.
+3. Mark/block body = component_body (markup + meta lines mix freely via
+   component_item Choice) — `shortcut:`/`toolbar{}` head lines need no new capture.
+4. Schema emission hook: stdlib load → all %macros registered (MetaRegistry,
+   src/metasystem/registry.rs:230-280) → THEN walk %registers mark/block bodies'
+   HtmlExpr → editable-schema.json (pattern: types.json emission). Ordering risk
+   noted by study — emission is a LATE pass.
+
+** Locked author surface
+#+begin_src spacetime
+@mark &bold(&sel) { <strong>...&sel</strong> }
+@mark &link(&sel, $href url) {
+  shortcut: "mod+k";
+  <a href="$href">...&sel</a>
+}
+@block &figure(&sel, $src url, $alt string = "") {
+  <figure><img src="$src" alt="$alt"><figcaption>...&sel</figcaption></figure>
+}
+@editable(bind: $body) {
+  marks: &bold &italic &link &mention(source: $teammates);  // partial application
+  blocks: &h2 &p &figure;
+}
+#+end_src
+
+** Testing constraints (agent://1-TestingInfraMap)
+- LinkeDOM (--headless): document.getSelection() → null; NO selection/caret/IME.
+  ∴ AST model, ops, schema, paste-lift purity, round-trip fuzz = headless;
+  selection/beforeinput/IME/popover = --cdp (needs cdp). Fidelity ladder honored.
+- @when has input/keydown rails but NO beforeinput/selection simulation yet —
+  CDP tests drive via @eval Range setup + real key events; consider @when
+  extension in-feature if repeated.
+- @property/@fuzz (Mulberry32, shrinking) → op-sequence fuzz for ast-roundtrip.
+- @drive admin tests assert-only (BUG-058 blocks @capture in @drive).
+- BUG-051: nested directives in @fixture don't execute — mount via @mount.
+
+** Execution manifest (waves; FEATs created 2026-06-10)
+| wave | item | depends |
+|------|------|---------|
+| W0 | FEAT-095 html5ever consolidation (lol_html removal) | — |
+| W0 | FEAT-096 template grammar: typed params + ...& splice | — |
+| W1 | FEAT-097 @mark/@block + registries + schema emission | 096 |
+| W1 | FEAT-098 engine: ast-model + editable-surface + @editable | 097 (fixtures allow overlap) |
+| W2 | FEAT-099 server AST validation + schema route | 095,097 |
+| W2 | FEAT-100 admin/dev integration + delete dev-rich-toolbar | 098,099 |
+| W3 | FEAT-101 paste gate + nesting + advanced marks | 098,099,100 |
+| FUP | FUP-040 unify type-annotation surfaces | after waves |
+W0 items parallel. W1 FEAT-098 may start against hand-registered mark fixtures
+before 097 lands (registry contract frozen in FEAT-097 body).
+
+** Process methodology
+- per FEAT: tests colocated in the implementing commit (AGENTS.md record rule);
+  org notes appended at completion; gates are commands (rg/cargo/test runner)
+- cross-wave regression floor: cargo test --lib && cargo test --test
+  integration_tests && cargo run --features headless -- test tests/ --headless
+- CDP suites land WITH their feature (needs cdp), run in same commit
+- admin acceptance vehicle: projects/cms-testbed richtext field end-to-end
+- security review point: FEAT-099 validation corpus must port richtext.rs mXSS
+  tests to AST-rejection equivalents before sanitize demotion merges
+
+* CORRECTION (2026-06-10, user) — backtick holes; CDP infra restated
+Round-4 "Locked author surface" had WRONG hole syntax. Holes in Spacetime HTML
+are BACKTICK-delimited expressions — sigil table docs/language/data-and-rendering.md
+§2; HTML_HOLE node src/syntax/cst/parser.rs:1813-1830; skeleton extraction
+src/syntax/cst/ast.rs:99-135; real usage stdlib/primitives/data/each-inline.st:10
+(`<li class="todo">`$t.title`</li>`). I was misled by @template doc-comment
+examples (template.st:15-18 show bare $title/&content — themselves stale vs the
+backtick grammar; FEAT-096 now includes fixing those doc comments).
+
+Corrected surface (supersedes round-4 block):
+#+begin_src spacetime
+@mark &bold(&sel) { <strong>`...&sel`</strong> }
+@mark &link(&sel, $href url) {
+  shortcut: "mod+k";
+  <a href="`$href`">`...&sel`</a>
+}
+@block &figure(&sel, $src url, $alt string = "") {
+  <figure><img src="`$src`" alt="`$alt`"><figcaption>`...&sel`</figcaption></figure>
+}
+@editable(bind: $body) {
+  marks: &bold &italic &link &mention(source: $teammates);
+  blocks: &h2 &p &figure;
+}
+#+end_src
+Design consequence (simplification): NO new hole kind, NO sentinel flavor.
+`...` = spread EXPRESSION inside an ordinary hole (rg confirms no existing `...`
+token — expression-level addition only). Hole → HtmlExpr::Hole(JsExpr) unchanged;
+invoke-template flattens spread args into children. Attr-position spread =
+compile error. FEAT-096 + FEAT-097 bodies updated accordingly.
+
+CDP: chromiumoxide test infra (src/cdp.rs — warm browser, per-file tabs,
+__spacetime_run_tests(), paint rung) is the substrate for ALL selection/IME/
+admin-@drive suites in FEAT-098/100/101 — first-party, no puppeteer/external
+driver anywhere in the test plan.
+
+* CORRECTION (2026-06-10, user) — drop `...&sel` spread; `&sel` is enough
+The round-3/4 design introduced a `...&sel` splice form for selection content.
+WRONG: the existing element-substitution hole `` `&sel` `` ALREADY flattens a
+multi-node sequence (emit_element_hole parses an HTML-string value into a
+fragment and inserts ALL childNodes; a Node value is inserted directly). A
+selection is just the value bound to `sel` (FEAT-098 yields it); `` `&sel` ``
+inserts the whole thing. Build-verified.
+
+Locked author surface (FINAL, spread removed):
+#+begin_src spacetime
+@mark &bold(&sel) { <strong>`&sel`</strong> }
+@mark &link(&sel, $href url) {
+  shortcut: "mod+k";
+  <a href="`$href`">`&sel`</a>
+}
+@block &figure(&sel, $src url, $alt string = "") {
+  <figure><img src="`$src`" alt="`$alt`"><figcaption>`&sel`</figcaption></figure>
+}
+@editable(bind: $body) {
+  marks: &bold &italic &link &mention(source: $teammates);
+  blocks: &h2 &p &figure;
+}
+#+end_src
+Grammar additions for editable = ZERO beyond FEAT-096 (typed params + backtick
+holes in component bodies). No `...` token, no new HtmlExpr variant.
+
+* W0 COMPLETE + manifest revision (2026-06-10)
+FEAT-096 (typed params + backtick holes in component bodies) — DONE, committed
+203863cf. FEAT-095 SPLIT (user decision) into:
+- FEAT-095 (read-only extraction → html5ever) — DONE, committed 29b62d1f.
+- FEAT-102 (byte-surgical rewriter for CMS write paths) — NEW, replaces remaining
+  lol_html. Reason: lol_html preserves unmatched bytes verbatim on disk-writes;
+  html5ever full reserialize normalizes (attr order, comments, entities, void
+  tags) = data-loss on user .html. Needs an owned byte-surgical primitive +
+  fidelity corpus. lol_html stays until FEAT-102.
+
+Revised manifest:
+| wave | item | state | depends |
+|------|------|-------|---------|
+| W0 | FEAT-096 typed params + backtick holes | DONE 203863cf | — |
+| W0 | FEAT-095 html5ever extraction | DONE 29b62d1f | — |
+| W0+| FEAT-102 byte-surgical rewriter (lol_html removal) | ITEM | 095 |
+| W1 | FEAT-097 @mark/@block + registries + schema | ITEM | 096 |
+| W1 | FEAT-098 engine ast-model + editable-surface | ITEM | 097 |
+| W2 | FEAT-099 server AST validation + schema route | ITEM | 095,097 |
+| W2 | FEAT-100 admin/dev integration | ITEM | 098,099 |
+| W3 | FEAT-101 paste/nesting/advanced | ITEM | 098,099,100 |
+| FUP | FUP-040 type-annotation surfaces · FUP-041 hole unification | ITEM | post-waves |
+
+NB FEAT-102 is NOT on the critical path for editable: FEAT-099's AST validation
+replaces sanitize_richtext (a rewrite path, but server-side, NOT writing user
+.html — it validates AST before disk). The lol_html→byte-surgical removal can
+land in parallel with W1/W2. Critical path for editable: 096✓→097→098→099→100→101.
+
+W0 enablement proven. Next: FEAT-097 (@mark/@block macros + editable registries +
+schema emission), which builds directly on FEAT-096's typed-param + backtick-hole
+grammar now in HEAD.
+
+* NAMING (2026-06-10, user): @mark → @editable-mark, @block → @editable-block
+Avoids collision with block-types.md vocabulary (the six block types +
+`template` block type). Namespacing revisited later (potential @ed.mark sugar).
+Keyword tokens: `editable-mark`, `editable-block` (hyphenated, like existing
+multi-word directives). Registries: editable-marks / editable-blocks unchanged.
+Locked surface:
+#+begin_src spacetime
+@editable-mark &bold(&sel) { <strong>`&sel`</strong> }
+@editable-mark &link(&sel, $href url) { shortcut: "mod+k"; <a href="`$href`">`&sel`</a> }
+@editable-block &figure(&sel, $src url, $alt string = "") {
+  <figure><img src="`$src`" alt="`$alt`"><figcaption>`&sel`</figcaption></figure>
+}
+@editable(bind: $body) { marks: &bold &link; blocks: &h2 &figure; }
+#+end_src
+* W1 EXECUTION (2026-06-10): main-thread, delegation unavailable
+Subagent task workers fail to launch this session (No API key for kimi-code,
+both dispatches exit 1). ∴ ALL remaining FEATs built directly on main thread;
+review = inline gates (re-read diff + targeted tests per step); surfaced BUGs
+filed as org items + fixed mid-flight (not deferred).
+* CLUSTER A — sigil unification + grammar PEG (2026-06-10, user-directed)
+Goal: every author-facing sigil means exactly ONE thing. Three sigils overloaded
+today; drive each to a single meaning. The enabler (FEAT-103) unifies the two
+grammar engines so the metasystem expresses these constructs cleanly — never a
+Rust special-case (AGENTS self-describing rule).
+
+** Sigil ledger
+| sigil | BEFORE (overloaded)              | AFTER (clean)                          | wave   |
+|-------|----------------------------------|----------------------------------------|--------|
+| $x    | ref · hole · param-name          | ref / param-name ONLY                  | A1     |
+| ``…`` | hole (page markup only)          | hole EVERYWHERE (the one hole form)    | A1     |
+| :     | value-intro · type · meta-capture| value-intro (author) / meta (grammar)  | A2     |
+| space | type (param_list only)           | type (ALL author param decls)          | A2     |
+| ( )   | params · union · pseudo-sel      | first-class PEG combinator (form+ctype)| A0     |
+| &name | ref · sel-hole · named-sel        | unchanged (contextual, single-meaning) | —      |
+
+** Architectural finding (grounds FEAT-103)
+TWO grammar engines exist and have diverged:
+- %capture_type → CapturePatternAst{Group,Choice,Sequence,CharClass,Capture}
+  (meta_ast.rs:951) → compile_pattern (extractors/custom.rs) → token-cursor PEG.
+  FULL PEG: groups, alternation, modifiers, recursion. `cb_nested_each` proves
+  optional-literal-led-group + greedy-tail already works.
+- %form → FormClause (flat: inline_elements/params/post_arg_inline/body_capture/
+  body_params; meta_ast.rs:319) → try_match (form_compiler.rs) against CST nodes.
+  WEAK: PseudoSelector/KeywordBlock are hardcoded special-cases; no general group.
+∴ FEAT-103 = route the %form BODY region through the CapturePatternAst PEG that
+already exists, instead of bolting Group onto FormClause. One need → one impl.
+Removes the body_capture-string + pseudo-selector divergence (net simplification).
+
+** Resolution efficiency (answers the open question)
+Groups are INTRA-form (ordered-choice within one form's match), NOT expanded into
+sibling forms. Cross-form resolution UNCHANGED: prefix bucket O(1) → static
+specificity sort → first-match-wins (registry.rs:56, form_compiler.rs:3872).
+- optional-absent group contributes FLOOR (0) to specificity → a form cannot win
+  resolution by claiming optional content it didn't match.
+- the "multiple macro versions" pattern COLLAPSES: @fn($p)(: $rt)?{} = ONE form,
+  not two ranked siblings → fewer forms per bucket → resolution gets cheaper.
+- determinism via literal-led discipline: optional groups MUST be literal-led
+  (the `shortcut`/`,`/`key` anchor), same rule already documented in
+  component-body.st ("BOUNDED leaf types before a literal").
+
+** Execution manifest — Cluster A
+| wave  | item | what | depends |
+|-------|------|------|---------|
+| A0    | FEAT-103 | %form body region → CapturePatternAst PEG; ( )modifier groups + | — |
+|       |          | alternation; greedy-cursor handoff; pseudo-sel re-expressed as groups; |   |
+|       |          | unblocks `shortcut:` on @editable-mark (schema.rs:439 test waiting) |   |
+| A0-R  | REVIEW   | swarm reviewers: matcher correctness, resolution invariants, regression | A0 |
+| A1    | FUP-041  | backtick = the one hole form; codemod stdlib/examples/tests/fixtures + | — |
+|       |          | projects/ (user owns); REMOVE bare-hole recognition (phase 3 now) |   |
+| A1-R  | REVIEW   | swarm: codemod coverage, render-equivalence, no bare holes remain | A1 |
+| A2    | FUP-040  | @fn colon→space: adopt param_list, delete params.st, codemod @fn sites | — |
+| A2-R  | REVIEW   | swarm: @fn golden, no colon-param @fn, params.st gone | A2 |
+| A3    | close-out| sigil-ledger doc (docs/language/), AGENTS harmony note, grep proofs | A0,A1,A2 |
+NB A0/A1/A2 are INDEPENDENT (different surfaces) → parallelizable. A3 joins all.
+Transitional FIX waves inserted on demand: ANY FEAT/BUG a reviewer surfaces is
+filed as an org item + fixed before the dependent wave proceeds (never silently
+deferred). Unlimited budget: review between every wave.
+
+** Decisions locked (user, 2026-06-10)
+- FEAT-103: Option B (ambitious PEG unification), NOT Option A (no
+  ComponentBodyDef.shortcut field — shortcut is its own form capture).
+- FUP-040: breaking migration, mechanical codemod. @fn return type KEEPS `: T`
+  (value-position colon, consistent with clean `:`).
+- FUP-041: settle backtick NOW incl. phase-3 removal; move projects/ files over
+  (user has full ownership). Hole sugar = future additive layer, never a 2nd form.
+- FUP-042: SEPARATE arc, own R0 design doc before code (region re-type of the
+  document's core type). Not in Cluster A.
+
+** FUP-042 — regions (separate arc, R0 doc precedes code)
+A region = a named, ordered editable sub-space. Doc/list-item/column/caption are
+all regions. Flat block model = degenerate one-region case. Lists (homogeneous
+recursion) + columns (parallel sub-spaces) fall out of ONE primitive. Rides the
+existing `&hole` surface (region = named &sel that can hold blocks); invertibility
+generalizes from "exactly one &sel" to "each region one hole". Client liftHtml +
+server validate.rs co-evolve in lockstep over the recursive tree; @property fuzz
+proves client AST ≡ server-validated AST at every depth. R0 design doc first.

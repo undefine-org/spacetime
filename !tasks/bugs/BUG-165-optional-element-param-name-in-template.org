@@ -1,0 +1,106 @@
+#+TITLE: optional element param `&name?` in @template header is a CST parse error (doc'd feature, value-param `$x?` works)
+#+STATE: ITEM
+#+SESSION_ID: 152939d2e5b25e66
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-09T16-24-34-454Z_152939d2e5b25e66.jsonl]]
+#+CUSTOM_ID: BUG-165-optional-element-param-name-in-template
+
+* Initial Message
+
+can dom-refs (`&my-template(..., ...) { ... }`) contain all of ST? As in, html, CSS, ST syntax through macros, etc. and then it gets its scope solved to be within the template? Or does it have some special case?
+
+The goal is to empower the 'element-ref as function' way of creating Spacetime affordances the most blessed way to build encapsulation and whatnot. I would like to do that for Ora Ventures, whose website we want to rewrite completely to be attractive to Chief AI Officers at big groups in emerging markets, as well as capital-rich SMBs that want to be more dynamic and competitve. That website should be sober, have crisp but minimal copy, and showcase Spacetime features in a way that is unique and helps us convert more (so think of advanced interactions and motions in terms of high-convertion)
+
+Come back with your plan, sources, inspirations, for the copy
+Come back with your analysis for the &... thing
+
+* Found via
+Template-as-function analysis (research/spacetime-template-as-function-analysis.org, GAP-1),
+probing whether =@template= bodies/headers carry the full documented surface. The stdlib's own
+doc-comment example fails to compile.
+
+* Repro (RED, confirmed 2026-07-09 on main)
+#+begin_src spacetime
+@template &p($a, &b?) { <div>`$a``&b`</div> }
+<main class="m"></main>
+.m { &p("x"); }
+#+end_src
+
+=cargo run -- check <dir>= →
+: × expected COLON, found R_PAREN
+:  ╭─[index.st:1:21]
+: 1 │ @template &p($a, &b?) { <div>`$a``&b`</div> }
+:   ·                     ┬ ← the `?`
+
+Meanwhile =$a?= (optional VALUE param) parses fine, and
+=stdlib/macros/template.st= documents =&content?= / =&footer?= as supported
+("Optional Parameters (`?` modifier) … works for both value params ($) and
+element params (&)") — its own @example block is a RED fixture.
+
+* Root cause (traced)
+The failure is in the CST parser, BEFORE macro/form matching:
+
+1. The template header's arg list is parsed by
+   =src/syntax/cst/parser.rs::Parser.parse_arg_list= → =parse_arg= → =parse_arg_value=.
+2. For =&b?=: =parse_arg_value= hits =SyntaxKind::AMPERSAND= → =parse_element_ref=,
+   which consumes =&b= and RETURNS — it has NO modifier handling.
+3. Control returns to =parse_arg_value='s postfix loop, which sees
+   =SyntaxKind::QUESTION= and unconditionally takes the TERNARY branch:
+   bump =?= → =parse_arg_value= (matches nothing before =)=) →
+   =expect(SyntaxKind::COLON)= → "expected COLON, found R_PAREN".
+
+Why =$a?= works: =parse_arg_value='s DOLLAR branch calls
+=src/syntax/cst/parser.rs::Parser.parse_variable_ref=, which ALREADY consumes a
+trailing =?=/=*=/=+= modifier itself (the "Handle modifier: $name:type?" block,
+~L1861) — so the QUESTION never reaches the ternary branch. The element-ref
+path lacks the symmetric handling. Asymmetry between the two param kinds is
+the bug; the grammar layer (=stdlib/capture-types/param_list.st::optmark=,
+=( $binding:binding | $element:element ) $collection:collmark? $ptype:typeref? $optional:optmark?=)
+is already correct and never gets the chance to run.
+
+* Structural fix (chosen)
+Mirror the modifier handling into the element-ref path so =$name= and =&name=
+params are symmetric at the CST level — one meaning for =?= in param position,
+same consumption point for both sigils:
+
+- =src/syntax/cst/parser.rs::Parser.parse_element_ref=: after the name/property-path
+  loop, consume an optional =QUESTION= / =STAR= / =PLUS= modifier token exactly like
+  =parse_variable_ref= does (same token kinds, same position — before =finish_node=).
+  This is the precedent-following fix: =parse_variable_ref= established that the
+  modifier belongs to the ref node.
+- No reifier change expected: =stdlib/capture-types/param_list.st= already matches
+  =optmark?= after an element param; verify the param record reaches
+  =stdlib/primitives/template.st='s factory with ={ kind: "element", optional: true }=
+  (the runtime already treats a missing optional &param as =null= per the
+  documented contract in =stdlib/macros/template.st=).
+
+Risk check (do this, don't skip): =parse_element_ref= is called from expression
+positions too (=src/syntax/cst/parser.rs= call sites ~L824, L956, L1263, L1597,
+L3284). A genuine ternary with an element-ref condition (=&el ? a : b=) would
+change meaning — grep the repo + tests for that shape first; it is not a
+documented author surface (conditions on refs are written =@if(&footer)=), and
+=parse_variable_ref= already imposes the same greediness on =$x ?=, so symmetry
+argues the ternary-on-bare-ref shape was never parseable consistently anyway.
+If a test depends on it, scope the modifier consumption to arg-list context via
+a parser flag instead (fallback plan, less elegant).
+
+* Acceptance (all observable)
+1. RED fixture above compiles clean: =cargo run -- check= exits 0.
+2. The =stdlib/macros/template.st= doc examples compile verbatim as fixtures:
+   =@template &modal($title, &content, &footer?)= and
+   =@template &card($title, &actions?)= — add them under =tests/fixtures/=
+   (colocate test + doc per AGENTS rule).
+3. Behavior parity with the doc contract:
+   - =&card("Title")= (slot omitted) → factory receives =null= for =&actions=,
+     =@if(&actions)= branch does not render.
+   - =&card("Title") { <button>Edit</button> }= → slot filled.
+   Verify via a headless Spacetime test (=cargo run --features headless -- test tests/ --headless=)
+   asserting the rendered DOM with and without the slot.
+4. =$x?= value params still work (regression: existing tests green).
+5. =cargo test --lib= and =cargo test --test integration_tests= green.
+
+* Related
+- research/spacetime-template-as-function-analysis.org (GAP-1)
+- Blocks: PLAN for template-as-function hardening (filed alongside)
+
+* Parent
+[[id:PLAN-070-template-as-function-hardening-close-the][PLAN-070]] W1.

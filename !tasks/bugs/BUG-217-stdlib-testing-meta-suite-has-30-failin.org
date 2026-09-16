@@ -1,0 +1,237 @@
+#+TITLE: stdlib/testing/meta has 30 failing self-tests, masking real regressions in the test framework
+#+STATE: DONE
+#+CUSTOM_ID: BUG-217-stdlib-testing-meta-suite-has-30-failin
+#+PRIORITY: #B
+
+* Summary
+
+`stdlib/testing/meta/` — the suite that tests Spacetime's OWN test framework
+(`@given`, `@assert`, `@when`, `@then`, `@mock`, `@snapshot`, fixtures) — has
+30 failing tests out of 109.
+
+: cargo run --features headless -- test stdlib/testing/meta --headless
+: → 73 passed, 30 failed, 6 skipped
+
+Because the framework's self-tests are red by default, a real regression
+introduced into `@given`/`@assert`/`@when` would land in an already-red suite and
+be invisible. Every future change to the testing macros is therefore unguarded.
+
+* Confirmed PRE-EXISTING (not a PLAN-112 regression)
+
+Verified this session by substituting the ORIGINAL `stdlib/testing/test.st` (from
+commit 4477614b, before any PLAN-112 work) into the current tree and re-running:
+
+: 73 passed, 30 failed, 6 skipped   ← original @assert emit
+: 73 passed, 30 failed, 6 skipped   ← current @assert emit
+
+Identical. The failures predate this line of work and are unrelated to the
+`@assert` emit change.
+
+(A cleaner check via `git worktree` at the baseline commit was attempted first
+but could not build: the worktree lacks the vendored submodules that `build.rs`
+requires, and it panics rather than degrading. Worth knowing before anyone tries
+the same approach — see the Non-goals note below.)
+
+* What is failing
+
+The failures cluster heavily in `@given` — `stdlib/testing/meta/given-setup.test.st`
+— covering essentially every capability of that macro:
+
+- `@given sets data-state attribute`
+- `@given sets custom data attributes`
+- `@given sets textContent`
+- `@given sets innerHTML`
+- `@given sets form value`
+- `@given sets checkbox checked state`
+- `@given sets disabled state`
+
+plus `@assert with DOM queries` in `assert-custom.test.st`, and others across the
+suite. All report the generic `Assertion failed`, i.e. the assertion ran and the
+condition was false (they are NOT the silent-drop class described in BUG-216).
+
+A representative case:
+
+#+begin_src st
+  @test "@given sets data-state attribute" {
+    @fixture { <div data-given-test data-state="initial">Test Element</div> }
+    @given [data-given-test] { data-state: "modified" }
+    @assert (document.querySelector('[data-given-test]').dataset.state === 'modified')
+  }
+#+end_src
+
+* Investigation plan
+
+1. Establish WHEN this went red. The suite is presumably not red by design, so
+   bisect `stdlib/testing/` + the `@given` primitive to find the commit that
+   flipped it. NB the vendored-submodule constraint above — bisect in the main
+   checkout, or ensure submodules are present in any worktree.
+2. Determine whether the 30 failures share ONE root cause (most likely, given the
+   `@given` clustering) or several. Fix the shared cause first and re-measure
+   before touching individual tests.
+3. Decide per remaining test whether the TEST or the FRAMEWORK is wrong. Do not
+   assume the tests are stale — `@given` failing to set `textContent`,
+   `innerHTML`, `value`, `checked`, AND `disabled` reads much more like a broken
+   or renamed primitive than five simultaneously-wrong tests.
+
+* House rule that applies here
+
+Do NOT "fix" these by weakening or deleting the assertions. A test kept green by
+asserting less is worse than a red one, because it also removes the signal. If a
+test is genuinely obsolete, delete it outright with the reason recorded — do not
+hollow it out.
+
+Every fix must be sabotage-verified: with the fix reverted, the test must fail
+again. (This session found three separate tests that passed against broken code;
+that is the failure mode to guard against.)
+
+* Definition of done
+
+- `cargo run --features headless -- test stdlib/testing/meta --headless` is fully
+  green, or every remaining failure is an explicitly-skipped test with a recorded
+  reason and a linked follow-up.
+- The suite is part of the routine gate list so it cannot silently rot again.
+
+* Non-goals
+
+- Do not change `@assert`'s form/emit here — that is BUG-216, which is a distinct
+  (silent-drop) defect and must not be conflated with these genuine failures.
+- Do not modify `build.rs`'s vendor handling as part of this work; note it as an
+  obstacle for bisection and move on.
+
+* RESOLVED (2026-07-25, PLAN-113 W2.1) — 73 → 102 passing
+
+Baseline on entry was 70/33 (not 73/30: BUG-216's fix had already converted three
+more silent drops into visible failures, which is the intended direction).
+
+The item guessed ONE shared root cause. There were FIVE, and none was a stale
+test — every one was a real framework or backend defect:
+
+** 1. `@given` property bodies compiled to CSS and emitted nothing (8 tests)
+
+Two sibling macros share the surface `@given <sel> { … }`: `given` declaring
+`$state:properties` and `given-directives` declaring `$body:block`. The FIRST can
+never match — its capture is INLINE, so its form has no `body_capture` at all and
+`given-directives` claims every braced body.
+
+That body was then compiled as a SCOPE, where `data-state: "modified"` is a CSS
+declaration: it emitted a CSS rule and NO JavaScript, so the element was never
+touched. Eight self-tests asserted on state nothing had set.
+
+Fixed with a `.state_props` body accessor (`src/emit/js.rs`) that extracts the
+`name: value` pairs and a loop in `given-directives` that applies them, ahead of
+the existing scope compile. A body with no pairs yields `{}` and the loop is a
+no-op, so the two shapes COMPOSE rather than one shadowing the other. Declarations
+separate on `;` OR `,` — both spellings occur in real bodies, and splitting on `;`
+alone silently kept only the first pair of a comma list (2 further tests).
+
+** 2. `@snapshot`'s "optional" `of:` clause was mandatory (13 tests)
+
+`@snapshot $name:string of: $selector:selector? = ""` reads as optional, but a
+form matches its literals IN ORDER, so `of:` was required and the bare
+`@snapshot "name"` matched NO form and was silently dropped. Split into two
+sibling macros (`snapshot-of`, `snapshot`), which works because `$name:string` is
+bounded and cannot swallow the literal.
+
+** 3. LinkeDOM does not reflect the `checked` attribute (2 tests)
+
+`<input type="checkbox" checked>` parses with the attribute present and
+`el.checked === false`. `disabled` and `value` DO reflect; only `checked` does not.
+A backend disagreement, not a Spacetime defect — the same tests pass in Chromium.
+Patched in `src/headless_shims.js`, behind our own boundary rather than in the
+vendored library.
+
+** 4. LinkeDOM's `blur()` never clears `document.activeElement` (1 test)
+
+`focus()` sets it; `blur()` leaves it, so an element stayed focused forever and
+`@when <sel> blur` could not be observed. Same shim treatment.
+
+** 5. Three meta-tests contained bare JavaScript (4 tests)
+
+`const filtered = arr.filter(…)` is not valid Spacetime. Converted to `@let`,
+which the same file already uses everywhere else. One further test queried
+`document.querySelector('div')` — the FIRST div in the document, which is
+`@fixture`'s own wrapper, not the element the fixture declares.
+
+These five are the only cases where the TEST was wrong; all were fixed by making
+the test say what it meant, never by weakening an assertion.
+
+** Also fixed: one genuinely flaky assertion
+
+`snapshot captures class changes` asserted two `Date.now()` timestamps DIFFER —
+a race, not a property (measured: failed 2 of 3 runs). Replaced with the claim it
+was reaching for: the two snapshots are separate entries, each named correctly,
+both accumulated in order, and non-decreasing in time. Strictly STRONGER than the
+timestamp comparison, which a bug returning the same object for both would have
+passed whenever the clock ticked.
+
+* REMAINING: 5 failures, one cause, filed as BUG-226
+
+`@wait_until` / `@wait_for` have the same optional-trailing-clause defect as
+`@snapshot`, but the sibling-macro split does NOT work for them: their preceding
+capture is greedy (`:expr`, `:selector`) and swallows the `timeout:` literal.
+Tried both splits and reverted; a bare `:expr` sibling made the whole file fail to
+compile (0 tests ran, worse than 4 failures).
+
+Also tried and reverted: making the introducing literal skippable in
+`match_inline_element`. That dropped the suite TOTAL from 103 to 88 — forms
+requiring a trailing literal began matching too early and swallowed following
+directives. The preceding capture must be bounded FIRST.
+
+Left red rather than papered over, per this item's own house rule. BUG-226 (#A)
+carries the full analysis, both failed approaches, and the fix direction.
+
+* Definition of done — status
+
+- [x] Every remaining failure has a recorded cause and a linked follow-up
+      (BUG-226). Not "fully green": 4 tests remain red BY DESIGN because the
+      framework defect behind them is real and unfixed.
+- [ ] Suite added to the routine gate list — do this once BUG-226 lands, so the
+      gate starts from green.
+
+* W2 REVIEW FOLLOW-UP — four defects found, all in MY fixes
+
+** 1. The blur shim froze `activeElement` permanently (real bug I introduced)
+
+The first version installed `Object.defineProperty(doc, 'activeElement', …)`
+returning `doc.body` FOREVER on the first blur, so no later `focus()` could be
+observed — one blur broke focus tracking for the rest of the runtime. Reproduced:
+focus A, blur A, focus B → `activeElement` was still body.
+
+Fixed with a mutable `blurred` cell that any `focus()` clears, and an
+`activeElement` view that READS THROUGH to the document's own accessor and masks
+only the blurred element. Test added.
+
+** 2. `.state_props` truncated any value containing a separator (WRONG write)
+
+`textContent: "a, b"` was cut at the comma and `"a` written to the element — a
+wrong write, which is materially worse than a skipped one because the test then
+asserts against silently corrupted content.
+
+The splitter is now quote- AND bracket-aware, so a separator inside `"…"`, `'…'`,
+`(…)`, `[…]` or `{…}` is not a boundary. 3 tests added (comma/semicolon in a value,
+colon in a value, and a multi-declaration body — the last guards the opposite
+error, where quote-awareness merges the whole list into one declaration).
+
+** 3. The `"block"` PERMISSIVE change was HARMFUL, not merely unnecessary
+
+The reviewer judged it a no-op. Measured, it was worse than that: REMOVING it takes
+the suite from 99 to 102 passing. It had been ranking `:block`-bodied forms below
+siblings that should not have won. Reverted.
+
+Lesson: I added it while forming a hypothesis about `@given`, confirmed the
+hypothesis was wrong, and left the change in anyway. A change kept "because it
+seems more correct" without a measurement is exactly the kind of line that fails
+the earn-every-line bar.
+
+** 4. The fifth failure was NOT flaky — `<select>.value` is unimplemented
+
+`@when change sets value and dispatches event` failed consistently (3 of 3 runs).
+LinkeDOM does not implement `select.value`: reading returns undefined and assigning
+does not move the selection. Shimmed with real semantics — read the first
+`selected` option else the first option; assign by matching value and deselecting
+the rest; an unmatched value selects nothing and reads back `''`, as the DOM does.
+
+* Final state: 102 passed, 4 failed, 6 skipped
+
+All 4 remaining are BUG-226 (`@wait_until` / `@wait_for`), matching that item
+exactly.

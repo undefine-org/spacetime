@@ -1,0 +1,84 @@
+#+TITLE: Static export compiles without site_dir — every build-time file read resolves against the CWD
+#+STATE: DONE
+#+SESSION_ID: 153d8ede25f7aff7
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-25T11-25-45-495Z_153d8ede25f7aff7.jsonl]]
+#+CUSTOM_ID: BUG-219-static-export-compiles-without-site-dir
+
+* Initial Message
+
+https://ys2olone710qdtvpcgfny.preview.spacetime.undefine.org/brand isn't owkring but it is there in local. Why?
+
+* Symptom
+The DEPLOYED /brand page rendered the literal text:
+
+    Document not found
+    `@doc` could not read `brand/GUIDELINES.md`.
+
+while `cargo run -- serve projects/backdesk-new/` rendered the real 1898-char
+guideline document at the same URL. Nothing failed. `cargo run -- build`
+reported no warning, the page was 200, the markup was present, and the only
+visible difference was the CONTENT of one panel. A silent, green-looking
+divergence — the worst shape a deploy bug can take.
+
+Measured on projects/backdesk-new (2026-07-25), [data-doc] innerHTML length:
+- /brand   dev 1898              vs export 93   (the error stub)
+- /process dev 3446/2651/3159/4675 vs export ~93 x4
+
+* Root cause
+`src/export/bundle.rs::compile_bundles` built its compiler with
+`Compiler::from_file(&st_path, site_dir)` and called `.compile()` directly,
+never calling `.with_site_dir(...)`.
+
+`from_file`'s second argument is the WORKSPACE ROOT (used for import
+resolution + provenance); it is NOT the site dir. `Compiler::site_dir` is a
+separate, independently-set field that defaults to `None`
+(src/compiler.rs:449), and it is what `CompileOptions.site_dir` carries into
+every build-time FILE READ:
+  - `inject_doc_content` (src/compiler.rs:797)  -> `@doc(src: "...")`
+  - `unroll_static_each` (src/compiler.rs:1038) -> SSG `@each` over a
+    file-backed collection
+Both resolve `site_dir.join(src)` FIRST and fall back to the path relative to
+the process CWD. With `site_dir = None` only the CWD candidate remains, so
+`@doc(src: "brand/GUIDELINES.md")` looked for
+`$PWD/brand/GUIDELINES.md` — which happens to exist for NO invocation of
+`spacetime build` except one run from inside the project dir itself.
+
+The dev server always set it (`src/server.rs:374`,
+`.with_site_dir(site_dir)`), which is exactly why the bug was invisible
+locally. One field, set on one of two code paths -> dev and deploy disagree.
+
+* Why it stayed hidden
+`resolve_md`'s missing-file branch is deliberately loud IN THE PAGE (a
+rendered "Document not found" heading, by design — a moved doc must not
+silently blank). But it is not a compile DIAGNOSTIC, so the export reported
+success and `pages_exported` counted the broken page as exported. Loud in the
+browser, silent in the build log.
+
+* Fix
+src/export/bundle.rs: `.with_site_dir(Some(site_dir.to_path_buf()))` before
+`.compile()`, so the export's compile options match the dev server's.
+
+* Verification (observed, not inferred)
+- unit: `export::emit::bug218_clean_path_export_tests::doc_src_resolves_against_the_site_dir`
+  — builds a site whose index.st `@doc(src:)`s a markdown file, asserts the
+  emitted bundle does NOT contain "Document not found" and DOES contain the
+  file's prose. RED before the fix, GREEN after.
+- live: rebuilt projects/backdesk-new, served dist/ statically, drove both it
+  and `spacetime serve` with a real browser and compared [data-doc] innerHTML
+  lengths: /brand 1898 == 1898, /process [3446,2651,3159,4675] == identical.
+
+* Residual risk (NOT fixed here — deliberately scoped out)
+A `@doc` that cannot resolve still exports a "successful" build. The build
+should surface it as a warning the way a compile diagnostic is surfaced.
+Filed as FUP-138.
+
+* Related
+BUG-218 (found in the same investigation; that one is about WHICH pages get
+exported, this one about what those pages CONTAIN — independent root causes,
+both required to make the deployed /brand correct)
+
+NOTE [2026-07-25]: DONE in commit c5c0ae96. One line in compile_bundles:
+.with_site_dir(Some(site_dir.to_path_buf())). @doc content now byte-identical
+dev vs export (/brand 1898; /process [3446,2651,3159,4675]), browser-verified.
+Regression test doc_src_resolves_against_the_site_dir (RED before, GREEN after).
+Residual: a failed build-time read still exits 0 -> FUP-138.

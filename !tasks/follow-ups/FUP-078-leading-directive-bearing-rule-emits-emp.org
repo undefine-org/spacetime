@@ -1,0 +1,35 @@
+#+TITLE: Leading directive-bearing rule emits empty runtime JS (no preceding plain rule)
+#+STATE: DONE
+#+SESSION_ID: 1510a264694da858
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-20T13-59-24-837Z_1510a264694da858.jsonl]]
+#+CUSTOM_ID: FUP-078-leading-directive-bearing-rule-emits-emp
+#+COMPLETION_HASH: d92297814a13bfb9
+
+* Initial Message
+
+vendor threejs as stdlib/3d (or three if 3d doesn't work) and provide me with spectacular showcases of that ability in demos/3d/. Do your exploration+brainstorm, write your desired showcase in-chat, record your plan in a PLAN, then implement it end-to-end with spacetime tests to validate your assumption, and browser testing to go even further in the excellence
+
+* Symptom
+When the FIRST CSS rule in a .st file carries a directive (e.g. `h1.x { @balance(...) }`
+or `canvas.a { @stage{...} }`) and NO plain CSS rule precedes it, the
+`/__spacetime/runtime.js` route emits 0 bytes (HTTP 200, content-length 0). `cargo run
+-- check` passes, masking it. Adding any preceding plain rule (`body { margin: 0 }`) fixes
+it -> 1MB+ runtime.
+
+* Reproduced (2026-06-20, not 3d-specific)
+- core1.st: `@import "stdlib/text"` + `h1.x { @balance(lineHeight:1.2) }` -> 0 bytes
+- core2.st: same + leading `body { margin: 0; }` -> 289KB
+- Same with `stdlib/3d` `@stage`. So it's a CORE emit/codegen edge keyed on
+  "first scope block is directive-bearing", independent of which module.
+
+* Impact
+Low for authored sites (they always have page-level CSS first), but it's a silent
+foot-gun: `check` is green, the page is blank, no diagnostic. Found while validating
+stdlib/3d (PLAN-050) - worked around by ensuring showcases lead with a `body {}` rule.
+
+* Likely area
+src/emit or src/pipeline runtime-route assembly: probably the first scope block is being
+consumed as a file-leading construct (similar class to BUG-070/BUG-047 import-swallow).
+Needs: a failing test (leading directive rule -> non-empty emit) then fix.
+
+NOTE [2026-06-20]: Fixed in b523da3d. Root cause was NOT directive-specific: a terminator-less @import swallowed the following element-selector scope (IDENT-led sibling of BUG-047/070 .#< cases). Fixed both CST + events parsers; the swallowed scope's directive then FormMatches and emits. Tests: CST table + negatives, events FormMatch test, e2e emit proofs in text_module_test.rs. lib 2432 green.

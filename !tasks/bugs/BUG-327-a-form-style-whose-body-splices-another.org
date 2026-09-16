@@ -1,0 +1,92 @@
+#+TITLE: A `@form style` whose body splices another form emits NOTHING — silently, and `check` says ✓
+#+STATE: DONE
+#+SESSION_ID: 1534a2eae1903af0
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-18T13-07-01-638Z_1534a2eae1903af0.jsonl]]
+#+CUSTOM_ID: BUG-327-a-form-style-whose-body-splices-another
+#+COMPLETION_HASH: c55185711829580a
+
+* Initial Message
+
+so how do I use it? i launched it and little seems to actually work or be interactive. use the browser tool and see if there are errors in the code and stuff. please be thorough and make sure all expectred storiees work. work autonomously and complete as you go
+
+* Summary
+
+A style form that splices another style form in its body produces NO CSS at
+all — not the inner form's declarations, and not even its own sibling
+declarations. The whole rule disappears. `check` reports `✓ All 1 file(s)
+passed` and `build` succeeds.
+
+This is the project's banned bug class (BUG-229 / BUG-243 lineage: silent
+acceptance + silent drop) in the form system itself.
+
+* Reproduction (minimal, `scratch/roleprobe2/index.st`)
+
+#+begin_src spacetime
+@form style --leaf { font-size: 44px; color: #0f172a; }
+@form style --mid  { --leaf; font-weight: 700; }
+
+<h1 class="direct">D</h1>
+<h1 class="nested">N</h1>
+.direct { --leaf; }
+.nested { --mid; }
+#+end_src
+
+Emitted `dist/spacetime.css` — ENTIRE output:
+
+#+begin_src css
+.direct {
+  font-size: 44px;
+  color: #0f172a;
+}
+#+end_src
+
+`.nested` is absent. Note it lost `font-weight: 700` too, so this is not
+"nested splices don't expand" — the presence of a splice in a form BODY
+appears to void the whole form.
+
+Expected: either `.nested { font-size: 44px; color: #0f172a; font-weight: 700 }`
+(composition works), or a loud diagnostic saying a form body may not splice a
+form. Never silence.
+
+* Why this matters beyond the bug
+
+It is the blocker for role-indirection, the natural way to make design
+"schools" swappable (PLAN-135 follow-on). The intended shape:
+
+#+begin_src spacetime
+// a pattern splices ROLES, never a school directly
+.hero__title { --role-title; }
+
+// the school binds the roles — switch school = rebind, patterns untouched
+@form style --role-title { --sc-min-title; }
+#+end_src
+
+Today every `stdlib/showcases` pattern splices school forms BY NAME
+(`--sc-min-title`, `--sc-max-title`, …), so switching a pattern's school means
+editing every splice in it. With this bug fixed, a school is one block of role
+bindings and switching is a one-line change.
+
+* Investigation notes
+
+- Single-level splice expansion works (`.direct` above, and all of
+  `demos/brand-catalog`).
+- `spacetime inspect --layer expansion` prints nothing for the nested case.
+- Likely in `expand_style_form_splices` (`src/parser/mod.rs`), which was
+  introduced in PLAN-135 W2 for the one-level case: a splice appearing inside a
+  form DECLARATION body is presumably not visited, and whatever pass consumes
+  the form body then treats it as unresolvable and drops the rule rather than
+  diagnosing.
+
+* Acceptance
+
+1. RED-first gate: the repro above, asserting `.nested` carries all three
+   declarations (or asserting the diagnostic, if refusal is the chosen
+   semantics — but silence is not an option).
+2. Whichever semantics is chosen, `check` must agree with `build`.
+3. If composition is supported: a depth-2+ chain and a CYCLE
+   (`--a { --b; }` / `--b { --a; }`) must be handled — a cycle must be a loud
+   diagnostic, never a hang or a silent empty rule.
+
+NOTE [2026-08-07]: FIXED (PLAN-139 W2, 38b95fd1). Three layers: the `properties` capture type gains a splice alternative ordered FIRST (an ident arm would eat the `--name` token then fail on the missing colon — the original failure); the reifier carries a splice as a PropertyDef whose name is the reference, so every body consumer still sees one uniform list; expansion resolves it recursively with the chain threaded so a cycle is E0966 by name, never a hang. Gates: 4/4 .test.st under --cdp (was 1/3) + 5 Rust gates incl. cycle, self-splice, and the role-rebinding payoff.
+
+NOTE [2026-08-07]: FIXED (PLAN-139 W2, 38b95fd1). Three matching layers: the `properties` capture type gains a splice alternative ordered FIRST (an ident arm would consume the `--name` token then fail on the missing colon — precisely the original failure); the reifier carries a splice as a PropertyDef whose name IS the reference, so every body consumer still sees one uniform list; expansion resolves body-level references recursively with the chain threaded through, so a cycle is E0966 named-by-chain rather than a hang or an empty rule. Gates: 4/4 in tests/bugs/BUG-327-a-form-body-may-splice-a-form.test.st under --cdp (RED-checked at 1/3), plus 5 Rust gates covering cycle, self-splice, cross-import check/build agreement, and the role-rebinding payoff.

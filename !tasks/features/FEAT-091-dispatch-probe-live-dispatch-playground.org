@@ -1,0 +1,88 @@
+#+TITLE: @dispatch-probe: live dispatch playground (primitive + endpoint)
+#+STATE: DONE
+#+SESSION_ID: 14f94e45c6c3f247
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-02T11-06-49-499Z_14f94e45c6c3f247.jsonl]]
+#+CUSTOM_ID: FEAT-091-dispatch-probe-live-dispatch-playground
+#+COMPLETION_HASH: 7d665ce5777bae0b
+
+* Initial Message
+
+what's next to make this super usable? especially for e.g. multiple dispatch and making it useful as an actual browser. also, could you create a basic Markdown parser in pure Spacetime (only scoped to spacetime-docs for now, if needed), that you would use to integrate Markdown files already written about testing? How hard would that be?
+
+* Parent
+[[id:PLAN-033-world-class-spacetime-macro-dispatch-ref]]. The #5 "really cool" layer. Dep: FEAT-087. Parallel to 089/090.
+
+* Goal
+A live playground: type a Spacetime call (e.g. ~@data fetch $api : "/users"~) and
+watch the dispatch machine resolve it keystroke-by-keystroke — the scored candidate
+table, winner highlit, losers showing WHY they lost (−100 literal-miss, missing
+required, type mismatch).
+
+* Target files
+- ~src/server.rs~ — new route ~GET /__spacetime/dispatch?call=<urlenc>~ (register in
+  ~create_router_raw~ at server.rs:131 alongside the other /__spacetime/* routes) +
+  ~dispatch_handler~ (mirror ~runtime_js_handler~ at server.rs:1337). Runs FEAT-087's
+  ~parse_matches~ + explainer over the live registry, returns the resolution JSON.
+- ~stdlib/md/~ is the wrong home; create ~stdlib/devtools/~ OR fold into a new
+  ~stdlib/dispatch/~ module: ~%primitive dispatch-probe(&el, endpoint: string =
+  "/__spacetime/dispatch")~ (%emit js: read sibling <input> value, fetch endpoint,
+  render table into &el) + ~@dispatch-probe~ macro. Mirror stdlib/md structure.
+- ~demos/spacetime-docs/reference.st~ — wire the probe into each card's detail (or a
+  dedicated "Try it" panel).
+
+* Contract — endpoint
+~GET /__spacetime/dispatch?call=@data%20fetch%20%24api%20%3A%20%22%2Furl%22~
+→ 200 application/json, body = FEAT-087's probe JSON:
+~{ "call":"…", "directive":"@data", "candidates":[ {macro,total,winner,terms[]} … ],
+   "ambiguous":bool, "margin":int }~.
+Empty/invalid call → ~{ "call":"…", "directive":null, "candidates":[], "error":"no directive" }~
+(200 with error field, not a 500 — the UI renders the error inline).
+Dev-mode only (like the other /__spacetime/dev/* routes); guard accordingly.
+
+* Contract — primitive (%emit js, the sanctioned escape hatch)
+~%primitive dispatch-probe(&el, endpoint: string)~:
+- find the associated <input> (convention: ~&el~ contains or is preceded by
+  ~[data-probe-input]~; or take an ~input: selector~ param).
+- on input (debounced ~120ms): ~fetch(endpoint + "?call=" + encodeURIComponent(value))~
+  → render ~json.candidates~ into &el: one row per candidate, sorted total desc
+  (nulls last), winner row class ~probe__row--win~, rejected rows ~probe__row--out~,
+  each term as ~<span class="probe__term probe__term--{verdict}">label +points</span>~.
+- NO snarkdown/other deps; pure DOM. Cleanup the listener on teardown (%cleanup).
+
+* UX (the cool part)
+- Type ~@on cdick~ → every candidate red, "no winner — literal 'cdick' matches
+  nothing". Fix to ~@on click~ → the @on-click form jumps to ~+3 ✓~ and glows.
+- Show the margin ("won by +3") and an ambiguity banner when ~ambiguous~.
+- Seed each card's probe with that macro's canonical example call so it's live on
+  expand.
+
+* Edge cases
+- Endpoint runs the SAME explainer as ~inspect --layer dispatch --probe~ (FEAT-087)
+  — share the function, do not reimplement scoring in the handler.
+- ~parse_matches~ on a partial/garbage call must not panic — wrap and return the
+  error JSON.
+- Production build (no dev server) → the probe degrades gracefully: the primitive
+  shows "live probe needs the dev server" if the fetch fails. The static reference
+  (FEAT-090 cards) still works without it.
+- Rate: debounce in the primitive; the handler is cheap (in-memory registry).
+
+* Acceptance
+- ~curl '/__spacetime/dispatch?call=@data fetch $x : "/u"'~ (dev server) → JSON with
+  data-fetch winner total 6 + breakdown (matches FEAT-087's CLI probe byte-for-byte
+  on the candidates).
+- In the reference (CDP): type a call into a probe input → the scored table renders;
+  changing the keyword changes the winner live.
+- Garbage input → inline error, no 500, no console throw.
+- Full lib + integration green; a server test for the endpoint (mirror an existing
+  /__spacetime/* handler test).
+
+* Notes
+- This is honest to "no custom site JS": the only JS lives inside %primitive %emit
+  js, exactly like render-markdown (FEAT-086) and measure-text. The endpoint is
+  Rust. The page wiring is .st.
+- If the probe input two-way bind + endpoint feel heavy, ship a PRECOMPUTED variant
+  first (inject_dispatch_data already has the registry — bake probe tables for each
+  macro's canonical example at build time) and add the live endpoint as a follow-up.
+  But the live version is the wow; aim for it.
+
+NOTE [2026-06-10]: DONE. /__spacetime/dispatch?call= endpoint (server.rs dispatch_probe_handler) reuses cli::build_dispatch_probe (made pub) over cached_stdlib_registry — same scorer the CLI --probe prints, dev-mode only. stdlib/dispatch/ module: @dispatch-probe(out, endpoint) macro + dispatch-probe(&el,...) primitive (%emit js: debounced fetch, renders scored table; winner row glows .probe__row--win, losers .probe__row--out with red literal-miss / orange missing term colors). Wired into reference.st "Watch dispatch resolve" panel (seeded @data fetch example). Proven live over CDP: @data fetch -> winner data-fetch-kind ✓+13 with full breakdown; switching to @on click -> winner on-mutation-dispatcher-simple ✓+12. The only JS is inside the %emit js primitive; endpoint is Rust; wiring is .st. Screenshot reference-probe.png. lib 2179/0, integration 169/0. PLAN-033 COMPLETE.

@@ -1,0 +1,53 @@
+#+TITLE: Bare @import (no semicolon) swallows following scope as arg+body
+#+STATE: DONE
+#+SESSION_ID: 14f94e45c6c3f247
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-02T11-06-49-499Z_14f94e45c6c3f247.jsonl]]
+#+CUSTOM_ID: BUG-047-bare-import-no-semicolon-swallows-follow
+
+* Initial Message
+
+let's think about how we'll extend the stdlib for Spacetime using this as a philosophical underpinning: https://www.gingerbill.org/article/2025/09/08/package-managers-are-evil/
+
+
+In the context of integrating pretext to make text layout much simpler in Spacetime, especially in ora-ventures.com's hero section (projects/ora-ventures.com/ has some older syntax which the implementation agent will have to fix).
+
+Gather your thoughts and come up with your own understanding of the nuances of going that way for this project. Remember that the stdlib/ folder is going to go from having `macros/` and `primitives/` to a modular architecture for folders, which is how we are going to make the pretext macros btw.
+
+This is pretext: https://github.com/chenglou/pretext
+
+Also think about stuff we could put in the demos/ folder to showcase the integration with pretext and the latest Spacetime features. Let's not do ora-ventures.com just yet, let's first think about a nice framework for making the stdlib library both lean and "fusion-engine-included", and showcase that with pretext. Consider all angles
+
+* Symptom
+A bodyless directive like =@import "stdlib/text"= with NO trailing =;=,
+followed by =
+.box { ... }=, consumed =.box= as an inline arg and ={ ... }= as
+the import's body — so the scope vanished (scopes=0). The =import= FormMatch span
+covered the whole region (e.g. 0..44 instead of 0..26).
+
+* Impact
+Silently broke ALL directory-module imports, including the established
+=stdlib/mobile= (=examples/mobile-tasks/app.st= emitted 0 bytes). The 98 bare
+=@import= statements in stdlib only ever "worked" because the flat-dir loader
+loads those files regardless of import resolution; any site/module relying on
+=@import= RESOLUTION hit this.
+
+* Root cause
+The directive inline-arg loop accepts =DOT=/=HASH= (for =.class=/=#id= in form
+patterns) and did NOT stop at a newline. Present in BOTH parsers:
+- =src/syntax/cst/parser.rs= (parse_directive inline-arg loop)
+- =src/syntax/events/grammar/directives.rs= (inline_args outer + inner per-token loop)
+
+* Fix (commit e1076acf, PLAN-024 W3)
+Break the inline-arg loop when at =.=/=#= AND a newline precedes the token (a new
+scope statement, not a continuation). Required new newline tracking in the events
+parser:
+- =src/syntax/events/input.rs=: precompute =newline_before: Vec<bool>= per token
+- =src/syntax/events/parser.rs=: =newline_before_current()=
+- CST parser: thread an =inline_crossed_newline= flag via =skip_trivia_has_newline=
+
+* Verification
+=import_then_scope_variants= (semicolon / no-semicolon / blank-line / two-scopes)
+all preserve scopes; raw parse import span 0..26 not 0..44. lib 2090 + integration
+162 green.
+
+Found mid-flight while wiring stdlib/text; parent [[id:PLAN-024-modular-stdlib-vendor-git-submodule-pret]].

@@ -1,0 +1,152 @@
+#+TITLE: Film surface — land docs/language/film.st.md as the golden reference
+#+STATE: DONE
+#+SESSION_ID: 157047c1462c1c38
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-undefine-spacetime/2026-09-02T20-57-35-768Z_157047c1462c1c38.jsonl]]
+#+CUSTOM_ID: PLAN-150-film-surface-land-docs-language-film-st
+
+* Initial Message
+
+Using whatever tools and techniques you want, make the absolute most impressive, most mind blowing, most visually stunning 30s promo video for Spacetime (this repo). I want something that looks like we paid a studio $5m to produce.
+
+After that, I want you to do the same thing, but with Spacetime, and to compare/critique the two
+
+* Read first (in this order)
+1. =docs/language/film.st.md= — THE golden reference. Written affirmatively: every fence is a program the language will accept when this plan is done. Do not edit its syntax without a design conversation; edit its =— status —= blocks as waves land.
+2. =demos/promo/CRITIQUE.md= + =demos/promo/index.st= — the film that motivated every word, and what each word deletes from it. =demos/promo/studio-cut/promo.js= is the studio baseline (Three.js) each wave is measured against.
+3. =docs/specs/SIP-001-timeline-entities-and-score.org= §4 (score grammar, =->= sequencing, transitions §6), =SIP-001b= §1.2 (Transport vs Progress drivers), §8.6 (audio model — this plan picks: score is truth, both backends conform).
+4. =AGENTS.md= "Decisionmaking" — one sigil one meaning; variants as data; elegance bar; and "A source assertion is not a behavior assertion" (BUG-252). Every wave below has a =--cdp= behavior gate; a wave with only string gates is not done.
+5. =!tasks/bugs/BUG-382= — how the promo found a compiler bug; the FOUC initial-state block IS frame 0 of a film. Keep that in mind for every new keyframeable thing.
+6. Memory playbook =PB-rendering-a-film-from-a-spacetime-page= — the render loop, binary path (=~/.cache/cargo-target/debug/spacetime=), feature-flag trap (=cargo run= drops =cdp=), test-file traps.
+
+* Design invariants (non-negotiable)
+- =->= = a step between values. =at= = a position (score line OR keyframe stop). =--name= = a form reference. =&name= = an element (DOM, stage object, or audio entity). =@word= = a directive. =:slot { }= = a named sub-body inside a directive (the =@each= =:entering= shape). No proposal adds a second meaning to any of these.
+- Motion is written in ONE place: the =@on <driver> { … }= body. Camera moves, post-processing, 3D object props, audio gain are all PROPERTIES inside that body or forms consumed by it. No new driver kinds.
+- Every new variant is a =@form <kind>= (=post=, =camera=, =transition=, =shot=) registered through =stdlib/macros/form.st='s existing =%registers form($name, kind: …)=. Adding a kind = one macro arm + one body capture type. No Rust match arm per kind.
+- Determinism: everything must be a pure function of clip progress + compile-time data. =random()= resolves at compile time; =--noise-1d= is a pure function of progress. =tests/render/render_test.rs= (bit-identical two-run hash) must stay green after every wave — it is the film's regression net.
+- FOUC/frame-0: every keyframeable property must produce a correct progress=0 initial state through =generate_initial_state_css= (BUG-382's path). New property kinds (=@post= props, camera, stage-object props) need an initial-state emitter or an explicit "runtime-only, first tick before first paint" proof under =render=.
+
+* The gate that ties it together
+=tests/film_doc_gate_test.rs= (W0, below) builds =docs/language/film.st.md= like =tests/sip_001_w3_article_gate_test.rs= builds the launch article. Measured 2026-09-03: the doc currently fails with exactly ONE error (=E0956 Unknown primitive: post=) — every other new word parses as a generic keyframe/form and is SILENTLY accepted (the W0714 class). So W0 must first make each unlanded word a HARD diagnostic (unknown form kind, =at= inside a value, =&name= to a non-element, =:slot= on a macro that has none), so the doc goes RED per section and each wave turns its section GREEN. A wave's exit criterion is: its fences in film.st.md compile AND its =--cdp= gate moves pixels.
+
+* Waves
+Order = "unblocks the most for the least". W0–W2 are the 80 %. Each wave: RED gate → impl → GREEN → update film.st.md =— status —= → colocated commit with org record.
+
+** W0 — Doc gate + honest diagnostics (1 wave)
+- =tests/film_doc_gate_test.rs=: copy film.st.md to a temp dir as =index.st.md=, =spacetime build=, assert per-section on emitted JS/CSS. Initially assert the EXPECTED FAILURES (one =#[test]= per section, each =#[ignore]=d with the wave that unignores it).
+- Diagnostics: =@form <unknown-kind>= → E0946 already; add: keyframe value containing a bare =at= → E-NEW "positioned stops land in W1"; =@post= on a non-stage element → E0956 (already); =:slot= inside =@scatter=/=@form shot= → unknown-macro error. Purpose: no fence in the golden doc may compile green while its feature is absent.
+- Accept: =cargo test --test film_doc_gate_test= runs, all sections fail loudly with a message naming the wave.
+
+** W1 — Positioned stops + per-step easing + =--steps= (film.st.md §2)
+- Grammar: =stdlib/capture-types/keyframes.st= — a stop is =$value ("at" $pos:(percent|time))? ($easing:form_ref)?=. The =keyframes= capture must keep =->= as the only separator. Reify (=src/syntax/events/extractors/custom.rs::reify_keyframes=) fills =KeyframeDef= with =at= (fraction) and =easing= per stop; unpositioned stops are distributed evenly BETWEEN positioned neighbours (compute in reify, not runtime).
+- Runtime: =stdlib/primitives/animation/apply-animations.st= — the interpolator already reads per-keyframe =at=; add per-segment easing (=prev.easing || propEasing || bodyEasing=, it is ALMOST there: "Scope/property easing is supported by the engine (prev.easing || propEasing)").
+- Initial state: =generate_initial_state_css= must strip =at …= and =--name= from the first stop (=extract_initial_value=). Test: RED first.
+- =@form easing --steps($n)= in =stdlib/macros/presets.st=; =public/runtime/easing.js= gains =steps(n)=.
+- =stdlib/macros/film.st= (§12 forms) lands here since =--typewriter= needs =--steps=.
+- Gates: unit (reify positions), =tests/unit/primitives/positioned-stops.test.st= with =@clock advance= asserting value AT the position (RED on even spacing), =--cdp= gate on demos/promo's rewritten =--flash= (peak lands at 7.3 % ±1 frame).
+- Deletes: =&h1…&h6= clips in demos/promo; the caret =sign(sin())=. Rewrite the promo; re-render; contact sheet must match.
+
+** W2 — =@post= for any element, keyframeable, as a form kind (§3)
+- =stdlib/3d/index.st::@post= today: fixed params inside =@stage=. Refactor: =@post { properties }= AND =@post --form;= AND =@post= inside =@on= body. Register =post= as a form kind (=form.st=, body capture =properties=).
+- DOM primitive =stdlib/primitives/post.st=: stamps helper layers (=.st-post-bloom= blurred clone via =mix-blend-mode: screen= + luminance mask; =.st-post-aberration= two tinted clones; grain = SVG feTurbulence with =seed= bound to =--st-post-frame=; vignette radial mask; flash overlay; glitch =clip-path= slices). Every property is a custom property =--st-post-<name>= on the host so the EXISTING keyframe engine animates it; the layers read =var()=. No new interpolation code.
+- =@stage= lowering: same property names → pass uniforms (bloom→UnrealBloom strength, aberration→RGBShift). One vocabulary, two backends; document the DOM approximation per property in film.st.md §3 table (already written).
+- Frame-0: the host's =--st-post-*= initial values go through =generate_initial_state_css= automatically (custom props already handled).
+- Gates: =--cdp=: a bright element with =bloom: 0 -> 1= — pixel luminance OUTSIDE the element's box increases across the window (RED without layers); grain differs frame-to-frame (two consecutive =@clock= frames differ) and is identical across two renders (render_test determinism).
+- Deletes: promo =.grain/.vignette/.hit/.tagr/.tagb=; =@post(bloomStrength:)= param bag.
+
+** W3 — Camera as a form kind consumed by =@on= (§4)
+- =@form camera --name { position; target; fov; roll; easing; }= — kind arm in form.st, body capture =keyframes= (the vocabulary is validated by a =%capture_type camera_body= listing the four names; unknown → error).
+- Consumption: =@on <driver> --camera-form;= resolves in drivers.rs's form slot like a motion form; the difference is the LOWERING TARGET: if the host is a =@stage= canvas → write =camera.position/lookAt/fov= per tick; else → a generated =.st-rig= child gets =transform: matrix3d(inverse(view))= computed from position/target/fov (one small primitive, =stdlib/primitives/camera.st=; math is a lookAt + inverse, ~40 lines).
+- Composes: =@on &.clip { --crane; .title { … } }= — the form splice in a body already exists for motion forms (BUG-298 splice path); camera rides the same splice.
+- Gates: =--cdp= DOM: a =preserve-3d= box with =--crane= — the child's bounding rect changes across the window and matches a hand-computed projection at 50 % ±2px. =--cdp= stage: =camera.position= read via the engine at 50 %. Both RED first.
+- Deletes: =@stage(camZ:)=, =@scroll-3d(camZ:)=; promo =.cam= shake chains (→ =--shake= camera form in film.st).
+
+** W4 — Score drives =@stage= objects (§5)
+- =&name= on =@object/@particles/@light= registers the object in the same element registry the DOM uses (=selector_element= path) so =@on &.clip { &cloud { morph: 0 -> 3 } }= resolves. Property writes: apply-animations' =applyStyle= gains one branch: if the target is a stage object, set =object.userData.props[name]= and the object's form maps props→uniforms (=grid()= exposes =reveal/displace/fog=; =particles= exposes =morph/spin/size=). The prop VOCABULARY per object form is data (declared on the form), unknown prop → compile error.
+- =@scroll-3d(drive: X)= → migration capsule rewriting to =@on &.scroll { &obj { X: 0 -> to } }=; delete the primitive.
+- Add =grid()= object form (the studio S2 floor: fog, reveal ring, vertex ripple = =displace=) — this is the one piece of new GLSL, ~60 lines, vendored in stdlib/3d.
+- Gates: =--cdp= with real GPU flags (NB =render= uses =--disable-gpu=; add =--gpu= to render/test for stage pages, or accept swiftshader): read the particle uniform at 50 % of the window; the grid's displacement uniform pulses at the positioned stop.
+- Deletes: =@scroll-3d=; the "3D is a separate island" fact in CRITIQUE.md.
+
+** W5 — =@scatter= (§6)
+- Macro with =:shape= / =:rest= slots (=@each= =:entering= grammar shape). Primitive: rasterise =&from= via =stdlib/text='s canvas (static text → at BUILD time in the SSG pass, stamping =style="--x:…;--y:…"= on the N children like =@each= inline stamping; dynamic → hydrate). Slot forms: =--ring=, =--grid= as =@form value=s returning positions.
+- =@particles(shape: &tag)= under =@stage= reuses the same sampler for GPU positions.
+- Gates: unit — sampled points fall inside the glyph alpha; =--cdp= — 400 children have distinct =--x/--y= and their bounding box matches the text's ±5 %.
+
+** W6 — =random()= + =--noise-1d= (§7)
+- =random()= as a compile-time value form: resolved in the CSS emit pass with a hash of (file, selector, element ordinal, call ordinal); =random(k)= = independent stream k. Emitted as a literal (so CSS sees a number, render is deterministic).
+- =--noise-1d($amp, $hz, seed:)=: =@form value= evaluated per tick from clip progress (value-forms in animation values already resolve at runtime — check =interpolate.st='s value path); smooth periodic (sum of 3 sines with irrational ratios, seeded phases).
+- Gates: two builds → identical CSS (determinism); =--cdp= — an element under =--noise= moves, and two elements with different seeds differ.
+
+** W7 — =@audio= on the score + render mux (§8)
+- Blocked on BUG-306/310/311 (playback driver). Read them first.
+- =@audio(src) as &bed at Ns;= score entry (=score_entry= gains an audio subject); =mark &name at Ns;= is already captured — lower marks to (a) score positions usable in =at &mark=, (b) an exported marker list.
+- Browser: =<audio>= element created by the primitive, =currentTime= slaved to the transport; =gain/rate/pan= keyframeable via WebAudio nodes.
+- =render=: =src/render.rs= passes =-i <src> -itsoffset <at>= + an =afade=/=volume= filter compiled from the gain keyframes to the existing ffmpeg spawn; =--no-audio= to skip.
+- Conformance gate: a page with three marks; =--cdp= reads =audio.currentTime= at each mark vs the virtual clock (≤1 frame); ffprobe the rendered mp4 for an audio stream whose duration = film duration.
+
+** W8 — Transitions + sequencing lowering (§9)
+- =transition= form kind: body = two element-param blocks =&from { keyframes } &to { keyframes }=; capture already close to SIP-001 §6's sketch.
+- Score lowering (=src/pipeline/score.rs=): consume =->= sequence entries (today "grammar-only"): compute windows from =for= chains; a transition ref on an arrow EXTENDS both neighbours by =$d= and binds =&from/&to= to them, splicing the form's keyframe blocks as =@on &.clip= consumers with =range:= restricted to the overlap. A bare =->= = adjacent windows (cut).
+- =@form score= splice with =->= between fragments.
+- Gates: =--cdp= — =&a for 2s -> --crossfade(400ms) -> &b for 2s= on a 4.4 s loop: at 2.0 s both visible (a fading, b rising); at 2.5 s only b. RED today (=->= ignored → both windows never overlap).
+- Deletes: promo's per-scene =0 -> 1 -> 1 -> 1 -> 1 -> 0= envelopes.
+
+** W9 — =@form shot= (§10)
+- Kind with =:markup= + =:motion= slots. =:markup= registers a template under the same name (so =&card-reveal(...)= outside a score is the ordinary template call); =:motion= registers a motion form. Score placement =&card-reveal("A", "B") for 100%= → instantiate template at the placement's host + bind =@on &.clip --card-reveal-motion=. One new score-lowering rule; everything else is existing registries.
+- Gate: =--cdp= — a shot placed twice with different args yields two DOM instances that both animate on their own windows.
+
+** W10 — =@reveal(split: outline)= (§11)
+- Needs font→path. Options: (a) opentype.js vendored under =stdlib/text/vendor= (same rail as pretext); (b) server-side in Rust via =ttf-parser= at build. Prefer (a): runtime parity with dynamic text, same vendoring rail. =draw= = =stroke-dashoffset= over each glyph path, =fill= = real-text opacity. Accessibility: the SVG twin is =aria-hidden=; text stays.
+- Gate: =--cdp= — dashoffset of glyph 3 at 50 % is mid-range; at 100 % the real text opacity is 1.
+
+** W11 — Tooling (§13)
+- =src/render.rs= options: =--stills=, =--from/--to=, =--sheet=, =--dpr= (=deviceScaleFactor=), =--settle=, =--out .webm/.gif/frames/=. Pure options; ffmpeg args vary by extension.
+- =serve --scrub=: stdlib overlay page fragment (=stdlib/testing/= already has UI patterns) mounting a transport bar bound to =ST._clock= (install on first drag). Any =&.time= page gets it.
+- =--out film.lottie=: LAST; only when every consumer on the page is a DOM keyframe. A separate SIP if pursued.
+- Gates: render_test.rs cases for stills (two PNGs differ), range (frame count = (to−from)·fps), dpr (3840 wide).
+
+* Cross-cutting
+- After EVERY wave: re-render =demos/promo= (rewrite the scene the wave enables), regenerate =scratch/compare/side-by-side.jpg=, update CRITIQUE.md's frame table for that scene, update film.st.md's =— status —=. The film is the integration test.
+- Migration capsules (=stdlib/migrations/entries/=) for each deletion: =@scroll-3d= → =@on &.scroll=, =@post(bloomStrength:)= → =@post { bloom: }=, =@stage(camZ:)= → =--camera= form.
+- Diagnostics discipline: any new word that fails to match must be a hard error naming the word, never a silent drop (BUG-229/243 class).
+- Docs: film.st.md is the doc. =docs/language/README.md= gets one link. =docs/animation-presets.md= is stale (recon finding) — delete or point at film.st.md §12 when W1 lands.
+
+* Definition of done
+=cargo test --test film_doc_gate_test= green with zero =#[ignore]=; =demos/promo/index.st= ≤ ~150 lines and visually ≥ the studio cut on the CRITIQUE frame table (every row "Tie" or "Spacetime"); =render_test.rs= determinism green; all deletions' migration capsules shipped.
+
+* Progress (2026-09-03, session 1)
+Landed, each with a RED\u2192GREEN behavior gate, a working doc, and a colocated commit:
+- **W0** (=516a3882=) \u2014 film doc gate (=tests/film_doc_gate.rs=) + loud diagnostics for every unlanded word. New codes E0968 (film keyframe syntax not yet landed), E0970 (reserved film directive; =@scatter=/=@camera=/=@audio= now name their wave instead of W0714 "unknown, ignored"). Working docs convention established under =docs/language/film/= with =README.md= + =w0-doc-gate.st.md=.
+- **W1** (=dc7ee090=) \u2014 positioned stops (=0.85 at 25%=), per-step easing (=0 -> 1 --ease-out-expo=), =--steps(N)=. Single shared reify (=metasystem::expand::parse_keyframes_value=, pipeline copy delegates). Gate =tests/score/positioned-stops.test.st=. Working doc =w1-positioned-stops.st.md=. Snapshot baselines regenerated (also absorbed pre-existing st.js callMatch drift). Full lib suite green 3243/0.
+- **W2** (=362db1ab=) \u2014 =@post { bloom; grain; vignette }= DOM lens (=stdlib/primitives/post.st= + =stdlib/macros/post.st=), keyframeable via =--st-post-*= custom props (rides W1 keyframes). Coexists with 3D =@post(...)= by shape. Gate =tests/score/post-lens.test.st=.
+
+** W3 (camera) \u2014 NOT STARTED; blocker found
+Camera axes as a 3-vector value (=position: 0 9.5 4.5 -> 0 2.1 9.5=) do NOT parse today: a space-separated multi-component keyframe value trips the driver parser (=E0956 Unknown primitive: drive-legacy-space=). So W3 needs ONE of:
+  (a) per-axis SCALAR tracks (=--cam-x=/=--cam-y=/=--cam-z=/=--cam-fov=), a camera form whose body is those custom-prop keyframes, + a static-CSS rig primitive reading them into a =matrix3d= (or =perspective= + =translate3d= + =rotate= for the DOM approximation). This reuses ALL of W1/W2's custom-prop machinery \u2014 the recommended path, mirrors how W2 avoided a new interpolation path.
+  (b) extend the keyframe grammar to accept space-separated vector values (bigger, touches the core parser; also unlocks =translate: x y z= generally).
+Recommended: (a). Register =camera= as a form kind in =stdlib/macros/form.st= (one arm, body =keyframes=); make =resolve_motion_form= accept =motion|camera=; route a camera form to a NEW =camera-rig= primitive (not =apply-animations=) that writes the rig child's transform from =--cam-*=. Gate on =--cdp=: the rig's =getBoundingClientRect= / computed =transform= changes across a clip window and matches a hand-computed projection at 50%.
+
+** Remaining after W3: W4 (score drives @stage 3D), W5 (@scatter), W6 (random/noise), W7 (@audio+render mux; blocked on BUG-306/310/311), W8 (transitions), W9 (@form shot), W10 (@reveal outline), W11 (render tooling). Each still has its MUST_FAIL canary (or KNOWN_SILENT tripwire for W6/W10) in the doc gate, so none can silently regress.
+
+** Doc-gate state
+=cargo test --test film_doc_gate= green: W1+W2 canaries moved to working docs; W3/W5/W8/W9 still in MUST_FAIL; =random()= (W6) and =@reveal(split: outline)= (W10) in KNOWN_SILENT (tripwires that fail when their wave lands, forcing the canary to move).
+
+NOTE [2026-09-03]: W3 (78b56fc4) — camera as a form kind. Path (a) taken: axes position/target/fov/roll rewrite to --cam-* custom-property tracks (src/pipeline/drivers.rs::rewrite_camera_axes), animated by W1 engine; a static rig transform on the host reads them (perspective+translate3d+rotateZ). resolve_motion_form accepts kind motion|camera. Consumed via body splice @on &.clip { --crane; } (bare statement form still errors E0956 drive-legacy-space — deferred W3-arc). Unknown axis = E0949. Gate tests/score/camera.test.st (--cdp, seen RED vs constant transform). Working doc docs/language/film/w3-camera.st.md. Camera canary left MUST_FAIL. The earlier "vector doesn't parse" blocker was a MISDIAGNOSIS: vectors parse fine in a brace @on body; only the trailing-; legacy form fails. Doc gate 4/4, integration 217/217.
+
+NOTE [2026-09-03]: W4 (19728cd6) — score drives 3D via named stage-object channels. @object &orb (...) registers a channel proxy on its canvas (_stStageObjects['&name']); @on writes keyframed values to it (apply-animations resolveStageObject descends from consumer into hosted canvas); three-object frame loop applies channels (scale/spin/pos/opacity/emissive/metalness/roughness/morph) to the real mesh. No new interpolation path. Gate stdlib/3d/tests/stage-clip.test.st (--cdp needs timing, RED vs ignored channel). Working doc w4-score-3d.st.md. INFRA: src/cdp.rs now uses SwiftShader not --disable-gpu (WebGL was null in headless → all 3D gates failed). FOUND+FILED BUG-383: @on directly on a <canvas> never receives a score driver (div works); W4 workaround = consumer is wrapping element. W4-arc remaining: grid() object form (reveal/displace/fog), @scroll-3d as @on &.scroll sugar. Lib 3243/0, integration 217/217.
+
+NOTE [2026-09-03]: W5 (056b9cc2) — @scatter positions from a shape. Macro stdlib/macros/scatter.st + primitive stdlib/primitives/scatter.st. Slots are pseudo-selector body params (:shape/:rest), captured as properties map; each maps a prop to a sample axis (--x: sample-x) NOT bare --x; (bare dashed-ident collides with form-splice; : introduces value = harmony). Primitive draws source text to offscreen canvas, rejection-samples count points over alpha (deterministic PRNG seeded from text). GRAMMAR FIX src/syntax/events/form_compiler.rs: absent optional pseudo-selector now binds inner captures to empty (was unbound → E0804 in %binds). Scatter left reserved table; doc-gate reserved canary moved to @audio. Gate tests/score/scatter.test.st (--cdp needs layout, RED vs collapsed sampler). Working doc w5-scatter.st.md. Lib 3243/0, integration 217/217, doc gate 4/4.
+
+NOTE [2026-09-03]: W6 (9a5bf020) — random() + --noise-1d. random(): src/compiler.rs rewrite_random_calls turns random()/random(N) into var(--st-rnd-N) + emit_random_stamp_js stamps per-element deterministic seed (document index), via registerSelectorInit rail + deferred document sweep. Per-element, per-stream independent, build-stable. --noise-1d($amp,$hz,seed:): apply-animations.st detects it in staticProperties, drives on clip watch (layered sines) instead of applying once; static-only scope now routes through processScope. Gates tests/score/random.test.st + noise.test.st (--cdp, both RED-proven). random() removed from KNOWN_SILENT (works, not silent gap). Working doc w6-random-noise.st.md. Snapshots regenerated. Lib 3243/0, integration 217/217, doc gate 4/4. NB CDP timing tests: stamp needs @wait for deferred sweep; !== in @eval trips test parser (use === or typeof x === 'object').
+
+NOTE [2026-09-03]: W8 (7b49eeb6) — transitions on score -> + FOUNDATIONAL -> sequencing fix. @form transition kind (form.st + stdlib/capture-types/transition-body.st — capture type MUST be in capture-types/ dir, not macros/, to resolve in %form). transition-edge primitive watches clips' __clip_ windows, plays &from over outgoing tail / &to over incoming head. score.rs::transition_edges detects transition between clip steps. CRITICAL FIX: score arrow chain &a->&b->&c kept only &a — repeated capture group ( "->" $next )* surfaced no name so SequenceExtractor discarded its Array. Fixed capture_name_of in extractors/custom.rs (name repeated group by sole inner sequence capture, scoped to */+ only — broad version broke 24 tests: handle-block/param_list/sum-types). Also looped inline-group repetition in form_compiler.rs. Gate tests/score/transition.test.st (--cdp RED-proven). Working doc w8-transitions.st.md. Lib 3243/0, integration 217/217. KEY LESSON: keyframe-text BindValue::String auto-reifies to {properties} object in resolve stage — primitive accepts both. Remaining W8-arc: $d overlap refine, per-region easing, route transitions, fragment-joined.
+
+NOTE [2026-09-03]: W9 (e84abcd6) — @form shot (markup+motion). shot form kind (form.st + stdlib/capture-types/shot-body.st): :markup + :motion slots. Binds register-template with body=$body.markup, animations=$body.motion (sub-field access via PLAN-077 W6 dotted paths works in %binds). Name normalization: --form declared / &template invoked — buildTemplateFactory + E0402 collector (src/pipeline/mod.rs) strip both sigils. FIXED DEAD REF: public/runtime/templates.js called Spacetime.applyAnimations (never defined → template animations never ran); defined it as one-shot mount reveal. Gate tests/score/shot.test.st (--cdp RED-proven). Working doc w9-shots.st.md. Snapshots regenerated. Lib 3243/0, integration 217/217, doc gate 4/4 (MUST_FAIL now empty). W9-arc: score-placement of shots, per-region nested motion. KEY: single %registers per macro limit; capture types MUST be in capture-types/ dir.
+
+NOTE [2026-09-03]: W10 (6bf846b1) — @reveal(split: outline) text as geometry. reveal.st: outline split builds SVG <text> twin in element font (strokable geometry), sr-only twin keeps text accessible. draw→stroke-dashoffset (dashLen→0), fill→fill-opacity. Driven by rAF loop setting inline style each frame NOT WAAPI (WAAPI on SVG stroke-dashoffset doesn't reflect via getComputedStyle — proven). Gate tests/score/outline.test.st (--cdp RED-proven). Removed from KNOWN_SILENT (now empty — W6 random + W10 outline both gated). Working doc w10-outline.st.md. Lib 3243/0, integration 217/217, reveal 19/0. W10-arc: per-glyph stagger, draw easing, true font-to-path. NOTE: reveal keyframe-body capture (@reveal{} body → %keyframes) doesn't deliver draw/fill props reliably — outline self-animates default draw regardless (pre-existing reveal body-capture gap). RESEQUENCING: W11 render tooling does NOT depend on W7 audio (roster miswired); W7 blocked on BUG-306/310/311 — doing W11/W12 first, W7 last.
+
+NOTE [2026-09-04]: W11 (a421f588) — render tooling stills/from/to/dpr. src/render.rs: render_stills+StillsOptions (capture timestamps as PNGs, no ffmpeg), RenderOptions grows dpr/from_ms/to_ms + Default impl, capture_into threads dpr into device-scale + start_ms into frame loop. CLI src/main.rs: --stills/--dpr/--from/--to. Gates tests/render/render_test.rs (w11_stills/dpr/from_to). Output to scratch/ NOT /tmp. Working doc w11-render-tooling.st.md. Render 11/11, lib 3243/0. W11-arc: --sheet, serve --scrub, webm/gif/lottie targets. Existing render tests updated with ..Default::default().
+
+NOTE [2026-09-04]: W12 (62fe13a5) — shipped film vocabulary stdlib/film/index.st (@import "stdlib/film"). Forms: --focus-pull/--shimmer/--typewriter/--glitch/--drift (motion), --cinema (post), --shake/--push-in (camera). Added `post` form kind to stdlib/macros/form.st. Opt-in module (filesystem-loaded like 3d, not embedded). Gate tests/score/film-vocab.test.st (--cdp RED-proven). Working doc w12-vocabulary.st.md. Lib 3243/0. NOTE: @post --cinema; bare-form consumption doesn't work (same bare-@on-statement gap as camera) — post form declares but consumption via @post{} splice = E0949; deferred W12-arc. Motion/camera forms consume fine via @on &.clip { --x; }.
+
+NOTE [2026-09-04]: W7 (3e7b5c7c) — @audio on the score (browser-play). score_audio capture in score.st (entry alongside mark/gap/line); audio_entries in score.rs emits score-audio bind. score-audio.st primitive: hidden <audio>, watches score progress, seeks to progress*total-at, plays while live. gain/rate keyframed via @on &.clip (W4 channel-proxy rail). NOT blocked by BUG-306/310/311 (those are video-drives-score, inverse). @audio outside score = hard error (parser). Gate tests/score/audio.test.st (--cdp, seek target advances, RED-proven via _stSeekTarget). Working doc w7-audio.st.md. Lib 3243/0, integration 217/217. W7-arc: render MUX (ffmpeg audio track), pan, conformance. ALL W0-W12 NOW LANDED. Remaining: w3-arc (bare @on --form; + lookAt), promo rewrite+render.

@@ -1,0 +1,264 @@
+#+TITLE: FUP-144: strengthen @data subscribe — typed slot + non-null seed (parity with sibling @data kinds)
+#+STATE: DONE
+#+SESSION_ID: 153c9c68ea93c166
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-24T17-46-26-602Z_153c9c68ea93c166.jsonl]]
+#+CUSTOM_ID: PLAN-118-fup-144-strengthen-data-subscribe-typed
+#+COMPLETION_HASH: ecc66c44d99a6c6a
+
+* Initial Message
+
+look at the spacetime_lv and do a review and show me the features that would be most exciting for you to do there
+
+* Initial Message
+User (2026-07-24): after the forms spikes, implement FUP-144 autonomously end to
+end. This plan scopes + sequences it. Derived from FUP-142 SPIKE 1-4 findings and
+a compiler-internals investigation (agent://0-SubscribeInternals).
+
+* Goal
+Bring `@data subscribe` to PARITY with every sibling `@data` kind: accept an
+optional `$type:typeref?` and seed a non-null initial value, so:
+  - a subscribed signal can be TYPED (kills the decorative `@type` / W0203),
+  - nested reads (`$form.errors.email`) are TOTAL, not guarded by try/catch
+    against a null seed,
+  - local patterns that need a well-shaped object before the first server diff
+    (the forms `@field` values pattern, FUP-142 Finding B) work from mount.
+
+This is the KEYSTONE for the forms vertical (FUP-142) and benefits EVERY
+subscriber, not just forms.
+
+* Verified facts (from agent://0-SubscribeInternals + my own probes)
+- Grammar is self-hosted in stdlib. Adding `$type:typeref?` to subscribe's
+  `%form` is a STDLIB edit; the Rust parser (src/parser/mod.rs ~6535-6624) maps
+  `typeref` + `?`-optional GENERICALLY — no Rust special-case for subscribe.
+- Current subscribe form: data-kind.st L538-556:
+    %form { @data subscribe $name:binding from $host:binding : $assign:ident ; }
+    %binds { local-state-impl(name: $name, initial: null) -> { $state as $name }
+             signal-subscribe(name: $name, host: $host, assign: $assign) }
+    %registers binding($name) { … NO type arg … }
+- local-state-impl (stdlib/syntax/local-state.st) seeds
+  `window._localState[name] = initial` and dispatches `local:<name>:updated`.
+- signal-subscribe (stdlib/primitives/signal.st L581+) writes every bridge value
+  through `window.SpacetimeLocal[target]` and REPLAYS an already-present assign.
+  ∴ a non-null seed is SAFELY overwritten by the first server diff — seed is just
+  the pre-first-diff value. No reconciler change needed.
+- No typeref→zero-value machinery exists today (TypeRegistry in src/type_system.rs
+  stores fields but exposes no per-type default synthesiser). ∴ automatic
+  zero-value-from-type is OUT of the minimal scope → the seed is EXPLICIT.
+- REGRESSION RISK (my probe): the CURRENT grammar SILENTLY DEGRADES a subscribe
+  whose shape doesn't match — `@data subscribe $form Env from $h : form ;` today
+  does NOT match subscribe (extra token before `from`) and falls through to a
+  PLAIN LOCAL (no `__stLiveSubscriptions` emitted), passing check with no error.
+  Baseline confirmed: `@data subscribe $form from $h : form ;` emits 3×
+  `__stLiveSubscriptions`; the typed-but-unslotted variant emits 0. ∴ the fix
+  MUST make `$form Env from …` MATCH subscribe (real subscription + type),
+  and a test must assert the subscription is still emitted (guard the degrade).
+
+* Design decision — seed grammar (RESOLVED)
+Two shapes considered:
+  A. type-only, derive zero-value from the type → needs NEW Rust (zero-value
+     synthesiser). REJECTED for minimal scope (no such machinery; violates
+     "smallest correct change").
+  B. explicit optional seed tail → PURE STDLIB, mirrors @data inline's `: value`.
+     CHOSEN.
+Chosen surface (mirrors sibling optionality; `:` stays the assign selector, seed
+rides an optional `=` tail like param-defaults elsewhere):
+    @data subscribe $name:binding $type:typeref? from $host:binding : $assign:ident ( = $seed:balanced(';') )? ;
+Examples:
+    @data subscribe $count from $counter : count ;                 // unchanged, seed defaults
+    @data subscribe $count number from $counter : count ;          // typed, default seed
+    @data subscribe $form FormEnvelope from $auth : form = { "values": {}, "errors": {}, "valid": false } ;  // typed + explicit seed
+Default seed when `= …` omitted: keep BACKWARD-COMPAT — if no seed AND no type,
+seed stays `null` (existing behaviour, so all existing pages are byte-stable). If
+a seed is given, use it. (Type-driven default deferred to a follow-up with the
+zero-value machinery.)
+NB the `( = $seed )?` optional-group tail must be validated to PARSE in a %form;
+if the balanced-capture optional-group tail is unsupported there, fall back to a
+separate macro variant (specificity-ordered, like host-http vs host-http-opts) —
+decide during W1 with a spike.
+
+* Waves
+
+** W1 — Grammar + seed (the core stdlib change) [DOING]
+- Edit stdlib/macros/data-kind.st `data-subscribe`:
+  - add `$type:typeref?` between `$name:binding` and `from`.
+  - add optional seed tail `( = $seed:balanced(';') )?` before `;`.
+  - `%binds`: `local-state-impl(name: $name, initial: $seed)` (seed defaults to
+    null when absent — confirm the capture yields null/None cleanly; if it yields
+    empty-string, guard in the macro or default in local-state-impl).
+  - `%registers binding($name, type: $type)` (add the type arg, matching siblings).
+- SPIKE the optional-group tail parseability FIRST (5-min probe). If unsupported,
+  use two specificity-ordered %macro variants (seeded / unseeded) — same pattern
+  as host-http-opts.
+- Acceptance:
+  - `@data subscribe $x from $h : a ;` still emits a real subscription
+    (`__stLiveSubscriptions` present) AND is byte-stable vs before (counter.st,
+    board.st bundles unchanged except intended).
+  - `@data subscribe $x T from $h : a ;` MATCHES subscribe (not a degraded local):
+    `__stLiveSubscriptions` present, `$x` typed in the registry.
+  - `@data subscribe $x T from $h : a = SEED ;` seeds `_localState.x = SEED`.
+
+** W2 — Tests (RED→GREEN) [blockers: W1]
+- Extend tests/bugs/FEAT-159-liveview-subscribe.test.st (the existing direct
+  subscribe test) with:
+  - a TYPED subscribe + explicit seed: assert `_localState`/SpacetimeLocal holds
+    the seed at mount (pre-diff), THEN the server setter overwrites it (seed →
+    server value), proving seed is pre-first-diff only.
+  - a REGRESSION guard: assert the typed form still registers a subscription
+    setter (the degrade-to-local bug would make this fail).
+- Add a compile test (integration or headless) that the typed form emits
+  `__stLiveSubscriptions` (guards the silent-degrade regression at the emit layer).
+- Run: cargo test --lib, cargo test --test integration_tests, and
+  `cargo run --features headless -- test tests/ --headless` for the .st tests.
+
+** W3 — Prove on the forms fixture [blockers: W1, W2]
+- Re-express elixir/spacetime_lv/frontend/signup.st (and/or signup_field.st) with
+  a TYPED, SEEDED subscribe:
+    @data subscribe $form FormEnvelope from $auth : form = { "values": {"email":"","password":""}, "errors": {"email":"","password":""}, "valid": false } ;
+  - the `@type FormEnvelope/FormErrors/FormValues` is now REFERENCED (no W0203).
+  - the emitted nested reads for `$form.errors.email` etc. are TOTAL (no
+    `try/catch` guard) — verify in emitted spacetime.js (the try/catch that
+    SPIKE-1 documented should be GONE for the seeded typed subscribe).
+  - rebuild + browser-drive the validate/submit loop (regression: still green).
+- Update FUP-142 with the result and mark seam #1 CLOSED by FUP-144.
+
+** W4 — Docs + close-out [blockers: W1, W2, W3]
+- Update the data-and-rendering doc / @data subscribe reference to document the
+  type slot + seed (mirror the sibling-kind docs).
+- Colocate: the test + doc + fixture change land with the implementation commit(s)
+  per AGENTS ("Colocate the tests + docs + PRD updates").
+- Close FUP-144; note follow-ups: type-driven zero-value seed (deferred),
+  E0928 field-name check via the now-available subscribe type (feeds FUP-142 OQ2 /
+  SPIKE-5), and the silent-degrade looseness (file a BUG if the fix doesn't
+  already turn a malformed subscribe into a hard error).
+
+* Non-goals
+- Type-driven zero-value synthesis (no machinery; explicit seed instead) — FUP.
+- Compile-time field-name checking on subscribed types (FUP-142 SPIKE-5).
+- The `@field` sugar / `@data form` wrapper (FUP-142) — this plan only unblocks them.
+- Runtime type ENFORCEMENT on the SpacetimeLocal write (none exists; out of scope).
+
+* Sequencing rationale
+W1 is the whole mechanism; W2 proves it + guards the regression I found; W3 is the
+real-world payoff on the forms fixture; W4 makes it durable. Strictly linear —
+each wave needs the prior. Single-surface change (one macro + one primitive param
++ tests), so no parallelism needed.
+
+* Risks
+- The optional seed-tail grammar (`( = $seed )?`) may not parse in a %form →
+  mitigated by the W1 spike + the two-variant fallback.
+- Silent-degrade looseness: the fix must not just ADD the slot but ensure a
+  malformed subscribe errors rather than degrading. If turning the degrade into a
+  hard error is bigger than W1, scope it to a follow-up BUG and keep W1 to the
+  additive slot.
+- Byte-stability of existing bundles: assert counter.st/board.st subscribe
+  emission is unchanged (the `initial: null` default path must be preserved when
+  no seed is given).
+
+* W1 EXECUTION NOTES (2026-07-24)
+Implemented in stdlib/macros/data-kind.st. TWO macros now (mirrors fetch vs
+fetch-opts):
+  - `data-subscribe` (bodyless, %order 250): added `$type:typeref?` slot.
+    Grammar: `@data subscribe $name $type? from $host : $assign ;`
+  - `data-subscribe-seeded` (body, %order 249): typed + `{ initial: <seed>; }`.
+    Grammar: `@data subscribe $name $type? from $host : $assign { initial: $seed; }`
+
+** What WORKS (verified by build + emitted-JS inspection, in scratch/fup144/)
+- Untyped bodyless: `@data subscribe $count from $h : count ;` — unchanged, real
+  subscription (3× __stLiveSubscriptions on board.st; 2 on counter.st). Byte-stable.
+- Typed bodyless: `@data subscribe $count number from $h : count ;` — real
+  subscription, type registered. (Fixes the silent-degrade: pre-fix, a token
+  between $name and `from` fell through to a plain local; now it MATCHES.)
+- Scalar seed: `@data subscribe $count number from $h : count { initial: 0; }`
+  → `_localState["count"] = 0` + real subscription. CLEAN.
+- One-level object seed: `{ initial: { "email": "", "valid": false }; }` — works.
+
+** What does NOT work — nested-object seeds (SCOPED OUT, pre-existing limitation)
+- Two-level seed `{ initial: { "errors": { "x": "" } }; }` → PARSE ERROR
+  ("expected scope block, directive, or declaration").
+- ROOT CAUSE: `initial: $seed:balanced(';')` uses the shared BalancedExtractor.
+  A nested `{...}` VALUE is pre-split by the directive grammar into a child BODY
+  node, so it's missing from the flat inline token slice; `scan_end` (bounded by
+  the last slice token) stops before the nested content and the balance never
+  closes. This is NOT introduced by FUP-144 — the SAME failure reproduces in the
+  EXISTING `@data fetch … { initial: { "a": { "b": "" } }; }`. Same family as
+  BUG-228 (object-literal parsing in @data seeds).
+- Seed-by-reference (`initial: $someInlineSignal;`) also does NOT resolve — emits
+  the literal string "$someInlineSignal". The seed is a literal expr, no signal
+  interpolation. (Documented; not a regression.)
+
+** SCOPING DECISION
+W1 ships type-slot + scalar/one-level-object seed (real, tested value). Nested
+object seeds are BLOCKED on the BalancedExtractor/BUG-228 limitation → filed
+against BUG-228 (updated to note it also blocks nested subscribe/fetch seeds),
+deferred. Forms impact: the envelope's nested `errors`/`values` can't be seeded
+directly, BUT the `@field-error` reader already GUARDS a missing `.errors`
+(`errs && typeof errs === 'object'`), and the `values` object is a separate
+`@data inline` (one-level, seedable). So forms are unblocked for the common path;
+the nested seed is a nice-to-have gated on the parser fix.
+
+** Regression status: GREEN
+- elixir/spacetime_lv/frontend/ — all 6 files pass check.
+- board.st (3) / counter.st (2) subscription emission unchanged.
+- No Rust changes; pure stdlib. (cargo --lib subscribe filter: 0 targeted unit
+  tests exist yet — W2 adds them.)
+
+* W2 EXECUTION NOTES (2026-07-24) — tests + a real ordering bug caught
+New test: tests/features/FUP-144-typed-seeded-subscribe.test.st (3 tests, all
+GREEN). Covers: typed bodyless still registers a real setter (silent-degrade
+guard); explicit scalar seed is pre-first-diff then overwritten by a diff;
+one-level object seed shapes the signal pre-diff then overwritten.
+
+** BUG CAUGHT BY THE TEST — seeded variant emitted at the wrong %order.
+Initially gave data-subscribe-seeded `%order 249` (copying fetch-opts). The test
+"typed+seed registers under the module" FAILED: the seeded subscribe registered
+under the EMPTY-STRING module key. Root cause: signal-subscribe's IIFE reads
+`window.__stHosts[host].module`; at %order 249 it EMITTED BEFORE the `@host`
+registration (%order 250), so module was '' at registration time → the bridge
+would never route diffs to a seeded subscribe (silent production breakage).
+FIX: set data-subscribe-seeded to %order 250 (same as bodyless subscribe AND
+@host); the two subscribe %forms disambiguate by SHAPE (body vs bodyless), not
+%order, so sharing 250 is safe. Verified: registers under TestWeb.CounterLive.
+This is exactly the class of integration bug the plan aimed to prevent — and the
+test caught it before it shipped.
+
+** Regression suite: ALL GREEN
+- cargo test --lib: 2829 passed, 0 failed.
+- cargo test --test integration_tests: 202 passed, 0 failed, 1 ignored.
+- tests/bugs/FEAT-159-liveview-subscribe.test.st: 1 passed (existing subscribe).
+- tests/integration/signal-flip.test.st: 1 passed (subscribe+flip path).
+- tests/features/FUP-144-typed-seeded-subscribe.test.st: 3 passed (new).
+
+* W3 EXECUTION NOTES (2026-07-24) — typed subscribe on the forms fixture
+Changed elixir/spacetime_lv/frontend/signup.st:
+  `@data subscribe $form from $auth : form ;`
+  → `@data subscribe $form FormEnvelope from $auth : form ;`
+
+** Seam #1 (decorative type / W0203) — CLOSED (the type-slot half)
+- BEFORE: `@type FormEnvelope/FormValues/FormErrors` were defined but NOT
+  referenced (plain untyped subscribe) → W0203 "defined but never used".
+- AFTER: typing the subscribe REFERENCES FormEnvelope (and FormValues/FormErrors
+  transitively, as its fields). `cargo run -- check signup.st` shows ZERO W02xx
+  type warnings. The envelope @types now earn their place.
+- Binding is registered WITH its type (%registers binding($name, type: $type)) —
+  the substrate a future compile-time field-name check (FUP-142 OQ2/SPIKE-5) reads.
+
+** The seed half (remove try/catch guards) — NOT achieved, and HONESTLY so
+- The emitted nested reads are STILL guarded: `try { __v = ST.resolve(node,
+  'form').errors.email } catch { return }`. Because the FormEnvelope is NESTED
+  ({values, errors, valid}) and nested-object seeds hit the BUG-228/Balanced
+  limitation (W1 notes), `$form` still starts null → the guard is CORRECT and
+  necessary. Removing the guard requires the nested seed, which is deferred.
+- Net for forms: the WHOLE of seam #1's "typed" win lands; the "total reads"
+  win waits on the nested-seed parser fix (BUG-228). This is the accurate,
+  non-oversold state.
+
+** Live regression: GREEN
+- Rebuilt + staged signup bundle; mix compile clean; served /signup.
+- Browser-drove validate + submit: email/pw errors render on invalid, clear on
+  valid, submit → success "true". Typing the subscribe broke nothing.
+- Full frontend check: all 6 files pass.
+
+** FUP-142 cross-update owed (W4): mark seam #1's typed-half CLOSED by FUP-144;
+seam #1's total-reads-half remains BLOCKED on BUG-228 (nested seed).
+
+NOTE [2026-07-26]: DONE 2026-07-24. All 4 waves complete. Committed d8d47bd6 (FUP-144 core: stdlib + test + README) + 3f919e9d (FUP-142 forms spike fixtures). Shipped: type slot + seeded companion on @data subscribe; caught+fixed a %order registration bug; typed the forms fixture (W0203 gone); docs updated. Regressions all green (2829 unit + 202 integration + 4 subscribe .st tests). Deferred + filed: nested-object seeds (BUG-228), type-driven zero-value seed, compile-time field-name check (FUP-142 OQ2/SPIKE-5).

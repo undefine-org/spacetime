@@ -1,0 +1,150 @@
+#+TITLE: A comment inside @handle { } body drops ALL its clauses (optimistic/receive/final emit empty)
+#+STATE: DONE
+#+SESSION_ID: 15119c48cafc615e
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-21T08-11-12-555Z_15119c48cafc615e.jsonl]]
+#+CUSTOM_ID: BUG-135-a-comment-inside-handle-body-drops-all-i
+
+* Initial Message
+
+the recent %animates on the liveview-kanban demo still does not work. Here's what I get in the browser:
+
+
+[derived-signal viewedCards] TypeError: can't access property "length", SpacetimeLocal.history is undefined
+    anonymous http://localhost:3333/__spacetime/runtime.js?entry=index.st line 8275 > Function:3
+    recompute http://localhost:3333/__spacetime/runtime.js?entry=index.st:8275
+    afterData http://localhost:3333/__spacetime/runtime.js?entry=index.st:2337
+runtime.js:8278:19
+    recompute http://localhost:3333/__spacetime/runtime.js?entry=index.st:8278
+    afterData http://localhost:3333/__spacetime/runtime.js?entry=index.st:2337
+[derived-signal viewedCards] TypeError: can't access property "length", SpacetimeLocal.history is undefined
+    anonymous http://localhost:3333/__spacetime/runtime.js?entry=index.st line 8275 > Function:3
+    recompute http://localhost:3333/__spacetime/runtime.js?entry=index.st:8275
+    set http://localhost:3333/__spacetime/runtime.js?entry=index.st:8118
+    load http://localhost:3333/__spacetime/runtime.js?entry=index.st:6269
+runtime.js:8278:19
+Template not found: card 2 runtime.js:10106:19
+Template not found: card 2 runtime.js:10391:19
+Template not found: card 2 runtime.js:10676:19
+[derived-signal viewedCards] TypeError: can't access property "length", SpacetimeLocal.history is undefined
+    anonymous http://localhost:3333/__spacetime/runtime.js?entry=index.st line 8275 > Function:3
+    recompute http://localhost:3333/__spacetime/runtime.js?entry=index.st:8275
+    <anonymous> http://localhost:3333/__spacetime/runtime.js?entry=index.st:8154
+    <anonymous> http://localhost:3333/__spacetime/runtime.js?entry=index.st:8155
+runtime.js:8278:19
+[derived-signal viewedCards] TypeError: can't access property "length", SpacetimeLocal.history is undefined
+    anonymous http://localhost:3333/__spacetime/runtime.js?entry=index.st line 8275 > Function:3
+    recompute http://localhost:3333/__spacetime/runtime.js?entry=index.st:8275
+    afterData http://localhost:3333/__spacetime/runtime.js?entry=index.st:2337
+
+* Symptom
+Placing a `/* … */` (or `//`) comment ANYWHERE inside a `@handle $sig { … }`
+body causes the ENTIRE handle to emit with empty clauses:
+=optimisticStmts = ""=, =handleArms = null=, =finalStmts = ""=. The handler
+silently does nothing (no optimistic apply, no receive dispatch, no final).
+
+Discovered wiring demos/liveview-kanban: a descriptive comment above the
+=optimistic {= clause (still inside the =@handle { }= braces) made drag-and-drop
+a no-op. Removing the comment fixed it.
+
+* Repro (minimal)
+#+begin_src
+@handle $move {
+  /* this comment breaks everything below */
+  optimistic { $cards.update($card, { col: $to }); }
+  receive { Moved(c) => { ... } }
+  final { $dragging <- null; }
+}
+#+end_src
+=> optimisticStmts/handleArms/finalStmts all empty. Remove the comment => all
+three capture correctly.
+
+NB: a comment in a *bare-statement* body (e.g. inside `optimistic { }` itself in
+some isolated cases) behaved inconsistently — the demo's multi-line comment INSIDE
+the optimistic block ALSO broke it, while a single-line comment in a trivial
+isolated file did not. The reliable rule today: keep `@handle` bodies
+comment-free; put explanation ABOVE the `@handle` line.
+
+* Likely cause (to confirm)
+The `@handle` form is captured by the handle_optimistic / handle_receive /
+handle_final %capture_types (stdlib/capture-types/handle-block.st), each using
+=balanced('}')=. The clause-group merge in the form matcher likely does not skip
+comment trivia between/within clauses, so a comment token desyncs the
+=( $optimistic:handle_optimistic )? ( $receive:handle_receive )? ( $final:handle_final )?=
+sequence and every optional group fails to match -> all clauses default empty.
+The matcher should treat comments as trivia inside a `@handle` body (parity with
+how comments are ignored elsewhere in directive bodies).
+
+* Where
+- src/syntax/ form matcher for capture-type clause groups (the merge that lifts
+  $optimistic/$receive/$final), and/or the lexer trivia handling feeding it.
+- stdlib/capture-types/handle-block.st (the three %capture_types).
+
+* Acceptance
+- A `@handle $sig { /* comment */ optimistic { … } receive { … } final { … } }`
+  emits non-empty optimisticStmts + handleArms + finalStmts (comment ignored).
+- A headless test: compile a @handle with an interleaved comment, assert the
+  emitted JS contains the optimistic statement text (RED before / GREEN after).
+- Then restore the descriptive comments inside demos/liveview-kanban's @handle.
+
+* Workaround in place
+demos/liveview-kanban keeps its @handle comment-free; the explanation lives in
+the comment ABOVE the `.board { @handle … }` block.
+
+* Root cause (CONFIRMED)
+Capture-type EXTRACTORS skip only =SyntaxKind::WHITESPACE= in their leading-skip
+loops, NOT =COMMENT= — even though both are trivia (=SyntaxKind::is_trivia()=
+covers =WHITESPACE | COMMENT=). The =@handle= body is matched as three optional
+clause GROUPS =( $optimistic )? ( $receive )? ( $final )?= via
+=match_body_groups= (src/syntax/events/form_compiler.rs), each compiled to a
+=compile_pattern_with_defs= extractor over the body token slice.
+
+A leading =/* … */= (or =//=) emits a =COMMENT= token at index 0. The
+=LiteralExtractor("optimistic")= leading-skip loop only steps past =WHITESPACE=,
+so it sees the =COMMENT= first, fails to match, the =OptionalExtractor= returns
+=consumed=0=, and =match_body_groups='s cursor never advances. Every subsequent
+clause group then re-starts on that same comment and likewise yields empty →
+=optimisticStmts=""=, =handleArms=null=, =finalStmts=""=. The handler silently
+no-ops.
+
+Verified by emit-diff (compile() JS): with the comment the markers `col:`
+(1→0), `dragging` (2→1), `Moved` (2→1) all drop.
+
+* Fix
+Make the extractor leading-skip loops trivia-aware: replace the six
+=token.kind == SyntaxKind::WHITESPACE= leading-skip checks in
+src/syntax/events/extractors/custom.rs with =token.kind.is_trivia()= (covers
+=WHITESPACE | COMMENT=). One sigil, one meaning: a comment is trivia EVERYWHERE,
+including between/within capture-type clause groups. No new mechanism; reuses the
+existing =is_trivia()= predicate already used in form_compiler's cursor.
+
+Sites fixed (custom.rs): BalancedExtractor, SkipBlockExtractor, LiteralExtractor
+(leading + multi-token-literal interior guard), CharClassExtractor,
+SequenceExtractor (inter-element skip), plus the one test helper.
+
+* Tests (RED→GREEN)
+tests/integration/js_emit_snapshots.rs:
+- =test_js_emit_handle_comment_does_not_drop_clauses= — @handle with a LEADING
+  body comment must emit `col:`/`dragging`/`Moved`, and the marker COUNTS must
+  equal the comment-free emission. (RED before fix, GREEN after.)
+- =test_js_emit_handle_interleaved_comment_keeps_all_clauses= — comments BETWEEN
+  clauses are also trivia.
+
+* Verification
+- cargo test --test integration_tests: 181 passed, 0 failed (incl. 2 new).
+- cargo test --lib syntax:: (638), form_match (71), events:: (267): all pass.
+- cargo test --lib extractors:: (83): all pass.
+- headless signal-dispatch.test.st: 8/8 pass.
+- Full headless suite: 549 passed / 62 failed — IDENTICAL to HEAD baseline (the
+  62 are pre-existing V8-backend env limits: window.getSelection, DOMParser,
+  el.animate, registerTimeline). Zero regressions from this change.
+
+* Demo restored
+demos/liveview-kanban/index.st: descriptive comments put BACK inside the
+=@handle $move { … }= body (optimistic/receive/final each annotated). =check=
+passes. NB: an UNRELATED pre-existing route-EXPORT diagnostic exists at
+index.st:51 (the =@data signal= decl) in =build=/export — present in committed
+HEAD, orthogonal to BUG-135; filed as a separate concern, not addressed here.
+
+* Workaround REMOVED
+The "keep @handle bodies comment-free" rule no longer applies — comments are now
+trivia inside @handle (and any %capture_type clause group).

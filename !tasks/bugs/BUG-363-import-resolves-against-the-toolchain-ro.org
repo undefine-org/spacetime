@@ -1,0 +1,81 @@
+#+TITLE: @import resolves against the toolchain root, never the importing file
+#+STATE: ITEM
+#+SESSION_ID: 153f5ed0617636c7
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-26T21-12-46-213Z_153f5ed0617636c7.jsonl]]
+#+CUSTOM_ID: BUG-363-import-resolves-against-the-toolchain-ro
+
+* Initial Message
+
+ok so is there any point in keeping the worktree now? verify
+
+* Symptom
+
+A relative `@import` is searched for ONLY in the toolchain checkout root, not
+beside the file that wrote it. Every project that factors shared declarations
+into a sibling file fails to build.
+
+#+begin_src text
+✗ Export failed: Route '' has compile diagnostic: Compile failed:
+  Import resolution failed: Could not resolve import '_helpers.st'
+  from projects/animations/index.st.
+  Searched: ["/home/user/code/ora/verse/_helpers.st"]
+#+end_src
+
+Note the search path: the toolchain root. The file doing the importing lives in
+`projects/animations/`, and `_helpers.st` sits right next to it.
+
+* Reproduction (minimal, no project needed)
+
+#+begin_src bash
+mkdir -p scratch/impp
+printf '@form easing --x { linear }
+' > scratch/impp/_helpers.st
+printf '@import "_helpers.st";
+%%scope page
+<div class="b">hi</div>
+' > scratch/impp/index.st
+cargo run -- build scratch/impp/
+# -> Could not resolve import '_helpers.st' ... Searched: ["<toolchain root>/_helpers.st"]
+#+end_src
+
+Running `cargo run -- build .` from INSIDE the project directory does not help —
+the search path is still the toolchain root, so this is not a CWD issue that a
+different invocation can work around.
+
+* Why it matters
+
+- `projects/animations` (4 pages) imports `_helpers.st` and cannot build at all.
+- `cargo run -- check <dir>` reports these files as CLEAN, because the check
+  path apparently never resolves the import either. So the failure is invisible
+  until export, and a green `check` is actively misleading.
+- Any project splitting declarations across files is affected. This is the
+  ordinary way to share design tokens and easing curves.
+
+* Relationship to BUG-227
+
+BUG-227 fixed the same CLASS of defect for the stdlib registry: the loader
+trusted a CWD-relative `"stdlib"` and silently fell back to the embedded copy
+when the process ran from anywhere else. `STDLIB_REGISTRY` now resolves through
+`toolchain::workspace_root_for`. Import resolution appears to have kept the old
+habit, anchored to the toolchain root instead of to the importing file.
+
+The correct base is neither CWD nor the toolchain root — it is the DIRECTORY OF
+THE FILE CONTAINING THE `@import`. That is the only base under which a relative
+path means what the author wrote.
+
+* Found by
+
+The SIP-001c easing migration (commit b01994dc). Verifying the migrated
+`projects/animations` actually built surfaced this; the migration itself is
+sound and unrelated. Confirmed pre-existing with a freshly created probe that no
+migration had ever touched.
+
+* Acceptance
+
+- A relative `@import` resolves against the importing file's directory.
+- `cargo run -- build scratch/impp/` (above) emits a page.
+- `cargo run -- check` REPORTS an unresolvable import rather than passing it
+  silently — a check that cannot see the failure is the more dangerous half.
+- `projects/animations` builds.
+- A gate covers: sibling import, subdirectory import, and an unresolvable import
+  that must still fail loudly.

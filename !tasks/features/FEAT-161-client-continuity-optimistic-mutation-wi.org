@@ -1,0 +1,67 @@
+#+TITLE: Client continuity: optimistic mutation with rollback, animated transitions between server states, ephemeral presence channel
+#+STATE: DONE
+#+SESSION_ID: 1539989eb44441ea
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-22T09-34-26-513Z_1539989eb44441ea.jsonl]]
+#+CUSTOM_ID: FEAT-161-client-continuity-optimistic-mutation-wi
+#+DEPENDS: FEAT-159 FEAT-160
+#+COMPLETION_HASH: bfca512ea14742c2
+
+* Initial Message
+
+explain the FUPs and show me your vision for the Spacetime <> LV connection and what would make it *wow*. Exlpain the impact of each bug that you saw
+
+* Wow pillar 3 of 3 — "Data-difft, not template-difft": the client keeps
+continuity. Principles: elixir/spacetime_lv/AGENTS.md §bridge principles (1, 3).
+
+* Problem
+The substrate is already right (phx-update="ignore"; Spacetime's signal
+renderer patches exactly the bound nodes — finer-grained than HEEx diffing).
+But the .st AUTHOR has no spelled-out machinery for the three things that make
+a data-fed client feel alive: (a) acting before the server answers, (b)
+moving smoothly between two server states, (c) ephemeral local-only
+interaction (your own cursor, hover ghosts) that never touches the wire.
+
+* Deliverable — three patterns, each landing as stdlib machinery + tests, not
+demo-only code:
+
+1. *Optimistic mutation with reconciler rollback.* @handle's optimistic arm
+   already exists; this FEAT makes the round-trip sound over the live
+   transport: fire → apply optimistic value immediately → correlated {:reply}
+   confirms (keep) or a rejection/Fail arm restores the pre-fire value
+   (rollback). Deliver as a documented, tested pattern in
+   stdlib/primitives/signal.st (a `send emit … optimistic:` affordance or a
+   composeable @handle idiom — pick per the elegance bar: prefer the idiom if
+   zero new grammar). Server must be able to REJECT an event with a tagged
+   reply ({:reply, %{tag: "err", reason: …}}) — already possible post-FEAT-137.
+2. *Animated transitions between server states.* When a subscribed assign
+   diff lands (FEAT-159), the affected view transitions via @clock/@timeline
+   (docs/testing/ANIMATION.md) instead of snapping: a card that moved columns
+   on someone else's screen GLIDES. Deliver the stdlib affordance that binds a
+   signal-write to a timeline (FLIP-style: measure old position → apply new →
+   animate the delta), testable with @clock virtual time.
+3. *Ephemeral presence channel.* Cursor trails and drag ghosts: high-frequency
+   ephemeral payloads that other clients see but the server never persists.
+   LiveView-native answer: Phoenix Presence + push_event relay (server relays
+   without storing) decoded via the @data stream surface (FEAT-160). Local
+   cursor rendering is pure .st (no wire). Rate-limit/coalesce in the bridge
+   (one outbound frame per animation frame, latest-wins).
+
+* Tests
+- Headless .st (@clock): optimistic fire → reject reply → value restored;
+  assign diff mid-animation → timeline retargets, no snap.
+- mix: rejected move_card → {:reply, %{tag: "err"}} path.
+- Animation tests per docs/testing/ANIMATION.md; live page via @drive --cdp.
+
+* Depends on
+FEAT-159 (subscribe channel — transitions animate STREAMED state),
+FEAT-160 (stream surface — presence relay decode). Consumed by the kanban demo.
+
+NOTE [2026-07-22]: 2026-07-22: Implemented optimistic mutation rail: @handle snapshot/restore idiom documented; `policy latest` now carries monotonic generation across live/ws/http replies and signal-handler suppresses stale earlier replies; CounterLive `dec` rejects at zero with `{tag: "err"}` and demo restores the optimistic decrement. Focused tests green: signal-dispatch 9/9; CounterLive 4/4; frontend check had passed before unrelated parser changes. Full FEAT remains DOING: animated signal-write transitions, local presence, outbound rAF coalescing, browser proof and gates still pending. Later frontend check blocked by unrelated `NestedScope.composed_selector` compile errors in src/parser/mod.rs.
+
+NOTE [2026-07-22]: Completed remaining continuity rails. `@flip $signal(duration:, easing:)` binds subscribed assign writes to a shared-rAF FLIP transition; a deterministic `@clock` test proves intermediate motion, mid-flight retarget, and final convergence. `SpacetimeBridge.pushEphemeral` coalesces outbound transient payloads latest-wins to one rAF; Counter adds a pure local pointer cursor. Remote Phoenix Presence relay is deferred explicitly to FEAT-162.
+
+Browser proof on :4001 (document `signal:dec:reply` trace): at zero, `{before-fire: "0"}` → optimistic DOM write `"-1"` → decoded `{variant: "Failed", reply: "Count cannot go below zero"}` with view `"0"` → settled `"0"`. Preceding direct bridge drain observed 449 decrement replies from 447 through zero, then tagged `err`, proving the rejectable server branch.
+
+Verification: `mix precommit` 9 passed; `cargo run --features headless -- test tests/ --headless --format json` 652 passed/0 failed; `cargo test --lib` 2723 passed/2 failed, only pre-existing BUG-207 failures in `src/analysis/tests.rs`; `cargo run -- check elixir/spacetime_lv/frontend/` passed; focused signal-dispatch 9/9 and signal-flip 1/1 passed.
+
+NOTE [2026-07-22]: FEAT-161 completed; remote peer Presence relay is tracked as FEAT-162.

@@ -1,0 +1,75 @@
+#+TITLE: @drag(bounds: &el) is inert — %derives cannot resolve an element-ref capture
+#+STATE: DONE
+#+SESSION_ID: 1511009590860ad7
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-20T20-50-56-706Z_1511009590860ad7.jsonl]]
+#+CUSTOM_ID: PLAN-057-dragbounds-el-is-inert-derives-cannot-re
+#+COMPLETION_HASH: bf46892cdb6d70a4
+
+* Initial Message
+
+why is drag and drop not even being triggered in @demos/liveview-kanban/
+
+* Problem (audit PLAN-053/054/055 finding #3)
+
+`@drag(bounds: &slider-track)` does nothing — the drag is never clamped to the
+bounds element. The %derives bound branch is silently dead.
+
+* Root cause
+
+drag.st's %derives:
+  $x: $bounds != none
+    ? clamp($rawX, 0, &$bounds.rect.width - &self.rect.width)
+    : $rawX
+
+`bounds` is an ELEMENT-REF capture (CapturedValue::Element("&slider-track")).
+translate_derive_expr lowers a derive into a DETACHED compute closure
+`function(v){ return (...) }` registered via ST.derive. That closure has the
+gesture signals (v.*) and `el` (self), but NOT the element-resolution context
+that maps a Spacetime `&name` marker to its DOM node (ctx.elements in
+src/emit/js.rs). So:
+  - captured_value_to_js_literal has no real Element arm -> inlines `null`
+    (now EXPLICIT + commented after the audit, was the `_ => null` catch-all).
+  - `$bounds != none` becomes `null != null` -> always false -> clamp branch dead.
+  - `&$bounds.rect.W` translates to `ST.rectOf(SpacetimeLocal.bounds)` which
+    references a page global that does not exist (harmless: guarded false, and
+    ST.rectOf(undefined) returns a zero rect).
+
+So the axis constraint works; the bounds constraint is inert.
+
+* Current state (post-audit)
+
+- Behavior made SAFE + EXPLICIT: captured_value_to_js_literal has a dedicated
+  Element/Selector/Binding -> "null" arm with a comment; ST.rectOf is null-safe.
+- Limitation DOCUMENTED in stdlib/macros/drag.st's %form (bounds param note).
+- NOT a regression: bounds never worked (%animates/%derives were dropped before
+  PLAN-054).
+
+* Fix options
+
+1. Thread the element-resolution map into derive codegen: when a %derives expr
+   references `&$<capture>` resolving to an Element, emit a querySelector/ref
+   lookup for the bound element and pass it into the compute closure (e.g. via a
+   captured `const __bounds = <resolved>;` in the animate fragment, before the
+   ST.derive calls). Then `&$bounds.rect.W` -> `ST.rectOf(__bounds).W` and
+   `$bounds != none` -> `(__bounds != null)`.
+   This is the real fix; medium effort, touches generate_animate_fragments +
+   translate_derive_expr (needs the resolved element name) + the element-ref
+   resolution surface.
+
+2. Reactive bounds: if the bounds element can resize, the clamp should re-run —
+   currently derives only depend on gesture signals. A ResizeObserver-backed
+   bounds signal would be the complete version.
+
+* Acceptance
+
+`@drag(axis:"x", bounds: &track)` on a handle clamps the handle's translateX to
+[0, track.width - handle.width]. A headless test (mocked rects) asserts the
+clamp; the live slider demo confirms.
+
+* Files
+- src/pipeline/evaluate.rs (translate_derive_expr element-ref handling),
+  src/pipeline/mod.rs (generate_animate_fragments: resolve + inject bounds el),
+  stdlib/macros/drag.st (remove the limitation note when fixed),
+  public/runtime/st.js (ST.rectOf already null-safe).
+
+NOTE [2026-06-21]: Closed by PLAN-058 W4. The bounds element now resolves through the __stRefs named-element registry (the element-ref primitive populates it; ST.ref("name") reads it). translate_derive_expr inlines an Element capture as ST.ref("name") (not null), so $bounds != none → ST.ref(...) != null (live test) and &$bounds.rect.W → ST.rectOf(ST.ref(...)).W (real rect). Headless tests (mocked rects) assert the clamp to [0, track.w - handle.w]: stdlib/dnd/tests/bounds.test.st (2 tests, green).

@@ -1,0 +1,62 @@
+#+TITLE: Compile-time hydration — prerender @each into static HTML
+#+STATE: ITEM
+#+SESSION_ID: 14f8685429e4ccf1
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-01T18-22-11-112Z_14f8685429e4ccf1.jsonl]]
+#+CUSTOM_ID: FUP-030-compile-time-hydration-prerender-each-in
+
+* Initial Message
+
+ok let's think deeply deeply. What would a headless CMS for Spacetime look like? like a headless CMS that has all the nice features of a headless CMS and the power of Spacetime combined. Look at the stdlib and the __dev__ to understand some of the pre-existing experiments, and do a research on the state of headless CMSes, before coming back with your THOUGHTS AND REFLECTIONS (no decisions yet)
+
+* Origin
+docs/specs/spacetime-cms.md §2 (the gap); stage2-3 §4.1.
+STAGE 3 (Framer killer) — also unlocks SSG/SEO for the whole framework.
+
+* Why
+=@data= is purely CLIENT-side today. Verify:
+- =data-source= primitive (stdlib/primitives/data/source.st) emits a runtime =fetch()=.
+- =@each= renders into empty =data-st-source= containers IN THE BROWSER.
+- the static export pipeline (src/export/, layers discover→bundle→html→emit) STRIPS
+  dev attributes (src/export/html.rs) but NEVER pre-renders content into static HTML.
+∴ "compile-time hydration" is a MISSING PIPELINE STAGE, not an optimization.
+
+Stage 3's page-builder canvas must show the REAL rendered page (real data, real
+layout) so "edit on the real page" is truthful and the canvas == shipped output. That
+FORCES compile-time hydration. It also gives the whole framework SSG/SEO benefits
+independent of the CMS.
+
+NOTE: V1 and Stage 2 explicitly DEFER this (they use the existing client-side @each
+re-render via DataUpdate → ST.setData for preview). This FUP is the Stage-3 trigger.
+
+* Scope
+1. New export stage in src/export/: read =data/*.json= → evaluate =@each= / template
+   invocations at build → bake static HTML into the page output.
+2. Make hydration a PER-=@data= MODE (compile-time vs live runtime fetch), so it is a
+   FLAG, not a fork. (Reuses the @data macro surface in stdlib/macros/type-data.st.)
+3. THE FORK (decide here):
+   - prerender-only: bake HTML, no client re-attach. Simple. Canvas = static truth.
+   - prerender + hydrate-adopt: runtime re-adopts baked DOM for live filtering /
+     animation. The SSR "difficulty cliff."
+   RECOMMENDATION: prerender-only FIRST (sufficient for the builder canvas; keeps us
+   off the cliff). Defer hydrate-adopt until a concrete feature demands it.
+
+* Insights / challenges
+- The evaluation engine for @each at build time may overlap with the existing pipeline
+  Evaluate/Expand layers (src/pipeline/) — investigate reuse vs a dedicated SSG pass.
+- Templates already register their structure (stdlib/macros/template.st) — baking is
+  "instantiate template per data row," which the runtime already does client-side; the
+  task is doing it in Rust at build.
+- Locale interaction: data-source resolves ={locale}= at runtime; the prerender stage
+  must bake per-locale (projects already ship locales/en.json + fr.json).
+
+* Acceptance
+- Building unkn bakes the talent roster (and other @each sections) into static HTML in
+  dist/, matching the live-rendered DOM.
+- A per-@data flag selects compile-time vs live hydration.
+- The page-builder canvas renders the baked page (parity with shipped output).
+
+* Related
+- docs/specs/spacetime-cms.md §2; stage2-3 §4.1
+- src/export/ (discover/bundle/html/emit), src/export/html.rs (attr stripping)
+- src/pipeline/ (Evaluate/Expand — possible reuse)
+- stdlib/primitives/data/source.st, stdlib/macros/type-data.st, stdlib/macros/each.st

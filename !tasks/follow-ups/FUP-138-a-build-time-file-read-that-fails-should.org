@@ -1,0 +1,46 @@
+#+TITLE: A build-time file read that fails should be a build warning, not only a rendered stub
+#+STATE: ITEM
+#+SESSION_ID: 153d8ede25f7aff7
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-25T11-25-45-495Z_153d8ede25f7aff7.jsonl]]
+#+CUSTOM_ID: FUP-138-a-build-time-file-read-that-fails-should
+
+* Initial Message
+
+https://ys2olone710qdtvpcgfny.preview.spacetime.undefine.org/brand isn't owkring but it is there in local. Why?
+
+* Why
+BUG-219: `@doc(src:)` could not read its markdown for every deploy of
+projects/backdesk-new and every build reported success.
+`inject_doc_content::resolve_md`'s failure path inlines a visible
+"# Document not found" heading into the PAGE — loud where a human eventually
+looks, silent where CI looks.
+
+The export already has a warning channel plumbed end to end:
+`CompiledSpacetime::pipeline_errors` -> `CompiledBundle::diagnostics` ->
+`ExportReport::warnings` -> printed by `src/main.rs:1792`'s build summary. A
+failed build-time file read simply never enters it.
+
+* Change
+`src/compiler.rs::inject_doc_content` — on the `Err` branch of `resolve_md`,
+in addition to inlining the visible error string, push a Diagnostic so it
+flows to `pipeline_errors`. The message should name BOTH candidate paths that
+were tried (site_dir-relative and CWD-relative), because the failure that
+produced BUG-219 was precisely a site_dir that was never set — a diagnostic
+saying only "not found" would not have revealed the cause.
+
+Apply the same treatment to the other build-time reader,
+`html::ssg_unroll::unroll_static_each`, if it can fail silently the same way
+(verify first — do not assume).
+
+* Acceptance
+- A site whose `@doc(src:)` points at a missing file: `cargo run -- build <site>`
+  still renders the visible stub AND prints a warning naming the file and the
+  paths tried.
+- A unit test asserts the diagnostic is present in `pipeline_errors` (not just
+  the string in the emitted JS), so the WIRING is what's locked, not the
+  rendering.
+- Existing `compiler::doc_src_missing_file_emits_visible_error_not_blank`
+  passes unchanged — the visible stub is a feature; this adds to it.
+
+* Related
+BUG-219 (the incident this generalizes)

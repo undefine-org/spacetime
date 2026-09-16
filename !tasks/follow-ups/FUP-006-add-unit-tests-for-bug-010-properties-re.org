@@ -1,0 +1,116 @@
+#+TITLE: Add unit tests for BUG-010 Properties re-lex path and debug_assert for pointer arithmetic
+#+STATE: ITEM
+#+SESSION_ID: 14a77002fa8c180b
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-03-30T20-58-47-146Z_14a77002fa8c180b.jsonl]]
+#+CUSTOM_ID: FUP-006-add-unit-tests-for-bug-010-properties-re
+#+EFFORT: S
+#+PRIORITY: #B
+#+LAYER: parser
+#+BLOCKER: BUG-011-fix-collect-descendant-tokens-duplicate
+
+* Initial Message
+
+Implement these audit recommendations from org://AUD-003-audit-implementation:
+
+Here are my findings:
+
+---
+
+## Audit Findings
+
+### 1. Latent duplicate-token bug in catch-all `_ =>` arm
+- **What**: The `_ =>` catch-all in `extract_body_captures` still uses `collect_descendant_tokens` which produces duplicate tokens. Any future `$var:fields`, `$var:params`, or `$var:states` body capture would silently fail the same way `Properties` did.
+- **Where**: `src/syntax/events/form_compiler.rs:1054-1111` (the `_ =>` arm)
+- **Why**: Silent extraction failure — the capture returns `None`, the field is silently absent, and the downstream consumer gets empty data. Latent today (no stdlib captures hit this), but a trap for the next person who adds a body capture using a complex extractor type.
+- **Effort**: `medium` (would need the same re-lex approach or fix `collect_descendant_tokens` to deduplicate)
+
+### 2. No unit tests for BUG-009 fix (el_init condition)
+- **What**: The plan's BUG-009 item specified 3 unit test scenarios (exports → Body, cleanup → Body, neither → None) but none were added. The fix is only covered by the snapshot test `data_directive_js`.
+- **Where**: `src/pipeline/expand.rs` — no `#[test]` module exists
+- **Why**: The snapshot test validates one case (data-source with exports). The critical distinction — a selectorless global with neither exports nor cleanup staying `None` — has no coverage. A future refactor could regress this without test failure.
+- **Effort**: `small`
+
+### 3. No unit test for BUG-010 fix (Properties re-lex path)
+- **What**: The plan's BUG-010 item specified unit tests (parse `@type Foo { name: string; }` → TypeRegistry with fields), but none were added. Verification was done via server endpoint only.
+- **Where**: `src/syntax/events/form_compiler.rs` — no test for the `CaptureType::Properties` arm
+- **Why**: The re-lex + pointer-arithmetic offset calculation is subtle. A regression (e.g., someone refactoring `inner` derivation to use `String` instead of `&str` slice) would silently break the offset math with no test failure.
+- **Effort**: `small`
+
+### 4. Pointer arithmetic assumes `inner` is a subslice of `source`
+- **What**: `inner.as_ptr() as usize - source.as_ptr() as usize` is safe today because `inner` is derived via `&source[body_start..body_end].trim().trim_start_matches('{')...`. But there's no `debug_assert!` guarding this invariant.
+- **Where**: `src/syntax/events/form_compiler.rs:1025`
+- **Why**: If a future refactor changes `inner` to be heap-allocated (e.g., `.to_string()` or `.replace(...)` earlier in the chain), the pointer arithmetic would produce garbage offsets silently. A `debug_assert!(inner.as_ptr() >= source.as_ptr() && ...)` would catch this in debug builds.
+- **Effort**: `trivial`
+
+* Scope
+** In Scope
+- Add ~debug_assert!~ guarding the pointer arithmetic invariant (audit finding #4)
+- Add integration test: ~@type Foo { name: string; age: number; }~ parsed through ~parse_matches~ produces ~CapturedValue::Properties~ with correct fields
+- This tests the FULL pipeline through the form compiler, not just the extractor in isolation
+** Out of Scope
+- Changing extractor logic (covered by existing tests in ~complex.rs~)
+- TypeRegistry tests (already exist in ~type_system/tests.rs~)
+
+** Note on BUG-011 interaction
+If BUG-011 (collect_descendant_tokens dedup) lands first, the dedicated ~CaptureType::Properties~ arm will be removed. In that case:
+- The ~debug_assert!~ is no longer needed (pointer arithmetic is removed)
+- The integration test is still needed (validates Properties extraction works via the catch-all path)
+- Adjust test expectations accordingly
+
+* Implementation
+
+** Part 1: debug_assert! (audit finding #4)
+File: ~src/syntax/events/form_compiler.rs~, line 1025
+
+Add before the pointer arithmetic:
+#+begin_src rust
+debug_assert!(
+    inner.as_ptr() as usize >= source.as_ptr() as usize
+        && (inner.as_ptr() as usize + inner.len())
+            <= (source.as_ptr() as usize + source.len()),
+    "inner must be a subslice of source for pointer arithmetic offset calculation"
+);
+#+end_src
+
+This catches any future refactor that makes ~inner~ heap-allocated (e.g., ~.to_string()~, ~.replace()~). Zero cost in release builds.
+
+** Part 2: Integration test for Properties extraction
+File: ~src/syntax/events/form_compiler.rs~ inside the ~mod tests~ block (line 3035+)
+
+The test should exercise the FULL form matching pipeline (parse_matches → form compiler → body capture extraction → PropertiesExtractor) to validate the end-to-end path:
+
+#+begin_src rust
+#[test]
+fn test_type_body_produces_properties_capture() {
+    use crate::syntax::events::parse_matches;
+    use crate::syntax::registry::SyntaxRegistry;
+    use crate::syntax::form_match::CapturedValue;
+
+    // Use the real stdlib registry to get the @type form pattern
+    let registry = &*crate::parser::STDLIB_REGISTRY;
+
+    let source = "@type Foo {
+  name: string;
+  age: number;
+}";
+    let (matches, _diags) = parse_matches(source, registry);
+
+    // Find the type match
+    let type_match = matches.iter().find(|m| m.macro_name == "type").unwrap();
+    assert_eq!(type_match.get_ident("name"), Some("Foo"));
+
+    // Fields must be CapturedValue::Properties, not String
+    let fields = type_match.get_properties("fields").expect("fields should be Properties, not String");
+    assert_eq!(fields.len(), 2);
+    assert_eq!(fields[0].name, "name");
+    assert_eq!(fields[0].type_ref, "string");
+    assert_eq!(fields[1].name, "age");
+    assert_eq!(fields[1].type_ref, "number");
+}
+#+end_src
+
+* Acceptance Criteria
+1. ~debug_assert!~ added at form_compiler.rs:1025 (or removed if BUG-011 lands first)
+2. Integration test exercises ~parse_matches~ → Properties extraction end-to-end
+3. ~cargo test --lib test_type_body_produces_properties~ passes
+4. ~cargo test --lib~ passes (1977+ tests, zero failures)

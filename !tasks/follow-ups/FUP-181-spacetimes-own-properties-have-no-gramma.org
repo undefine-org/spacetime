@@ -1,0 +1,116 @@
+:PROPERTIES:
+:CUSTOM_ID: FUP-181
+:CATEGORY:  followups
+:END:
+#+TITLE: Spacetime's own properties: derive the table, don't write it
+
+* ITEM [#A] Derive property->type from the declarations that already exist
+
+** The correction (this replaces the hand-written table this item first proposed)
+
+I filed this asking for a stdlib table:
+
+    %css_property easing  { accepts: easing }
+    %css_property stagger { accepts: duration }
+
+That was wrong, and the reason is measurable: **the types are already declared.**
+Every one of these properties is a `%form` parameter, and a `%form` parameter
+already carries its capture type in its declaration:
+
+    stdlib/macros/loop.st:51    easing:  $easing:ident   = ease-out
+    stdlib/macros/fade-in.st:54 easing:  $easing:easing  = ease-out
+    stdlib/macros/loop.st:52    stagger: $stagger:number = 100
+    stdlib/macros/fade-in.st:108 stagger: $stagger:time  = 50ms
+
+A hand-written table would have been a SECOND declaration of a fact the form
+already states — the exact duplication this arc exists to delete. The compiler
+can derive property->type by walking the registered forms it already parsed.
+
+** What the derivation exposes (the real finding)
+
+The moment you try to derive it, it does not typecheck — because the SAME
+property is declared with DIFFERENT types across the stdlib:
+
+  | property | declared as                                   | sites |
+  |----------+-----------------------------------------------+-------|
+  | easing   | ident×35, easing×3, <NONE>×3, string×1         |    42 |
+  | stagger  | number×35, time×3, <NONE>×2                    |    40 |
+  | duration | time×19, number×11, <NONE>×6                   |    36 |
+  | distance | length×4, <NONE>×4, string×2, number×1         |    11 |
+  | color    | <NONE>×5, string×3, color×3                   |    11 |
+
+16 properties have more than one declared type. This is not a table waiting to
+be written — it is a set of DISAGREEMENTS waiting to be found, and a derivation
+is what finds them. A hand-written table would have silently picked one winner
+per property and buried the conflict forever.
+
+** Why the disagreement is not cosmetic (measured)
+
+`capture_type_accepts` under each declared type:
+
+    number  <- 60ms   ACCEPT      time <- 60ms   ACCEPT
+    number  <- 8px    ACCEPT      time <- 60     refuse
+    number  <- abc    ACCEPT
+    number  <- #e8eef7 ACCEPT
+
+`number` accepts EVERYTHING — it is not a grammar, it is an unchecked hole. So
+`stagger: $stagger:number` (35 of 40 sites) checks nothing at all, and the 3
+sites declaring `:time` are the only ones that check anything. The majority
+spelling is the broken one, which is why nobody noticed.
+
+Same shape for easing:
+
+    ident  <- not-a-curve       ACCEPT     easing <- not-a-curve  refuse
+    ident  <- cubic-bezier(...) ACCEPT     easing <- cubic-bezier(...) ACCEPT
+
+`easing: $easing:ident` (35 of 42 sites) accepts any identifier. 1,010 `easing`
+declarations in the corpus are checked by a rule that cannot fail.
+
+** A blocker the derivation must handle FIRST
+
+Authors write token references in these positions, and the scalar grammars
+refuse them:
+
+    easing <- --ease-out-expo   refuse      <- demos/spacetime-docs/index.st:148
+    color  <- var(--ink)        refuse
+    time   <- var(--dur)        refuse
+    length <- var(--pad)        refuse
+
+`--ease-out-expo` is real authored code in the docs demo TODAY. It passes only
+because `:ident` checks nothing. Tighten `easing` to its real grammar without
+first admitting token references and that demo breaks — a correct fix causing a
+red build, which is how tightening gets reverted instead of finished.
+
+So the ORDER is forced:
+  1. every scalar grammar admits `var(--x)` and a bare `--token` reference
+     (they are values of that type, resolved later — the same argument that
+     makes `var()` a deferral in the declaration validator, not an error);
+  2. THEN derive property->type from the form declarations;
+  3. THEN reconcile the 16 conflicts, each one a real decision (`stagger` IS a
+     duration; `easing` IS an easing), fixing the declaration at its site;
+  4. THEN the derived map drives validation, LSP completion, and the
+     did-you-mean list (src/diagnostics/suggestions.rs:16, 98 names with no
+     types — the last hardcoded property list).
+
+** Acceptance
+
+- The map is DERIVED: no file in the repo lists a property beside a type.
+- A conflict is a BUILD DIAGNOSTIC, not a silent winner: declaring the same
+  property as two types names both sites. That gate must be seen to fail — it
+  currently would, 16 times, which is the proof it is real.
+- `easing: not-a-curve` refused with the same E-code and span shape as
+  `color: #e8ee1`; `easing: --ease-out-expo` still accepted.
+- `stagger: 60ms` and `stagger: 60` both accepted (a duration with an explicit
+  unit, and the bare-number legacy spelling) — or the legacy spelling is
+  migrated deliberately via `%migration`, not broken silently.
+
+** Relationship to the cancelled table
+
+PLAN-122 cancelled a `%css_property` table that would have mirrored ~600 CSS
+properties lightningcss already knows. This item now cancels its OWN table for
+the same reason at a different scale: the fact is already written down, in the
+form declarations. Two sources for one fact is the defect, whoever writes the
+second one.
+
+Upstream CSS properties keep answering by lightningcss sentinel probe. Spacetime
+properties answer from their form declarations. Neither is hand-maintained.

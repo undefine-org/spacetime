@@ -1,0 +1,50 @@
+#+TITLE: reify_component_body parity gaps (4 divergences vs parse_component_body)
+#+STATE: DONE
+#+SESSION_ID: 14fc108ed3772fa8
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-04T14-32-37-965Z_14fc108ed3772fa8.jsonl]]
+#+CUSTOM_ID: BUG-063-reify-component-body-parity-gaps-4-diver
+#+COMPLETION_HASH: c47a63dda4fce3c2
+
+* Initial Message
+
+Ok, start with Phase B. Use a wave manifest with in-chat mid-flight check-ins exlpaining what's going on, what' you've done, and what you're doing next. use main thread for architectural work and reviewer swarms in between waves. add as many gap implementation as needed; you have unlimited time budget. file FEAT/BUG you find mid-flight using the org tool and fix/implement them mid-flight
+
+* Source
+Reviewer swarm on FEAT-079 B3b+B3c (agents 15-ParityGaps, 16-GrammarRobustness). 4 concrete
+out-of-corpus inputs where reify_component_body (the new self-describing producer) diverges from
+parse_component_body \u2014 would break the byte-identical parity gate after cutover. Caught BEFORE
+the path is live (pre-cutover). Both reviewers independently flagged #1 and #3.
+
+* Divergences
+1. [P1] reify_block passes a THROWAWAY `sink` to parse_on_event_block_scoped instead of the real
+   `diagnostics` (form_compiler.rs ~2813). A behavior-block `@on` with no `$x <- ...` assignment
+   emits E0906 in the Rust path, dropped in reify. Input: `.b { @on click { doThing(); } }`.
+2. [P1] A root @directive other than @on/@match/@exports/@if/@else (e.g. `@media (...) { }`,
+   `@each(...) { }`) is silently DROPPED by parse_component_body (generic @name branch ->
+   parse_on_event_block -> None -> continue) but LEAKED INTO html by reify (None-handler pushes
+   `@`-led segment to html_buf). Input: `<div>x</div>
+@media (max-width:600px){ .card{color:red} }`.
+3. [P1] cb_toggle uses `$var:binding`, which only captures `$ident[.ident]*`. A compound/dotted
+   root toggle condition (`.active: $count > 0;`, `.card: $.featured;` \u2014 documented in
+   template-component-model.org) partially-consumes -> classify rejects (consumed!=len) -> falls
+   to html. Original parse_class_toggle keeps the whole RHS as var_name ("count > 0"). ROOT-level
+   only (block-internal uses string parse_class_toggle, works).
+4. [P2] reify_inject reconstructs a bracket selector target as `[{inner}]` from the TRIMMED
+   balanced inner, dropping internal whitespace. Input: `[ class="v" ] <- $x;` -> original
+   `Selector{"[ class=\"v\" ]"}`, reify `Selector{"[class=\"v\"]"}`.
+
+* Fix (structural, grammar-first)
+- #3: cb_toggle = `"." $class:ident ":" "$" $var:balanced(';') ";"?` \u2014 the literal `$` enforces the
+  original's `: $` requirement (so `.foo: bar;` w/o $ still -> html), and balanced(';') captures
+  the whole compound RHS. reify_toggle strips nothing (var already $-less).
+- #4: cb_inject = `$target:balanced('<') "<-" $value:balanced(';') ";"?` \u2014 capture the verbatim
+  target up to the arrow; reify_inject classifies the target string EXACTLY like parse_injection
+  (value-semantics on the split field). Removes the bracket/name structural split from grammar.
+- #1: thread the real `&mut diagnostics` into reify_block.
+- #2: None-handler: a `@`+alpha segment (not @if/@else) is a directive -> DROP (parity), not html.
+
+* Regression
+Add all 4 inputs to component_body_corpus::CORPUS (go RED pre-fix, GREEN post-fix) + keep the
+fleet differential.
+
+NOTE [2026-06-08]: Fixed all 4: #3 cb_toggle now `"." ident ":" "$" balanced(';')` (compound RHS verbatim); #4 cb_inject now `balanced('<')` verbatim target + reify_inject classifies like parse_injection (internal ws kept); #1 reify_block threads real &mut diagnostics; #2 None-handler drops `@`+alpha directive segments (parity, not html). 4 inputs added to CORPUS (red->green). Corpus 42/42 + fleet 25/25 byte-identical, lib 2156/0. NB P2 architectural (reify_block re-parses block-inner in Rust via parse_class_toggle/parse_on_event) tracked separately for B3g exit gate.

@@ -1,0 +1,122 @@
+#+TITLE: Delete @if/@else and the 17 unmaintained stdlib/mobile macros
+#+STATE: ITEM
+#+SESSION_ID: 153f5ed0617636c7
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-26T21-12-46-213Z_153f5ed0617636c7.jsonl]]
+#+CUSTOM_ID: BUG-366-delete-if-else-and-the-17-unmaintained-s
+
+* Initial Message
+
+ok so is there any point in keeping the worktree now? verify
+
+* Decision
+
+Delete. Two groups, two different reasons — and one of them changed while this
+was being scoped, so read the mobile section before acting.
+
+* Group 1 — `@if` / `@else` (`conditional`, `conditional-else`)
+
+`stdlib/macros/each.st:268` and `:284`. **Delete outright.**
+
+- ZERO usages in stdlib, examples, demos, tests, projects.
+- Already documented dead in its own source: "NOT IMPLEMENTED (BUG-362) ...
+  declares a `%form` and a `%when` clause but has NO `%emit` block and no
+  primitive behind it, so nothing renders — `@if($x) { … }` fails with
+  `E0956: unknown primitive: conditional`, and even a literal `@if(true)`
+  produces no output."
+- It is WORSE than absent. Inside a `@template`'s markup the source leaks as page
+  TEXT (W0712 / BUG-358), and as its own comment observes, "a conditional that
+  renders NOTHING satisfies every `should not_exist` assertion, so the false
+  branch always appears correct".
+
+** The language already has the mechanism
+
+The `=>` arm form exists, is bound to a real primitive, and works:
+
+#+begin_src spacetime
+@on $open { true => --slide-open(280ms); false => --slide-shut(200ms); }
+#+end_src
+
+`on-signal-arms` (`stdlib/macros/on.st:142`) -> `drive-arms`. The sum-variant
+shape is the same idea over a response type:
+
+#+begin_src spacetime
+@handle $save {
+  receive {
+    Created(todo) => { $todos <- $todos.replace(todo); }
+    Invalid(errs) => { $errors <- errs; }
+  }
+}
+#+end_src
+
+So `@if` is a SECOND answer to a question already answered — one need, two
+implementations, and the second one does not work. Deleting it is the
+one-need-one-implementation move.
+
+** Acceptance (group 1)
+
+- Both macros removed from `each.st`.
+- A tombstone comment records what replaced them (`@on $sig { true => … }`) so
+  the next author reaching for `@if` is redirected rather than left guessing.
+- `E0956: unknown primitive: conditional` becomes unreachable; if a page writes
+  `@if(...)` it now gets an unknown-directive diagnostic, which is honest.
+- Corpus check flat: examples 35, demos 36, fixtures 6, headless 744/11.
+
+* Group 2 — the 17 `stdlib/mobile` macros
+
+**BLOCKED ON A CORRECTION — see BUG-365.**
+
+These were scoped for deletion as "dead: declare `%states` and emit nothing".
+That diagnosis was WRONG. They are the only users of an UNIMPLEMENTED BRANCH:
+`generate_state_fragments` (`src/pipeline/mod.rs:935`) emits CSS only inside
+`if let Some(cond)`, so an unconditional `base { … }` state falls off the end of
+the loop silently. Every one of the 17 uses `base`; the `%states` blocks that DO
+emit (`dark when $dark`, `resizing when $active`) are conditional.
+
+So deleting them would remove the EVIDENCE of a compiler gap and leave the gap
+for the next author to rediscover. Fix BUG-365 first.
+
+** After BUG-365, the deletion is still worth considering — on different grounds
+
+Not "it doesn't work" but "nobody uses it":
+
+- 3 usage sites total, all in `examples/mobile-tasks/app.st` (`@mobile-tokens`,
+  `@mobile-typography`, `@safe-area`), a file that already fails to build for
+  unrelated E0946 grammar errors.
+- `stdlib/mobile` is an opt-in module (`@import "stdlib/mobile"`), 57 macros, and
+  visibly unmaintained.
+
+DO NOT delete whole files. `colors.st` and `typography.st` each hold live
+siblings (`mobile-colors-dark`, `mobile-theme`, `mobile-heading`, `mobile-text`)
+that emit real CSS through `%binds`/`%derives`. The deletion is surgical:
+
+| file                                   | delete                                             | keep                              |
+|----------------------------------------+----------------------------------------------------+-----------------------------------|
+| theme/motion.st                        | mobile-motion                                       | (file becomes empty)              |
+| theme/tokens.st                        | mobile-tokens                                       | (file becomes empty)              |
+| theme/colors.st                        | mobile-colors                                       | mobile-colors-dark, mobile-theme  |
+| theme/typography.st                    | mobile-typography                                   | mobile-heading, mobile-text       |
+| macros/layout/safe-area.st             | safe-area, safe-area-inset, safe-area-container     | —                                 |
+| testing/device.st                      | device-profile, device-custom, device-frame         | —                                 |
+| testing/touch.st                       | touch-tap, swipe, pinch, long-press, drag, state, preset | —                            |
+
+** Acceptance (group 2)
+
+- BUG-365 fixed and its gate GREEN first.
+- Then, if deletion is still wanted: the 17 removed, live siblings untouched and
+  still emitting (`@mobile-colors-dark` 1253 bytes, `@mobile-theme` 2479,
+  `@mobile-heading` 968 — measured before, must match after).
+- `examples/mobile-tasks/app.st` either updated or its remaining references
+  removed; it must not gain new error classes.
+- `stdlib/mobile/index.st` no longer advertises deleted macros in its doc
+  examples.
+
+* Order
+
+1. BUG-365 (the `base` branch) — unblocks the diagnosis.
+2. Group 1 delete (`@if`/`@else`) — independent, can land any time.
+3. Group 2 delete — only after (1), and only on the usage argument.
+
+* Context
+
+PLAN-147 (the design pass that found these), BUG-362 (`@if` documented dead),
+BUG-358 / W0712 (`@if` leaking as page text), BUG-365 (the `base` branch).

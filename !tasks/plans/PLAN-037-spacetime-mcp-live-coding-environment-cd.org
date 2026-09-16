@@ -1,0 +1,110 @@
+#+TITLE: Spacetime MCP — live coding environment + CDP server
+#+STATE: DOING
+#+SESSION_ID: 1506c4eca48798a5
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-12T22-05-28-594Z_1506c4eca48798a5.jsonl]]
+#+CUSTOM_ID: PLAN-037-spacetime-mcp-live-coding-environment-cd
+
+* Initial Message
+
+let's dream u pfor a moment, an mcp server (cargo run -- mcp ...) that also acts like
+1. a cdp server
+2. a 'live coding environment' where we can send Spacetime code and it lets us work with it.
+
+the rules inside it are really simple. There's a simple interface where we can choose the environment, and wihtin the environment there's tabs. the agent can discover/spin up/attach to environments (same things with tabs within the environment). The environment is an import path, for example, and the tab is an entry point. the tab can be a file that exists or (usually) code that is sent directly by the agent. there are special webhooks available to those pages (like how stdlib/__admin__ has communications), and those are generic webhooks that the agent can leverage to add interactivity to the website. The responses can be sent back as rich data that is immediately useful to the agent (e.g., since the usecase and first demo is an easy way to choose between component options that the agent wants to introduce to a file, this part of the architecture will be made in a way to let the agent most ergonomically propose code options to the user and let them choose between them).
+
+The first wave should only have the skeleton and prove that it works (you'll add it to here using the kdl way of adding MCPs to Spell, and then I'll reload Spell and you'll test drive it).
+
+Use the org tool to keep track of the work, once it has been settled.
+
+* Vision
+
+`cargo run -- mcp` exposes Spacetime as an MCP server (stdio JSON-RPC 2.0) that
+Spell attaches to via `spell.kdl`. It is simultaneously:
+  1. an *MCP server* — tools over stdio
+  2. a *CDP server* — drives a warm Chromium (reuses the existing `cdp` feature)
+  3. a *live coding environment* — send Spacetime code, work with it live
+
+** Mental model (one concept, reused)
+
+  Environment  ≡  an import path (workspace root)       — discover · spin-up · attach
+     └─ Tab    ≡  an entry point (a file OR inline code) — discover · spin-up · attach
+          └─ webhooks → generic interactivity → rich choice data back to the agent
+
+Generic webhooks (same family as stdlib/__admin__ comms) let the agent add
+interactivity to a live page. First demo usecase: the agent proposes several
+component *options* for a file; the human picks; the choice returns to the agent
+as rich structured data (MCP `structuredContent`).
+
+* Protocol facts (verified against Spell src @ packages/coding-agent/src/mcp)
+
+- stdio transport: newline-delimited JSON-RPC 2.0 over stdin/stdout (transports/stdio.ts)
+- handshake: `initialize` → reply {protocolVersion, capabilities, serverInfo}
+            → client sends `notifications/initialized`
+- protocolVersion the client offers: "2025-03-26" (echo it)
+- discovery: `tools/list` → {tools:[{name,description,inputSchema}]}
+- invoke: `tools/call` {name,arguments} → {content:[...], isError?, structuredContent?}
+- `structuredContent` is surfaced by Spell on the `data` channel (machine-readable)
+- KDL registration: `mcp { server "spacetime" type=stdio { command "..." args "..." } }`
+- stdout MUST carry protocol bytes ONLY; all logging → stderr.
+
+* Waves
+
+** WAVE 1 — Skeleton + proof  [DOING]
+   - `Command::Mcp` subcommand + dispatch in main.rs
+   - src/mcp/{mod,protocol,state,tools}.rs ; `pub mod mcp` in lib.rs
+   - stdio JSON-RPC loop: initialize / initialized / tools/list / tools/call / ping
+   - Environment+Tab in-memory registry
+   - Tools: st_health, st_env_list, st_env_open, st_tab_list, st_tab_open
+   - st_tab_open compiles a file OR inline code → structured {ok,css_len,js_len,html_len,errors}
+   - No new deps. stdout = protocol only.
+   - PROOF: register in spell.kdl, reload Spell, list + call tools, get structured results.
+
+** WAVE 2 — Live HTTP surface + webhooks  [ITEM]
+   - mcp boots an internal axum server (reuse create_router/dev infra) serving each tab
+   - generic webhook endpoint per page (admin-comms family) → choices flow back
+   - tool: st_tab_choose / option-picker — agent proposes component options, human picks
+
+** WAVE 3 — CDP server  [ITEM]
+   - attach/drive a warm Chromium over the existing `cdp` feature
+   - render tabs in a real browser; screenshots + layout/timing/paint probes as tool results
+
+* Acceptance (W1)
+  - `cargo build` clean
+  - Spell `tools/list` shows the st_* tools after reload
+  - `st_tab_open` with inline code returns compiled sizes + any errors as structuredContent
+
+NOTE [2026-06-12]: WAVE 1 SHIPPED. Files: src/mcp/{mod,protocol,state,tools}.rs, `pub mod mcp` in lib.rs, Command::Mcp + dispatch in main.rs, project spell.kdl registering `server "spacetime" type=stdio { command "cargo"; args "run" "--quiet" "--" "mcp" }`. No new deps. cargo build clean (only pre-existing resolve.rs warning unrelated). Smoke-tested full handshake: initialize → notifications/initialized → tools/list (5 st_* tools) → tools/call (st_health/st_env_list/st_env_open/st_tab_list/st_tab_open) → ping. Live compile loop proven: inline valid .st → {ok:true, css_len, js_len, html_len, errors:[]}; invalid → {ok:false, errors:[miette text]}, all on structuredContent. stdout verified pure protocol; cargo+compiler noise isolated to stderr. NEXT: user reloads Spell, then test-drive via the real MCP tool surface.
+
+NOTE [2026-06-12]: WAVE 2 SHIPPED — the option-picker round-trip. New: src/mcp/live.rs (LiveServer: ephemeral-port axum on its own thread+current-thread runtime; proposal store Arc<Mutex>; picker page = pure HTML+CSS, ZERO JS, choose = native <form method=post>; routes /__mcp/propose/{id} GET, /__mcp/choose/{id} POST webhook with PRG redirect, /__mcp/option/{id}/{idx} GET self-contained iframe page). McpState gains lazy live() + next_proposal_id(). Tools: st_propose{title,prompt?,env?,options[{label,code}]} compiles each option, renders live, returns {proposal_id,url}; st_proposal_status{proposal_id} -> {decided,chosen:{index,label,code}}. Each option dogfoods the compiler (css+js+html inlined, runtime bundled). cargo build clean. Smoke (w5): propose->picker page serves->option iframe serves (runtime+css present)->webhook POST option=1->status returns chosen Outline+code. Browser-driven (w6): opened picker, both Spacetime cards rendered live in iframes, clicked Choose on Bold solid -> green chosen badge + 'Choice recorded' + server-side persistence across reload. Screenshots w2_picker2.png / w2_chosen.png. NOTE: option code must include file-scope <markup> to populate compiled.html (CSS-only -> blank iframe). NEXT: user reloads Spell to pick up st_propose/st_proposal_status; then W3 (CDP).
+
+NOTE [2026-06-12]: W2 REVIEW — user rejected 3 things, all valid. ROOT CAUSES (verified):
+1. "Not receiving signals" — Spell MCP client has NO server->user push (manager.ts only acts on list_changed/resources_updated; notifications never become chat messages). The ONLY path human-action->agent is a TOOL RESULT. Per-call timeout = 30s, configurable via spell.kdl `timeout`. FIX: replace poll-based st_proposal_status with a BLOCKING await tool (st_await_choice) that long-polls the shared store and returns the instant the human clicks; bounded < ~25s, re-callable if still pending (returns {decided:false} so agent loops).
+2. "Hover does nothing" — MY demo code bug, not the engine: `@on hover lift {` (no duration) silently no-ops. Correct: `@on hover lift(300ms)` -> verified emits mouseenter/mouseleave + transform CSS. Use durations in all demo code.
+3. Picker must be a .st PROVIDED BY THE MCP (admin is mostly Spacetime). FIX: ship stdlib/__mcp__/picker.st — a generic meta-renderer that @data fetches /__mcp/proposal/{id}.json and @each-renders option cards (iframe preview via src hole, choose via @on click -> POST webhook). Verified Spacetime can do: @data fetch + @each + attribute holes src="`$opt.x`" (cart-demo) + @on click reactive POST (admin drawer.st).
+
+VISION REFINED: the MCP = a toolkit for building ad-hoc signal-back Spacetime interfaces. Affordances so the agent composes interactive experiences from primitives. picker is the first instance, not a one-off.
+
+PLAN W2.5: (a) ship stdlib/__mcp__/picker.st generic renderer + serve it from live.rs as a compiled .st page; (b) JSON contract route /__mcp/proposal/{id}.json; (c) st_await_choice blocking tool; (d) keep webhook POST /__mcp/choose. Compile picker.st via the same Compiler path (dogfood). Cache: no-store on dynamic routes.
+
+NOTE [2026-06-12]: W2.5 SCOPE LOCKED (user: full + both signal paths). PROVEN FACTS this session:
+- MCP spec DOES support server->user push via elicitation/create (2025-06-18). I was wrong to deny it.
+- Spell does NOT implement it: client.ts initialize declares only capabilities:{roots}; stdio.ts #handleMessage routes {id} as response-to-our-request and {method-only} as notification — a server-initiated request {id+method} falls in the id-branch, finds no pending req, SILENTLY DROPPED. No reply ever sent. Verified by reading source.
+- Compile is PURE (same .st bytes -> byte-identical css/js; verified by double-build diff).
+- PROOF templated(A) vs live-edit(B): A subset B (fill(tmpl,data) is just a final source string; Lemma=purity). B not-subset A (arbitrary structure vs fixed typed holes). NOT equivalent; duals. Capture types make A type-checked + atomic-N-render. => use BOTH: structural variants = options array (live-code axis); typed parameterization within an option = native @template + capture-type params + @each. NO bespoke placeholder system.
+- Verified @template &chip($name,$pad number)+@each renders typed fills: registerTemplate+each+$name/$pad+variants all compile in; hover(200ms) needs the DURATION (my earlier demo bug).
+
+BUILD PLAN W2.5 (full):
+SPELL (~/code/ora/spell): declare elicitation capability + route server-initiated requests in stdio.ts + manager handler -> user prompt UI -> reply.
+VERSE: (a) stdlib/__mcp__/picker.st generic meta-renderer (@data fetch proposal json, @each option cards, iframe preview via src hole, @on click choose). (b) /__mcp/proposal/{id}.json contract route + serve compiled picker.st. (c) diagnostics in BOTH channels: structuredContent.options[i].diagnostics[] AND rendered on card. (d) @template typed-placeholder preview support. (e) st_await_choice blocking tool (floor). (f) elicitation/create push when client advertises capability (proper channel).
+
+NOTE [2026-06-12]: W2.5 VERSE SIDE SHIPPED + PROVEN. (1) stdlib/__mcp__/picker.st — generic Spacetime meta-renderer, ZERO custom JS: @data fetch "data.json" (relative URL resolves against page path), @data derive reflectors, @template &mcp-card($opt) + @each($options) rendering cards with iframe preview (src hole), native <form> POST choose. Compile gotchas found+fixed: :root{} invalid standalone (only valid in @import-macro ctx) -> moved color-scheme to body; * {} is fine; relative fetch URL fails `check` (static-file resolution) but `build` clean. (2) live.rs rewritten: picker compiled once via include_str!+OnceLock, served at /__mcp/propose/{id}/ + /__mcp/picker.{css,js}; new /__mcp/propose/{id}/data.json contract route with server-precomputed statusLabel/badge/previewUrl/chooseUrl/code/diagnostics; choose webhook redirects to .../; await_choice(id,deadline) poll method. (3) Diagnostics BOTH channels: OptionOutcome carries Vec<OptionDiagnostic>{severity,code,message}; st_propose structuredContent.options[i].diagnostics[] AND data.json options[i].diagnostics[] AND broken option_page renders them inline. (4) st_await_choice blocking tool: returns the instant human clicks (proven: returned 1.6s after a delayed click with {decided:true,chosen:{index,label,code}}); timeout_secs clamp 1-28 under client 30s; {decided:false} on timeout -> re-callable. HOVER BUG CONFIRMED root cause: my demo missed the duration; lift(300ms) wires mouseenter/mouseleave correctly (verified in option js). Browser-driven full round-trip: 3 cards @each-rendered, broken shows error inline, click Bold->chosen:1->reactive status update. Screenshots w25_picker.png, w25_chosen.png. cargo build clean. REMAINING: s1 Spell elicitation (cross-repo, the proper push channel), t1 @template typed-placeholder previews.
+
+NOTE [2026-06-12]: W2.5 COMPLETE (both repos). VERIFIED FACT on signals: MCP spec DOES support server->user push via elicitation/create (2025-06-18). Spell did NOT implement it (stdio #handleMessage routed {id+method} server-requests into the id-branch -> dropped; capabilities declared only {roots}). I was wrong to deny push exists; user correct.
+
+SPELL ELICITATION (8 files, ~/code/ora/spell/packages/coding-agent): (1) mcp/transports/stdio.ts: onServerRequest prop + #handleServerRequest routes {id+method} BEFORE response branch, replies same-id framing. (2) mcp/types.ts: ElicitationSchema/Property/MCPElicitationParams/Result types, elicitation capability, onServerRequest on MCPTransport. (3) mcp/client.ts: capabilities.elicitation={}, PROTOCOL_VERSION 2025-03-26->2025-06-18, onServerRequest plumbed through connectToServer. (4) mcp/manager.ts: #onServerRequest field+setOnServerRequest setter+wired in connect+#handleServerRequest. (5) modes/components/elicitation.ts NEW: ElicitationComponent extends Container — multi-field form (string->Input, enum->cycle, boolean->toggle, number->Input), up/down field nav, enter accept/ctrl+d decline/esc cancel, required validation. (6) extension-ui-controller.ts: showElicitation/hideElicitation overlay lifecycle. (7) interactive-mode.ts: showElicitation delegate + init() wires mcpManager.setOnServerRequest -> showElicitation for elicitation/create. (8) modes/types.ts: hookElicitation slot. tsgo clean (0 errors in my files), mcp-kdl tests 9 pass.
+
+VERSE st_elicit (server side): protocol.rs serve loop restructured to pull-based line iterator so a tool can do server->client roundtrip; elicit_roundtrip() sends elicitation/create + pulls matching reply; captures client_supports_elicitation at initialize; st_elicit tool descriptor. Smoke-proven: WITH capability -> server pushes request, client replies, tool returns {action:accept,content:{theme:dark}}; WITHOUT capability -> {supported:false,isError} fallback to st_propose.
+
+TYPED PLACEHOLDERS (t1): proved templated(A) subset live-edit(B), not equiv; capture types make A type-checked+atomic-N. Native @template+capture-type params+@each IS the typed-hole engine (verified @template &chip($name,$pad number)+@each compiles). No bespoke system; option code carries templates directly. st_elicit is the richer typed-form affordance.
+
+DEMO REQUIRES Spell REBUILD+RESTART (running instance is old build). Cannot demo elicitation live this session. NEXT: user rebuilds spell, restarts, then st_elicit pushes a real prompt.

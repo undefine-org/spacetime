@@ -1,0 +1,31 @@
+#+TITLE: Live-stream consumer never propagates a pushed event to @handle
+#+STATE: ITEM
+#+CUSTOM_ID: BUG-287-live-stream-consumer-never-propagates
+
+* Symptom
+
+A `@data stream $fx from $view { receive to Effect { "flash" => … } }`
+consumer registers with the LiveView bridge, the server `push_event`s, the
+envelope arrives — and the `@handle $fx { receive { Flash($f) => … } }`
+never fires. Probed live in the knowledger desk (2026-08-05): registered a
+raw listener on the bridge channel and saw the pushed envelope arrive;
+neither the raw `{message, kind}` shape nor the wrapped `{type, payload}`
+envelope ever reached the handle arm.
+
+* Impact
+
+Transient server-initiated notices (flash-style "this already happened"
+messages that must NOT be an assign) have no working declarative path.
+reframes.st declares `$fx` for exactly this; the desk moved flash to the
+signal-REPLY path instead, which provably lands.
+
+* Workaround (in use)
+
+Answer the user's own gesture with `{:reply, %{tag, reply}}` and carry the
+notice in the reply payload (`receive to XResult` decode arms + `@handle`).
+
+* Note
+
+The stream registration code in the compiled bundle
+(`registerLiveStream`) re-seeds and settles fine — the break is between
+bridge publish and the receive-arm decoder's dispatch to `@handle`.

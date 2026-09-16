@@ -1,0 +1,40 @@
+#+TITLE: MCP region mount + bundle transport + registerBundle
+#+STATE: DONE
+#+CUSTOM_ID: FEAT-126-mcp-region-mount-bundle-transport-regist
+#+DEPENDS: PLAN-041-plan-039-unified-live-mcp-environment-or FEAT-125-mcp-bundle-extraction-compile-to-bundle
+#+LAYER: mcp
+#+PRIORITY: A
+#+COMPLETION_HASH: 2c85907fc35192ab
+
+* Parent
+[[id:PLAN-041-plan-039-unified-live-mcp-environment-or][PLAN-041]] Wave 2 (KEYSTONE).
+
+* Summary
+The vertical slice that makes the unified env real. Three pieces:
+1. *Extend =view-mount=* (stdlib/primitives/view.st) to resolve =$=-dynamic template names (Fork 1-A) — align with @each/@match; lets a region mount a template named by a runtime signal (the bundle's arrival sets the signal).
+2. *=registerBundle(templates, css, origin, regionId)= runtime helper* — wraps css in =@scope ([data-st-region])= ([[id:FEAT-129-mcp-css-scope-isolation-registration-tim][FEAT-129]]), calls existing register-template logic per template, sets the region's tpl signal.
+3. *Bundle transport* — new endpoint =GET /__mcp/instance/{host}/bundles= returns the desired bundle set; page polls (Transport A, alongside input.json); page diffs vs registered set (content-hash idempotency), registers new, disposes removed. =st_mount(fn, region?, input?) -> {region_id, instance_id}= injects.
+
+* Why
+=Spacetime.templates= is already a runtime Map (recon-verified); factories are decoupled; dynamic dispatch already shipped in @each/@match. This FEAT wires bundle arrival -> registration -> region mount over those existing mechanisms. @view was the only dispatch primitive missing =$=-resolution — extending it deletes the asymmetry (Fork 1-A) and makes regions == @view wildcard arm with a dynamic name.
+
+* Target
+- =stdlib/primitives/view.st= — view-mount: add =$=-resolution to =ref.name= (mirror @each/@match dynamic dispatch).
+- =stdlib/__mcp__/primitives/= (host.st or new bundle.st) — =registerBundle= primitive + bundle-poll wiring (extend @mcp-input model or add @mcp-bundles).
+- =src/mcp/live.rs= — =GET /__mcp/instance/{host}/bundles= route.
+- =src/mcp/tools.rs= — =st_mount= signature change (region param); bundle-set assembly.
+
+* Edge
+- Bundle whose template invokes a template not in any registered bundle -> runtime warn (existing invoke-template behavior); region shows partial.
+- Bundle arrives while region mid-render -> serialize via poll handler (next poll picks up).
+- Hot-swap state -> discarded (keep-alive is follow-up; locked decision).
+- Factory throws -> catch in region-mount, log, leave region in last-good state (mock m6; do NOT blank).
+
+* Acceptance (the keystone gate)
+- Headless: agent-sent =@template= compiles (FEAT-125) -> bundle pushed -> page polls -> region mounts -> RENDERS + REACTS (param change re-renders) + ISOLATES STATE (two regions same bundle independent).
+- Emitted-JS asserted for the view-mount dynamic-name resolution.
+- =st_mount= returns ={region_id, instance_id}=; NO standalone URL (Fork 6).
+- Region hot-swap: signal change disposes + remounts; mid-swap no crash.
+- =cargo test= + headless green.
+
+NOTE [2026-06-18]: W2 keystone committed fbf1ee94. Bundle pipeline: source→Bundle JSON at /__mcp/instance/{id}/bundles; Spacetime.registerBundle + pollBundles register into a region of the ONE page (no iframe). Factory body extracted to Spacetime.buildTemplateFactory (template.st delegates — single factory builder, harmony). view.st gains $-dynamic template names. Test feat126_register_bundle_mounts_region_and_isolates_state passes. KEY FINDING: headless 251 failures are a PRE-EXISTING baseline (byte-identical failing-test set proven by swapping pure HEAD) — NOT caused by W2 nor by eval form. Real headless gap was get_combined_runtime() missing templates.js; fixed by adding ST_TEMPLATES. Indirect (0,eval) retained. Gates: lib 2313/0, integration 172/0, snapshots 13/0, v8 427/9 (pre-existing BUG-039), headless 356/251 (0 regressions).

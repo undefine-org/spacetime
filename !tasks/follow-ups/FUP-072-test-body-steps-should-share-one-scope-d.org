@@ -1,0 +1,45 @@
+#+TITLE: Test-body steps should share ONE scope (drop per-step IIFE + const el preamble for test directives)
+#+STATE: DONE
+#+SESSION_ID: 150ccb99745d347e
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-17T14-25-31-601Z_150ccb99745d347e.jsonl]]
+#+CUSTOM_ID: FUP-072-test-body-steps-should-share-one-scope-d
+#+COMPLETION_HASH: 2422cc07c4651323
+
+* Initial Message
+
+Dig into the FUPs and explain to me
+1. what got done
+2. what you can do with it
+3. what we should do next
+
+treat this as an overall report to explain things to me from scratch
+
+#+DEPENDS: BUG-108-headless-test-harness-let-bindings-dont
+
+* Parent
+BUG-108 fixed the @let "X is not defined" cluster (376/238 → 452/162) with a targeted fix: @let emits a bare global assignment, and emit.rs uses `let el` (not `const el`) when a fragment reassigns `el`. This works but is a PER-NAME workaround around a structural mismatch.
+
+* The structural mismatch
+A @test body is conceptually ONE sequential scope, but the pipeline compiles each step (@let/@eval/@then/@when/@assert) as a separate file-scope directive wrapped in its OWN IIFE `(function(){ const el = document.body; <step> })()`. Consequences:
+- A `const`/`let` in one step is invisible to the next (why @let must leak a global).
+- Every step re-injects `const el = document.body`, so `el` can NEVER be rebound to persist across steps. Tests like tests/unit/assertions/binding.test.st do `@let (el = querySelector(...))` then `@eval (ST.set(el, ...))` in the NEXT step — where `el` is document.body again, so the signal lands on the wrong element and the later `@then $sig on .selector` reads undefined. ~14 binding/state residual failures stem from this.
+
+* Proposed fix (principled)
+Make test-body step directives share ONE scope: emit them as `JsScope::Inline` (no per-step IIFE) WITHOUT the `const el = document.body` preamble, so the @test async fn body is a single lexical scope. Then `@let (NAME = value)` → a normal `const NAME = value` visible to every later step, for ANY name including `el`, with no global leak and no per-name `let` workaround.
+
+Design questions:
+- How to mark a directive as "test-scoped / inline"? The test macros (stdlib/testing/test.st) have no `%scope`; JsScope is decided in src/pipeline/expand.rs::ir_to_expanded by Phase/selector/exports. Options: (a) a macro attribute (`%scope inline` / a `test` phase) the test macros opt into; (b) the runner compiles a @test body as one fragment rather than N file-scope directives; (c) detect the test context. Prefer (a) — a declared, data-driven property, consistent with the metasystem.
+- The `const el` preamble exists for selector/global primitives that use `el`. Test directives that DON'T reference `el` shouldn't get it. expand.rs already returns `el_init: None` for selectorless globals with no exports/cleanup — yet the emit still shows `const el`; investigate why (the synthetic emit-js path may force Body). Fixing that root removes the preamble for @let/@eval naturally.
+- Must NOT regress the IIFE isolation that media-query / selector primitives rely on (two `const mql`). Only TEST-BODY directives change scope, not site directives.
+
+* Acceptance (RED→GREEN)
+- A headless test: @let (el = querySelector('.x')) ; @eval (ST.set(el,'v',1)) ; @then $v on .x should equal 1 — passes (el persists across steps). RED today (signal lands on document.body).
+- tests/unit/assertions/binding.test.st and state.test.st recover their `el`-cross-step failures (binding 6→~29, state similar).
+- The BUG-108 per-name `let el` workaround in emit.rs can be REMOVED (the preamble no longer exists for test directives) — net simplification.
+- No regression: full `cargo run --features headless -- test tests/ --headless` failure count strictly drops from 162; lib + snapshots green; site (non-test) emit unchanged (snapshot diff empty).
+
+* Out of scope
+- BUG-101 (dev-editable tests inline-eval `var el` copies — fix = drive the real primitive).
+- Backend-ceiling refusals (DOMParser/IntersectionObserver/layout — --cdp by design).
+
+NOTE [2026-06-19]: FIXED 2026-06-19 (root-cause variant of the proposed fix). The spurious per-step `const el = document.body` preamble came from ir_to_expanded (src/pipeline/expand.rs): a file-level test directive resolves through `.with_selector(...unwrap_or_default())`, turning selector None into Some("") , and the Phase::Global arm treated `Some("")` (empty) as `Some(_) => ElInit::Body` → preamble. Fix: treat an empty-string selector exactly like None — only bind `el = document.body` when the primitive actually %yields exports or registers %cleanup; otherwise el_init=None (no preamble). This removes the per-step `const el` for @eval/@let/@assert/@then naturally, at the ROOT the FUP predicted ("the synthetic emit-js path may force Body"). Result: @let (el = querySelector('.x')) now persists across steps (the bare-global @let assignment is no longer shadowed by a const el preamble) — the FUP RED case passes. Impact: headless suite 456→513 passed / 162→105 failed (−57). Site emit UNCHANGED (only test_and_fixture snapshot changed at logic level; mixed_file_selector/data_directive/template_* drift is purely the concurrent templates.js runtime-bundle edit from the MCP session, not site logic). The BUG-108 `let el` reassign-detection in emit.rs was LEFT in place — it is now defensively dead for the documented case but harmless and self-documenting; removing it is cosmetic with regression risk (deferred). Residual binding/state failures are the @try $error lowering bug → filed BUG-112 (out of FUP-072 scope as noted). Backend-ceiling refusals (DOMParser/getSelection/IntersectionObserver/layout) remain --cdp-only by design.

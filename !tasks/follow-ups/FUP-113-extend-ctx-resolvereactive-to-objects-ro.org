@@ -1,0 +1,60 @@
+#+TITLE: Extend ctx.resolveReactive to @object's roughness/metalness (and design color/emissive signal support)
+#+STATE: ITEM
+#+SESSION_ID: 15251010f7982b56
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-06T10-48-12-510Z_15251010f7982b56.jsonl]]
+#+CUSTOM_ID: FUP-113-extend-ctx-resolvereactive-to-objects-ro
+
+* Initial Message
+
+push the capabilities of the 3d module + the workbench mcp through a concrete idea of a user interface that talks directly to this very agent using the mcp tools. This is a pressure test against both the host apis and the 3d apis. Design the 3d mockups using generate_image and then implement whatever surfaces you need using the blender mcp. commit as you go
+
+* Context
+FEAT-153 shipped `ctx.resolveReactive` (stdlib/3d/primitives/three-stage.st)
+and wired it into `@gltf`'s `src` param only, deliberately scoped to the
+concrete FEAT-151 blocker. This follow-up extends the SAME proven mechanism
+to `@object`.
+
+* Straightforward part: roughness / metalness
+Both are plain `number`-typed params (same class of BUG-159 capture-type gap
+as `@gltf`'s `src` — `NumberExtractor` also rejects a `$`-prefixed token).
+Fix shape, mirroring what already shipped:
+1. `stdlib/3d/macros/object.st`: change `roughness: $roughness:number` /
+   `metalness: $metalness:number` captures to `:expr` (accepts literal OR
+   `$signal`).
+2. `stdlib/3d/primitives/three-object.st`: keep the PRIMITIVE param types as
+   `number` (mirrors `three-gltf.st`'s `src: string` staying `string` even
+   though its macro capture is `:expr` — the primitive receives the raw
+   text, a literal number OR `"$sig"`, and resolves it itself).
+3. Restructure material creation into a `rebuildMaterial()` closure (parallel
+   to `three-gltf.st`'s `load()`) that disposes the OLD material
+   (`mat.dispose()`) and constructs a new one with the current
+   roughness/metalness values, called once via
+   `ctx.resolveReactive(rawRoughness, (v) => { roughness = v; rebuildMaterial(); })`
+   and again for metalness (or a combined resolver reading both — avoid
+   double-rebuilding on simultaneous changes if both are reactive).
+
+* Harder part, needs its own design pass: color / emissive
+`color: $color:color` / `emissive: $emissive:color` currently read via a
+COMPILE-TIME `%color.rgba` field accessor (`src/emit/js.rs::apply_param_field_accessor`,
+the `(Some("color"), "rgba")` arm) — this parses a color string to normalized
+RGBA at RUST COMPILE TIME, which is fundamentally incompatible with a runtime
+signal value (the compiler can't know a signal's future value ahead of time).
+Making `color`/`emissive` reactive needs a RUNTIME color-parsing path (JS-side
+hex/named-color -> RGBA, mirroring `src/color.rs`'s Rust parser logic in JS,
+or exposing a `ST.parseColor(str)` runtime helper the primitive calls instead
+of the compile-time `.rgba` accessor when the captured value is a `$signal`
+reference). Investigate whether a JS-side color-parse helper already exists
+in `public/runtime/st.js` before writing a new one (unlikely, but check —
+duplicate logic between Rust and JS color parsing is exactly the kind of rot
+`stdlib/AGENTS.md`/repo elegance-bar discipline flags).
+
+* Acceptance
+- `@object(shape: "box", roughness: $liveRoughness)` visibly re-renders (a
+  `--cdp` layout-tier test, refuses correctly on `--headless`) when
+  `$liveRoughness` changes, mirroring FEAT-153's `@gltf` verification
+  approach (live browser + puppeteer, mesh/material identity check).
+- `@object(color: $liveColor)` — file a DESIGN note (not a hasty
+  implementation) resolving the compile-time-vs-runtime color parsing
+  question above BEFORE writing the fix, per this repo's elegance-bar rule
+  (a new mechanism earns its place only if it deletes a special case, not
+  adds a parallel color-parsing implementation).

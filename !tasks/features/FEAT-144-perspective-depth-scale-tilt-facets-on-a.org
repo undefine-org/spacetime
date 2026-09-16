@@ -1,0 +1,155 @@
+#+TITLE: Perspective depth/scale/tilt facets on @anchor — text feels IN the 3D field (FEAT-142 continuation)
+#+STATE: DONE
+#+SESSION_ID: 152262b47a31ca42
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-04T08-53-49-160Z_152262b47a31ca42.jsonl]]
+#+CUSTOM_ID: FEAT-144-perspective-depth-scale-tilt-facets-on-a
+#+PARENT: FEAT-142-spatial-ecs-scene-entities-as-named-sele
+
+* Initial Message
+
+look up the recent work on Spacetime ECS system and tell me how you would make the text feel even more stuf to the 3d, by enabling the perspective calculations opened up by the 3d module's facet system available to bind to the Spacetime text
+
+* Initial Message
+
+User: "look up the recent work on Spacetime ECS system and tell me how you would make the
+text feel even more stuck to the 3d, by enabling the perspective calculations opened up by
+the 3d module's facet system available to bind to the Spacetime text" — then: "do that then
+showcase it in the projects/spatial-showcase demo".
+
+* Parent
+FEAT-142-spatial-ecs-scene-entities-as-named-sele (Spatial ECS). This is a Wave-G+ follow-on:
+the typed `@anchor`/`three-anchor` mechanism already tracks a world point's SCREEN position
+and VISIBILITY per frame (Wave 1/D), but throws away the depth/off-axis information the
+`vec3.project(camera)` call already computes. Anchored text today is a flat 2D billboard that
+happens to move — it doesn't feel like it is IN the perspective field.
+
+* The gap (verified in repo, not guessed)
+`three-anchor.st` (both projects/everswap-clone/lib/ and projects/spatial-showcase/lib/,
+byte-identical copies) computes `v.project(camera)` each frame, reads `v.x`/`v.y` for screen
+position and `v.z` only to test `behind = v.z > 1`. Camera distance-to-point and NDC offset
+(the two things perspective/foreshortening/off-axis-tilt would derive from) are computed then
+discarded. `%exports` currently publish only `$screenX/$screenY/$visible` (number/number/bool).
+
+* The fix (reuses the EXACT existing mechanism, no new grammar)
+Same `%emit js { ... %yield x -> $sig }` / `%exports { $sig: type }` / `%binds { prim(...) -> {
+$sig } }` pipeline already proven churn-safe (R1, FEAT-142 note 2026-06-30) for
+$screenX/$screenY/$visible. Add sibling facets, computed from values already in scope:
+- `$depth`  : number 0..1 (near..far, from `camera.position.distanceTo(world)` + `near`/`far` params)
+- `$scale`  : number (foreshortening, lerp(scaleNear,scaleFar,1-depth))
+- `$tiltX`/`$tiltY` : number degrees (off-axis lean, derived from the SAME NDC `v.x`/`v.y` already
+  computed for screen position — camera-relative, NOT terrain-normal, so L1 stays mountain-free
+  per the FEAT-142 pressure-test battery)
+
+Visual application is OPT-IN (`depth: bool = false` param on `@anchor`/`three-anchor`, default
+false) so existing everswap-clone tuned legs are UNCHANGED: when true, the primitive composes
+`perspective(900px) rotateX() rotateY() scale()` onto the SAME transform string it already owns
+(compositor-only, matches the existing translate-only write). Additionally — ALWAYS, cheap,
+harmless when unused — the primitive writes 4 CSS custom properties on the anchored element
+every frame (`--anchor-depth/--anchor-scale/--anchor-tilt-x/--anchor-tilt-y`), the exact same
+reactive-custom-prop pattern already established by `stdlib/syntax/element-ref.st` (`--st-name-width`
+etc). This is the "bind to text" surface: any descendant text can read
+`calc(var(--anchor-depth) * ...)` in PLAIN CSS — zero new Spacetime binding grammar, reuses the
+custom-prop facet idiom that already exists.
+
+* Elegance-bar check (AGENTS.md)
+- Small extension of an existing, already-proven mechanism (yield→exports→binds passthrough +
+  custom-prop facet pattern) — no new subsystem. ✓
+- Variants are data (more scalar yields / more custom props), not a Rust match arm — zero Rust
+  touched. ✓
+- Recovers information already computed and discarded (`v.z`, camera distance) rather than
+  duplicating projection math. ✓
+- Testable by the same CDP machinery already gating FEAT-142 (extend
+  tests/*.cdp.test.st with depth/scale assertions across two camera samples). ✓
+
+* Build
+- lib/three-anchor.st (BOTH projects, kept API-identical per repo's established practice of
+  syncing the shared-but-uncopied primitive across the two consumer projects): add
+  near/far/scaleNear/scaleFar/tiltMax/depth params; compute + yield $depth/$scale/$tiltX/$tiltY;
+  set 4 CSS custom props unconditionally; apply the perspective transform only when depth:true.
+- lib/anchor.st (BOTH projects): extend %form + %binds passthrough for the new params/exports.
+- projects/spatial-showcase/index.st: flip `depth: true` on the 4 @anchor calls (tuned near/far
+  to the @orbit distance range 4-14); style .tag .v/.k with `calc(var(--anchor-depth)...)` for
+  atmospheric depth-fog (opacity/letter-spacing), proving text reacts to the facet via plain CSS.
+- everswap-clone: primitive gains the capability but `depth` stays false (default) at every
+  existing call site — zero visual change to the shipped, reviewer-hardened migration.
+- Tests: extend projects/spatial-showcase/tests/showcase.cdp.test.st (or a new depth.cdp.test.st)
+  — assert $depth/$scale resolve as numbers, assert depth VARIES across two @orbit auto-rotate
+  samples (reactive proof, same pattern as FEAT-142 Wave D's screen-tracks-camera assertion),
+  assert the CSS custom props are readable via getComputedStyle, assert `scale(` appears in the
+  applied transform when depth:true.
+
+* Acceptance
+- cargo check projects/everswap-clone + projects/spatial-showcase green.
+- New/extended CDP test green (`cargo run --features cdp -- test projects/spatial-showcase/tests/... --cdp`).
+- Visual: spatial-showcase labels subtly scale/tilt/fog with camera distance as the scene
+  auto-orbits — screenshot captured.
+- everswap-clone visual output UNCHANGED (depth:false default; screenshot diff / spot-check).
+- Commits colocated with tests+docs per AGENTS.md; this org item updated with the outcome.
+
+* Outcome (2026-07-04) — SHIPPED, verified end-to-end
+
+Built exactly as designed: reused the existing %yield/%exports/%binds passthrough
++ the CSS custom-prop facet idiom (stdlib/syntax/element-ref.st precedent) — zero
+Rust changes, zero new grammar.
+
+** three-anchor.st (BOTH projects, kept in sync)
+- New params: perspective:bool=false, near:number=4, far:number=30,
+  scaleNear:number=1.15, scaleFar:number=0.75, tiltMax:number=6.
+- Recovers camera.position.distanceTo(world) (previously computed nowhere —
+  new, but O(1)) and the NDC v.x/v.y already computed for screen position
+  (previously discarded after the `behind` test) into:
+  - $depth (0 near..1 far), $scale (foreshortening lerp), $tiltX/$tiltY
+    (camera-relative off-axis lean, degrees — NOT terrain-normal, so L1 stays
+    mountain-free per the FEAT-142 pressure-test battery).
+- ALWAYS publishes --anchor-depth/--anchor-scale/--anchor-tilt-x/--anchor-tilt-y
+  as CSS custom properties on the anchored element (cheap, harmless if unused).
+- perspective:true additionally composes `perspective(900px) rotateX() rotateY()
+  scale()` onto the element's own transform (same string it already owns).
+- anchor.st: %form + %binds passthrough for all 6 new params + 4 new exports.
+
+** everswap-clone: capability added, ZERO visual change
+All 5 existing @anchor call sites keep perspective at its default (false) —
+verified in emitted JS (`DEPTH_ON = false` at all 5 sites). Existing
+tests/anchor.cdp.test.st (3 sections: mechanism, tracking, interactivity) still
+green, unchanged.
+
+** projects/spatial-showcase: the actual showcase
+- All 4 @anchor calls (crown/helmet/flux/prism) flipped `perspective: true`
+  (near:5, far:13, tuned to @orbit's minDistance:4/maxDistance:14 band).
+- .tag .k/.v CSS reads `calc(var(--anchor-depth) * ...)` for letter-spacing +
+  opacity — atmospheric-perspective text fog, driven by PLAIN CSS custom
+  properties, proving text binds to the facet with zero Spacetime binding
+  grammar (the exact ask: "make the perspective calculations available to bind
+  to the Spacetime text").
+- tests/showcase.cdp.test.st: new §4 asserts the custom props are real numbers,
+  the transform composes scale()/perspective()/rotateX/rotateY when
+  perspective:true, and --anchor-depth CHANGES across two camera samples
+  (reactive proof, same pattern as §3's screen-tracking assertion).
+
+** Bonus find: live BUG-143 hit, fixed
+spatial-showcase's `@orbit(..., autoRotate: true, autoRotateSpeed: 0.35)` call
+passed args out of the macro's %form declaration order (real param IS
+`autoRotate: number`, no `autoRotateSpeed` param exists) → BUG-143 (named args
+silently drop out of order) resolved autoRotate to its default 0 → camera was
+FROZEN. This silently neutered both the intended perspective-facet demo (no
+camera motion → no depth variation) AND the pre-existing CDP test's "tag moved
+as camera orbited" assertion (was passing vacuously against near-zero drift
+tolerance, not because the camera genuinely moved). Fixed by reordering args to
+match declaration order; verified camera position genuinely changes over 5s of
+real time. Noted as a new repro instance on BUG-143 (not re-filed — already ITEM).
+
+** Verification
+- cargo check: both projects, all files, green (21 + 7).
+- cargo build: both, green.
+- cargo run --features cdp -- test (both anchor.cdp.test.st and
+  showcase.cdp.test.st) --cdp: green, including the 4 new FEAT-144 assertions.
+- Live puppeteer sampling across real auto-orbit motion: depth 0.519→0.390,
+  0.412→0.538 etc across two samples per landmark — genuinely reactive, not
+  static. Screenshots: scratch/feat144-showcase-t0.png,
+  scratch/feat144-showcase-orbiting.png.
+
+** Commits
+- everswap-clone e3c2485: perspective facets added, unused (perspective:false
+  default at all 5 call sites) — zero visual regression.
+- spatial-showcase 5ea3e0f: perspective facets synced + exercised on all 4
+  anchors + BUG-143 orbit fix + extended CDP test.

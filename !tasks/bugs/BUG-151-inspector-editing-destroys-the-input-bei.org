@@ -1,0 +1,30 @@
+#+TITLE: Inspector editing destroys the input being edited (poll re-renders @each mid-edit)
+#+STATE: DONE
+#+SESSION_ID: 1522aa9778a04732
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-04T14-07-53-826Z_1522aa9778a04732.jsonl]]
+#+CUSTOM_ID: BUG-151-inspector-editing-destroys-the-input-bei
+#+COMPLETION_HASH: 7ea0511e69f0cb52
+
+* Initial Message
+
+i have restarted the session, can you do the visual confirmation now?
+
+User-reported (2026-07-05): "when I try to edit anything on the right side of the workbench it disappears."
+
+** Repro
+Compose a guest on the stage, select an element (canvas or navigator), open the inspector, type into an "edit content" / binding input. The field (and its section) vanishes.
+
+** Root cause (source-confirmed + oracle agent://18-WorkbenchRedesign)
+The editable inputs render inside a poll-driven filtered loop:
+  lists.st:112,123,134  @each($mcpStageNodeBindings as $b, when $b.node_id == $selectedNode) { &row($b); }
+  cards.st:93,103       <input value="$b.value"> (value straight from the snapshot row)
+On `change`, mcp_param (actions.st:51-52) round-trips to the server, which writes region_mount_input (live.rs:2002-2026). The ~1s @mcp-input poll (data.st:5,43) then republishes $mcpStageNodeBindings; template.st:320-358 rebuilds the @each with replaceChildren(fragment) -> the focused <input> DOM node is destroyed + recreated -> focus + draft text lost, section appears to disappear. The prior B4a "fingerprint-skip" only suppresses UNCHANGED republishes; a real edit changes state so it republishes and nukes the input.
+
+The deeper fault: editable interaction DOM is OWNED by the poll snapshot instead of by client edit state. Fixed structurally by PLAN-065 W_session (client editor-session projection) + W_commit (optimistic commit/reconcile). NOT a fingerprint patch.
+
+** Fix
+PLAN-065 waves W_session + W_commit. Verify: focus an inspector input, type without committing, wait multiple polls -> input stays mounted+focused+draft preserved; commit -> canvas updates, input persists; server rejection -> input stays with draft + field error.
+
+Parent: PLAN-065.
+
+NOTE [2026-07-05]: FIXED via W_session (commit 09bf4717) + live-proven. Client-owned $activeBindings/$activeParams projected on selection; inspector @each iterates them, not the poll arrays. Type without committing, wait 5 poll ticks: input persists (sameNode, focus, value). W_hygiene extended the same to frame params. Swarm-cleared 0.88.

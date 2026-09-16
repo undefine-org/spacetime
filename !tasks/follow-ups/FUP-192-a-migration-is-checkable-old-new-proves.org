@@ -1,0 +1,73 @@
+#+TITLE: A migration is checkable — old ≤ new proves a widening safe
+#+STATE: ITEM
+#+SESSION_ID: 153f5ed0617636c7
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-26T21-12-46-213Z_153f5ed0617636c7.jsonl]]
+#+CUSTOM_ID: FUP-192-a-migration-is-checkable-old-new-proves
+
+* Initial Message
+
+ok so is there any point in keeping the worktree now? verify
+
+* Why — this is the maximalist payoff
+
+A `%migration` that retypes a parameter is, today, an act of faith. Someone
+decides `$easing:string` should become `$easing:easing`, edits the declaration,
+and finds out from the corpus whether every call site survived.
+
+With `≤` it becomes a THEOREM:
+
+    old ≤ new   →  the migration is a WIDENING. Every value that satisfied the
+                   old type satisfies the new one. PROVABLY safe, no sweep.
+
+    otherwise   →  it is a NARROWING, and the table can enumerate exactly which
+                   corpus values fall outside the new type — a list, before the
+                   change lands, rather than a build failure after.
+
+* Why this matters more than it sounds
+
+This arc measured the cost of getting it wrong. A `:string` -> `:easing`
+migration is an UNQUOTING, not a retyping — measured: `easing <- "ease-out"` is
+FALSE, `easing <- ease-out` is TRUE. Declaration and every call site must move
+TOGETHER, and nothing checks that today.
+
+And the `number ≤ time` trap is the same question from the other side: a blanket
+numeric migration made staggers 1000× too slow across twenty files, SILENTLY,
+with a green build, because `stagger: 0.05` is seconds and `duration: 600` is
+milliseconds. A migration checker that understood the relation would have
+refused to call that a widening.
+
+* CodePath
+
+  stdlib/migrations/entries/                            the migration capsules
+  src/parser/meta_ast.rs::MacroDefAst                   `retired: Option<RetiredMacroTag>`
+      NB: migration capsules must NOT supply contracts — the structural
+      `retired.is_some()` exclusion (commit b9ca6c09) exists for this reason and
+      must survive.
+  src/validation/consistency.rs::subtype                from FUP-189
+  src/validation/migration_check.rs                     NEW
+      fn is_widening(old_ty, new_ty) -> bool
+      fn narrowing_casualties(old_ty, new_ty, corpus) -> Vec<Site>
+  tests/migration_safety_test.rs                        NEW
+
+* Verification seeds
+
+- REPLAY THE HISTORY. The `:string` -> `:easing` migration already happened
+  (commit 1abc3c54, `stdlib/macros/signal-flip.st`). Run the checker against it:
+  it must report NARROWING and name `tests/integration/signal-flip.test.st:13`
+  (the call site that needed `"linear"` -> `linear`). If it reports "safe", the
+  checker is wrong — this is the RED case, and it is already in the history.
+- The `reveal.st` `:string` -> `:length` migration (same commit, 2 sites) is a
+  second replay case with 4 known call sites.
+- A genuine widening must report SAFE with no casualties. Construct one from the
+  `%widens_to` rows once FUP-189 lands.
+
+* Deprecation sweep
+
+If this works, the manual corpus-sweep step in the migration workflow is
+obsolete for widenings. Say so in `docs/` where the workflow is written, and
+delete the instruction rather than leaving two procedures. A checker nobody
+trusts enough to skip the sweep has not actually landed.
+
+* Blocked on
+
+FUP-189.

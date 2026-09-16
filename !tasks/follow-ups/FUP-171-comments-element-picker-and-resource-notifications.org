@@ -1,0 +1,219 @@
+#+TITLE: FUP-171 — comments: AST-complete element anchors, the picker, notifications
+#+CATEGORY: follow-ups
+
+* ITEM FUP-171 — What PLAN-123 left undone, and the honest reason
+:PROPERTIES:
+:CUSTOM_ID: FUP-171-comments-element-picker-and-resource-notifications
+:PARENT:   PLAN-123
+:END:
+
+NOTE ON THE ID: filed as FUP-166, renumbered to FUP-171 on 2026-08-03 on a
+FALSE PREMISE (see FUP-169: there was no id collision — a full CUSTOM_ID is
+=FUP-<n>-<slug>=, so sharing a numeric prefix is not a clash). The rename was
+unnecessary and is NOT being undone: the new id is already cited from
+=comments/tests.rs=, =server.rs=, =main.rs=, =mcp/tools.rs=, =pick.st=,
+=locate.st=, =pill.st= and from commit messages. Earlier commits saying
+"FUP-166" and meaning THIS file: =92f8b657=, =0184d575=, =39fbb650=,
+=723391bc=, =66217b7e=, =36a98bf0=, =af6fb0f8=.
+
+** CORRECTION — the first version of this file was wrong
+
+The original FUP-171 claimed the element picker was deferred because building
+it "would have required custom JavaScript, banned by docs/antipatterns.md."
+
+THAT WAS FALSE, and it was filed as if it were a principle.
+
+- =docs/antipatterns.md:3= bans JS "anywhere outside of =%primitive= and
+  =@test=". =%primitive= + =%emit js= is the SANCTIONED RAIL, not a loophole:
+  151 stdlib files use it.
+- =stdlib/__inspector__/primitives/inspect-pick.st= is ALREADY an element
+  picker written in Spacetime — 71 lines, capture-phase listener,
+  =preventDefault= so picking a link does not navigate, =%cleanup= on teardown.
+- =demos/editable-blog= shows the pattern end to end: a published page whose
+  content upgrades to a structured editor in place, author writes zero JS.
+
+So the picker was never blocked by a rule. The mistake was treating "I would
+have to write a primitive" as "I would have to break a rule" — a capability
+claim asserted without checking. The real reason follows, and it is a better
+one, which is exactly why the false version needed removing: it hid a genuine
+design defect behind a fake constraint.
+
+** 1. THE REAL BLOCKER — element anchors are not AST-complete
+
+*** What ships today
+
+#+begin_src rust
+Element { route: String, selector: String }   // src/comments.rs:92
+#+end_src
+
+The selector is an OPAQUE STRING. =anchor_rejection= checks only that it is
+non-empty. Nothing resolves it, nothing validates it, nothing knows what it
+points at.
+
+*** Why that is dangerous, not merely incomplete
+
+Spacetime's structural ids are POSITIONAL. From =src/introspect/html_ids.rs=,
+described in its own docs as "the SINGLE source of truth":
+
+  an index is burned by an =Element=, and by a BARE =Hole= in text position
+
+So =data-st-node="0.1.2"= means "third structural child of the second child of
+the root". Insert one =<p>= above a commented paragraph and every later id
+shifts by one.
+
+The comment does NOT orphan. It SILENTLY RE-POINTS AT A DIFFERENT ELEMENT.
+
+A note saying "this claim is unsupported" quietly slides onto the next
+paragraph. No warning, no orphan row, no diagnostic — just a lie that reads
+like data. That is the worst failure mode available to a comment system, and
+it is strictly worse than not having element anchors at all.
+
+Contrast the inline anchors PLAN-123 shipped: identity is BLAKE3 over
+file + type + meta + first text line, so a body edit keeps the comment and a
+header edit orphans it. Deliberate, content-addressed, fails loud.
+
+THE SAME FEATURE HAS TWO IDENTITY MODELS AND THE WEAKER ONE IS UNDEFENDED.
+
+*** Why a picker would have made it worse
+
+A picker is a factory for element anchors. Shipping one on top of positional
+selectors would have industrialized the silent-re-point bug: every comment
+made the easy way would carry the fragile identity. Deferring it was right;
+the reason recorded was not.
+
+** 2. WORK — in dependency order
+
+*** STATUS 2026-07-31: W-a…W-e ALL SHIPPED. §3 replies partially shipped.
+
+Read this before the wave text below, which is preserved as the ORIGINAL
+reasoning and is now partly superseded.
+
+- W-a SHIPPED (=76b1c2e0=), but NOT the way this file assumed — see the
+  correction under W-a.
+- W-b SHIPPED (=39fbb650=) — =element_fingerprint= + =resolve_element=.
+- W-c SHIPPED (=723391bc=) — =check= + MCP surface unverified anchors.
+- W-d SHIPPED (=66217b7e=) — =stdlib/comments/__dev__/pick.st=, pure Spacetime.
+- W-e PARTIALLY SHIPPED (=36a98bf0=) — =locate.st= does hover/scroll/highlight
+  by CONTENT. Jump-to-SOURCE is still open; W-a landed the spans but nothing
+  consumes them yet. That is the one genuinely open item in this section.
+
+DEPENDENCY ORDER WAS WRONG. This file asserted W-b was blocked by W-a
+("without this an element anchor can never resolve to source"). False: content
+identity needs tag/class/id/text, which =element_label= + =bindings= already
+supplied. W-b shipped FIRST, months of span work not required. The lesson is
+recorded because the same false ordering could be re-derived.
+
+*** W-a: Element/Hole nodes carry source span + file  [ENABLER]
+
+=src/introspect/project.rs=: the =NodeKind::Element | NodeKind::Hole= arm emits
+=invoke_span: Value::Null= and no =file=, while =Template=/=Extern= carry both.
+Thread the span through =bundle_walk= / =html_walk= the way templates already
+do.
+
+Without this an element anchor can never resolve to source, so =check= cannot
+validate it, the pill cannot jump to it, and an agent cannot read the code the
+comment is about.
+
+SHIPPED 2026-07-31 (=76b1c2e0=) — AND THE PLAN ABOVE WAS THE EXPENSIVE ROUTE.
+Threading spans through the existing walk was believed to need a
+span-preserving parse across 59 =HtmlExpr::Element= construction sites (PLAN-064
+B4). It did not. html5ever's =TreeSink= has a =set_current_line= hook that the
+tree builder calls UNCONDITIONALLY, and =src/html/treesink.rs= simply never
+implemented it. Implementing it and reading the line at =create_element= time
+(not append time) gives each element the line its OWN tag was written on.
+
+=LineOffsets= (=src/introspect/html_walk.rs=) converts line→byte offsets once
+per body, so projecting a large page stays linear. =line: None= is reserved for
+SYNTHESIZED elements — absence means "not authored", never "not bothered".
+
+DELETED a special case: the =NodeKind::Element | NodeKind::Hole= arm in
+=project.rs= existed ONLY to force =invoke_span: null=; with real spans it was
+byte-identical to the fallback and is gone.
+
+*** W-b: element anchor becomes a resolvable AST reference  [blocked by W-a]
+
+Give element anchors content-derived identity, mirroring =inline_id=: hash the
+tag, the identifying attributes, and a digest of the text content. Keep the
+positional path as a HINT for fast lookup, never as the identity.
+
+Resolution MUST be able to FAIL. An unresolvable anchor becomes an orphan and
+enters the existing W4a orphan rail (re-anchor / dismiss) — not a parallel one.
+Silent re-pointing must become structurally impossible, not merely unlikely.
+
+*** W-c: check + scan validate element anchors  [blocked by W-b]
+
+An anchor that no longer resolves must surface in =check=, the pill, and MCP,
+through the SAME orphan projection the other kinds use. A broken anchor must
+never be invisible.
+
+*** W-d: the composer picker, in pure Spacetime  [blocked by W-b]
+
+Model on =stdlib/__inspector__/primitives/inspect-pick.st=:
+- listener exists ONLY while picking (safety boundary + cheaper than an
+  always-on listener that branches per click);
+- capture phase + =preventDefault= + =stopPropagation=, so picking a link does
+  not navigate away and picking a button does not fire a destructive action
+  merely because someone wanted to comment on it;
+- =%cleanup= removes the listener;
+- must exclude the comments widget itself (=closest('.st-comments-widget')=),
+  the way inspect-pick excludes =.st-inspector-widget=.
+
+Mints the W-b anchor, never a raw selector string.
+
+NB =server::comments_doc_accuracy_tests::the_doc_does_not_promise_an_element_picker=
+FAILS if the pill grows a picker without the doc changing. That test is the
+reminder; update it, do not delete it.
+
+*** W-e: hover-highlight + jump-to-element  [blocked by W-d]
+
+A comment on an element you cannot find is a riddle. Hovering a comment row
+outlines its element; activating scrolls to it. With W-a landed, also offer
+jump-to-source. Orphaned anchors must LOOK unresolvable rather than silently
+doing nothing when clicked.
+
+** 3. Replies + authored status transitions  [independent]
+
+A comment today is one body plus a status. Real review needs replies, and a
+status change needs an author and a timestamp to be accountable — "who marked
+this resolved, and when" is currently unanswerable.
+
+Bump =SCHEMA_VERSION=, keep back-compatible reads, and carry the shape through
+pill + MCP + check identically (the D8 rule: hints travel BESIDE the record,
+never inside it).
+
+** 4. =comments://<env>= accepts subscriptions but never notifies  [STILL VALID]
+
+This deferral survives scrutiny. The resource reads correctly and shares the
+tool's projection; =resources/subscribe= validates and records the
+subscription — but nothing emits =notifications/resources/updated=, so a
+subscriber holds a stale index until it re-reads.
+
+WHY DEFERRED: the MCP layer has NO notification producer at all. Building one
+for a single resource would be a bespoke rail — the parallel implementation
+this repo forbids — and it would be rebuilt the moment a general mechanism
+arrives.
+
+UNBLOCKS WHEN: the MCP layer grows a general server→client notification path.
+Comments then becomes one publisher among several.
+
+NOW TRACKED IN FULL AS **FUP-168**, which found something worse while writing
+it up: the server ADVERTISES ="resources": { "subscribe": true, "listChanged":
+true }= in its `initialize` reply, and two tests PIN that advertisement. So this
+is not a missing feature — it is a protocol-level promise with nothing behind
+it, and a correct client is entitled to subscribe INSTEAD of polling and then
+never hear anything. See FUP-168 for the evidence, the loop-shape root cause,
+and the W-a…W-e work.
+
+Documented honestly in =docs/language/comments.md= today ("subscribing is
+accepted, but no change notifications are emitted yet — re-read to refresh").
+
+** 5. Cross-process concurrency remains last-writer-wins  [ACCEPTED]
+
+Dismiss / re-anchor / prune / update serialize on a process-local lock, so one
+server's handlers stay consistent with each other. Two processes (a dev server
+and an MCP server) writing the same record still race; an external editor
+participates in nothing.
+
+This is D10's accepted boundary — the hosted tier owns real transactions.
+Recorded so the process-local lock is never mistaken for a stronger guarantee
+than it is.

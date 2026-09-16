@@ -1,0 +1,43 @@
+#+TITLE: @form shot markup: a param value starting with $ (e.g. price "$24.99") is dropped
+#+STATE: DONE
+#+SESSION_ID: 157047c1462c1c38
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-undefine-spacetime/2026-09-02T20-57-35-768Z_157047c1462c1c38.jsonl]]
+#+CUSTOM_ID: BUG-384-form-shot-markup-a-param-value-starting
+#+COMPLETION_HASH: 5a44621429287212
+
+* Initial Message
+
+ok so
+1. what have you actually implemented (syntax) vs. what's left to implement (syntax as well)
+2. what would that allow us to do in general
+3. did you regenerate the Spacetime video
+
+Discovered building demos/film-showcase (PLAN-150 promo).
+
+## Symptom
+A @form shot (or @template) whose markup interpolates a param whose VALUE begins
+with `$` renders empty. In the film's product card, `&product-card("Ceramic
+Mug", "$24.99")` renders "Ceramic Mug" correctly but the `$24.99` price shows
+blank.
+
+## Likely cause (unverified)
+The factory/interpolateHtml interpolation (public/runtime/templates.js) treats a
+value starting with `$` as another hole to resolve, OR the `$$`→literal-$ escape
+(the `\u0000` stash) mis-fires on a value that legitimately contains `$`. The
+value `"$24.99"` substituted into `` `$price` `` yields `$24.99`, which a
+subsequent pass may re-interpret as a `$price`-style hole and drop.
+
+## Reproduction
+```
+@form shot --c($price) { :markup { <div class="p">`$price`</div> } :motion { opacity: 0 -> 1; } }
+.a { &c("$24.99"); }
+// .p renders empty; expected "$24.99"
+```
+
+## Fix acceptance
+A --cdp gate: the .p textContent === "$24.99". The interpolation must treat a
+resolved VALUE as literal text, never re-scan it for holes. The W9 backtick-strip
+fix (28496fc3) handles the delimiters; this is the orthogonal value-contains-$
+case.
+
+NOTE [2026-09-04]: FIXED. Root cause: the factory's (and interpolateHtml's) backtick-hole pass resolved `` `$price` `` -> `$24.99` and injected it into the DOM string, then the SECOND bare-hole text pass (regex >...$var...<) re-scanned that literal `$24.99`, parsed it as a `$24` variable with `.99` path, found data["24"] undefined, and returned '' — wiping the price. Fix (public/runtime/templates.js): after a resolved value is escaped, stash any literal `$` it contains as \u0000 (the same rail `$$` already uses); the trailing \u0000 -> `$` restore returns it to display text, so the bare-hole pass can never re-interpret a resolved value. Applied in BOTH the factory backtick pass and interpolateHtml. Gate: tests/score/shot.test.st now asserts `.price` textContent contains "$24.99" (RED-proven against the unfixed runtime, GREEN after). Snapshots regenerated (runtime JS is include_str!-embedded). Found + fixed while rebuilding demos/film-showcase.

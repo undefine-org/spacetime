@@ -1,0 +1,226 @@
+#+TITLE: Inspector pill — shared tree seeker + typed param editors (dock + workbench)
+#+STATE: DOING
+#+SESSION_ID: 153cb1f969f16d98
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-24T19-20-39-591Z_153cb1f969f16d98.jsonl]]
+#+CUSTOM_ID: PLAN-112-inspector-pill-shared-tree-seeker-typed
+
+* Initial Message
+
+ok my friend, can you please tell me how you would bring in the most important parts of the automatically-generated Webflow-like interfaces in the workbench (auto-generated editing components with rich inputs by type, and tree structure seeker) into a pill format, similar to the host pill and the migration pill?
+
+Design finalized 2026-07-24 after 5-agent read-only investigation (structure projection, span-patch rails, selection tagging, admin widgets, dock injection). All file:line references verified against current tree.
+
+* Goal
+
+A shared Inspector pill bringing the MCP workbench's auto-generated editing UI (typed param editors) + tree/structure seeker to (a) EVERY dev-served page via the `.st-dev-dock` (next to the host + migrations pills), and (b) the workbench itself, whose inspector/navigator drawers converge onto the same shared component.
+
+Decisions locked (user-confirmed):
+1. Shared pill component: dock-mounted on every dev page AND consumed by the workbench.
+2. Write rail: source span-patch only (persistent file edits → watcher reload). No ephemeral override rail in the pill.
+3. Rich typed widgets hoisted out of the admin drawer into a shared =stdlib/fields/= module; admin + workbench + pill all consume it.
+4. v1 tree granularity: template invocations only (one node per template call + its params). Element/binding granularity deferred.
+5. Bidirectional selection: tree click → highlight live-page element AND page element click → select tree node (dev-only DOM stamping).
+6. Write on commit (change/blur); user's git is the safety net (migrations-pill precedent).
+
+* Non-goals (v1)
+
+- Element-level nodes + per-binding editing: element/hole StructureNodes carry =source_span: None= (src/introspect/html_walk.rs); element editing needs span enrichment first. The workbench itself only edits elements via the ephemeral region-override rail we excluded.
+- Subtemplate ELEMENT stamping: invocation-base threading through nested builders is unsolved in the workbench too (src/mcp/bundle.rs:275-291 stamps only =main=).
+- richtext/select/chips/relation widgets in the pill: hydration-provider contract needed; template params are scalars.
+- Compile-gate on EditAst disk writes: follow-up hardening (precedent: migrations + /save write blind; watcher surfaces errors).
+- Workbench literal dock chrome: the pill FORMAT replaces the drawer CONTENT; whether workbench also mounts the dock wrapper is cosmetic, deferred.
+
+* Architecture: four planes
+
+#+begin_example
+READ       introspect projection → JSON rows → pill tree + editors
+WRITE      fields widgets → save-adapter → EditAst (dev-ws) → disk → watcher reload
+SELECTION  dev-only template-root stamps → click/highlight ↔ $insSelectedNode
+PACKAGING  stdlib/inspector/ core (data-agnostic) + per-world data adapters
+           (dock: HTTP + dev-ws · workbench: @mcp-input + mcp-action)
+#+end_example
+
+Load-bearing decision: the component core is data-agnostic; each world plugs adapters. The two worlds genuinely differ (dock: same-origin =@data fetch=/dev-ws vs workbench: =@mcp-input(refresh:1000)= + =mcp-action= sink) — one .st file cannot serve both raw; shared templates + thin per-world wiring is the honest shape.
+
+* Investigation evidence (what changed the sketch)
+
+1. READ RAIL HALF-EXISTS: src/sync/handlers.rs:1370 =handle_inspect_structure= already compiles a regular dev-served .st via =mcp::bundle::compile_to_bundle= → =introspect::structure_from_bundle=, reachable as a dev-ws query (src/dev_server.rs:393). Projection chain: source → parse/resolve_imports → =mcp::state::Bundle= (TemplateBundle/ParamSpec, src/mcp/state.rs:473-596) → =structure_from_bundle= (src/introspect/bundle_walk.rs:31-95) → MCP-private JSON adapters (=stage_structure_from_bundle= src/mcp/live.rs:780, =stage_node_params_from_structure= :624). Only stage discovery + the JSON adapters are MCP-coupled.
+2. WRITE RAIL EXISTS: =handle_edit_ast_inner= (src/sync/handlers.rs:1153-1271) validates file path, validates =__invoke_span= bounds, calls =apply_text_patch= (same fn the MCP =mcp_node_param= rail uses in-memory, src/mcp/live.rs:2372-2458), writes to DISK; watcher (src/main.rs:2409-2427) → ws Reload (src/dev_server.rs:214-267). Admin motion fields already ride EditAst from the browser. ∴ pill writes = EditAst over existing dev-ws; NO new server write path.
+3. MCP EDITS ARE NOT DURABLE: =update_source= (src/mcp/live.rs:1210) mutates only FunctionRegistry — no fs::write. But it compiles-before-commit, a property worth stealing later (see follow-up).
+4. NO STRUCTURAL DOM IDENTITY ON REGULAR PAGES: =data-st-node= stamping is opt-in codegen (=emit_builder_root_scoped_stamped=, src/emit/html_reactive.rs:301-470) used only for MCP =main= template; explicit test =unstamped_builder_emits_no_data_st_node= (:1144). =data-st-id=/=data-st-origin= (debug provenance, src/syntax/form_match.rs:1410-1607) and =data-st-ssg= (src/html/ssg_unroll.rs:923-951) are confirmed non-substitutes. Bidirectional selection ⇒ new compiler emission. Id space is already shared: src/introspect/html_ids.rs is the single dotted-id allocator used by both the walker and stamped builder.
+5. ADMIN WIDGET COUPLING MAPPED: generic = &fld-* markup (stdlib/__admin__/app/drawer.st:18-166), HSV/range/coercion helpers (public/runtime/st.js:2100-2365, pure fns), widget-dispatch descriptor shape. Admin-coupled = SpacetimeLocal.entries/activeIndex, relation cache + adHydrateControls imperative hydration, media-library, =[index]=-prefixed data-path, adEditField→EditJson transport (src/sync/handlers.rs:142-280 rewrites whole pretty-printed JSON file). Regression net: tests/v8_runtime_test.rs:2960-3070.
+6. DOCK INJECTION SEAM: =host_widget_inject= (src/server.rs:2638-2679) compiles both pills, emits stylesheet links + DEV_DOCK_CSS + dock wrapper + scripts; injected on all dev HTML paths (:689-925, :1020-1062, :1290-1318, :1375-1410, :1490-1570, :4116-4160). Sentinel substitution precedent: =compile_host_widget_raw= (:2144-2265). Workbench page (src/mcp/live.rs:1789-1835) does NOT receive the dock. Signal collision is OBSERVED behavior (migrations pill.st header: un-prefixed =$isExpanded= opened both panels) → strict =$ins= prefix.
+
+* Plane details
+
+** Plane 1 — Read: projection consolidation
+- Hoist the JSON adapters (=stage_structure_from_bundle=, =stage_node_params_from_structure=) + the value-quoting coercion (from the mcp_node_param resolver) out of src/mcp/live.rs into src/introspect/. They are pure Bundle+StructureNode→JSON fns; only the hardcoded =rail:"mcp_param"= / =region:"stage"= fields on binding rows are MCP-specific and drop out at template granularity. MCP converges onto hoisted fns — the private copies are DELETED (elegance bar clause 3).
+- Fix during hoist: extern nodes project as =kind:"template"= though the IR kind is Extern (inherited honesty bug).
+- Adapter output gains: =widget= (per-param widget kind from TemplateParamDef.type_ref, src/syntax/form_match.rs:154-180, via a DATA table mirroring admin's node.widget vocabulary — string→text, number→number, bool→toggle, color→color, length→range-length, duration→range-duration) and =source_hash= (content hash per contributing file; migrations staleness precedent src/migrate.rs:406-456).
+- Transport: =GET /__spacetime/inspect/structure.json?entry=<page.st>= — thin axum handler calling the same fn handle_inspect_structure calls (route family src/server.rs:144-242). Pill fetch idiom: =@data fetch … { refresh: 2s }=.
+- Entry-path discovery: sentinel =__SPACETIME_INSPECT_ENTRY__= substituted at inject time in host_widget_inject (it knows which .st it decorates).
+- v1 row shapes:
+  node  {id, label, kind, depth, template, param_count, invoke_span, recursive}
+  param {node_id, param, value, type, widget, bound, span_start, span_end, file, source_hash}
+
+** Plane 2 — Write: EditAst, hardened
+- Rail: field commit → stdlib/__dev__/primitives/dev-save.st (:120-220, already converts edit events → EditAst ws payloads) → handle_edit_ast_inner → apply_text_patch on invoke_span → fs::write → watcher → Reload → page reloads → pill refetches (fresh spans). apply_text_patch's named-property semantics match invocation args (&card(title: "Hi") — patch property =title= within invoke_span).
+- Hardening (from investigation risks):
+  1. STALENESS: EditAst payload gains optional =expect_hash=; handler re-hashes file, rejects on mismatch w/ clean error the pill surfaces ("page changed — reopen the field"). Additive, protocol-compatible.
+  2. PANIC FOOTGUN: push EditAst's span bounds checks (handlers.rs:1178-1190) INTO apply_text_patch (currently can panic on start>len / start≥end when called raw, :651-758) — fixes every caller incl. MCP.
+  3. COMPILE-GATE: v1 accepts blind write (matches migrations + /save precedent; watcher surfaces errors in-page; git is the net). Follow-up FUP for opt-in compile-before-commit on EditAst.
+- Commit semantics: =change= (blur/enter); range/color drags additionally debounced 400ms (admin motion pattern, st.js:2100-2365).
+
+** Plane 3 — Selection: dev-only template-root stamping
+- v1 stamps TEMPLATE ROOTS only (matches template-granularity tree; avoids the unsolved subtemplate-element base-threading).
+- Static path: extend ssg_unroll (:923-951, already adds data-st-ssg=1 at the right place) to also emit =data-st-node="<template-node dotted id>"= in dev mode.
+- Reactive path: pass the template node id at the invocation site so builders stamp the root element (one attribute per invocation — far narrower than full element stamping).
+- Dev-only: gated on serve-mode; =build= output ships clean. Sibling test to unstamped_builder_emits_no_data_st_node asserting prod cleanliness.
+- @each caveat: repeated invocations share one node id — semantically CORRECT for source editing (one source span); detail panel says "n instances".
+- Gestures (pure Spacetime, workbench idiom env.st:369-463):
+  - page→tree: pick-mode toggle ($insPicking) gates a delegated =@on click [data-st-node]= at page scope → =$insSelectedNode <- $.closest('[data-st-node]').dataset.stNode= + BUG-151 snapshot copy into $insActiveParams. Pick-mode gating prevents hijacking normal page interaction.
+  - hover: pure CSS =body:has(.st-inspector-widget.is-picking) [data-st-node]:hover { outline: … }= (no overlay geometry; workbench has none either).
+  - tree→page: reactive =<style>= element in the pill whose =text <-= derives the attribute selector from $insSelectedNode. SPIKE FIRST: if =text <-= on <style> doesn't re-apply CSS live, v1 ships one-directional (page→tree, the load-bearing half) + follow-up compiler affordance.
+
+** Plane 4 — Fields module + packaging
+- =stdlib/fields/=: moves &fld-* markup for text/number/toggle/color(+HSVA)/range-length/range-duration, pure helpers (HSV convert, range parse/compose, adCoerceValue), descriptor contract; .ad-* styles → .st-fld-*. Seam:
+  descriptor {widget, label, value, addr}   addr = {kind: "json-path" | "invoke-span" | "mcp-action", …}
+  adapter(descriptor, newValue) → consumer's rail
+  Three adapters: admin→EditJson (unchanged behavior) · pill→EditAst(span+expect_hash) · workbench→mcp_node_param action.
+- =stdlib/inspector/=:
+  core.st — tree-row + node-detail + param-row templates, $ins* selection spine; data-agnostic; consumes stdlib/fields.
+  __dev__/pill.st — dock chrome (pill+panel, migrations grammar verbatim: glass 999px pill, spark mark, count badge, chevron, panel bottom:calc(100%+8px) w/ spring bezier, .is-hidden resting rule when structure empty/unavailable), HTTP fetch adapter, EditAst save adapter, pick-mode toolbar. Badge = node count; .is-working while patch in flight.
+- Server touchpoints (third pill): compile_inspector_widget_raw (clone of migrations', server.rs:2283-2358) · routes GET /__spacetime/inspect/{runtime.js,styles.css,structure.json} · third slot in host_widget_inject · entry sentinel.
+- Workbench convergence: env.st drawers re-mount core.st templates; data.st keeps @mcp-input arrays; actions.st keeps mcp_node_param sink. DELETE from cards.st/lists.st: &mcp-structure-node, &mcp-node-detail, &mcp-node-param-row, &mcp-node-binding-row + bindings.
+
+* Waves
+
+Execution protocol: implementation waves run as delegated tasks; BETWEEN waves, a reviewer swarm runs IN THE MAIN THREAD over the wave's diff before the next wave starts. Swarm findings are fixed (or explicitly waived w/ rationale noted here) before proceeding.
+
+** W1 — Projection consolidation (Rust)
+Hoist JSON adapters + value coercion into src/introspect/; widget data table; Extern kind fix; source_hash field; bounds checks into apply_text_patch; /__spacetime/inspect/structure.json route + entry sentinel; MCP converges (private copies deleted).
+Gate: cargo test --lib · cargo test --test integration_tests · existing MCP tests green · route returns correct rows for a fixture project.
+
+** W1R — Reviewer swarm (main thread)
+Focus: adapter-hoist fidelity (MCP snapshot byte-compat where intended), apply_text_patch bounds-check regressions across ALL callers, route auth/scope (dev-mode-only), row-shape contract vs this PLAN.
+
+** W2 — stdlib/fields/ hoist
+Widgets + pure helpers + descriptor/adapter contract; admin converges onto shared module (EditJson adapter, behavior unchanged); .ad-* → .st-fld-* with admin styles preserved.
+Gate: cargo test --test v8_runtime_test (widget dispatch + richtext preservation, :2960-3070) · headless admin fixtures · manual admin smoke (color picker, range twin, toggle).
+
+** W2R — Reviewer swarm (main thread)
+Focus: admin regression surface (data-path semantics, [index] prefixing, motion EditAst rail untouched), hidden ST.* global deps left behind, descriptor contract completeness for W3's consumer.
+
+** W3 — Pill v1, panel-only
+stdlib/inspector/core.st + __dev__/pill.st; compile_inspector_widget_raw + routes + dock third slot + sentinel; EditAst writes w/ expect_hash (protocol + handler + dev-save plumbing); $ins prefix discipline.
+Gate: new headless .st tests (tree renders from fixture, param edit round-trips to disk, stale-hash rejects cleanly) · live serve smoke on a real project · both other pills still function (collision check).
+
+** W3R — Reviewer swarm (main thread)
+Focus: signal-namespace collisions (observed-failure class), write-path safety (span validation, hash guard, error surfacing UX), dock injection on every HTML path variant, resting-rule correctness (no dead chrome on non-dev/failed-fetch).
+
+** W4 — Selection stamping + gestures
+Dev-only template-root data-st-node emission (ssg_unroll + reactive invocation-site path); prod-clean sibling test; pick mode + delegated click + hover CSS; reactive-<style> spike → tree→page highlight or documented one-directional fallback.
+Gate: emit unit tests (stamped-in-dev, clean-in-build) · CDP test (--cdp) for click-select round-trip · @each multi-instance selection shows "n instances".
+
+** W4R — Reviewer swarm (main thread)
+Focus: prod-output cleanliness (no stamps in build), pick-mode gating (no interaction hijack when off), id-space agreement stamp↔tree (html_ids single-allocator invariant), spike outcome honesty.
+
+** W5 — Workbench convergence
+env.st inspector/navigator drawers re-mount core.st templates; delete parallel card/list templates; workbench adapter (mcp-action) wired.
+Gate: workbench headless tests · manual MCP session (st_workbench → compose → select → edit) · deleted-template grep returns zero refs.
+
+** W5R — Reviewer swarm (main thread)
+Focus: workbench behavior parity (BUG-151 poll-survival preserved via client-owned snapshots), no orphaned styles/templates, both worlds render identical tree/editor UI from shared core.
+
+* Follow-ups to file when reached
+- FUP: opt-in compile-before-commit gate on EditAst disk writes (steal update_source's property).
+- FUP: element/hole source_span enrichment in html_walk → element-granular tree + binding rows.
+- FUP: subtemplate builder stamping (invocation-base threading) — benefits workbench too.
+- FUP: hydration-provider contract → select/chips/relation/richtext in shared fields.
+- FUP: compiler-level widget signal namespacing (replaces prefix discipline).
+- FUP (conditional): reactive <style> affordance if W4 spike fails.
+
+* Risks
+- Panel real estate: tree + editors in one upward 380-420px panel; cap max-height 60vh + scroll (migrations idiom); consider per-top-level-node collapse if noisy.
+- Bundle fidelity on complex projects: compile_to_bundle warns/ignores file-scope HTML (v1 templates-oriented); pill tree on a page with heavy file-scope markup shows template invocations only — acceptable for v1, states its scope in the panel empty-state.
+- Watcher reload loop UX: every committed edit reloads the page; pill panel state ($insIsExpanded, selection) resets. Mitigation: persist $ins spine via the same mechanism the pills already tolerate reloads with (re-derive from fetch); if intolerable, sessionStorage-backed signal is a follow-up.
+- apply_text_patch property-name collisions inside a span (two params with substring-related names) — W1 review focus.
+
+NOTE [2026-07-24]: W1 + W1R COMPLETE (commits e1e4cb5a, ee264464, f879d806).
+
+W1 delivered: src/introspect/project.rs owns the host JSON shape (structure_json / structure_json_for_entry / param_rows), hoisted out of src/mcp/live.rs which now CALLS them (private copies deleted). Widget selection is a data table. Extern nodes report their real kind. GET /__spacetime/inspect/structure.json is live, dev-gated, path-validated.
+
+DESIGN CORRECTION found during implementation (not anticipated by the PLAN): byte spans are PER-FILE, but TemplateBundle carried no origin file, so a row was not a usable write address for any imported template. Added TemplateBundle.source_file threaded through the walk; every row carries `file` = the INVOCATION-SITE file. Also found and fixed the synthetic `<bundle>.st` import anchor leaking as a plausible-but-unopenable path.
+
+BUG FOUND BY THE END-TO-END TEST (would have shipped): value quoting was decided by the KEY's spelling, but a template invocation has a bare key with a quoted value — so the patcher wrote `title: patched`, invalid Spacetime. The MCP rail hid this by pre-quoting at its own call site while the EditAst DISK rail silently corrupted files. Quoting now lives in the patcher (emit_patch_value); MCP's duplicate deleted.
+
+W1R swarm (3 reviewers) found 5 real defects, ALL fixed w/ regression tests in f879d806: (1) P1 injection via a forgeable prefix/suffix "source atom" exemption I introduced — object literals now take no exemptions and bare-key exemptions must match the whole value; (2) P1 nested entries mis-resolved imports -> added compile_to_bundle_at; (3) P1 span/hash could describe different snapshots -> rows now carry span_text + an agreement check, and the write rail verifies it via __expect_span_text; (4) P1 guards not atomic with the write (lost update) -> read→verify→write now locked, test fails 4/5 without the lock; (5) P2 a real file named `<bundle>.st` aliased to the entry -> exact-anchor comparison.
+
+ALSO: 5 compiler snapshots were failing BEFORE this work (stale since BUG-211 20706980, which made runtime registries idempotent without updating them). Verified pre-existing by testing at that commit and its parent; refreshed in ee264464 so the suite is green and future regressions are visible.
+
+Gates: 2754 lib (was 2748; +6 new tests) + 191 integration, all green.
+
+NOTE FOR W3: the write contract the pill must use is {file, span_start, span_end, source_hash, span_text} -> EditAst patch {__invoke_span, __expect_hash, __expect_span_text, <param>: <bare value>}. Send BARE values; the patcher owns quoting. A row with a null source_hash is display-only (its snapshot could not be verified) and must not be written.
+
+NOTE [2026-07-24]: W2 + W2R COMPLETE (commits 797358ed, 4a78f894).
+
+DELIVERED: stdlib/fields/ owns six pure typed widgets (text, number, toggle, color+HSV, range-length, range-duration) as `&field-*` templates + two control primitives + `.st-fld-*` styles + 9 real module tests. Admin consumes them; its six `fld-*` widgets are deleted. Descriptor contract for W3: {label, value, path, addr, addrSel, addrKind, addrFile, addrStart, addrEnd, rnum, runit, rmin, rmax, rstep} — `data-path` for the admin JSON rail, `data-addr-*` for the pill's span rail; both ride through to the control. Composites write through ONE channel (range → hidden [data-range-twin], color sliders → hex text), so a single delegated `@on input` per consumer suffices.
+
+DISPATCH CONTRACT (important for W3): `ST.adFieldTemplate(widget)` is the ONE place a widget kind becomes a template name. Call it — do not hardcode names. Structural kinds (group/derived) are admin-owned scaffolding, not inputs.
+
+FOUR DEFECTS FOUND BY TESTING THE REAL THING:
+1. The delivered module tests were FAKE (mounted hand-written HTML + own listeners; passed with the module deleted). Rewritten against the real mount path (`Spacetime.invokeTemplate`) — which immediately exposed #2 and #3.
+2. Composite controls never fired: `%primitive`s existed but nothing bridges a primitive to a `@directive`. Added the `%macro` bridges (stdlib/text @measure pattern).
+3. A thin `fld-* → field-*` wrapper template renders NOTHING: a body that is a lone ref compiles to `html: ""`, and the runtime only renders body refs once it produced a root element. Descriptors now name the shared template directly.
+4. Live admin regression mid-wave: `ST.adRangeParse` deleted while `adFormFields` still called it → the descriptor builder threw and the drawer rendered EMPTY. Restored as `ST.fieldRangeParse` (+ alias); audited both JS and .st sides for other dangling `ST.*` — none.
+
+W2R swarm (3 reviewers) → 2 real defects fixed in 4a78f894: (a) P1 derived brand previews read the stale swatch after the color-class rename; (b) widget→template dispatch encoded twice (JS + Rust) and free to drift — now single-sourced in `ST.adFieldTemplate`, server no longer assigns `tpl`, Rust copy deleted. While consolidating I caught that `group` would have resolved to `field-text`, replacing every section header with an empty textbox. New gate test pins every widget kind to a REGISTERED template. Three further reviewer findings assessed and correctly rejected with live evidence (toggle hydration is pre-existing + unchanged; derived rows cannot leak; piped-formula derives were already broken pre-W2).
+
+FILED BUG-212 (#A): at the TOP LEVEL of an `%emit js` body, a bodyless `if (cond) return;` followed by an arrow declaration is mis-emitted — guard swallows the arrow body, `return` deleted, binding dropped, silently. This cost the range control its entire behavior. Trigger narrowed by four-way differential; root cause located by review in `extract_cond_and_body` (src/emit/js_parser.rs) — it scans forward for a brace and adopts the arrow's. Zero live exposure in shipped stdlib (verified). Guards in stdlib/fields use the positive-condition form, documented in-file.
+
+Gates: 2754 lib · 191 integration · 438 v8 · 652 headless · 9 module tests. Admin verified live (real dev server + browser) against a pre-refactor baseline: identical markup/labels/paths/widgets/values, byte-identical screenshots, and text/slider/color edits each round-trip to disk with units and hex preserved.
+
+NOTE [2026-07-25]: W3 + W3R COMPLETE (commits 44e9bf38, 6bdf7aef).
+
+DELIVERED: stdlib/__inspector__/ — the Inspector pill, a third dev-dock widget. Renders the served page's template tree (indent by depth), selection projects that node's params into the shared typed widgets, and an edit writes the real .st source via EditAst. Runtime helpers in public/runtime/st.js: ST.insEditorRows (projection), ST.insWriteRequest (per-widget value extraction + refusal), ST.insDisplayValue (unquote for display), ST.insRefreshCredentials (in-place freshness).
+
+PROVEN LIVE (real dev server + Chromium, not just tests): 9-node tree w/ correct depths; selection yields exactly that node's params as correctly-typed widgets; text/color/slider/toggle edits each round-trip to disk; editing the SECOND of two &note(...) calls changed ONLY that invocation (per-instance span addressing); three chained edits land without re-selecting.
+
+SIX DEFECTS FOUND BY DRIVING THE REAL THING (each invisible behind a green suite):
+1. `Spacetime.templates = new Map()` clobbered the registry — every dock widget embeds a full runtime, so the LAST bundle erased earlier templates and the pill's editor list rendered nothing. BUG-211's class, missed for this registry. Now idempotent.
+2. `text <- ($a || $b)` — `||` in a text binding parses as a filter pipe → unbalanced parens → SyntaxError that killed the whole bundle silently. Combine in a derive instead.
+3. Pill markup had been moved inside a @template (for test mounting), which empties compiled.html — the thing the dock injects. Rendered in tests, invisible on every real page.
+4. A `&ref` inside a template BODY renders as LITERAL TEXT. Refs are selector-scope constructs; editors are now one @each dispatching straight to the widget.
+5. `%$request` never substitutes — the emitted primitive referenced a bare `$insWriteRequest` and threw. Follow the effect-runner convention (signal name + explicit watch).
+6. `file: null` (the common single-file case) blocked every write via a falsy guard.
+
+W3R swarm (3 reviewers) → 5 more real defects fixed in 6bdf7aef: composite (range/color) edits NEVER wrote because they commit on `input` not `change` — the single most severe, and my own earlier check had passed only because it dispatched `change` manually; toggle wrote the literal `on`; an emptied number would have written malformed source (`count: )`); credentials went stale after the first write so the NEXT edit was silently refused (fixed in place, preserving BUG-151); the entry path was unescaped in both the injected script URL and the fetch URL (an `&` would point the pill's writes at a DIFFERENT file). Plus a watcher leak + double-subscription in the write primitive.
+
+Gates: 2755 lib · 191 integration · 438 v8 · 656 headless · 9 pill tests. All 9 pill tests sabotage-verified (they fail when their target behavior is broken).
+
+CARRIED FORWARD (reviewer findings deliberately not patched blind):
+- Escaped-string round-trip: `insDisplayValue` strips quotes but leaves escapes, so re-submitting an unchanged value containing `\"` or `\\` can alter the literal. Needs the row to carry a decoded value alongside the raw token.
+- Bare-name template collisions between a page bundle and a dock bundle remain possible (the registry fix only stopped the wholesale clobber). Wants a namespacing/ownership policy.
+- `insEditorRows` hardcodes range bounds 0-200; a duration param (600ms) is awkward. The admin derives bounds per widget kind (adFormFields) — converge on that.
+
+NOTE [2026-07-25]: W4 + W4R + W5 + W5R COMPLETE. PLAN-112 delivered end to end (commits e1e4cb5a, ee264464, f879d806, 797358ed, 4a78f894, 44e9bf38, 6bdf7aef, aedb846c, 06966827, dad84ae1, dcd58ab9).
+
+W4 — BIDIRECTIONAL SELECTION. Dev-only instance stamping: structure ids from the SAME bundle walk the inspect route uses are threaded as a (source span → id) map on the compile context and applied to invoke-template's optional `node` arg. Production maps are empty, so `build` output cannot acquire inspector attributes (sabotage-verified test). Pick mode owns the page listener: while OFF it is not registered at all. Verified live: clicking the second of two &note(...) selected node 0.3 and editing changed only that invocation.
+
+W4R → 3 fixes. (a) P1 stamps could MIS-ADDRESS: ids are keyed by byte span but resolve_imports flat-merges files without rebasing spans, so two files can claim one span and the first match would stamp the wrong invocation — a click would then rewrite the wrong source. Ambiguous spans are now dropped entirely (no stamp beats a wrong one). (b) Picking hijacked then navigated away — the gesture now suppresses the page action on an accepted pick only; verified both directions live. (c) Instance count went stale.
+
+W5 — WORKBENCH CONVERGENCE. The last parallel implementation is gone: the workbench rendered an untyped <input> for every param while the pill and admin gave the same data a real swatch. Both bespoke row templates deleted; rows dispatch through ST.adFieldTemplate to the shared field-* widgets. The row→descriptor projection is ONE helper (ST.fieldEditorRows); the pill and workbench both delegate. The workbench's own rails (in-memory FunctionRegistry revisions, NOT disk writes) are untouched. Verified in a live MCP-mounted workbench: the instance contract lists field-text/number/toggle/color/range-*, bespoke rows absent, navigator templates kept, no JS errors.
+
+W5R → 4 fixes, all verified live. (a) P1 a checkbox wrote the literal `on` (mcp-action read .value, which is always "on"); now reads .checked. (b) P1 composite edits could NOT reach the MCP rail — they commit via a synthetic event from a twin/hex partner, which the isTrusted guard rejected; composite commits now carry an explicit marker the guard admits while the hydration hazard stays closed. (c) Range bounds were one hardcoded 0-200 shared by all consumers, so touching a 600ms duration CLAMPED it to 200ms — per-kind bounds restored. (d) A toggle rendered inverted (`checked` is DOM state, not a rendered attribute; the only hydration path queries .ad-form which neither pill nor workbench has) — the descriptor now carries `checked` as an ordinary attribute hole.
+
+FINAL GATES: 2758 lib · 191 integration · 438 v8 · 656 headless · 15 pill · 11 fields · 1 workbench. All green.
+
+TEST-HONESTY NOTE: three separate tests in this plan were found to pass on broken code and were rewritten (W2's entire module suite, W4's production-cleanliness assertion, W5R's toggle assertion). Every fix in the last three waves was sabotage-verified — the test was confirmed to FAIL with the fix removed.
+
+DEFERRED (filed, not fixed — each has a stated reason):
+- BUG-212 (#A, filed): %emit js mis-emits a top-level bodyless `if (cond) return;` before an arrow declaration — guard swallows the arrow body, `return` deleted, binding dropped, silently. Root cause located in extract_cond_and_body (src/emit/js_parser.rs); zero live exposure in shipped stdlib (verified). Fix + regression test specified in the bug.
+- Bare-name template collisions between a page bundle and a dock bundle remain possible (the W3 registry fix only stopped the wholesale clobber). Wants a namespacing/ownership policy.
+- Single-quoted literals and quoted-numeric tokens round-trip lossily — PRE-EXISTING in the server's value logic, not introduced here.
+- The new workbench test exercises the helper/template seam, not the workbench's own selection→edit path; W5R specified the real tests to write (seed both server row arrays, drive the navigator + stamped canvas clicks, assert selected-only typed controls, then replace the poll arrays and assert focused editors survive).
+- Nested stamped invocations get overlapping hover outlines (cosmetic).
+- ~50 pre-existing failures in stdlib/testing/meta, unrelated to this work (confirmed at the parent commit).

@@ -1,0 +1,39 @@
+#+TITLE: MCP origin field (MacroRecord + FunctionRecord) + origin drawer
+#+STATE: DONE
+#+CUSTOM_ID: FEAT-128-mcp-origin-field-macrorecord-fnrecord-o
+#+DEPENDS: PLAN-041-plan-039-unified-live-mcp-environment-or FEAT-126-mcp-region-mount-bundle-transport-regist FEAT-127-mcp-per-region-instance-identity-host-br
+#+LAYER: mcp
+#+PRIORITY: A
+#+COMPLETION_HASH: d2f71a9de92fa190
+
+* Parent
+[[id:PLAN-041-plan-039-unified-live-mcp-environment-or][PLAN-041]] Wave 3 (provenance).
+
+* Summary
+Tag every loaded Spacetime with WHERE it came from (Stdlib | Env(env_id) | Agent(agent_id) | Kit). One field on two existing rails (no new mechanism):
+- =MacroRecord.origin= (src/metasystem/registry.rs) — compiler knows source path at %register.
+- =FunctionRecord.origin= (src/mcp/state.rs) — MCP knows caller at st_fn_put.
+Surfaced via the existing =@data dispatch $macros= rail ([[id:FEAT-084-data-registry-the-self-documenting-galle][FEAT-084]]) + input.json functions[]. The origin drawer (mock m3) renders it.
+
+* Why
+The user's "tiny example": see every loaded Spacetime + its origin (stdlib / env / sent by agent). Origin tracking today is NONE (recon-verified). Fork 3-B: FLAT registry + origin as metadata (NOT namespaced); collisions = LOUD error at registration.
+
+* Target
+- =src/metasystem/registry.rs= — add =origin: Origin= to MacroRecord; populate at register (derive: under stdlib/ -> Stdlib; else Env).
+- =src/mcp/state.rs= — add =origin: Origin= to FunctionRecord; =st_fn_put= sets Agent for inline source, Env(env_id) when env bound, Stdlib for the MCP's own functions.
+- =Origin= enum: Stdlib | Env(env_id) | Agent(agent_id) | Kit.
+- =stdlib/__mcp__/workbench/= — origin drawer (cards/lists/templates) per mock m3: filter by origin; search; each row name + kind + origin chip + source path + mount-status.
+- Extend registration to CHECK for name collisions across origins -> loud error (not silent last-wins).
+
+* Edge
+- Function moves origin (agent-sent -> kit) -> origin field updated on re-put; name stays bare.
+- Collision: two bundles same template name, different origins -> registration error (loud), surfaced to agent/user.
+- Origin drawer empty filter -> graceful empty state.
+
+* Acceptance
+- =@data dispatch $macros= entries carry origin; headless asserts a stdlib macro has origin=Stdlib, an agent-sent fn has origin=Agent.
+- Origin drawer renders every loaded fragment with the correct chip color (mock m3 parity).
+- Collision produces a loud error, not silent overwrite.
+- =cargo test= + headless green.
+
+NOTE [2026-06-18]: W3 committed (impl 444bd299, gap-fix d180e722). Origin enum (Stdlib|Env(id)|Agent|Kit) in src/mcp/origin.rs with {kind,id,label} JSON. Two rails: (1) $macros gallery rows carry `origin` alongside `kind` (build_dispatch_json, inline origin_of — compiler stays independent of mcp layer); (2) FunctionRecord.origin set at put_function via origin_from_args (precedence env>stdlib-contract>agent). Workbench &mcp-function-card renders an mcp-origin-chip (data-origin keyed CSS, warm-dark palette). Collision-check DEFERRED (W2 region-namespacing already removed bleed; user-confirmed). Reviewer swarm (2 reviewers) → 2 P2 fixes: workbench env.st now Stdlib (was Agent); stdlib detection tightened to LEADING stdlib/ (was /stdlib/ substring → false-positive on projects/foo/stdlib/). Tests: 4 origin enum + 2 FunctionRecord JSON + 3 origin_from_args + 1 compiler dispatch = 10. Headless chip RENDER assertion deferred to FUP-064 (pre-existing @each-over-data-signal renders empty holes, reproduced on pure HEAD, affects ALL card fields). Gates: lib 2323/0, integration 172/0, v8 428/9 (pre-existing BUG-039), headless 356/251 (0 regressions).

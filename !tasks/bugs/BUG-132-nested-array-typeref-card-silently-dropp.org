@@ -1,0 +1,110 @@
+#+TITLE: Nested-array typeref (Card[][]) silently dropped @data directive → derive crash
+#+STATE: DONE
+#+SESSION_ID: 15119c48cafc615e
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-21T08-11-12-555Z_15119c48cafc615e.jsonl]]
+#+CUSTOM_ID: BUG-132-nested-array-typeref-card-silently-dropp
+
+* Initial Message
+
+the recent %animates on the liveview-kanban demo still does not work. Here's what I get in the browser:
+
+
+[derived-signal viewedCards] TypeError: can't access property "length", SpacetimeLocal.history is undefined
+    anonymous http://localhost:3333/__spacetime/runtime.js?entry=index.st line 8275 > Function:3
+    recompute http://localhost:3333/__spacetime/runtime.js?entry=index.st:8275
+    afterData http://localhost:3333/__spacetime/runtime.js?entry=index.st:2337
+runtime.js:8278:19
+    recompute http://localhost:3333/__spacetime/runtime.js?entry=index.st:8278
+    afterData http://localhost:3333/__spacetime/runtime.js?entry=index.st:2337
+[derived-signal viewedCards] TypeError: can't access property "length", SpacetimeLocal.history is undefined
+    anonymous http://localhost:3333/__spacetime/runtime.js?entry=index.st line 8275 > Function:3
+    recompute http://localhost:3333/__spacetime/runtime.js?entry=index.st:8275
+    set http://localhost:3333/__spacetime/runtime.js?entry=index.st:8118
+    load http://localhost:3333/__spacetime/runtime.js?entry=index.st:6269
+runtime.js:8278:19
+Template not found: card 2 runtime.js:10106:19
+Template not found: card 2 runtime.js:10391:19
+Template not found: card 2 runtime.js:10676:19
+[derived-signal viewedCards] TypeError: can't access property "length", SpacetimeLocal.history is undefined
+    anonymous http://localhost:3333/__spacetime/runtime.js?entry=index.st line 8275 > Function:3
+    recompute http://localhost:3333/__spacetime/runtime.js?entry=index.st:8275
+    <anonymous> http://localhost:3333/__spacetime/runtime.js?entry=index.st:8154
+    <anonymous> http://localhost:3333/__spacetime/runtime.js?entry=index.st:8155
+runtime.js:8278:19
+[derived-signal viewedCards] TypeError: can't access property "length", SpacetimeLocal.history is undefined
+    anonymous http://localhost:3333/__spacetime/runtime.js?entry=index.st line 8275 > Function:3
+    recompute http://localhost:3333/__spacetime/runtime.js?entry=index.st:8275
+    afterData http://localhost:3333/__spacetime/runtime.js?entry=index.st:2337
+
+* Symptom
+On demos/liveview-kanban, the browser threw on every recompute:
+
+#+begin_example
+[derived-signal viewedCards] TypeError: can't access property "length", SpacetimeLocal.history is undefined
+#+end_example
+
+The =@data derive $viewedCards= reads =$history.length=, but =$history= (declared
+=@data inline $history Card[][] : []=) was never seeded into =SpacetimeLocal=, so
+the derive's initial recompute crashed. This crash aborted the page's reactive
+init, cascading into "Template not found: card N" warnings and the user-reported
+"%animates don't work" (enter/exit transitions never ran because init died).
+
+* Root cause
+=consume_type_term= in =src/syntax/events/extractors/simple.rs= consumed only ONE
+=[]= array suffix. For a 2-D type =Card[][]= it captured =Card[]= and left a
+trailing =[]=. The enclosing =@data inline= =%form= pattern
+(=$name:binding $type:typeref? : $value:expr ;=) then failed to match the stray
+=[]= before =:=, so the WHOLE directive was silently dropped — no =local-state-impl=
+emitted, =SpacetimeLocal.history= never created.
+
+Verified: =cargo run -- inspect --layer parse= on three =@data inline= decls showed
+=data: 2= (not 3); =Card[][]= alone yielded =data: 0=.
+
+* Fix
+Changed the single =if= consuming =[]= to a =while= loop so a type term consumes
+every adjacent =[]= pair (=Card[]=, =Card[][]=, ...). One-line structural fix in
+=consume_type_term=.
+
+* Tests
+- Unit: =typeref_extractor_nested_array= in =src/syntax/events/extractors/simple.rs=
+  (RED before / GREEN after) — asserts =Card[][]= → =TypeRef("Card[][]")=, 5 tokens.
+- Live: rebuilt demos/liveview-kanban, served, verified in-browser:
+  - =SpacetimeLocal.history = []= seeded, =viewedCards= computes (arr[6]), no derive error.
+  - Reactive =@each= re-projection works (moving a card todo→done updates columns live).
+  - Enter animation runs (style mutations on entering card; opacity transitions).
+
+* Out of scope (separate, pre-existing gaps surfaced in same session)
+- =[ws] Failed to parse client message=: the demo's =@host ws("/ws")= points the
+  =$move= signal + =@presence= frames at the dev EDIT socket
+  (=src/dev_server.rs= =ClientMessage=), which only knows Sync-edit + DevServer
+  control messages. No runtime-signal/collection/presence backend exists
+  server-side (the README calls multiplayer "in the integration plan"). Tracked
+  under FEAT-136/137.
+- =SpacetimeRealtime is undefined=: =public/runtime/realtime.js= is not bundled
+  into the served runtime (omitted from =format_js_with_runtime= /
+  =get_combined_runtime=), so =@presence='s =conn = SpacetimeRealtime.connect= has
+  no client runtime. Same multiplayer-backend gap.
+
+* Update — ws parse-error spam also fixed (was listed out-of-scope)
+The =[ws] Failed to parse client message= spam was a SECOND defect, now fixed:
+
+The dev =/ws= is the edit-protocol socket, but a served page aims its OWN runtime
+traffic there too (=@host ws("/ws")= signal frames =\{type:"move",\u2026\}=, =@presence=
+=\{type:"PresenceJoin",\u2026\}=). The recv loop logged EVERY non-edit frame as a parse
+error. Fix (=src/dev_server.rs=): on a parse failure, inspect the frame's =type=
+discriminator; only warn when it names a KNOWN edit/control message
+(=is_edit_protocol_type=) — a genuinely malformed edit. A page's own runtime
+frame (unknown type) is swallowed quietly. New unit test
+=edit_protocol_type_recognises_own_frames_only=.
+
+Verified: a freshly-built server logs 0 parse errors for move / PresenceJoin /
+PresenceUpdate / Subscribe frames.
+
+GOTCHA: the fix only takes effect on a server STARTED FROM THE NEW BINARY. A
+=cargo run -- serve= process launched before the rebuild keeps running the old
+code and will keep spamming — restart it.
+
+NB: this only silences the noise. The =$move= optimistic→reply loop and
+=@presence= cursors still need a real runtime-signal/presence BACKEND on the dev
+=/ws= (and =public/runtime/realtime.js= is not bundled, so =SpacetimeRealtime= is
+undefined client-side). That multiplayer backend remains FEAT-136/137 scope.

@@ -1,0 +1,189 @@
+#+TITLE: PLAN-045: server-vs-agent event routing (action registry + audience contract)
+#+STATE: DONE
+#+SESSION_ID: 150e2d6b06162626
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-18T16-11-23-032Z_150e2d6b06162626.jsonl]]
+#+CUSTOM_ID: PLAN-045-plan-045-server-vs-agent-event-routing-a
+#+COMPLETION_HASH: 730ed3d900c8bc61
+
+* Initial Message
+
+please look at the work recent work with the spacetime mcp and showcase it to me
+
+* Initial Message
+User, driving the live MCP workbench: "i also would like to lessen the need for
+the agent to do stuff. this is super roundabout; there's a whole category of
+requests that can be fulfilled directly by the server without passing through the
+agent. the agent should only receive messages it was specifically meant to
+receive (generally speaking by having sent those to the agent, or if the .st file
+represents an agent-control interface kind of thing)."
+
+* Goal
+Make the live MCP environment SELF-DRIVING for the class of requests the server can
+resolve on its own (navigation, inspection, toggles), and wake the agent ONLY for
+events that are agent-addressed. Today every browser click lands in one undifferentiated
+event queue and `st_await` drains all of it — so server-handled nav clicks sit in the
+agent's await stream, cost a turn, and can even satisfy an UNRELATED armed await.
+
+Target: a browser click routes by a declared AUDIENCE. Server-audience actions
+(st_env_open / st_tab_open / mcp_refresh) run synchronously at the signal sink, update
+input.json, repaint — agent never involved. Agent-audience actions (kit-choice /
+kit-confirm / kit-submit, and any action a page declares agent-control) are the ONLY
+events `st_await` ever returns.
+
+* Verified repo facts (read 2026-06-18, commit fa7febd7)
+- ONE signal sink: `POST /__mcp/signal/{instance}` -> `signal_sink` (live.rs:709) ->
+  `record_event` (appends to `instance.events`) -> `dispatch_signal_action` (live.rs:739).
+- `dispatch_signal_action` ALREADY resolves st_env_open / st_tab_open / mcp_refresh
+  server-side (synchronously updates input.json + repaints). So a CLASS of requests is
+  already server-handled — the routing seam exists, it's just not principled.
+- DUPLICATION (harmony violation): `dispatch_signal_action` (live.rs:739) and
+  `dispatch_mcp_action` (tools.rs:532) carry the SAME match arms for the same actions.
+  Two parallel implementations of one decision.
+- NO audience filter: `await_event` (live.rs:509) returns the first `event.seq >
+  await_cursor` with NO filtering by who the event is for. Every recorded event —
+  including server-handled nav — is awaitable. Latent bug: a nav click can satisfy an
+  agent's unrelated `st_await`.
+- The `other =>` arm rejects unknown actions as "unsupported mcp-action" — conflating
+  "server doesn't handle this" with "this isn't agent-addressed". kit-* actions fall
+  here today and are only handled because the AGENT calls st_await and tools.rs's
+  dispatch re-derives them. The kit answer is genuinely agent-addressed; nav is not.
+- `LiveEvent` (live.rs:~143): { seq, instance_id, event_type, payload, correlation, raw }.
+  `InstanceRecord` (live.rs:109): carries `await_cursor` + `events`.
+- Tests live in `src/mcp/live.rs` mod tests (live.rs:1000+) and `cargo test --lib mcp`
+  (38 today). This is the verification machinery — routing is fully unit-testable
+  WITHOUT a live server (no FUP-071 dependency).
+
+* Design — registry-as-data + audience (passes the elegance bar)
+Per AGENTS.md: variants must be DATA (registry entries), not a Rust match-arm per case;
+the change must DELETE a special-case; testable by the SAME machinery it generalizes.
+
+** The action registry (single source of truth)
+Replace BOTH match blocks (live.rs:739 + tools.rs:532) with one registry:
+
+  enum Audience { Server, Agent }
+
+  struct ActionSpec {
+      action: &'static str,
+      audience: Audience,
+      // Server specs carry a resolver fn(workbench/state, payload) -> Result<(summary, data)>.
+      // Agent specs carry none — the event is delivered to the agent verbatim.
+  }
+
+  fn action_registry() -> &'static [ActionSpec] { ... }   // the ONLY place actions are enumerated
+
+  Built-in specs:
+    st_env_open       -> Server (resolver: open_environment_action)
+    st_tab_open       -> Server (resolver: open_tab_action)
+    mcp_refresh       -> Server (resolver: refresh snapshot)
+    st_workbench_refresh -> Server (alias)
+    kit-choice        -> Agent
+    kit-confirm       -> Agent
+    kit-cancel        -> Agent
+    kit-submit        -> Agent
+
+  Lookup(action) -> Option<&ActionSpec>. The two former dispatchers become ONE function
+  that takes a spec: Server -> run resolver synchronously at the sink; Agent -> mark the
+  event agent-audience and DO NOT resolve (the agent reads it via st_await).
+
+** Audience on the event (the await filter)
+- Add `audience: Audience` to `LiveEvent`, set at `record_event` time by registry lookup
+  (default for an unregistered action: see "page-declared" below).
+- `await_event` filters: only `Audience::Agent` events advance/satisfy `await_cursor`.
+  Server events are recorded in `instance.events` (so the comms drawer still shows the
+  full history) but are INVISIBLE to st_await. This kills the wrong-consumer bug AND the
+  turn-cost: nav never wakes the agent.
+- Non-`mcp-action` events (raw `message`/`clicked` envelopes): default Agent (a bare
+  signal a page sends is, by definition, something it wants the host/agent to see),
+  UNLESS a future page opts out. Keep v1 conservative: only `mcp-action` is registry-routed;
+  everything else stays Agent-audience (status quo for those paths).
+
+** Page-declared agent-control (the extensibility hook)
+The user's second route to the agent: "if the .st file represents an agent-control
+interface". For an action NOT in the built-in registry:
+  - default audience = Server-REJECT (return ok:false "unknown action"), so an
+    unrecognized click never silently wakes the agent. This is the safe default and
+    matches "agent only gets what's meant for it".
+  - a mounted instance MAY declare itself agent-control (carries an `agent_control: true`
+    or an `agent_actions: [..]` allowlist, sourced from the mount). For such an instance,
+    unregistered actions route to the AGENT instead of rejecting. This is how a bespoke
+    agent-control surface (not a kit) gets its custom events through without a Rust change.
+  SCOPE NOTE: if this needs a new st_mount param + state plumbing beyond a small field,
+  it is W3/S0 — the built-in registry already covers EVERYTHING that exists today (kits +
+  workbench), so v1 is correct and complete without it. Decide during W3 by inspection;
+  do not speculatively add a mount param.
+
+* Wave plan
+** W1 — action registry, unify the two dispatchers (keystone)
+- Add `Audience` enum + `ActionSpec` + `action_registry()` in a focused module
+  (src/mcp/actions.rs or a section of live.rs).
+- Rewrite `dispatch_signal_action` (live.rs) to look up the spec and, for Server, run the
+  resolver; DELETE the duplicated match in `dispatch_mcp_action` (tools.rs) — tools.rs's
+  await-side handler now shares the SAME registry + resolver path (no second enumeration).
+- Verify: `cargo test --lib mcp` green; a new unit test asserts the registry is the single
+  enumeration (e.g. both call sites resolve st_env_open through it). DELETES the parallel
+  match (elegance bar criterion 3).
+** W2 — audience field + await filtering (the behavior change)
+- Add `audience` to `LiveEvent`; set in `record_event` from the registry.
+- Filter `await_event` to Agent-audience only.
+- RED->GREEN unit test: record a Server event (st_env_open) + an Agent event (kit-choice)
+  on one instance; assert `await_event` returns ONLY the kit-choice, and the server event
+  was resolved synchronously (input.json updated) and is present in `events` history but
+  not delivered to await. Assert the wrong-consumer bug is fixed (a nav click does not
+  satisfy an await armed before it).
+** W3 — page-declared agent-control (assess, implement-or-S0)
+- Inspect whether routing unregistered actions to the agent for a declared agent-control
+  instance needs more than a small field. If small: add it + a unit test (custom action on
+  an agent-control instance reaches await; same action on a normal instance is rejected).
+  If it needs a new mount param + plumbing: S0 it, file a FUP with the RED->GREEN spec, and
+  ship W1+W2 (which already deliver the user's core ask for all existing surfaces).
+** W4 — stdlib + docs harmony
+- If any stdlib-side contract is needed (e.g. a kit/page declaring its audience), keep it a
+  DATA entry, not new JS/primitive. Document the routing model in the live.rs header + a
+  short docs note (the one sink, the two audiences, the registry).
+- Harmony audit: ONE registry, ONE dispatch path, no per-action route, no second match.
+
+* FUP-071 relationship (decided: SEPARATE, not folded in)
+FUP-071 (filesystem stdlib hot-reload) is an ORTHOGONAL subsystem (how stdlib bytes reach
+the binary), not event-flow. It fails the elegance bar's "small extension of existing
+grammar/registry" test, and the routing logic is fully unit-testable in Rust WITHOUT a live
+server, so the routing work does not depend on it. Folding it in would violate one-concern.
+Keep FUP-071 standalone. (It WOULD make iterating on any stdlib-side audience contract in
+W4 nicer, but that is a convenience, not a requirement — W4 is tiny and unit-tested.)
+
+* Acceptance
+- ONE action registry is the single enumeration of actions; both former dispatchers resolve
+  through it (no duplicated match). Harmony grep clean.
+- Server-audience actions (st_env_open/st_tab_open/mcp_refresh) resolve at the sink and are
+  NOT returned by st_await. Agent-audience actions (kit-*) are the ONLY events st_await
+  returns. Proven by RED->GREEN unit tests.
+- The wrong-consumer bug (a nav click satisfying an unrelated armed await) is fixed and has
+  a regression test.
+- `cargo test --lib mcp` green (>= 38 + new tests); `cargo build` clean.
+- Unknown action with no agent-control declaration is rejected (ok:false), never silently
+  awaited.
+
+* Verification (orchestrator)
+- cargo build; cargo test --lib mcp (the routing machinery). NB: live end-to-end verification
+  is BLOCKED this session by FUP-071 (cannot refresh the running server's stdlib/binary
+  without stopping it). Routing logic is verified by unit tests — the correct machinery for
+  it. Live smoke deferred to the next server restart, noted in the completion record.
+
+* Non-negotiable constraints
+- No new HTTP route per action (the one /__mcp/signal/{instance} sink stays).
+- No new page JS / %primitive unless inspect proves a gap.
+- Registry entries are DATA; adding an action = a registry row, never a new match arm in two
+  places.
+- Do NOT git stash/reset/revert. Edits via the edit tool.
+
+* Out of scope
+- FUP-071 (filesystem stdlib hot-reload) — separate subsystem.
+- PLAN-040 auto-event-surfacing (Spell noticing events without st_await) — adjacent but the
+  delivery channel, not the routing decision; this plan makes that cleaner by ensuring only
+  agent-audience events would ever surface.
+- Right-rail occlusion (fa7febd7) — already shipped.
+
+* Parent
+[[id:FEAT-123-mcp-preludes-host-environment-browser-an]] (the live MCP environment + kits).
+Follows PLAN-041 (environment/transport), PLAN-043 (kits). Sibling of PLAN-040 (surfacing).
+
+NOTE [2026-06-18]: Implemented across W1-W4, commit 156ead74. Action registry (src/mcp/actions.rs) is the single enumeration; LiveEvent.audience + await_event filter route server actions to the sink (synchronous, never wakes agent) and only agent actions to st_await. Page-declared agent-control wired via st_mount{agent_control:true} (W3 implemented, not S0). Cutover deleted the duplicate tools::dispatch_mcp_action — sink is the ONE dispatcher. 48/0 mcp tests (+10), build clean, harmony audit clean. FUP-071 kept separate (orthogonal subsystem) and blocks only live e2e, which is deferred to next server restart; routing verified by unit tests.

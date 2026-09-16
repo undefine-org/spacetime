@@ -1,0 +1,60 @@
+#+TITLE: Parameterised / named scopes: %macro valid only within a named scope kind
+#+STATE: ITEM
+#+SESSION_ID: 1503ca05d05c0c62
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-10T14-32-18-497Z_1503ca05d05c0c62.jsonl]]
+#+CUSTOM_ID: FUP-050-parameterised-named-scopes-macro-valid-o
+
+* Initial Message
+
+(b) -> what would that achieve?
+(c) -> is an FUP filed?
+(d) -> yeah what about integration points with stdlib/__admin__? I'd LOVE so automatic content editing on the website directly. This is a DESIGN investigation, let's think about what's most Spacetimey. At the same time, you may think about showing me how you'd use this to edit blogs and whatnot.
+
+Also, think about how you could set up a default editable flow and leverage Spacetime's introspection to automatically augment the admin side with editable-everything, optionally improvable with something akin to the @cms block
+
+* Idea (user)
+"Parameterised scopes — e.g. let certain %macro scopes only apply within other named scopes."
+
+Today scope is BINARY: macro_scope_matches (src/metasystem/registry.rs:764) keys on
+None→File / Some(selector)→Selector; a macro declares `%scope file | selector`. There is no
+way to express "this macro is valid ONLY inside an @each body / a template scope / a named
+scope X." Generalise scope to a (kind, name, params) identity in the containment tree the
+matcher ALREADY walks (assign_match_to_nested_scopes), and let a %macro declare a scope
+RESTRICTION, e.g. `%scope within(template)` / `%scope within(each)`.
+
+* Why it matters (ties to PLAN-039)
+PLAN-039 makes a template body a SCOPE. It needs, MINIMALLY, a scope identity richer than
+"Selector" (a param environment + a template kind). That minimal form is IN PLAN-039. The
+GENERAL form here would let MORE component_body special-cases die into the scope mechanism:
+- @exports (template-only) → "a macro scoped within(template)" instead of a component_body field
+- &ref.$count cross-instance access, &cards[] collection refs (template-component-model.org)
+  → macros valid within(template)/within(each), not bespoke fields
+So parameterised scopes could make the PLAN-039 break CLEANER (more deletions), not wider.
+
+* The ELEGANCE BAR (fold into PLAN-039 only if ALL hold; else ship PLAN-039 minimal + do this later)
+1. Expressible as a SMALL extension of the existing %scope grammar (`%scope within(<kind>)`),
+   no new subsystem.
+2. macro_scope_matches generalises from a 2-case match to a containment-tree query with the
+   scope KINDS as DATA, not a Rust match arm per kind.
+3. It DELETES at least one existing special case (target: @exports's component_body field) —
+   proof it REDUCES net complexity.
+4. Testable by the SAME scope-assignment machinery: a macro scoped within(each) MATCHES inside
+   an @each scope and is REFUSED outside (a parse diagnostic), gated by a unit test.
+
+If any fails → this stays a separate arc AFTER PLAN-039. If all pass → adopt as a PLAN-039 wave
+(it strictly improves the refactor's cleanliness, the user's stated condition).
+
+* Disposition of directives/injections (decided, separate from this FUP)
+ComponentDirective (OnEvent/ClassToggle/ContentBinding) + ContentInjection are a PARALLEL
+DUPLICATE of the three core reactive constructs that ALREADY have a selector/file-scope emitter
+(emit_reactive_binding_js; proven by ora-ventures _faq.st + a /tmp build). They DELETE in
+PLAN-039 (not mapped field-by-field) — behavior preserved because the unified selector-scope
+emitter serves template-body scopes once the body is a scope. See
+research/spacetime-directives-injections-disposition.org.
+
+* Provenance
+research/spacetime-directives-injections-disposition.org; research/template-component-model.org
+(exports/refs/collection-refs); src/metasystem/registry.rs:764 (binary macro_scope_matches);
+src/parser/mod.rs:536 (assign_match_to_nested_scopes containment tree).
+
+NOTE [2026-06-13]: VERDICT: elegance bar HOLDS on all 4 points → FOLD INTO PLAN-039 (research/spacetime-scope-kind-is-a-capture-type.org). User's reframing: <kind> is a CAPTURE-TYPE/CONSTRUCT reference, not a new scope enum variant — scope vocabulary = construct vocabulary, one namespace. KEY EVIDENCE: MacroScope is a CLOSED Rust enum (File/Selector/PropertyValue/Operator/Expr/TimelineBody/Template) with hardcoded as_str + parse ladders, BUT macro_scope_matches (registry.rs:764) only enforces File vs Selector — Template/TimelineBody/Expr/Operator/PropertyValue are DECLARED-BUT-NEVER-ENFORCED = already-zombie variants. So the enum is itself rot. Reframing: scope identity becomes kind:ConstructRef (the name of the macro/capture-type that introduced the region; 'selector'/'file' are two built-in kinds, no privilege); %scope within(<construct>) is matched by a CONTAINMENT QUERY over the scope stack (assign_match_to_nested_scopes already builds it); kinds are DATA (registry keys), zero Rust per kind. Bar checks: (1) within(<ident>) validated vs the EXISTING capture_types registry, no new subsystem, DELETES the MacroScope enum+ladders = less code; (2) kinds-as-data is GENUINELY true (this is the crux — without the reframing it'd just be a bigger enum); (3) deletes the MacroScope ladder + @exports field + &ref/&cards[] bespoke fields; (4) RED→GREEN unit test over the scope stack (within(each) matches inside @each, refused outside). DECIDING SUBTLETY: PLAN-039 S1 must give a template body a scope IDENTITY anyway — if S1 records scope.kind:ConstructRef (general) instead of an is_template flag (one-off), within(<kind>) falls out free and MacroScope retires in the same pass. So fold the MINIMUM into PLAN-039 (scope.kind + within() matching + retire MacroScope enum + migrate @exports); migrate collection-refs/&ref as LATER PLAN-039 waves, gated per-construct (must delete a special field + pass a within() test). PLAN-039 becomes: kill BOTH parallel systems (component_body parser AND the scope-kind enum) by making scope identity a construct reference.

@@ -1,0 +1,216 @@
+#+TITLE: Headless test infra review — categorize all 62 failures, drive to 0
+#+STATE: DONE
+#+SESSION_ID: 151324b4cb5d38d9
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-22T12-45-43-597Z_151324b4cb5d38d9.jsonl]]
+#+CUSTOM_ID: PLAN-059-headless-test-infra-review-categorize-al
+
+Baseline: `cargo run --features headless -- test tests/ --headless` → **549 passed, 62 failed, 2 skipped** (144s). Goal: 0 failures.
+
+Method: ran suite with `--format json`, mapped each failing test to its `.st` file via `@test "name"` scan, then isolated each cluster (probe harness globals, dump compiled JS, run sibling-working tests) to assign an EVIDENCE-BASED root cause. No guesses.
+
+═══════════════════════════════════════════════════════
+ROOT-CAUSE TAXONOMY (62 failures, 23 files)
+═══════════════════════════════════════════════════════
+
+The 62 split into THREE kinds:
+- **A. HARNESS GAP** (missing/low-fidelity polyfill in the V8+linkedom backend) — 17
+- **B. RUNG-BY-DESIGN** (test needs layout/timing; logic backend correctly refuses → counted FAILED) — ~13
+- **C. CODE / TEST-CONTRACT BUG** (real product or test-authoring defect) — ~32
+
+NB the A/B boundary: a rung-refusal is the system working as designed (FIDELITY_LADDER.md: refuse-to-fake). But it still prints as FAILED, so to reach "0 failed" these must either move to `--cdp` runs or be excluded from the logic-rung gate. Decision needed (see OPEN QUESTIONS).
+
+─────────────────────────────────────────────
+A. HARNESS GAPS — missing DOM polyfills (17)
+─────────────────────────────────────────────
+The headless runtime (`src/main.rs::new_headless_runtime`) loads linkedom + a thin mock layer (`requestAnimationFrame`, `getComputedStyle = el.style||{}`, `fetch`). It does NOT polyfill: `DOMParser`, `window.getSelection`, `IntersectionObserver`, `Element.prototype.animate`, focus tracking (`el.focus()` is a no-op, `document.activeElement` absent). Probed + confirmed all undefined.
+
+A1. **no DOMParser** (5) — tests/unit/data/sanitizer.test.st
+   sanitize strips script tags / preserves formatting / strips javascript: / strips handlers / strips style
+   → `DOMParser is not defined`. The sanitizer impl uses `new DOMParser()`. linkedom exposes parseHTML but not the DOMParser constructor as a global.
+
+A2. **no window.getSelection** (5) — tests/dev-editable-text-duplication.test.st
+   edit+Enter / edit+blur / rapid re-click / data-t locale / child span nodes
+   → `window.getSelection is not a function`. contenteditable edit flow calls getSelection().
+
+A3. **no IntersectionObserver** (3) — tests/unit/animations/on-visible-mutation.test.st
+   @on visible fires on enter viewport / via IO not addEventListener / fires @emit
+   → IO is the mechanism under test; absent in headless.
+
+A4. **no Element.animate (WAAPI)** (1) — tests/unit/assertions/timeline.test.st
+   be_animating detects active animations → `el.animate is not a function`.
+
+A5. **no focus tracking** (2) — tests/integration/form.test.st (focuses first invalid field), tests/integration/modal.test.st (traps focus on open)
+   → `Expected X to be focused`. linkedom has no activeElement/focus model.
+
+A6. **CSS-var stringification fidelity** (3) — tests/unit/runtime/core.test.st (ST.set updates CSS variable, ST.bindStyle), tests/unit/runtime/interpolate.test.st (ST.applyProperty)
+   → linkedom `el.style.getPropertyValue('--st-progress')` returns `0.5` (Number) where a real browser returns `'0.5'` (String). Test asserts `=== '0.5'`. Product code is correct; the backend's CSSOM is lower-fidelity. (Confirmed: setProperty/getPropertyValue exist + work, only the type coercion differs.)
+
+A7. **have_count assertion unimplemented** (1) — tests/bugs/BUG-microtask-storm.test.st (large DOM subtree insertion completes quickly)
+   → `Unknown assertion: have_count`. `@then .x should have_count 50` — the assertion verb is not registered in stdlib/testing/test.st. Pure harness gap (the perf part of the test passes; the trailing count assertion throws).
+
+─────────────────────────────────────────────
+B. RUNG-BY-DESIGN — needs layout/timing (≈13)
+─────────────────────────────────────────────
+These call layout/timing-gated assertions (be_visible/be_hidden/have_style/have_width) or getBoundingClientRect. ST._rung.require('layout', …) throws on the logic backend BY DESIGN (FIDELITY_LADDER.md). Working as intended, but printed as FAILED.
+
+B1. rung-refusal, explicit (9):
+   tests/e2e/page-load.test.st — page enters loaded state, header animates in, hero staggered, layout at desktop width
+   tests/integration/form.test.st — validates required field, clears error, shows loading, conditional fields show (be_hidden/be_visible)
+   tests/unit/primitives/scroll-driver.test.st — scroll driver initializes at 0 progress (have_style)
+
+B2. layout via getBoundingClientRect (4) — tests/bugs/BUG-revelation-headline-clipping.test.st
+   headline stays above nav / clearance at 1280x800 / soft-sticky grows / soft-sticky stays at viewport
+   → uses `getBoundingClientRect().top` + viewport height; linkedom returns 0s. These are genuinely layout-rung tests mis-filed as plain @test (no `needs layout`), so they don't refuse — they run and assert against 0. SHOULD be `needs layout` (then they'd refuse cleanly) or move to CDP.
+
+NB form.test.st spans both A5 (focus, 1) and B1 (rung, 4) — counted in each.
+
+─────────────────────────────────────────────
+C. CODE / TEST-CONTRACT BUGS (≈32)
+─────────────────────────────────────────────
+
+C1. **Scoped-state init plane mismatch** (12) — THE BIG ONE, single root cause:
+   Files: component-model/scoped-state.test.st (4), component-model/exports.test.st (2), component-model/template-refs.test.st (2), + the dev-hooks file shares the symptom indirectly.
+   ROOT: `$count number: 0;` inside `@given .sel { … }` compiles (via given-directives → %$body.scoped_js) to BODY-SCOPE `window._localState["count"] = 0` (+ `local:count:updated` dispatch). But the tests assert ELEMENT-SCOPE `ST.get(el, 'count')`. Confirmed by dumping compiled JS: line emits `window._localState["count"]=0`, and `ST.store(el)` returns `{}`. The two reactive planes (element-signal vs body-local) never bridge for a bare scoped-state decl in a test `@given` block.
+   This is EITHER a product bug (scoped `$x: v` in an element scope should ST.set on that element) OR a test-contract bug (tests should read `SpacetimeLocal.count` / use `@then $count on .sel`). Need a decision — but 12 failures collapse to one fix.
+
+   Compile warning corroborates: these files emit E0909 (`<-` content injection outside component body) + E0900/E0905 (hole-as-state-decl) — the component-body grammar isn't fully honored in the test `@given` scope.
+
+C2. **@template body + @each / collection-ref builder gap** (7) — pinned-RED by the test files themselves:
+   tests/unit/templates/collection-ref-each.test.st (4) — file header explicitly states these are RED pins for "BUG-085 / PLAN-039 (unify nested constructs in component bodies)", EXPECTED red until that lands. A `@template` body hosting `&cards[] .sel { @each(…) }` drops the @each (emitted payload `refs:[]`, no @each primitive).
+   tests/unit/mcp/kit-form.test.st (1) — `@template &kit-form(){ … @each($mcpFields as $field){ &kit-field } }` renders 0 rows (same builder gap).
+   tests/unit/mcp/kit-picker.test.st (2) — same, options @each in template body.
+   tests/bugs/BUG-data-publish-breaks-each.test.st (1) — @each over @data source after SpacetimeLocal publish renders 0 rows.
+   EVIDENCE it's structural (not seeding): sibling tests/unit/templates/each-data-drive.test.st (plain selector `.sel { @each(...) }`) PASSES. Only the @template-body / collection-ref form fails. → product builder gap (was tracked as PLAN-039/BUG-085 in an older org numbering; not yet landed).
+
+C3. **dev-mode hooks not loaded headless** (5) — tests/dev-hooks.test.st
+   __stDebugHook / __ST_DEBUG__ defined / registerTimeline via hook / recordError→getErrors / hook updates progress.
+   ROOT: `window.__stDebugHook` is DEFINED only in stdlib/__dev__/primitives/dev-hooks.st (a dev-mode primitive). The headless combined runtime (get_combined_runtime) loads 10 core ST modules; the __dev__ tier is never injected. So the hooks are undefined. EITHER a harness gap (headless should load __dev__ when a test imports it) OR a test-contract bug (these tests must `@import` the dev module / run with a dev flag). Currently the file has no dev import.
+
+C4. **@cycle interval vs headless @wait cap** (4) — tests/unit/macros/cycle.test.st
+   cycle changes text after interval / wraps around / extracts field / triggers MutationObserver.
+   ROOT: `@cycle(interval: 100ms)` uses real `setInterval(100)`. But `@wait 150ms` is CAPPED to 10ms in headless (stdlib/testing/test.st wait macro: `Math.min(duration,10)`). So 100ms interval never fires within the capped wait → text stays "first". This is a TIMING-rung test running on logic with a virtual-clock mismatch. Either `needs timing` (+ CDP/virtual clock) OR @cycle should honor a test-injectable clock. Real timing bug in the test harness's time model, not the product.
+
+C5. **microtask-storm batched-notification chain** (2) — tests/bugs/BUG-microtask-storm.test.st
+   "ST.set dependent that triggers another ST.set" → sigA expected 20 got 0; "rapid updates deliver final value" → dependent must receive final 5.
+   ROOT (likely, needs confirm): ST.set batches dependent notifications into a microtask; a dependent that itself calls ST.set re-enters before the batch flushes, and the assertion reads sigA synchronously after the loop (no @flush between). Could be a real batching bug OR a missing @flush in the test. Probe pending.
+
+C6. **dev-panel locale tree** (1) — tests/dev-panel-locale-tree.test.st
+   data tree includes both data and locale sources → "Locale source should appear alongside data sources". Needs isolation probe (likely shares C3 dev-runtime-not-loaded or a registry-merge bug).
+
+C7. **state-claims negative test mis-authored** (1) — tests/fixtures/w8-seed/state-claims.test.st
+   "have_state gates on wrong state": @mount div data-st-state="inactive", then asserts `state == "active"`. The test NAME says it should gate (reject) a wrong state, but it's written as a POSITIVE assertion → always fails. There is no xfail/@refute-for-the-whole-claim construct; the claim grammar has `not_have_state` but this test wants "assert that asserting active FAILS". TEST-CONTRACT bug: rewrite to `@then .wrong-state { state != "active"; }` or `should not_have_state "active"`.
+
+═══════════════════════════════════════════════════════
+SUMMARY TABLE
+═══════════════════════════════════════════════════════
+| Cluster | n | Kind | Fix locus |
+|---|---|---|---|
+| C1 scoped-state plane mismatch | 12 | code/contract | given-directives lowering OR test reads |
+| C2 @template-body @each gap | 7  | code (pinned) | builder (PLAN-039 class) |
+| C3 dev hooks not loaded | 5  | harness/contract | load __dev__ headless OR import |
+| A1 no DOMParser | 5  | harness | polyfill |
+| A2 no getSelection | 5  | harness | polyfill |
+| C4 @cycle vs wait-cap | 4  | harness time-model | virtual clock / needs timing |
+| B2 revelation getBCR | 4  | rung mis-filed | needs layout / CDP |
+| A3 no IntersectionObserver | 3  | harness | polyfill |
+| A6 CSS-var stringify | 3  | harness fidelity | polyfill coercion |
+| B1 rung-refusal explicit | 9  | by-design | CDP or exclude |
+| A5 no focus | 2  | harness | polyfill |
+| C5 microtask chain | 2  | code/contract | batching / @flush |
+| kit-picker (subset C2) | 2  | code | builder |
+| A4 no animate | 1  | harness | polyfill |
+| A7 have_count missing | 1  | harness | add assertion |
+| C6 dev-panel locale | 1  | code | probe |
+| C7 state-claims mis-authored | 1  | contract | rewrite test |
+(clusters overlap files; counts are per-failure, total 62)
+
+═══════════════════════════════════════════════════════
+REMEDIATION WAVES (to reach 0)
+═══════════════════════════════════════════════════════
+W1 (cheap harness polyfills, no product risk): DOMParser, getSelection, IntersectionObserver, Element.animate, focus/activeElement, CSS-var string coercion, have_count assertion. Closes A1-A7 (17).
+W2 (test-contract fixes): C7 rewrite state-claims; C3 decide+wire dev-runtime; B2 add `needs layout` to revelation (→ clean refuse) or move to CDP.
+W3 (product fixes): C1 scoped-state plane (12 — biggest single win), C4 cycle clock, C5 microtask batching.
+W4 (builder gap): C2 @template-body @each (7) — largest; may be deferred if PLAN-039 is a big lift.
+
+OPEN QUESTIONS (need user decision):
+Q1. Rung-refusals (B1, 9) print FAILED by design. To hit "0 failed" on the logic backend: (a) run those under `--cdp`, (b) mark `needs layout` AND have the runner report refusals as SKIPPED not FAILED, or (c) accept they're "0 logic-failures + N rung-deferred". Which?
+Q2. C1 scoped-state: is `$x: v` in an element scope SUPPOSED to be element-signal (ST.set) or body-local? Determines whether we fix product lowering or the tests.
+Q3. C2 builder gap (PLAN-039 class): fix this session or defer as known-RED pin?
+
+═══════════════════════════════════════════════════════
+C2 DEEP ANALYSIS (the @each / collection-ref cluster, 7 failures)
+═══════════════════════════════════════════════════════
+Prior art: BUG-129 (17 harness gaps — recommends SHIM) + BUG-130 (@each-in-template-body) already filed 2026-06-20, same session, with full root-cause. My categorization independently matches them.
+
+SPLIT the 7 "C2" failures into TWO root causes via isolation probes:
+
+(1) TEST-CONTRACT BUG — wrong seeding channel (kit-form 1, kit-picker 2 = 3, + likely data-publish 1):
+   Plain selector-scoped `.kit-fields { @each($mcpFields as $f){ &kit-field($f) } }` INSIDE a @template body DOES render headless. PROVEN: replicated kit-form with `ST.setData('mcpFields',[...])` → renders 2 fields, holes resolved (name="service", type="text"). The committed tests instead dispatch a raw `local:mcpFields:updated` CustomEvent → renders only 1 unresolved instance (`--st-field:$field` leaks).
+   Root: live-page-faithful publish is `ST.setData(name,arr)` (drives registry replay + `data:<name>:loaded`); a bare `local:<name>:updated` does not carry the same array-arrival semantics for a `@data inline` source. → FIX = correct test seeding to ST.setData (the FUP-064 convention already documented in each-data-drive.test.st). NOT a product bug.
+
+(2) GENUINE BUILDER GAP — collection-ref form (collection-ref-each = 4):
+   `&cards[] .cref-cards { @each($crItems as $item){ &cref-card($item) } }`. PROVEN broken even WITH correct ST.setData seeding: 0 children. Dumped compiled JS: the `cr-dash` builder emits ONLY `<section><div>` markup; the `&cards[] .sel { @each }` block is DROPPED — `crItems` never appears in an emitted @each primitive. This is BUG-130's "REMAINING open tail" + the file's self-documented PLAN-039 RED-pin: template-body parser swallows the collection-ref+@each block instead of descending it. → FIX = deep parser/builder change. 4 legitimate RED pins.
+
+REVISED C2 verdict:
+- 3 (kit-form, kit-picker ×2) = test-contract bug → fixable now (seeding → ST.setData).
+- 1 (data-publish) = needs same probe; likely test-contract (channel).
+- 4 (collection-ref-each) = genuine builder gap (BUG-130 tail), legitimately RED.
+The "builder gap" is NARROWER than first thought: only the collection-ref `&ref[] .sel { @each }` form. Plain selector @each in template bodies already works.
+
+═══════════════════════════════════════════════════════
+C1 DEEP ANALYSIS (scoped-state plane, 12 failures) — RESOLVED
+═══════════════════════════════════════════════════════
+Question was: is `$x: v` in an element scope element-signal or body-local?
+ANSWER (proven): body-local is CORRECT and the product is CONSISTENT. The TESTS are wrong.
+
+EVIDENCE:
+1. Compiled a REAL page `.counter { $count number: 0; .display{text:$count} @on click{...} }` via `cargo build`. It lowers `$count number: 0` to `window._localState["count"] = 0` + `local:count:updated` dispatch — IDENTICAL to the test `@given` path. The reactive binding reads via `ST.resolve(node,'count')` + `ST.watchScoped(node,'count',...)`, NOT `ST.get(el,'count')`.
+2. Probed the test runtime AFTER an init flush (`@wait 30ms`): `ST.resolve(el,'count')===0`, `SpacetimeLocal.count===0`, `_localState==={"count":0}`. Scoped state IS correctly populated — the product works exactly as the live page does.
+
+ROOT CAUSE of the 12 failures (two test-authoring bugs):
+(a) Tests read `ST.get(el,'count')` — the RAW element-signal store — which scoped state never populates. They should read `ST.resolve(el,'count')` (the plane-agnostic read that checks element-signals THEN SpacetimeLocal). `ST.get` returns undefined for body-local scoped state.
+(b) Tests assert SYNCHRONOUSLY right after `@given`, before the async selector-init runs. Need a flush (`@wait`/`@flush`) first.
+
+DEEPER FRAMEWORK INCONSISTENCY (the elegant fix):
+The canonical assertion `@then $signal on .sel should equal` (stdlib/testing/assertions/binding.st:39) ALSO uses `ST.get(__el, __signalName)` — so it too only sees element-signals, not scoped state. Meanwhile `ST.resolve` (st.js) is the UNIFYING read: walks element-signal ancestors AND falls back to SpacetimeLocal. 
+→ ELEGANT FIX: change the binding-assertion vocabulary (`should equal`/`not_equal`/`be_gt`/… in binding.st) to read via `ST.resolve(el,name)` instead of `ST.get(el,name)`. This makes `@then $x on .sel` correct for BOTH element-signals (ST.set, e.g. microtask-storm) AND scoped state (`$x: v`, e.g. component-model) — one read, both planes. Then rewrite the 12 component-model tests to use `@then $count on .sel should equal 0` (+ a flush) instead of the raw `@assert (ST.get(...))`.
+
+This is harmonious (one read path) and removes the foot-gun permanently. The microtask-storm `@then $sigA on .chain should equal 20` already works because that test uses ST.set directly (element-signal) — ST.resolve still finds it (element-signal checked first). No regression.
+
+VERDICT C1: 12 = test-contract bug. Fix = (1) binding.st assertions read via ST.resolve; (2) rewrite 12 component-model assertions to `@then $x on .sel` + flush. Product unchanged.
+
+═══════════════════════════════════════════════════════
+OUTCOME (2026-06-22) — 62 → 0 failures
+═══════════════════════════════════════════════════════
+Final: `cargo run --features headless -- test tests/ --headless` → **598 passed, 0 failed, 15 skipped** (was 549/62/2).
+The 15 skipped are layout/timing-rung tests now correctly reported as SKIPPED (deferred to --cdp) instead of FAILED — the rung ladder working as designed.
+
+Regressions: NONE. cargo test --lib 2502/0, integration 181/0, v8_runtime 437/0, snapshots 74/0.
+
+WHAT LANDED (by cluster):
+- A (17 harness gaps) → src/headless_shims.js: DOMParser, getSelection/createRange, IntersectionObserver (geometry-aware), Element.animate+getAnimations, focus/blur/activeElement, FocusEvent, Mouse/KeyboardEvent init-dict preservation, CSSOM setProperty coercion, have_count assertion. Closed BUG-129.
+- C3 (5 dev-hooks) → seeded __stDebugHook/__ST_DEBUG__ in headless bootstrap from the primitive's OWN JS (dev_hooks_js extracts the %emit body at runtime — single source of truth, honoring AGENTS no-duplicate rule).
+- C4 (4 cycle) + 1 blur → raised @wait cap 10ms→250ms so real setTimeout/setInterval fire within waits.
+- C1 (12 scoped-state) → binding.st assertions read via ST.resolve (unifies element-signal + body-local planes); component-model tests fixed: backtick `\`$x\`` state decls → bare `$x` (harmony: backtick is the hole form, not a state decl), + flush before sync reads. Isolation test corrected to reflect real semantics (file-scope selector state is body-global by name; per-element isolation is a @template-instance feature, pinned in template-refs).
+- C2a (3 kit-form/picker) + 1 data-publish → seeding to the SpacetimeLocal proxy write (the live-page channel) instead of bare CustomEvent dispatch.
+- C5 (2 microtask-storm) → @flush before reading microtask-batched dependent results.
+- C6 (1 dev-panel) → test asserts the merged data-tree (data + locale planes) matching the now-fixed renderTree, not the registry.
+- C7 (1 state-claims) → negative assertion `state != "active"` for the gate-rejection intent.
+- B (13 rung) → revelation tests marked `needs layout`; rung refusals report SKIPPED not FAILED (runner change in 3 loops: stdlib/testing/test.st, src/test_runner.rs, src/main.rs headless loop).
+- C2b (4 collection-ref) → the deep BUG-130 builder fix landed: parser harvests `&name[] .sel { @each }` ELEMENT_REF_STMT bodies as nested scopes (NestedScope.collection_ref), match_sink surfaces the interior @each flat, compiler emits a MutationObserver populating $cards. Closed BUG-130 + BUG-141.
+
+FILES TOUCHED:
+- src/headless_shims.js (NEW) — web-platform shims
+- src/main.rs — wire shims + dev_hooks_js into both headless runtime paths; headless loop rung-skip
+- src/test_runner.rs — rung-skip in HTML/CDP loop
+- src/compiler.rs — emit_collection_ref_js (MutationObserver) + NestedScope.collection_ref handling
+- src/parser/mod.rs — collection_ref_scopes_from_body harvest + collection_ref field plumbing
+- src/parser/ast.rs — NestedScope.collection_ref field
+- src/syntax/events/match_sink.rs — grandparent-ELEMENT_REF exemption (each surfaces flat)
+- src/analysis/{visual_lint,element_deps}.rs, src/lsp/workspace/usage_visitor.rs — collection_ref: None in test constructions
+- public/runtime/st.js — ST.set/bindStyle string coercion; rung require tagged __stRungSkip
+- public/runtime/interpolate.js — applyProperty string coercion
+- stdlib/testing/test.st — wait cap 250ms; have_count alias; rung-skip in loop
+- stdlib/testing/assertions/binding.st — ST.resolve (both planes)
+- tests/: component-model/{scoped-state,exports,template-refs}, unit/mcp/{kit-form,kit-picker}, bugs/{microtask-storm,data-publish-breaks-each,revelation-headline-clipping}, fixtures/w8-seed/state-claims, dev-panel-locale-tree — test-contract fixes
+- src/snapshots/*.snap — accepted (runtime JS coercion + rung-tag changes)

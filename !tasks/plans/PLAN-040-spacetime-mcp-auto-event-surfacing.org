@@ -1,0 +1,807 @@
+#+TITLE: Spacetime MCP — automatic live event surfacing in Spell sessions
+#+STATE: PLAN
+#+CUSTOM_ID: PLAN-040-spacetime-mcp-auto-event-surfacing
+#+CREATED: 2026-06-16
+
+* Initial Message
+
+User wants a full real plan for why Spacetime MCP events captured by =st_await= are not automatically noticed inside a Spell session, and what must change when the MCP server is built from =~/code/ora/verse=.
+
+Current observed UX:
+
+#+begin_example
+browser click
+→ POST /__mcp/signal/inst-1
+→ Verse MCP LiveStore queues event
+→ agent must call st_await(instance_id)
+→ event delivered as tool result
+#+end_example
+
+Target UX:
+
+#+begin_example
+browser click
+→ POST /__mcp/signal/inst-1
+→ Verse MCP queues event
+→ Spell session notices without explicit st_await
+→ event appears in chat/session/event inbox with enough payload to act
+#+end_example
+
+* Verified repo facts
+
+** Verse MCP current state
+
+Files:
+- =src/mcp/protocol.rs=
+- =src/mcp/state.rs=
+- =src/mcp/live.rs=
+- =src/mcp/tools.rs=
+- =src/mcp/mod.rs=
+
+Observed implementation:
+
+- MCP transport is stdio JSON-RPC line protocol.
+- =initialize= currently advertises only:
+
+  #+begin_src json
+  { "tools": { "listChanged": false } }
+  #+end_src
+
+- No =resources/list=, =resources/read=, =resources/subscribe=, =resources/unsubscribe= handlers exist.
+- =LiveServer= owns an in-memory =LiveStore= with:
+
+  #+begin_src rust
+  instances: HashMap<String, InstanceRecord>,
+  next_event: u64,
+  #+end_src
+
+- =InstanceRecord= already has durable per-instance event history:
+
+  #+begin_src rust
+  pub await_cursor: u64,
+  pub events: Vec<LiveEvent>,
+  #+end_src
+
+- =LiveEvent= already has the right payload shape:
+
+  #+begin_src rust
+  pub seq: u64,
+  pub instance_id: String,
+  pub event_type: String,
+  pub payload: Value,
+  pub correlation: Option<String>,
+  pub raw: Value,
+  #+end_src
+
+- =/__mcp/signal/{id}= appends a =LiveEvent= into =InstanceRecord.events= and returns JSON:
+
+  #+begin_src text
+  { ok: true, event: event.to_json() }
+  #+end_src
+
+- =st_await= calls =LiveServer::await_event=, which polls until it finds =event.seq > instance.await_cursor=, then advances =await_cursor=.
+- Therefore event capture already exists; automatic session surfacing does not.
+
+** Spell current MCP notification state
+
+Files:
+- =~/code/ora/spell/packages/coding-agent/src/mcp/client.ts=
+- =~/code/ora/spell/packages/coding-agent/src/mcp/manager.ts=
+- =~/code/ora/spell/packages/coding-agent/src/mcp/transports/stdio.ts=
+- =~/code/ora/spell/packages/coding-agent/src/internal-urls/mcp-protocol.ts=
+- =~/code/ora/spell/packages/coding-agent/src/sdk.ts=
+- =~/code/ora/spell/packages/coding-agent/src/config/settings-schema.ts=
+
+Observed implementation:
+
+- Spell MCP client already supports resources APIs client-side:
+  - =resources/list=
+  - =resources/templates/list=
+  - =resources/read=
+  - =resources/subscribe=
+  - =resources/unsubscribe=
+- Spell manager handles server notifications:
+  - =notifications/tools/list_changed=
+  - =notifications/resources/list_changed=
+  - =notifications/resources/updated=
+  - =notifications/prompts/list_changed=
+- =mcp.notifications= default is =false=.
+- When =mcp.notifications=true= and a subscribed resource emits =notifications/resources/updated=, =sdk.ts= currently injects a follow-up:
+
+  #+begin_example
+  [MCP notification] Server "..." reports resource `...` was updated.
+  Use read(path="mcp://...") to inspect if relevant.
+  #+end_example
+
+- =mcp://<resource-uri>= is implemented by =McpProtocolHandler= and resolves to =resources/read= against the server that lists the resource/template.
+
+** Latest MCP spec facts relevant to this plan
+
+Latest stable spec at time of planning: =2025-11-25=.
+
+Relevant stable surfaces:
+- Server resources: =resources/list=, =resources/read=, =resources/templates/list=, optional =resources/subscribe=, =notifications/resources/updated=.
+- Resource subscriptions are the standard mechanism for server-side resource update notifications.
+- Tools remain request/response; a tool result is only visible when the model/client calls the tool.
+- Stream/event-like server push over stdio must still be JSON-RPC notification/request bytes on stdout, not arbitrary logs.
+
+* Core diagnosis
+
+Current Verse design is pull-only at the MCP protocol layer:
+
+#+begin_example
+LiveStore queues events ✓
+st_await consumes queued events ✓
+MCP resource representing event stream ✗
+MCP resource subscription ✗
+server notification when new event arrives ✗
+Spell auto-read / event-specific injection ✗
+#+end_example
+
+Spell already has enough generic MCP resource notification plumbing to make a minimal version work, but Verse does not speak that resource/subscription surface yet, and Spell's current follow-up is generic, not event-aware.
+
+* Architecture decision
+
+Use MCP resources + resource subscriptions as the first-class bridge, not a bespoke Spell-only background =st_await= loop.
+
+Rationale:
+
+1. MCP-native: follows existing =resources/subscribe= + =notifications/resources/updated= semantics.
+2. Reuses Spell MCP manager and =mcp://= resolver.
+3. Keeps =st_await= as manual/blocking compatibility path.
+4. Avoids a second parallel transport for the same events.
+5. Future-proofs other Spacetime live surfaces: any live instance can expose history as a resource.
+
+Non-goal for first implementation:
+- Do not build a CDP/browser event panel first.
+- Do not add a custom Spell polling loop as the primary path.
+- Do not change Spacetime website code to custom JS; event emitters remain Spacetime/live-surface mechanisms.
+
+* Target model
+
+Each mounted Spacetime MCP instance gets a stable MCP resource URI:
+
+#+begin_example
+spacetime://instances/{instance_id}/events
+#+end_example
+
+Optional related resource URIs:
+
+#+begin_example
+spacetime://instances/{instance_id}
+spacetime://instances/{instance_id}/events/latest
+spacetime://instances/{instance_id}/events?after={seq}
+#+end_example
+
+Resource read returns JSON text with event history and cursors:
+
+#+begin_src json
+{
+  "instance_id": "inst-1",
+  "latest_seq": 7,
+  "events": [
+    {
+      "seq": 7,
+      "instance_id": "inst-1",
+      "type": "click",
+      "payload": { "id": "save" },
+      "correlation": null,
+      "raw": { "type": "click", "payload": { "id": "save" } }
+    }
+  ]
+}
+#+end_src
+
+When =/__mcp/signal/{id}= appends an event, Verse emits a JSON-RPC notification on stdio:
+
+#+begin_src json
+{
+  "jsonrpc": "2.0",
+  "method": "notifications/resources/updated",
+  "params": { "uri": "spacetime://instances/inst-1/events" }
+}
+#+end_src
+
+Spell receives that notification, and either:
+
+- W1: injects existing generic follow-up telling the agent to read =mcp://spacetime://instances/inst-1/events=.
+- W2: auto-reads the resource and injects the newest event payload directly.
+
+* Implementation plan
+
+** WAVE 1 — Verse MCP resources + subscriptions (minimal MCP-native push)
+
+Goal: make Verse expose instance event streams as MCP resources and notify subscribers when events change.
+
+*** Files
+
+- =src/mcp/protocol.rs=
+- =src/mcp/state.rs=
+- =src/mcp/live.rs=
+- =src/mcp/tools.rs= only if tool outputs should include resource URIs
+- new optional =src/mcp/resources.rs= if protocol.rs would otherwise grow too large
+
+*** Protocol additions
+
+Advertise resources in =initialize_result=:
+
+#+begin_src json
+{
+  "capabilities": {
+    "tools": { "listChanged": false },
+    "resources": { "subscribe": true, "listChanged": true }
+  }
+}
+#+end_src
+
+Add dispatch handlers:
+
+#+begin_example
+resources/list
+resources/templates/list
+resources/read
+resources/subscribe
+resources/unsubscribe
+#+end_example
+
+Initial =resources/templates/list=:
+
+#+begin_src json
+{
+  "resourceTemplates": [
+    {
+      "uriTemplate": "spacetime://instances/{instance_id}/events",
+      "name": "Spacetime instance events",
+      "title": "Spacetime Instance Events",
+      "description": "Event history emitted by a mounted Spacetime MCP live instance.",
+      "mimeType": "application/json"
+    }
+  ]
+}
+#+end_src
+
+Initial =resources/list=:
+
+- Return concrete resources for current mounted instances.
+- If no instances exist: return =[]=.
+- On new mount, optionally emit =notifications/resources/list_changed= so Spell can refresh resources and subscribe to the new instance event resource.
+
+Concrete resource item:
+
+#+begin_src json
+{
+  "uri": "spacetime://instances/inst-1/events",
+  "name": "inst-1 events",
+  "title": "<instance title> events",
+  "description": "Event stream for mounted Spacetime instance inst-1",
+  "mimeType": "application/json"
+}
+#+end_src
+
+=resources/read= behavior:
+
+- Accept only =spacetime://instances/{id}/events= for W1.
+- Return one content item:
+
+  #+begin_src json
+  {
+    "contents": [
+      {
+        "uri": "spacetime://instances/inst-1/events",
+        "mimeType": "application/json",
+        "text": "{...json...}"
+      }
+    ]
+  }
+  #+end_src
+
+- JSON text should include:
+  - =instance_id=
+  - =latest_seq=
+  - =await_cursor= (manual st_await cursor, for diagnostics only)
+  - =events= full list for W1
+
+=resources/subscribe= behavior:
+
+- Validate URI.
+- Add URI to =McpState= subscription set.
+- Return empty result ={}=.
+
+=resources/unsubscribe= behavior:
+
+- Remove URI.
+- Return empty result ={}=.
+
+*** Important stdio design issue
+
+Current =signal_sink= runs on the live HTTP server thread, while MCP stdout writer lives in =protocol::serve= main stdio loop.
+
+Do NOT write to stdout from the HTTP thread directly without a single writer discipline.
+
+Need one of these designs:
+
+**** Preferred: notification queue drained by MCP loop
+
+- Add shared notification queue/channel to =McpState= / =LiveServer= bridge.
+- =signal_sink= enqueues =ResourceUpdated(uri)= after appending event.
+- MCP stdio loop drains queued notifications between incoming requests, writing JSON-RPC notifications to stdout.
+
+Problem: stdio loop blocks on =stdin.lock().lines().next()=, so it will not drain while no new client request arrives.
+
+This is not enough for automatic push.
+
+**** Better W1 design: make protocol loop concurrent with channel select
+
+Refactor =protocol::serve= from blocking =std::io::BufRead= loop to a small two-thread or async-ish structure:
+
+- reader thread reads stdin lines and sends parsed =Value= into =incoming_rx=.
+- live server sends outbound notifications into =outbound_rx=.
+- main protocol loop owns stdout lock and =recv= selects between:
+  - incoming JSON-RPC messages → dispatch response
+  - outbound notifications → write notification
+
+Rust std option:
+
+#+begin_src rust
+std::sync::mpsc::channel::<Inbound>()
+std::sync::mpsc::channel::<Outbound>()
+recv_timeout(Duration::from_millis(50))
+try_recv outbound in a loop
+#+end_src
+
+Invariant:
+- stdout single-owner: main protocol loop only.
+- stderr remains diagnostics only.
+- server-initiated elicitation must continue to work; if =elicit_roundtrip= currently pulls =lines= directly, refactor it to send a server request via stdout owner and await matching inbound response through the same dispatcher. If too large, keep W1 resource notifications isolated and schedule elicitation dispatcher cleanup in W1.5.
+
+Risk:
+- Existing =st_elicit= currently depends on direct line pulling inside =protocol.rs=. A full concurrent dispatcher touches this. Plan tests must cover =st_elicit= regression.
+
+**** Acceptable temporary design if avoiding dispatcher refactor
+
+Implement =resources/list/read/subscribe= + =st_events= first, but no actual async notifications. This improves manual/cursor polling but does NOT satisfy automatic surfacing. Mark as W0 only, not done.
+
+*** LiveServer changes
+
+Add resource URI helper:
+
+#+begin_src rust
+pub fn instance_events_uri(id: &str) -> String {
+    format!("spacetime://instances/{id}/events")
+}
+#+end_src
+
+Add read helper:
+
+#+begin_src rust
+pub fn read_instance_events(&self, id: &str) -> Option<Value>
+#+end_src
+
+Add subscription/event-notification hook. Possible shape:
+
+#+begin_src rust
+pub enum LiveNotification {
+    ResourceUpdated { uri: String },
+    ResourcesListChanged,
+}
+
+pub struct LiveServer {
+    pub port: u16,
+    store: Store,
+    notify: std::sync::mpsc::Sender<LiveNotification>,
+}
+#+end_src
+
+But =LiveServer::start()= currently has no args. Change to:
+
+#+begin_src rust
+pub fn start(notify: Sender<LiveNotification>) -> std::io::Result<Self>
+#+end_src
+
+Then =McpState::live()= must create/pass the sender owned by protocol loop.
+
+Alternative: keep =LiveServer= independent and have it store =Option<Sender<...>>=.
+
+*** Tool output additions
+
+Update =st_mount= structuredContent to include:
+
+#+begin_src json
+{
+  "events_resource": "spacetime://instances/inst-1/events",
+  "events_read_url": "mcp://spacetime://instances/inst-1/events"
+}
+#+end_src
+
+This gives agents an explicit affordance even before auto UX improves.
+
+*** Tests
+
+Add Rust unit/integration tests for MCP protocol in Verse. Existing tests do not cover MCP.
+
+Suggested test file:
+- =tests/integration/mcp_protocol_tests.rs= or a unit test module under =src/mcp/protocol.rs= if easier.
+
+Test cases:
+
+1. =initialize= advertises =resources.subscribe=true= and =resources.listChanged=true=.
+2. =resources/list= empty before mount.
+3. =st_mount= returns =instance_id= and =events_resource=.
+4. =resources/list= includes =spacetime://instances/{id}/events= after mount.
+5. =resources/read= returns JSON with events =[]= before signal.
+6. Simulate signal append at LiveServer level or via HTTP POST; =resources/read= returns event with seq/type/payload.
+7. =resources/subscribe= accepts valid URI and rejects invalid URI with =-32602=.
+8. On signal for subscribed URI, stdio output includes =notifications/resources/updated=.
+9. Regression: =st_await= still returns the event and advances =await_cursor=.
+10. Regression: =st_elicit= still round-trips or returns supported fallback correctly after protocol loop refactor.
+
+Verification commands:
+
+#+begin_src sh
+cargo test --lib mcp
+cargo test --test integration_tests mcp
+cargo build
+#+end_src
+
+If adding a dedicated test binary:
+
+#+begin_src sh
+cargo test --test mcp_protocol_tests
+#+end_src
+
+** WAVE 2 — Spell auto-read for Spacetime event resources
+
+Goal: notification produces a useful in-session observation, not just a generic “resource updated” pointer.
+
+*** Files
+
+In =~/code/ora/spell=:
+
+- =packages/coding-agent/src/sdk.ts=
+- possibly =packages/coding-agent/src/mcp/manager.ts=
+- possibly =packages/coding-agent/src/config/settings-schema.ts=
+- tests under =packages/coding-agent/test/=
+
+*** Behavior
+
+When Spell receives:
+
+#+begin_src json
+{
+  "method": "notifications/resources/updated",
+  "params": { "uri": "spacetime://instances/inst-1/events" }
+}
+#+end_src
+
+and =mcp.notifications=true=:
+
+1. Debounce per =(serverName, uri)= as today.
+2. Detect Spacetime events URI:
+
+   #+begin_src text
+   /^spacetime:\/\/instances\/([^/]+)\/events$/
+   #+end_src
+
+3. Read resource via =mcpManager.readServerResource(serverName, uri)=.
+4. Parse JSON text.
+5. Inject only new events since last injected seq for that URI.
+6. Store last injected seq in session-local map, not persistent global settings.
+7. Follow-up text should be concise and actionable:
+
+   #+begin_example
+   [Spacetime event] inst-1 emitted click#7
+   payload: {"id":"save"}
+   source: mcp://spacetime://instances/inst-1/events
+   #+end_example
+
+8. If parse/read fails, fall back to current generic follow-up.
+
+*** State
+
+Add in =sdk.ts= near =notificationDebounceTimers=:
+
+#+begin_src ts
+const mcpResourceEventCursors = new Map<string, number>();
+#+end_src
+
+Key:
+
+#+begin_src ts
+const key = `${serverName}:${uri}`;
+#+end_src
+
+Cursor semantics:
+
+- Use max seq successfully injected.
+- If resource read returns full history, filter =event.seq > lastSeq=.
+- If no =seq= fields, fall back to generic notification.
+- If many events arrive, cap injected events per follow-up (e.g. 5) and summarize rest.
+
+*** Config
+
+Keep =mcp.notifications=false= default for safety.
+
+Optional new setting:
+
+#+begin_src text
+mcp.notificationAutoReadResources = true
+#+end_src
+
+But likely unnecessary for first pass: if user explicitly enabled notifications, auto-reading the resource that raised the notification is the expected behavior.
+
+Security note:
+- MCP resource content is untrusted. Follow-up must label server/source.
+- Do not silently execute event payloads as instructions. Phrase as observation.
+
+*** Tests
+
+Add/extend Spell tests:
+
+- Mock MCPManager emits resources updated for =spacetime://instances/inst-1/events=.
+- Mock =readServerResource= returns JSON with events.
+- Assert =session.followUp= called with event summary.
+- Assert cursor prevents duplicate injection on repeated notification with same seq.
+- Assert generic notification path remains for non-Spacetime URI.
+- Assert read/parse failure falls back to generic pointer.
+
+Likely test file:
+
+#+begin_example
+packages/coding-agent/test/mcp-resource-notification-autoread.test.ts
+#+end_example
+
+Verification:
+
+#+begin_src sh
+bun test packages/coding-agent/test/mcp-resource-notification-autoread.test.ts
+bun test packages/coding-agent/test/mcp-manager-subscription-action.test.ts
+bun run --parallel check:ts
+#+end_src
+
+** WAVE 3 — Watch affordance and resource lifecycle polish
+
+Goal: the agent/user can declare intent to watch only selected instances, and resource lists stay fresh.
+
+*** Verse additions
+
+Add tools:
+
+#+begin_example
+st_events(instance_id, after_seq?, limit?)
+st_watch(instance_id)
+st_unwatch(instance_id)
+#+end_example
+
+Notes:
+- =st_events= is non-blocking cursor read. Useful even if Spell notifications disabled.
+- =st_watch= can be syntactic sugar over =resources/subscribe= semantics for agents that only see tools.
+- =st_unwatch= unsubscribes.
+
+But avoid duplicating state if possible:
+- =st_watch= should call the same subscription registry as =resources/subscribe=.
+- =st_events= should call the same =read_instance_events_after= as =resources/read=.
+
+*** Spell additions
+
+Potential slash command or session command:
+
+#+begin_example
+/mcp watch spacetime inst-1
+/mcp unwatch spacetime inst-1
+/mcp notifications
+#+end_example
+
+This is optional if automatic subscribe-to-listed-resources is enough.
+
+*** Tests
+
+Verse:
+- =st_events(after_seq)= returns only new events.
+- =st_watch= then signal emits notification.
+- =st_unwatch= stops notification.
+
+Spell:
+- command/controller tests if adding UI commands.
+
+** WAVE 4 — Event inbox / panel (UX hardening)
+
+Goal: avoid noisy chat while preserving live observability.
+
+Options:
+
+1. Chat follow-ups only — simplest, already fits current session model.
+2. Event inbox panel — better for high-frequency UI events.
+3. Hybrid — low-frequency semantic events auto-follow-up; high-frequency events go to inbox with digest.
+
+Recommended later shape:
+
+#+begin_example
+EventInboxItem {
+  source: "mcp:spacetime",
+  uri: "spacetime://instances/inst-1/events",
+  seq: 7,
+  title: "inst-1 click#7",
+  payloadPreview: "{ id: save }",
+  timestamp: ...
+}
+#+end_example
+
+Need rate limits:
+- max events per follow-up
+- digest threshold per second
+- ignore noisy event types unless watched explicitly
+
+* API contracts
+
+** Verse resource JSON contract
+
+#+begin_src json
+{
+  "schema_version": 1,
+  "instance_id": "inst-1",
+  "latest_seq": 7,
+  "await_cursor": 3,
+  "events": [
+    {
+      "seq": 7,
+      "instance_id": "inst-1",
+      "type": "click",
+      "payload": {},
+      "correlation": null,
+      "raw": {}
+    }
+  ]
+}
+#+end_src
+
+** Notification contract
+
+#+begin_src json
+{
+  "jsonrpc": "2.0",
+  "method": "notifications/resources/updated",
+  "params": {
+    "uri": "spacetime://instances/inst-1/events"
+  }
+}
+#+end_src
+
+** st_mount structuredContent contract addition
+
+#+begin_src json
+{
+  "instance_id": "inst-1",
+  "url": "http://127.0.0.1:12345/__mcp/instance/inst-1/",
+  "events_resource": "spacetime://instances/inst-1/events",
+  "events_read_url": "mcp://spacetime://instances/inst-1/events"
+}
+#+end_src
+
+* Failure modes + mitigations
+
+** Notification emitted before Spell subscribes
+
+Mitigation:
+- Resource read returns full history; Spell cursor catches up on next notification/read.
+- =st_mount= tells agent resource URI immediately.
+
+** Spell misses notification due process restart
+
+Mitigation:
+- MCP state is in-memory today; restart loses events. Accept for live-session W1.
+- Future: durable event log if needed.
+
+** High-frequency UI events flood chat
+
+Mitigation:
+- W2 cap events per follow-up.
+- W4 event inbox/digest.
+- Encourage semantic host-directed events, not raw mousemove.
+
+** stdout corruption
+
+Mitigation:
+- Single stdout owner in protocol loop.
+- All diagnostics remain =eprintln!=.
+- Add protocol tests that parse every stdout line as JSON-RPC.
+
+** st_elicit regression during protocol-loop refactor
+
+Mitigation:
+- Keep explicit regression test.
+- Prefer dispatcher abstraction that supports both server notifications and server requests.
+
+** Generic MCP resource content as prompt injection
+
+Mitigation:
+- Spell follow-up labels content as event payload, not instruction.
+- No automatic tool execution from payload.
+
+* Acceptance
+
+End-to-end proof:
+
+1. Register Verse MCP in Spell.
+2. Enable in Spell config:
+
+   #+begin_src kdl
+   mcp notifications=#true
+   #+end_src
+
+3. Start Spell session with Spacetime MCP connected.
+4. Call =st_mount= and open returned URL.
+5. Browser click posts to =/__mcp/signal/inst-1=.
+6. Verse emits =notifications/resources/updated= for =spacetime://instances/inst-1/events=.
+7. Spell session receives notification.
+8. Spell reads event resource or gives mcp:// pointer depending on wave.
+9. Agent sees event without calling =st_await=.
+10. =st_await= still works and can consume the same queued event history manually.
+
+* Recommended execution order
+
+1. Verse W1 resources/read/list first, no async notification. Small and testable.
+2. Verse protocol dispatcher refactor for async notifications, keeping =st_elicit= green.
+3. Verse subscriptions + notification emission from =signal_sink=.
+4. Manual Spell proof with existing generic =mcp.notifications= follow-up.
+5. Spell W2 auto-read Spacetime event resources.
+6. Optional watch tools / inbox.
+
+* Concrete next task split
+
+** Task A — Verse resource surface
+
+Files: =src/mcp/{protocol,state,live,resources}.rs=.
+
+Deliver:
+- capabilities.resources advertised
+- resources/list/templates/read implemented
+- =st_mount= returns event resource URI
+- tests for read/list after mount and after signal
+
+** Task B — Verse async notification dispatcher
+
+Files: =src/mcp/protocol.rs=, =src/mcp/state.rs=, =src/mcp/live.rs=.
+
+Deliver:
+- single stdout writer
+- inbound reader thread/channel
+- outbound notification channel
+- =signal_sink= notification enqueue
+- resources/subscribe/unsubscribe
+- tests for notification output
+- st_elicit regression green
+
+** Task C — Spell event auto-read
+
+Files: =packages/coding-agent/src/sdk.ts= + tests.
+
+Deliver:
+- detect Spacetime events URI
+- read resource on update
+- cursor/dedupe per session
+- inject event summary follow-up
+- fallback generic behavior unchanged
+
+** Task D — E2E smoke
+
+Deliver:
+- documented config
+- run Verse MCP through Spell
+- mount instance
+- browser signal
+- observe automatic chat/event follow-up
+
+* Open questions
+
+1. Should event history resource return full history forever or bounded latest N?
+   - Recommendation: W1 full history; W3 add =after_seq/limit= via =st_events= and/or template URI.
+
+2. Should Spell auto-subscribe to all resources or only Spacetime event resources?
+   - Current Spell subscribes to all listed resources when notifications enabled.
+   - Recommendation: keep global behavior but auto-read only recognized/low-risk resources.
+
+3. Should =st_await= and Spell auto-read share a cursor?
+   - Recommendation: no. =await_cursor= remains tool-specific; Spell has its own injection cursor. Shared cursor would cause one consumer to starve the other.
+
+4. Should this use latest MCP 2025-11-25 tasks?
+   - Recommendation: no for event surfacing. Tasks are for durable request execution, not live UI event streams. Resource notifications fit better.

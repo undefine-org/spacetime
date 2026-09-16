@@ -1,0 +1,40 @@
+#+TITLE: Audit implementation
+#+STATE: DOING
+#+CUSTOM_ID: AUD-003-audit-implementation
+#+EFFORT: 1h
+#+PRIORITY: #B
+#+LAYER: coding-agent
+
+* Source
+Manual audit
+
+* Findings
+Here are my findings:
+
+---
+
+## Audit Findings
+
+### 1. Latent duplicate-token bug in catch-all `_ =>` arm
+- **What**: The `_ =>` catch-all in `extract_body_captures` still uses `collect_descendant_tokens` which produces duplicate tokens. Any future `$var:fields`, `$var:params`, or `$var:states` body capture would silently fail the same way `Properties` did.
+- **Where**: `src/syntax/events/form_compiler.rs:1054-1111` (the `_ =>` arm)
+- **Why**: Silent extraction failure — the capture returns `None`, the field is silently absent, and the downstream consumer gets empty data. Latent today (no stdlib captures hit this), but a trap for the next person who adds a body capture using a complex extractor type.
+- **Effort**: `medium` (would need the same re-lex approach or fix `collect_descendant_tokens` to deduplicate)
+
+### 2. No unit tests for BUG-009 fix (el_init condition)
+- **What**: The plan's BUG-009 item specified 3 unit test scenarios (exports → Body, cleanup → Body, neither → None) but none were added. The fix is only covered by the snapshot test `data_directive_js`.
+- **Where**: `src/pipeline/expand.rs` — no `#[test]` module exists
+- **Why**: The snapshot test validates one case (data-source with exports). The critical distinction — a selectorless global with neither exports nor cleanup staying `None` — has no coverage. A future refactor could regress this without test failure.
+- **Effort**: `small`
+
+### 3. No unit test for BUG-010 fix (Properties re-lex path)
+- **What**: The plan's BUG-010 item specified unit tests (parse `@type Foo { name: string; }` → TypeRegistry with fields), but none were added. Verification was done via server endpoint only.
+- **Where**: `src/syntax/events/form_compiler.rs` — no test for the `CaptureType::Properties` arm
+- **Why**: The re-lex + pointer-arithmetic offset calculation is subtle. A regression (e.g., someone refactoring `inner` derivation to use `String` instead of `&str` slice) would silently break the offset math with no test failure.
+- **Effort**: `small`
+
+### 4. Pointer arithmetic assumes `inner` is a subslice of `source`
+- **What**: `inner.as_ptr() as usize - source.as_ptr() as usize` is safe today because `inner` is derived via `&source[body_start..body_end].trim().trim_start_matches('{')...`. But there's no `debug_assert!` guarding this invariant.
+- **Where**: `src/syntax/events/form_compiler.rs:1025`
+- **Why**: If a future refactor changes `inner` to be heap-allocated (e.g., `.to_string()` or `.replace(...)` earlier in the chain), the pointer arithmetic would produce garbage offsets silently. A `debug_assert!(inner.as_ptr() >= source.as_ptr() && ...)` would catch this in debug builds.
+- **Effort**: `trivial`

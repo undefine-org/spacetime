@@ -1,0 +1,112 @@
+#+TITLE: @use lost its clauses, @use lost its consumer, @exports lost its list
+#+STATE: ITEM
+#+SESSION_ID: 153497be379ff5cc
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-18T12-18-12-318Z_153497be379ff5cc.jsonl]]
+#+CUSTOM_ID: BUG-299-use-lost-its-clauses-use-lost-its-consum
+
+* Initial Message
+
+can you explain to me what's left w.r.t modular imports and stuff here
+
+* Symptom
+
+Three independent breaks, all in the module surface, all found by probing the
+module system rather than by any test:
+
+#+begin_src spacetime
+@use "./badge.st" as b            // E0946 — "2 extra inline token(s)"
+@use "./badge.st"                 // E0956 — "unknown primitive: use"
+@exports { $host, $session: mut } // E0904 — "Invalid export variable name"
+#+end_src
+
+=examples/modules/index.st= — the SHIPPED module-system demo — failed to
+compile, and =cargo run -- build= emitted no CSS at all.
+
+* Root causes (three, unrelated to each other)
+
+** 1. =as= / =only= / =hiding= were never DECLARED (E0946)
+
+=parse_use_clause_tail= (=src/parser/mod.rs:1055=) reads the clauses into the
+per-file =ImportScope=, the module docs teach all three, and =examples/modules=
+uses =as=. But =%macro use='s =%form= declared only =@use $path:string=. The
+clauses survived purely because a trailing token that no capture claimed was
+silently IGNORED.
+
+BUG-264 (=fe2c4bee=/=6c5d8cb5=) correctly closed that leniency for body-less
+forms. =@use "…" as b= became E0946 the same day: the clause had no grammar to
+match, so it read as junk after the directive.
+
+*The leniency was load-bearing for a documented surface.* Nothing caught it
+because no test compiles =examples/modules=.
+
+** 2. =@use= had no consumer at expansion (E0956)
+
+=%macro use= declared =%imports= but no =%registers=. =@import= has
+=%registers import=. A directive with only =%imports= is consumed by the
+PARSER (lifted into =file.imports=, then =continue=) but hands the expansion
+layer nothing.
+
+Invisible while an unresolved primitive degraded to a =// Primitive not found=
+comment; BUG-268 correctly made that a hard E0956, and =@use= — alone among
+the imports — had no =%registers= record. =@import= never showed the bug
+because it always had one.
+
+** 3. =@exports= split on =;= only (E0904)
+
+=parse_exports_block= (=form_compiler.rs:3711=) did =inner.split(';')=. Both
+separators are taught: that fn's own doc-comment shows =;=, while
+=@template='s =@exports= (FEAT-115), the module-system docs and every PLAN-117
+fixture use =,=.
+
+A comma list was not rejected — it was SWALLOWED: ={ $host, $session }= parsed
+as ONE entry named =host, session=, which then failed the identifier check with
+an error pointing at the whole line. A single-cell block (={ $host }=) has no
+separator, so it kept working and hid this across the entire multi-export
+surface.
+
+* Fixes
+
+1. =%capture_type use_alias { "as" $name:ident }= and =use_filter= (a union, so
+   =only=/=hiding= occupy one optional slot and are mutually exclusive by
+   construction), named from =@use='s =%form=. Same shape as =on_as=
+   (=stdlib/macros/on.st=) — knowing one tells you the other. The clauses are
+   now DATA in the form registry, not a token the matcher happens to drop.
+2. =%registers import { path: $path }= on =%macro use=, symmetric with
+   =@import=.
+3. =inner.split([';', ','])=.
+
+Fixes 1 and 2 are stdlib grammar. Only fix 3 is Rust (9 lines).
+
+* Verification
+
+| check | before | after |
+|-------+--------+-------|
+| =examples/modules/index.st= | E0946, no CSS emitted | ✓ clean |
+| =@use … as / only / hiding= | E0946 | ✓ clean |
+| bare =@use= | E0956 | ✓ clean |
+| =@exports { $a, $b: mut }= | E0904 | ✓ clean |
+| unpublished cell read | (masked) | ✓ E0944 |
+| =cargo test --lib module= | 34/35 | *35/35* |
+| =registry_addressing_diagnostics= | 17/23 | *23/23* |
+| =cargo test --lib= | 3095 | *3098* |
+
+Differential proof the corpus damage is NOT from this fix: reverting these two
+files and rebuilding reproduces the identical error set on every probed target
+EXCEPT =examples/modules/index.st=, which only this fix repairs.
+
+* Not fixed here — a separate, larger E0946 wave
+
+The same BUG-264 tightening broke other directives that also relied on
+trailing-token leniency — =@type=, =@version=, =@edit-toggle= trip E0946
+across =demos/=, =stdlib/=, =examples/= and 6 projects, and =pulsar= trips a
+different =@exports= E0904. Those are the same CLASS (a real surface that was
+never declared) but different grammars, and each needs its own declaration
+audit. Filed separately rather than absorbed here.
+
+* Lesson
+
+Leniency hid three missing declarations for as long as it lasted, and removing
+it surfaced all three at once. The grammar must SAY what the parser reads —
+=parse_use_clause_tail= reading =as= while the =%form= never mentioned it is
+the same defect class as a pass that walks only two of three reference
+channels.

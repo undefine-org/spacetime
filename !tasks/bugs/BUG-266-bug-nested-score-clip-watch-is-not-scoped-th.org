@@ -1,0 +1,44 @@
+#+TITLE: nested @score &.clip watch is not scoped — the join never fires reactively
+#+STATE: DONE
+#+PRIORITY: #A
+
+* The bug
+A nested `@score &.clip` watches its parent window with bare `ST.watch` on its
+OWN node while the parent score publishes on an ANCESTOR; the join never fires
+reactively (video-pole head stays 0). Root: `stdlib/primitives/animation/score-window.st`
+emits `ST.watch(el, parent)` — not `watchScoped`, the exact FUP-094 doctrine
+D1 applied to apply-animations but not to the window map itself.
+
+Worse: `tests/clip_driver_test.rs` PINS the broken `ST.watch` string — a
+source assertion locking in dead behavior (BUG-252 class, again).
+
+* Evidence
+- tests/score/score-launch.test.st gate 5 failed before the demo worked around
+  it: `.shot .head` opacity===0 at 1000ms while `.film.__clip_shot`=1; live
+  probe confirmed `.shot.__clip_head`=0.
+- Found by agent 51 (LaunchDemoReverify), 2026-08-03.
+
+* Fix shape
+score-window.st watches via watchScoped (mirror ST.resolve's parent-chain
+walk — the same change D1 made in apply-animations). Delete the pinned-string
+assertion in clip_driver_test.rs; replace with the behavioral contract
+(nested score under a parent window moves reactively) — asserted on --cdp.
+
+
+* Fix landed (W5b)
+
+- stdlib/primitives/animation/score-window.st: the nested-score watch is now
+  `ST.watchScoped(%&el, %parent, …)` instead of bare `ST.watch` — mirroring
+  `ST.resolve`'s parent-chain walk (FUP-094 doctrine, the same change D1 made
+  in apply-animations). A nested `@score &.clip` now reacts to the window its
+  parent score publishes on an ANCESTOR node.
+- tests/clip_driver_test.rs: the pinned `ST.watch(el, "__clip_shot"` string
+  assertion is GONE, replaced by `ST.watchScoped(el, "__clip_shot"`; the
+  orphan-signal probe scans `ST.watchScoped(el, "` instead. The behavioral
+  contract lives in the CDP gates below, not in a source string.
+- CDP gates in tests/score/: nested-clip.test.st (film pole alone) and
+  two-pole.test.st (both poles, one mount) prove the nested `&.clip` moves
+  reactively under its parent's window. Both discriminate: reverting
+  watchScoped→watch makes them fail.
+
+Verified: tests/score --cdp 18/18 · clip_driver 4/4 · score_window_map 18/18.

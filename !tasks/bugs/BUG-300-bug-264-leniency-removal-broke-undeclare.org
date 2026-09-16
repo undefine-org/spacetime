@@ -1,0 +1,189 @@
+#+TITLE: BUG-264 leniency removal broke undeclared trailing clauses corpus-wide
+#+STATE: ITEM
+#+SESSION_ID: 153497be379ff5cc
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-18T12-18-12-318Z_153497be379ff5cc.jsonl]]
+#+CUSTOM_ID: BUG-300-bug-264-leniency-removal-broke-undeclare
+
+* Initial Message
+
+can you explain to me what's left w.r.t modular imports and stuff here
+
+* Symptom
+
+BUG-264 (=fe2c4bee= / =6c5d8cb5=) closed the "trailing tokens are silently
+ignored" leniency for body-less forms. That is CORRECT — the leniency was
+hiding real near-misses. But several shipped directives relied on it to carry
+clauses their =%form= never declared, so they now fail E0946
+("Unexpected N extra inline token(s) after directive").
+
+Measured at =5da43c15= with a freshly built binary:
+
+| target | codes |
+|--------+-------|
+| =demos/= | E0946 (=@type=, =@version=, =@edit-toggle=) |
+| =stdlib/= | E0946, E0956 |
+| =examples/= | E0946, E0956 |
+| =tests/fixtures/= | E0946 |
+| =projects/= (6 of 23) | E0946 / E0956 / E0904 |
+
+=@use= and =@exports= were the same class and are fixed in BUG-299; this item
+covers the remainder.
+
+* Root cause
+
+The same one, per directive: a clause that is REAL (the parser reads it, the
+docs teach it, pages use it) but is not declared in the directive's =%form=.
+While leniency held, an undeclared clause was dropped silently and everything
+appeared to work. With leniency gone, the undeclared clause is junk.
+
+∴ each affected directive needs its clause DECLARED as a =%capture_type= named
+from its =%form= — the BUG-299 fix shape (=use_alias= / =use_filter=, modelled
+on =on_as=). This is stdlib grammar work, not Rust.
+
+* Why this is worth doing properly rather than restoring leniency
+
+Restoring leniency would re-hide the near-miss class BUG-264 exists to catch,
+and would leave the grammar lying about what these directives accept. The
+declarations are the fix; the E0946s are an accurate report of a debt that was
+always there.
+
+* Scope
+
+1. Enumerate every directive tripping E0946 across =examples/=, =demos/=,
+   =stdlib/=, =tests/fixtures/= and =projects/= (start: =@type=, =@version=,
+   =@edit-toggle=).
+2. For each: read what the parser actually consumes, declare it in the =%form=
+   via a =%capture_type=, keep the name/shape parallel to =on_as=/=use_alias=.
+3. =pulsar= trips an =@exports= E0904 that BUG-299's comma fix does not clear —
+   diagnose separately.
+4. Gate: a corpus check with ZERO E0946/E0956, plus a test that compiles the
+   shipped examples (see the acceptance note below).
+
+* Acceptance note — the missing gate is the real story
+
+=examples/modules/index.st= is the shipped module-system demo. It was broken
+(E0946, zero CSS emitted) and NO test noticed, because no test compiles the
+examples tree. Every directive fixed here should be covered by compiling a real
+page, not by asserting on a matcher in isolation.
+
+∴ add a test that compiles =examples/**= and =demos/**= and fails on any
+diagnostic. That gate would have caught this whole wave on the commit that
+introduced it.
+
+NOTE [2026-08-07]: MEASUREMENT CORRECTED + SCOPE SPLIT [2026-08-07]
+
+The original table in this item is UNRELIABLE: it did not record its cwd, and
+=check='s verdict depends on it (BUG-326 — =load_stdlib_registry= probes
+=Path::new("stdlib/…").exists()= against the process cwd and silently falls
+back to the stdlib EMBEDDED at compile time). Same corpus, two cwds: 332 files
+failing from the repo root vs 146 from each file's own directory, with E0956
+going 3 → 35 and 80 files failing to resolve imports at all. Any corpus number
+without a stated cwd is noise.
+
+*Authoritative re-measure* — repo root, binary pinned by copy so a concurrent
+=cargo build= cannot shift results mid-sweep (this DID happen: an E0811
+=%migration= wave of 320 hits appeared and vanished between runs), 459 =.st= /
+=.st.md= across =examples/=, =demos/=, =stdlib/=, =tests/fixtures/=. Counting
+FILES, and counting bare parse failures and import failures too — grepping only
+for =error[ENNNN]= undercounts, which is how =tests/fixtures/test-runner/index.st=
+was first misfiled as clean when =build= cannot even parse it:
+
+| code | files |
+|------+-------|
+| E0956 unknown primitive | 100 |
+| E0408 | 15 |
+| E0947 unknown form | 13 |
+| E0946 grammar mismatch | 13 |
+| E0804 | 12 |
+| E0602 / E0405 | 5 / 5 |
+| E0952 / E0102 | 4 / 4 |
+| E0900 / E0504 / bare parse | 2 / 2 / 2 |
+| E0806 | 1 |
+| **total failing** | **128 / 459** |
+
+*The scope of this item shrinks accordingly.* E0946 is 13 files, not the
+headline. The headline is E0956, and it is NOT this item's cause:
+
+- **E0956 (100 files) → BUG-329.** =@on= lost its event dispatcher in
+  =d5952cb3= (Dec 2025); =%macro on= was deleted from =on-event.st= while
+  =@on-hover= / =@on-click= / =@on-visible= survived. Nothing routes =@on click=
+  (219 corpus sites) to them. BUG-268 (unknown primitive = hard failure) is what
+  made eight months of dead handlers visible. Needs a LANGUAGE RULING (restore
+  the dispatcher vs cut over to =@on &.click=), not a repair.
+- **E0947 (13 files) → CSS custom properties**, not directives: =--card-surface=,
+  =--sc-min-title=, =--duet= read as unknown forms in statement position.
+  Overlaps BUG-327 (filed concurrently).
+- **E0946 (13 files) → THIS ITEM.** Of these, only ~5 are the true
+  "Unexpected N extra inline token(s)" leniency class; the rest are "Expected
+  capture … but no tokens remaining", a DIFFERENT failure wearing the same code.
+
+*The E0946 sites, read individually:*
+
+| site | shape | reading |
+|------+-------+---------|
+| =demos/editable-blog/index.st:44= =@edit-toggle= | declared bare, used bare | context-dependent — passes in isolation, fails in the demo. Needs its own bisect. |
+| =examples/mobile-tasks/app.st:38= =@pull-refresh= | =%form= REQUIRES =( … ) { $styles:properties }=; site is bare | genuine undeclared-shape debt |
+| 9 × =@then { … }= (=stdlib/editable/tests/surface.test.st=, =tests/fixtures/native-template/*=) | =%macro then-claims= declares =@then $subject:selector { $claims:claim_block }= | the SELECTOR-LESS =@then { }= (13 corpus sites) has no declaration at all — same class as BUG-299's =@use … as= |
+| =examples/scripts/analyze-directives.st= =@script= / =@log= | | script-surface, likely never declared |
+| =examples/mobile-tasks/index.st:43= =$_duration:Custom("time")= | | capture-type mismatch, unrelated to leniency |
+
+∴ the remaining work under THIS item is: declare selector-less =@then=, declare
+or fix bare =@pull-refresh=, bisect =@edit-toggle=, and decide whether
+=@script=/=@log= are supported surfaces. =@type= and =@version= — named in the
+original Scope — are NOT E0946 sites in the corrected measurement; =@type='s 24
+E0956 files belong to the BUG-329 class (missing primitive), not to this one.
+
+*Method note for whoever picks this up:* pin the binary (=cp= it into
+=scratch/=), state the cwd, count files not occurrences, and count bare-parse
+and import failures — three separate wrong numbers were produced this session by
+skipping one of those four.
+
+NOTE [2026-08-07]: SELECTOR-LESS =@then= DECLARED [2026-08-07] — one slice of this item closed.
+
+=%macro then-group= added to =stdlib/testing/test.st=, beside =then-claims=:
+
+#+begin_src spacetime
+%form { @then { $body:block } }
+%emit js { { %$body.js } }
+#+end_src
+
+Disjoint from =then-claims= by construction — =$subject:selector= cannot match
+an empty head — so declaring both introduces no ambiguity. Declared as its OWN
+macro rather than making the subject optional: a =$subject:selector?= would let
+=@then { … }= parse AS then-claims, and every nested =@find=/=@assert= would
+then be read as a CLAIM (=<prop> <op> <value>;=) and fail far from the cause.
+
+E0946 cleared at all 13 sites (=stdlib/editable/tests/surface.test.st= ×6,
+=tests/dev-editable-single-object.test.st= ×3,
+=tests/fixtures/native-template/{optional-element-param,template-factory}.test.st= ×3,
+=tests/fixtures/w8-seed/state-claims.test.st= ×1).
+
+*The gate caught a dead first version, and this is the load-bearing part.*
+The macro initially emitted =%$body=, which COMPILED CLEAN — =spacetime check=
+was green — but interpolates source TOKENS rather than the expanded emission.
+Running it headless reported "Test made no assertions — its claims did not
+compile to anything". =%$body.js= (what =%macro test= itself uses) fixed it.
+∴ this feature's gate is a headless RUN, never a compile check; a =check= gate
+would have passed the dead version. Exactly the AGENTS "a source assertion is
+not a behavior assertion" case, caught by the harness rather than by review.
+
+Gate: =tests/lang/assertions/then-group.test.st= — 3 tests, all RUN gates
+(group of subject assertions · group carrying =@assert= · the subject form
+still resolving beside its new sibling). Proven to FAIL when the claim inside a
+group is false, so it is a real gate and not a green-by-construction one.
+
+*Discovered while gating: =@find= is not a test directive at all.* The only
+=%macro find= in the tree is =stdlib/scripting/script.st:237=. A test body
+using =@find ".sel" { have_text "x"; }= parses (it is a plausible directive
+shape) and asserts NOTHING. =stdlib/editable/tests/surface.test.st= is built
+entirely on it: all 6 tests now run and report =0 passed, 6 failed — Test made
+no assertions=, where before they failed to parse. That is an improvement (an
+honest failure replacing a parse error) but it means the editable surface has
+had ZERO real test coverage for as long as those tests have existed. Either
+=@find= should be declared as a test-assertion directive or those 6 tests must
+be rewritten onto =@then <subject> { claims }= (which does work — verified).
+Not fixed here: it is a coverage question for whoever owns =stdlib/editable=.
+
+Remaining under this item: bare =@pull-refresh= (=%form= requires
+=( … ) { $styles:properties }=), the context-dependent =@edit-toggle= E0946,
+and whether =@script=/=@log= (=examples/scripts/=) are supported surfaces.

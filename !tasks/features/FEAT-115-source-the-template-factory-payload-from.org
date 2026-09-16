@@ -1,0 +1,231 @@
+#+TITLE: Source the @template factory payload from the body SCOPE (retire reify_component_body)
+#+STATE: DOING
+#+SESSION_ID: 1503ca05d05c0c62
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-10T14-32-18-497Z_1503ca05d05c0c62.jsonl]]
+#+CUSTOM_ID: FEAT-115-source-the-template-factory-payload-from
+
+* Initial Message
+
+ok do the full W3-clean. Don't stop until you're fully done. Thanks.
+
+* Goal
+Make the `@template` factory payload (HTML, builder, states, exports, refs, matches)
+come from the body's *scope tree* (`ScopeBlock` kind=`Construct("template")`,
+landed in PLAN-039 S1d `baa8f32e`) instead of the parallel `reify_component_body`
+parser. This is the gate that lets us DELETE `reify_component_body` +
+`CaptureType::ComponentBody` + `component-body.st` grammar (the zero-zombie gate:
+`rg 'component_body|ComponentBody' src/ stdlib/ ⇒ 0`, currently ~388).
+
+* Why (architecture)
+"AST is truth." Today template-body facts surface TWICE: (1) as real
+`FormMatch`es / `CssDeclaration`s on the `Construct("template")` scope (World A,
+the truth), and (2) re-derived inside `ComponentBodyDef` by `reify_component_body`
+(World B, the parallel parser). The behavioral half (@on/@each/@editable/
+class-toggle/content-binding) ALREADY routes through World A per-instance
+(PLAN-039 Move 1/2a/2b/2c/2d, commits 1c852d44..d0a48ce0) and the page-global
+state leak is suppressed (S1e `585dd782`). What remains is the *data extraction*:
+`states`, `exports`, `html`, `builder` still read from `body: &ComponentBodyDef`.
+
+* Plan (reviewer-validated, agent://21-ReviewStatesExportsDesign)
+1. **states** — at the factory call site (`src/pipeline/expand.rs:357`
+   `component_body_to_js_with_params`), source the `states: [{var_name,type_name,
+   initial}]` payload from the `Construct("template")` scope's `local-state`
+   matches (already collected on the scope after S1d; they carry
+   captures name=Ident, type=TypeRef, value=Expr) instead of `body.states`.
+   Then delete `reify_state` (`form_compiler.rs:2552`) + the `states` field +
+   the `states_js` serializer (`form_match.rs:1442`). The factory seed loop
+   (`stdlib/primitives/template.st:285`) is UNCHANGED — only its payload source.
+2. **exports** — ASYMMETRY: `@exports{…}` has NO flat-match surface (it exists only
+   in `component-body.st` grammar + `reify_exports`). Add a tiny `%macro exports`
+   (file/template scope) producing a FormMatch `[{var_name,mutable}]`, associate to
+   its template by the same span containment, feed the factory `exports` payload,
+   delete `cb_exports` + `reify_exports`. Consumer is dev-only (`element.__stExports`
+   read under `window.__ST_DEV` in st.js:297/376) — so this is deletion-driven, not
+   a runtime correctness change.
+3. **html/builder** — already produced by `component_html_to_exprs` /
+   `emit_builder_root_scoped` (NOT reify classification); confirm the template
+   scope's recorded body HTML span feeds these, drop `body.html`/`body.builder`.
+4. **refs/selector_refs/matches/injections** — these duplicate the surfaced scope
+   matches; map each to the scope's `.matches` then drop the fields.
+5. Delete `reify_component_body`, `CaptureType::ComponentBody` (compiler-enforced —
+   every consumer becomes a build error, ~66 core sites guide the sweep),
+   `component-body.st` (`component_item` grammar), `MacroScope`→`within()` wiring
+   of `macro_within_matches` (already built+tested, `#[allow(dead_code)]` at
+   registry.rs:786). Repoint the E0905/W0703/W0706 diagnostics
+   (`pipeline/mod.rs:1150,1594,1674`; `scope.rs:183`) that currently read
+   `body.directives` to the scope matches.
+
+* Guards (from review)
+- Span-containment association needs (same `source_file`) ∧ (strict, non-default
+  span) ∧ (innermost/deepest-first) — `SourceSpan::default()` 0..0 ⊂ any 0-start
+  template; cross-file import spans collide. The existing deepest-first
+  `assign_match_to_nested_scopes` walk already gives innermost selection now that
+  the body is a NestedScope.
+- A same-named page state must keep emitting globally (covered by
+  `test_page_state_still_emits_when_same_name_as_template_state`).
+
+* Acceptance
+- `rg 'component_body|ComponentBody|reify_component_body|component_item' src/ stdlib/ ⇒ 0`
+- Regenerate the `component_body__*.snap` corpus against the scope path.
+- Live gates GREEN: BUG-103 (admin richtext mounts+persists per-instance),
+  BUG-085 (nested @each renders per-instance), two-instance @on/class-toggle/state
+  isolation, page-global non-leak.
+- lib/integration/v8 all green (the 9 BUG-087 media/selector reds are unrelated).
+
+* Provenance
+PLAN-039 sub-arc. Depends on S1d (`baa8f32e`) + S1e (`585dd782`). Kill-list:
+research/spacetime-component-body-killlist.org. Reviewer designs:
+agent://20-ReviewZombieSweep, agent://21-ReviewStatesExportsDesign.
+
+NOTE [2026-06-14]: S1 (states) + S2 (exports) DONE + committed (2c930677, b00bf2d6). S3 surface map COMPLETE (agent://23-MapS3Surfaces + direct verification). VERIFIED per-construct surface in template bodies:
+- @on (in .sel): flat `on` + scope `.c:on` → UNIFIED ✓
+- class-toggle `.x:$o` (in .sel): emits via unified path (classList+watchScoped, no directives payload) → UNIFIED ✓ (Move 2c)
+- @each (body): flat+scope `each` → UNIFIED ✓
+- &row() bare ref: flat+scope `template-invoke-bare` → UNIFIED ✓
+- content-injection `text <- $x`: SPLIT. selector-WRAPPED `.v { text <- $x }` → injections:[] (UNIFIED, textContent= binding) ✓ ; body-ROOT `text <- $x` → injections:[...] (REIFY-SOLE) ✗
+- html / builder: REIFY-SOLE (text-segmentation; CST drops multi-element, but real templates single-root). component_html_to_exprs is the only consumer outside reify.
+- matches (@match), selector_refs (SC-009 &name .sel{}): need same wrapped-vs-root check; likely reify-sole.
+
+KEY CORRECTION to disposition doc: injections are NOT a pure duplicate — only SELECTOR-WRAPPED injections are unified; BODY-ROOT `text <- $x` is reify-sole. So S3 ≠ pure deletion; it requires routing body-root `<-` (and html/builder, possibly matches/selector_refs) through World A before reify can die. This is build-out, not just field-drop.
+
+NEXT: html/builder is the keystone of S3 (sole producer, single consumer component_html_to_exprs). Plan: feed component_html_to_exprs from the template body's HTML directly (CST first HTML_ELEMENT node text for single-root, the common case) instead of reify's html_buf join; for body-root injections, either (a) make body-root `text <- $x` surface a flat content-binding match like the selector-wrapped form, or (b) treat selector-scoped as canonical and migrate the few body-root usages. Decision pending user.
+
+NOTE [2026-06-14]: S3a DONE (cc9f9640): html/builder sourced from CST body via span-subtraction — FIXED a live shipping bug (reify segmentation leaked `.sel{@on}` blocks as literal CSS text nodes + spurious display:contents wrapper into instance DOM) + fixed multi-root templates (CST drops adjacent sibling open-tags; span-subtraction over verbatim source recovers them). +2 regression tests.
+S3b DONE (73e417be): EXHAUSTIVELY probed every construct field's authoring forms, CORRECTING the disposition doc's "all duplicates" assumption:
+- selector_refs: ALWAYS EMPTY (dead) → dropped from payload.
+- injections: LIVE (body-root [slot]/[class] descendant-targeting; FEAT-071/072 BUG-061). Unified path only does text/attr/css-prop ON matched node, NOT slot/descendant. RETAINED.
+- refs: LIVE for DYNAMIC `&$w()` (FEAT-073). Static `&row()` unified via template-invoke-bare. RETAINED.
+- matches: LIVE @match render dispatch (FEAT-073). RETAINED.
+KEY CORRECTION: reify is NOT pure-dead. injections/refs(dynamic)/matches are tested capabilities the unified scope path does NOT subsume. So reify_component_body CANNOT be deleted yet — needs S3c to unify these three first.
+
+S3c (REMAINING for reify deletion):
+1. body-root injection → surface as a scope content-injection match (descendant/slot/attr target) routed through emit_reactive_binding_js extended for descendant targets, OR a dedicated injection primitive per-instance.
+2. dynamic dispatch &$w() → flat match (template-invoke-dynamic) resolving name from signal at mount.
+3. @match → flat match / scope construct for render dispatch.
+Then delete reify_component_body + CaptureType::ComponentBody + component-body.st + the 3 fields + factory forEach loops. THEN zero-zombie gate.
+
+NOTE [2026-06-14]: S3c DONE (fe0975f5): body-root content injection UNIFIED onto the scope path. injection_scopes_from_body transforms `target <- $x` into a synthesized selector-scoped reactive binding ([slot]/[class]→descendant text; text→root text; attr→root attr). BONUS: emit_reactive_binding_js now honours `| filter` at EVERY scope (was reify-injection-only) — a real capability gain. reify_inject deleted, factory forEach deleted, 5 unit tests migrated to find_injection_binding, 6 corpus cases+snaps removed. Gates green.
+
+REMAINING reify producers (last before deletion):
+- refs: DYNAMIC `&$w()` only (static `&row()` already unified via template-invoke-bare). FEAT-073 feat073_dynamic_dispatch test.
+- matches: `@match $sig {...}` render dispatch. FEAT-073 feat073_match tests.
+Both are render-dispatch constructs. S3d: surface dynamic-invoke + @match as flat matches / scope constructs, then delete reify_component_body + CaptureType::ComponentBody + component-body.st + ComponentBodyDef construct fields + factory refs/matches forEach. THEN zero-zombie gate.
+
+Session commits so far: 2c930677 S1(states) b00bf2d6 S2(exports) cc9f9640 S3a(html, fixed CSS-leak render bug) 73e417be S3b(selector_refs drop) fe0975f5 S3c(injections+filter). lib 2252 / integration 172 / v8 425(+9 BUG-087) throughout.
+
+NOTE [2026-06-14]: S3d ATTEMPTED + REVERTED (clean, forward-only). Built template-invoke-dynamic flat macro (&$name:binding) + invoke-template dynamic name resolution + folded the recursion depth guard into invoke-template. FINDINGS: (1) the macro correctly surfaces &$w() as a flat match emitting name:"$w"; (2) BUT body-root dynamic dispatch fails at runtime ("Template not found: w") because invoke-template's container + the host's $w param are not resolvable at mount time via ST.resolve(container,...) — the SAME per-instance param-timing/root-scoping problem injections had, but harder (the NAME itself is instance data, needed synchronously to pick the factory). The reify factory path resolves $w against `data` (host params available synchronously during the factory closure); the flat-match path runs later via registerSelectorInit when the param may not be seeded on a resolvable ancestor. (3) Also hit: %emit js MANGLES multi-line comments + multi-statement if/console.warn with line-broken strings (SyntaxError 'self'; cap-branch reflowed unconditionally) — keep emit JS single-line/defensive. REVERTED all 4 files to committed S3c state; refs+matches stay on reify. Green confirmed (feat071/073/077, bug061, per_instance all pass).
+
+S3d REMAINING (the last mile to reify deletion), now precisely scoped:
+1. Solve per-instance param timing for body-root render dispatch: the flat invoke/match match must resolve its subject/name against the HOST INSTANCE's params at mount. Options: (a) seed host params on the instance root BEFORE the dynamic-node observer fires the body matches; (b) a dedicated render-dispatch primitive that captures the host `data` closure like the factory does; (c) make @match a flat %macro modeled EXACTLY on @view (stdlib/macros/view.st + primitives/view.st — the reactive sibling already works at selector scope) with a render-once match-mount primitive resolving subject via the instance scope.
+2. New stdlib files need registration in src/stdlib_embedded.rs (include_str!) for embedded builds (filesystem stdlib works for tests without it).
+3. Then: no-op reify match/template_ref arms, delete reify_component_body + CaptureType::ComponentBody + component-body.st + ComponentBodyDef construct fields + factory refs/matches forEach. zero-zombie gate.
+
+SESSION DELIVERED (all committed, green): S1 states, S2 exports, S3a html (+fixed a LIVE CSS-leak render bug + multi-root templates), S3b selector_refs drop, S3c injections (+filter capability gain at all scopes). reify_state/reify_exports/reify_inject deleted. Remaining reify producers: refs(dynamic)+matches only.
+
+NOTE [2026-06-14]: S3d PART 1 DONE (645e4997): @match UNIFIED as a flat %macro (the render-once sibling of @view) + match-render primitive resolving subject/dynamic-name/args against the INSTANCE scope. reify_match deleted; matches no longer serialized. KEY TECHNIQUE that cracked the param-timing blocker: body-root constructs (no .sel wrapper) get the template's ROOT selector (template_root_selector) so they mount per-instance where params are seeded \u2014 scoped to `match` ONLY (template invocations keep their guarded reify-refs path). @view working in a template body was the proof-of-concept. Native .test.st @match tests pass (BUG-105 unlocked this). feat073 4/4. lib 2254/int 172/v8 425(+9 BUG-087)/headless 356-251.
+
+REMAINING: reify now produces ONLY `refs` (dynamic &$w(); static &row() already unified via template-invoke-bare). S3d PART 2: apply the SAME root-selector + instance-scope-resolution pattern to dynamic dispatch. The earlier dynamic-dispatch attempt failed because the body-root &$w() invoke bound to page scope; now template_root_sel + the match-render-style instance resolution is the proven fix. CAUTION (feat073_unbounded_recursion): do NOT reroute static &name() invocations (they need the reify-refs recursion-depth guard, or fold that guard into invoke-template first). Then: delete reify_component_body + CaptureType::ComponentBody + component-body.st + the now-empty struct construct fields + the factory refs forEach. zero-zombie gate (S5/S6).
+
+Session commits this turn: d4aaf993+d3d0dec7 BUG-105 (E0402 + .fixture_html, native template testing unblocked), 645e4997 S3d-match.
+
+NOTE [2026-06-14]: S3d COMPLETE (0e0dc9d6 refs + 645e4997 match): the @match + refs blockers are SOLVED. Breakthrough on refs: option (b) — keep the factory's mount-time forEach RENDER (the correct time for an invocation that creates a subtree; a body-root selector-init fires too late / self-references the root, which sank the flat-invoke attempt), source only the DATA from World A. scope_refs (bare/named flat matches) + harvest_dynamic_refs (dynamic &$w + collection &name[], the two forms with no flat surface) → body.refs, full 4-form parity. reify template_ref arm no-ops (keeps E0900 only).
+
+REIFY NOW PRODUCES NOTHING CONSUMED in final output:
+- states/exports/html/refs: overwritten by World A (scope_states/exports harvest/CST html/scope_refs).
+- injections/matches: unified to flat macros (injection_scopes_from_body / %macro match + match-render).
+- STILL live from reify: selector_refs (SC-009 &name .sel{}) + directives/css_rules/diagnostics (E0900/E0904/E0920/E0905/W0703).
+
+REMAINING for literal reify_component_body deletion (S5):
+1. selector_refs: surfaces as a flat `element-ref` macro already (stdlib/syntax/element-ref.st) + real fleet usage (ora-ventures.com). Source from element-ref flat matches like refs, OR confirm element-ref fully handles it.
+2. directives/css_rules: diagnostics-only (E0905/W0703 at pipeline/mod.rs:1150,1594,1674; scope.rs:183). Keep a thin diagnostics extractor OR migrate the diagnostics to World A.
+3. Then the production call site form_compiler.rs:1354 (the ComponentBody capture) constructs a World-A ComponentBodyDef (or the struct/CaptureType::ComponentBody is retired). ~388-ref compiler-enforced sweep.
+
+This turn's commits: d4aaf993+d3d0dec7 BUG-105 (E0402 + .fixture_html, native template testing UNLOCKED), 645e4997 @match unified (reify_match deleted), 0e0dc9d6 refs unified (reify builds nothing). lib 2254 / int 172 / v8 425(+9 BUG-087) throughout.
+
+NOTE [2026-06-14]: S5a+S5b DONE (62ef468c selector_ref deletion, 08a861dd struct deletion). reify_component_body shrunk: deleted reify_selector_ref/reify_nested_each/strip_selector_ref_prefix + orphaned helpers (template_ref_from_invocation, extract_braced_inner) + 5 dead structs (SelectorRef/NestedEachDef/EachInvocation/ComponentMatch/MatchArm) + 2 ComponentBodyDef fields (selector_refs, matches) + the ~100-line dead factory bodySelectorRefs forEach.
+
+S5c PRECISE BLOCKER (falsified this turn — the "diagnostics-only shell" assumption was WRONG):
+reify_component_body still has LIVE render+diagnostics duty for BODY-ROOT directives (not .sel-wrapped): class-toggle `.c--open: $open`, content-binding `.v { text: $open }`, self_prop, root_on. PROVEN: a body-root `.c--open: $open` is NOT captured in World A (construct matches=[], nested matches=[]) — reify is the SOLE source. Its `directives` payload is (1) serialized into the factory for RENDER (compiled JS contains the `value: "$open"` toggle wiring) AND (2) consumed by validate_template_scopes E0905 undefined-state check (pipeline/mod.rs:1205). So reify is NOT dead — deleting it silently drops body-root class-toggle/content-binding render + E0905 coverage.
+
+S5c REAL SCOPE = migrate body-root directives to World-A synthesized nested scopes, EXACTLY the S3c injection pattern (injection_scopes_from_body → template_root_selector → emit_reactive_binding_js). Need a `directive_scopes_from_body()` that lifts body-root self_prop/toggle/content-binding/root_on into nested ScopeBlocks adopting the template root selector, riding the unified scope render + a World-A E0905 pass over scope directives. Only THEN can reify_component_body + its directives arms + the factory directives payload + CaptureType::ComponentBody be deleted. Distinct .sel-wrapped directives (`.b { @on }`) ALREADY work via World A (nested .b matches=["on"]) — only BODY-ROOT directives remain on reify.
+
+Gates after S5a+S5b: lib 2246, integration 172, v8 425 (+9 BUG-087), golden green, snaps 52. Pre-existing unrelated breakage noted: tests/lsp_tests.rs (MacroDefAst.scope_within) — not in standard suites, left untouched; tests/test_helpers.rs ScopeBlock kind fixed as drive-by.
+
+NOTE [2026-06-14]: S5c DECISIVE FINDINGS (probed this turn):
+1. reify's `directives` are DIAGNOSTICS-ONLY — there is NO serializer for body.directives in form_match.rs. Confirmed 3 consumers, all validation: pipeline/mod.rs:1205 (E0905 undefined-state), :1649 (E0917 unused-state referenced-set), :1729 (E0908 bind-conflict has_reactive). Plus scope.rs:183 inspection-display.
+2. body-root directive RENDER goes through a SEPARATE path: pipeline/expand.rs staticProperties — and it is BROKEN at HEAD (mangles `property: "<div class=\"c\"></div>
+.c--open"` — swallows the HTML). NOT caused by my work.
+3. tests/unit/templates/body-directives.test.st = 1/11 PASS at HEAD (forward-looking spec added 0c4004f4, mostly unimplemented). Body-root toggles ARE used live: projects/pulsar/index.st (.psr-nav--open, .psr-scope-card--selected).
+4. Canonical .sel-WRAPPED directives ALREADY World-A: `.b { @on }` → nested `on` match; `.v { text:$x }` → css_declaration. Only BODY-ROOT directives (.c--open:$open;, root @on, self-prop aria-x:$y, root text:<-) lack World-A capture.
+
+S5c = TWO-BIRDS (killlist-sanctioned: "ComponentDirective DIES IF scope path emits these as FormMatches" — it does):
+  (a) synthesize body-root directives into World-A nested scopes adopting template_root_selector — EXACTLY the S3c injection_scopes_from_body pattern. This FIXES the broken body-root render (10 failing tests in body-directives.test.st) AND
+  (b) makes E0905/E0917/E0908 read directives from World-A scopes (re-derive var refs from `on` match bodies + css_declarations), THEN
+  (c) delete reify directives arms + reify_component_body + enum ComponentDirective + CaptureType::ComponentBody.
+
+NEXT: implement directive_scopes_from_body() (class-toggle `.x--y:$z`, self-prop `attr:$z`, root `@on`, mirror injection synthesis), verify body-directives.test.st goes green, migrate the 3 diagnostics, then delete. Gates: lib/int/v8 + body-directives.test.st + pulsar live.
+
+NOTE [2026-06-14]: S5c FULL DIAGNOSTIC CHAIN (this turn, committed 101df6fe synth + 61a4b200 keyframes-fix):
+
+GOAL was: migrate body-root directives off reify into World-A synthesized scopes, fixing the broken body-directives.test.st (1/11) AND enabling reify deletion. Traced a 4-layer bug stack:
+
+LAYER 1 (FIXED, 101df6fe): body-root reactive `:` decls (`.c--open: $open`) had NO World-A capture. Added directive_scopes_from_body() mirroring S3c injection synthesis → emits correct classList.toggle. Additive, green.
+
+LAYER 2 (FIXED, 61a4b200): the template %form's `$animations:keyframes?` greedily slurped the body-root `:` decl (keyframes grammar `(prop:balanced(':') ":" val:balanced(';'))*` has no arrow requirement), mangling `<div></div>
+.c--open` into a broken staticProperties prop. Proven vestigial (real anims use `& { x: 0 -> 1 }` → component_body `&` scope; keyframes? only ever fired spuriously; templateAnimations already {}). User-approved REMOVAL. Now body-root toggle compiles cleanly.
+
+LAYER 3 (OPEN, NOT fixed): canonical BACKTICK-HOLE state decl `` `$count` number: 42; `` is REJECTED by local-state %form (`$name:ident` — backtick wrap not accepted); only bare `$count number: 42` matches → produces a `local-state` World-A match. Used LIVE: projects/pulsar/index.st `` `$navOpen` bool: false ``. PER DOCS (data-and-rendering.md §): backtick is HOLE-only (interpolation), a DECL uses bare `$name` (space-introduces-type). So pulsar + body-directives.test.st are arguably MIS-AUTHORED (should be bare). DECISION NEEDED: (a) fix authoring (bare form) — harmony-correct per docs, but silently changes fleet; OR (b) accept backtick at decl sites — violates one-sigil-one-meaning. Recommend (a) + a clear E-code when a backtick-hole appears in decl position.
+
+LAYER 4 (OPEN, DEEPER — the real blocker): per-instance reactive class-toggle does NOT fire for invokeTemplate-created instances. PROVEN via E2E (boot + invokeTemplate + ST.set): page-level toggle reacts (class flips true); BUT an INVOKED-INSTANCE toggle does NOT react — for BOTH body-root AND `.sel`-WRAPPED forms (so NOT my synthesis, NOT reify). ST.set updates state (ST.resolve returns true) but the watchScoped subscription never re-renders the class. Same mount-order/observer family as the refs blocker. This is why body-directives.test.st is 1/11 and CANNOT reach green until the per-instance watchScoped-on-invoked-subtree wiring is fixed (registerSelectorInit init runs once but the reactive watch doesn't subscribe for dynamically-invoked instances).
+
+NET: reify's `directives` are diagnostics-only (E0905/E0917/E0908; NO serializer — render is staticProperties/World-A). Deleting reify_component_body still needs the 3 diagnostics migrated to World-A scope directives (tractable: `.b`→`on` match w/ body capture, `.v`→css_declaration; body-root now → synthesized scopes). But the FEATURE (body-root directive render on invoked instances) is blocked on LAYER 4, independent of reify. RECOMMEND: split LAYER 3 (backtick-decl) + LAYER 4 (per-instance watch) into their own BUG items; they are NOT reify-deletion prerequisites (reify directives are diagnostics-only). reify deletion can proceed via the diagnostics migration alone.
+
+NOTE [2026-06-14]: S5c DIAGNOSTICS MIGRATION (this turn, committed): the reify→World-A diagnostics migration is the actual path to deleting reify_component_body (reify directives are diagnostics-only; no render serializer). DONE 4 of 5 consumers:
+- 743c3697 E0905 (undefined-state) → reads context.scopes via scope_declared_state_names + scope_referenced_state_vars + first_signal_ref. CompileContext gained `scopes` field + with_scopes(); compiler.rs threads ast.scopes.clone(). 5 tests migrated to parse-based. E2E verified.
+- 99ad4426 W0703 (unused-state) → World-A scopes; exports stay body.exports (already World-A via S2). 4 tests migrated.
+- 74ff3224 W0706 (@bind+reactive mix) → has_reactive from scope_referenced_state_vars class/content kinds. 2 tests migrated.
+Earlier this turn: 62ef468c S5a (dead selector_ref deletion), 08a861dd S5b (5 dead structs + 2 fields), 101df6fe S5c.1 (directive_scopes_from_body synthesis), 61a4b200 S5c.2 (vestigial keyframes? removal).
+
+REMAINING reify consumer = W0711 ONLY (`text <- $expr` deprecation, reads body.injections at pipeline/mod.rs:~1162). BLOCKER: W0711 must distinguish arrow `text <- $x` (deprecated) from colon `text: $x` (valid content-binding, USED in fleet: cart-demo). At scope level both become css_declaration property="text"; `is_injection` is a RENDER-ROUTING flag (setAttribute vs textContent), NOT a syntax-origin flag — set inconsistently (body-root text<- → false; wrapped text: → false; wrapped text<- → true). So it can't discriminate. CLEAN FIX: add a `from_arrow: bool` to CssDeclaration (~5 construction sites + serde default), set true by injection_scopes_from_body's `<-` path AND convert_cst_scope's arrow handling; W0711 fires on property=="text" && from_arrow. THEN: body.injections read deletable → reify_component_body + ComponentDirective + ContentInjection-as-body-field + CaptureType::ComponentBody deletable (states/exports/html/refs/directives all World-A; selector_refs/matches deleted). NB W0711 has NO unit test and fleet actively uses `text <-` (would warn) — confirm W0711 intent before extending the model.
+
+Other body.states reads at pipeline/mod.rs:1494/1611/1629 are FINE as-is (body.states is World-A-overwritten by S1, so they read World-A data through the reify struct — only the STRUCT removal needs them repointed, not a behavior change).
+
+NOTE [2026-06-14]: S5c COMPLETE (consumer-side) — autonomous session. ALL production consumers of reify's parsed ComponentBodyDef output are now World-A-sourced. Commits this stretch:
+- 743c3697 E0905 → World-A scopes (CompileContext.scopes + with_scopes; scope_declared_state_names/scope_referenced_state_vars/first_signal_ref; 5 tests parse-based)
+- 99ad4426 W0703 → World-A scopes (exports stay body.exports/S2; deterministic order; 4 tests)
+- 74ff3224 W0706 → World-A scopes (has_reactive from scope class/content kinds; 2 tests)
+- a5a9651f W0711 DELETED entirely (user decision: text<- ≡ text: byte-identical aliases, verified 22733 bytes; <-=reactive-flow, :=general reactive-prop binding incl. color:/width: fleet-critical; W0711 was sole body.injections reader) + inspect scope-display directives → World-A (template_scope_directive_display; dropped unused TemplateScope.injections field; build_scope_tree takes scopes) + handlers.rs debug Display drops directive count.
+
+STATE: NO production code reads body.directives or body.injections anymore (only reify itself + form_compiler unit tests at 4733+). body.html/states/exports/refs all World-A-overwritten for @template. reify is DEAD WEIGHT for @template.
+
+KEYSTONE BLOCKER for literal reify_component_body deletion = the World-A scope-construct + overwrite is @template-ONLY (parser/mod.rs:447 directive name=="template", :629 macro_name!="template", :461 selector "@template:<name>"). The other :component_body users — template-inline (&name(params){body} definition) + @editable-mark/@editable-block — produce NO Construct scope, so they still need reify's full parse. CRITICAL FINDING: ALL THREE are UNUSED in the entire fleet+tests (top-level &name(){} defs: 0; @editable-mark/block defs: 0; @editable(...) in region-edit-demo is the separate primitive INVOCATION, not a definition). So reify is kept alive ONLY for unused constructs.
+
+DELETION PATH = FEAT-116: generalize Construct("template")/@template:<name> scope-construction to ALL body-bearing constructs. ~10 coupling sites (parser/compiler/pipeline). Two options: (a) reuse Construct("template")+@template: namespace for editable/inline (names unique, cheap) OR (b) real Construct(<kind>) generalization (FEAT-116 proper). Body-bearing directive forms reachable in the SAME root_node.directives() loop (template/editable-mark/editable-block all @-directives); template-inline (&name(){}) is the lone non-directive element-ref form (and unused). Recommend (a) as the minimal clean cutover since editable/inline are unused — extend the name filters at :447/:629 to the closed set, reusing the @template: machinery; then reify_component_body + ComponentDirective + ContentInjection + CaptureType::ComponentBody deletable. NOT rushed this session per no-broken-middle.
+
+Gates throughout: lib 2246, integration 172, v8 425 (+9 pre-existing BUG-087), snapshots 52, build clean. Pre-existing unrelated breakage untouched: tests/lsp_tests.rs (MacroDefAst.scope_within).
+
+NOTE [2026-06-14]: FEAT-116 + S5c parts 7/8 COMPLETE (autonomous). reify_component_body reduced to a pure BODY-SYNTAX VALIDATOR (lints only) — all parallel DATA production eliminated. Commits: dd853d51 (FEAT-116 generalize @template-only scope-construction to all body-bearing constructs via is_body_bearing_construct + is_template_directive broadened to template/editable-mark/editable-block), bd5e65ab (S5c.7 no-op body-root directive arms), e195e3c7 (S5c.8 decouple reify_block directive-build from css/section detection; delete reify_self_prop/reify_toggle/make_content_binding/make_content_binding_ex; 10 dead tests + corpus removed; 16 snaps regen).
+
+reify_component_body NOW produces: html (World-A-overwritten for body-bearing constructs, dead), states/exports/refs (World-A-overwritten, dead), directives/injections (EMPTY, no longer built), css_rules (DEAD — not consumed), section_transitions (LIVE → W0700 interleave lint), diagnostics (LIVE → E0900 unrecognized-body-content). So the ONLY live reify outputs are 2 LINTS: E0900 + W0700 (section_transitions). It is no longer a parallel implementation of any DATA — it is a body-syntax validator.
+
+FEAT-116 verified: @editable-mark/@editable-block now produce a @template:<name> Construct scope with populated root_matches (local-state/on) + nested-scope directives, fully World-A like @template. region-edit-demo compiles. is_body_bearing_construct (parser/mod.rs) + Context::is_template_directive (form_compiler.rs) kept in lockstep — the closed set {template,editable-mark,editable-block} is the complete current population (template-inline &name(){} defs unused).
+
+REMAINING for literal struct/type deletion (diminishing returns, not done): (1) parse_on_event_block/parse_state_action still CONSTRUCT ComponentDirective::OnEvent purely to return Option (presence=behavioral) + diagnostic side-effect — callers discard it. Refactor to bool/diagnostics-only to drop the last ComponentDirective construction. (2) Then ComponentDirective/ContentInjection/StateAction types + the empty ComponentBodyDef.directives/injections/css_rules fields deletable. (3) E0900+W0700 could move to a World-A body-lint pass, allowing reify_component_body itself to be deleted/renamed to a validator. These are honest-but-low-value finishing steps; the DATA-parallelism win (the actual goal) is DONE.
+
+Gates throughout: lib 2233, integration 172, v8 425 (+9 pre-existing BUG-087), snapshots 52, golden green, editable 34/34, region-edit-demo compiles. Pre-existing untouched: tests/lsp_tests.rs (MacroDefAst.scope_within).
+
+NOTE [2026-06-14]: S6 TYPE DELETION DONE (a9c630be + ff9225d2): deleted the 4 dead types ComponentDirective/StateAction/ContentInjection/InjectionTarget + the default_content_property helper + the ComponentBodyDef.{directives,injections} fields + the action-classification IR. parse_state_action → validate_on_action (diagnostics-only E0906 probe). 11 StateAction-classification tests deleted, E0906 test migrated, make_template_fm lost 2 params (6 callers), 13 corpus snaps + runtime snaps regen (empty fields gone). ComponentBodyDef now: html/states/exports/css_rules/refs/diagnostics/section_transitions. reify_component_body builds NO consumed DATA — it is a body-syntax VALIDATOR (E0900 unrecognized-content + W0700 section-interleave + E0906 malformed-@on). Gates: lib 2225, int 172, v8 425(+9 BUG-087), golden green, snaps 52.
+
+REMAINING reify_component_body deletion tail (low value, todo done-but-noted): the struct shell + E0900/W0700 lints would need to move to a World-A body-lint pass. A validator that no longer parses parallel DATA is NOT a "one need two impls" violation, so the elegance win is banked; deleting the validator itself is cosmetic.
+
+L3 DIAGNOSED (backtick-hole state decl): PROVEN `` `$navOpen` bool: false; `` in a @template body produces 0 local-state matches + E0905(undefined) + E0900(unrecognized) — pulsar's backtick-state is SILENTLY BROKEN (no seed) and now errors. Per docs/data-and-rendering.md §2 + harmony rule (backtick=hole everywhere, bare $x=decl with space-introduces-type), the backtick form is MIS-AUTHORING, not a grammar gap — the fix is to correct pulsar (`` `$navOpen` `` → `$navOpen`), which lives in gitignored projects/ (separate repo, user's fleet). The in-repo improvement would be a PRECISE diagnostic ("a `$x` hole cannot be a state declaration; use `$x type: value`") replacing the confusing E0900 — a diagnostic-design decision deferred for user input (don't want to add a mis-authoring special-case detector unilaterally). NOT a regression.
+
+L4 (per-instance class-toggle non-reactive on invokeTemplate): the watch path is ST.registerSelectorInit (st.js:171) + ST.watchScoped (st.js:449). PROVEN earlier: page-level toggle reacts to ST.set; an invokeTemplate-created instance's toggle does NOT (both body-root AND .sel-wrapped) — the init runs once but watchScoped doesn't re-fire for dynamically-invoked subtrees. Deep runtime mount-order bug, independent of reify. Blocks body-directives.test.st (1/11). Needs focused runtime investigation (the MutationObserver/scheduleInit ordering for invoked subtrees), not a quick fix.
+
+NOTE [2026-06-14]: L4 RE-DIAGNOSED (CORRECTED — was wrong): NOT a runtime bug. The per-instance class-toggle (body-root AND .sel-wrapped) works PERFECTLY in the real V8 + page-CSS path — PROVEN: a template invoked via page CSS (`.h { &card(); }`) mounts during DOMContentLoaded, seeds state in the factory, applies the INITIAL toggle (count=42>10 → .s--big present=true), AND reacts to ST.set (class flips). All correct.
+
+The earlier "bug" was a PROBE/HARNESS artifact: (1) my first probe called Spacetime.invokeTemplate imperatively then ST.set synchronously — init hadn't flushed. (2) body-directives.test.st (1/11) uses imperative invokeTemplate + @wait; in the HEADLESS backend the dynamically-appended element's registerSelectorInit never flushes. Root mechanism: page-CSS instances mount via the SYNCHRONOUS querySelectorAll fallback in registerSelectorInit (runs at DOMContentLoaded); imperatively-appended instances rely on the MutationObserver → ST._scheduleInit → _flushInit microtask path. LinkeDOM DOES ship a MutationObserver (linkedom.bundle.js:4147), but its callback delivery in the rustyscript/deno_core event loop isn't pumped by @wait→setTimeout in the headless harness, so _flushInit never runs for the appended subtree. The state SEED works (factory is synchronous in invokeTemplate) — only the registerSelectorInit-driven toggle render is missed. (Proof: a headless probe where assert1 'state seeds'=PASS, assert2 'initial toggle applied'=FAIL.)
+
+So FEAT-115's body-root directive feature is COMPLETE + CORRECT in production. The remaining gap is purely TEST-HARNESS: headless invokeTemplate+@wait doesn't deliver MutationObserver callbacks → _flushInit. FIX OPTIONS (test-infra, deferred — risky without full harness map): (a) headless harness pumps ST._flushInit() after each DOM-mutating @eval; (b) a headless MutationObserver-delivery pump on @wait; (c) rewrite body-directives.test.st to the page-CSS mount pattern (but @mount inline CSS-invoke didn't mount in a fixture — needs the right probe form). The src/main.rs:3194 headless runner uses rustyscript Runtime + LINKEDOM_JS + get_combined_runtime(); @wait = setTimeout (test.st). Did NOT modify harness (couldn't fully validate observer-delivery fix without breaking infra; user away).
+
+L3 unchanged (backtick-state mis-authoring; needs diagnostic-design call).

@@ -1,0 +1,105 @@
+#+TITLE: Rich text = constrained Spacetime AST (allowlist/denylist)
+#+STATE: ITEM
+#+SESSION_ID: 14f8685429e4ccf1
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-01T18-22-11-112Z_14f8685429e4ccf1.jsonl]]
+#+CUSTOM_ID: FUP-029-rich-text-constrained-spacetime-ast-allo
+
+* Initial Message
+
+ok let's think deeply deeply. What would a headless CMS for Spacetime look like? like a headless CMS that has all the nice features of a headless CMS and the power of Spacetime combined. Look at the stdlib and the __dev__ to understand some of the pre-existing experiments, and do a research on the state of headless CMSes, before coming back with your THOUGHTS AND REFLECTIONS (no decisions yet)
+
+* Origin
+docs/specs/spacetime-cms-stage2-3.md §"VEIN 2" (REFRAMED by the user 2026-06-03).
+STAGE 2 (Squarespace killer). This FUP SUPERSEDES two earlier ideas (a bespoke
+"richtext document schema" and a bespoke "Spacetime-aware sanitizer") — both collapse
+into one allow/denylist over the AST that already exists.
+
+* The reframe (the key insight)
+Earlier design proposed rich text as "an html5ever document tree + bespoke Spacetime
+traits, serialized over the wire," implying (a) a NEW wire schema and (b) a NEW
+sanitizer. The user asked the decisive question: *what is the difference between that
+and a Spacetime AST stripped of =%=-directives, with an allowlist/denylist?*
+ANSWER: none — the AST framing is the correct primitive. The html5ever-tree framing
+was over-engineering a thing the IR already is.
+
+* The key fact (verify)
+Spacetime ALREADY parses HTML into its own IR via an html5ever custom TreeSink:
+- src/html/treesink.rs:1 — "html5ever custom TreeSink → ir::HtmlExpr"
+- src/ir/code.rs:299 —
+  =HtmlExpr = Element{tag, attrs: Vec<(String, Vec<AttrPart>)>, children} | Text(String) | Hole(JsExpr) | Raw(String)=
+- =AttrPart= (src/ir/code.rs:316) = =Lit(String) | Hole(JsExpr)= — so =src=$.image=
+  (literal+hole+literal) round-trips losslessly.
+∴ html5ever is NOT a parallel tree; it is the front-end that PRODUCES the HTML portion
+of the Spacetime AST/IR. The "traits" the earlier draft invented (a =@scroll= on a
+quote, a =$binding= on an image src) ARE just AST nodes (an Element with a directive
+child; an AttrPart::Hole). ∴ Rich text = a Spacetime AST subtree, CONSTRAINED by an
+allowlist/denylist of node kinds.
+
+#+BEGIN_EXAMPLE
+@type Article { title: string; body: richtext; }   // body = constrained HtmlExpr subtree
+#+END_EXAMPLE
+
+* Scope
+1. Define the rich-text POLICY as an allowlist/denylist over AST/HtmlExpr node kinds
+   (and attributes):
+   - ALLOW structure: h1 h2 h3, p, ul/ol/li, blockquote, img, a, figure/figcaption
+   - ALLOW inline marks: strong, em, code, br  (the "hard 20%" — native AST, free)
+   - ALLOW Spacetime: AttrPart::Hole ($.field bindings); a curated set of motion
+     directives on blocks (@scroll/@reveal) — "animatable prose"
+   - DENY: %primitive, %emit js, %macro, <script>, <style>, <iframe>, on* event attrs,
+     javascript: URLs, form controls
+2. Decide & implement WHERE the policy is enforced. Likely all three:
+   (a) admin editor only OFFERS allowlisted kinds (UX),
+   (b) server VALIDATES an incoming EditAst body against the policy before persisting
+       (SECURITY-BEARING — mandatory),
+   (c) the compiler/TreeSink already rejects =%=-directives in this context.
+3. Add a =richtext= type signal: a field typed =richtext= tells the admin "render the
+   block editor for this allowlisted-AST field." Smallest form: a new primitive type
+   name; alternatively a Reference to a built-in.
+4. Storage locus: inline serialized AST subtree in the entry JSON, vs a sidecar
+   .st/.html fragment addressed by provenance (data-st-id/origin). Inline = simple,
+   one file; sidecar = cleaner git diffs + reuses provenance addressing. Provide a
+   recommendation; do not pre-bake.
+
+* What this explicitly does NOT need (consequences of the reframe)
+- NO bespoke document wire schema — reuse the EXISTING AST/JsonValue serialization that
+  EditAst already round-trips (src/sync/protocol.rs, handle_edit_ast; user confirms
+  EditAst is "taken care of"). Schema work shrinks to "define the allowlist."
+- NO bespoke regex sanitizer — sanitization IS the denylist (a node-kind filter over
+  the AST). Honours AGENTS.md: don't write a Rust HTML parser/fallback; the metasystem
+  is self-describing; the list is the policy. (The seed =__stSanitizeContentHtml= in
+  stdlib/__dev__/primitives/dev-save.st is the regex stopgap to replace.)
+- NO object-union TypeExpr for blocks — blocks are AST nodes, not union variants.
+
+* Dividends to preserve (do not regress)
+- inline marks native (<strong>/<em>/<a> are ordinary Element nodes).
+- animatable prose (a block Element can carry an allowlisted @scroll/@reveal) — no CMS
+  has animated structured content; their rich text is inert.
+- $data bindings in prose via AttrPart::Hole (<img src=$.image>).
+- provenance addresses every node (docs/CONTENT_EDITING.md) — editing round-trips.
+- the block-type menu IS the allowlist; allowlist a new node kind (or register a block
+  @template) → it appears in every writer's menu. Extensible by editing a list /
+  declaring a type — never by editing the editor. The metasystem dividend, on prose.
+
+* Open questions
+- Where exactly is enforcement centralized (editor/server/TreeSink)? Server is the
+  security-bearing point.
+- inline vs sidecar storage (Q7).
+- distinct =richtext= TypeExpr vs Reference to a built-in (smallest viable signal).
+
+* Acceptance
+- A documented allow/denylist policy exists, with the enforcement point(s) chosen.
+- Server REJECTS a denylisted node (e.g. <script>, %emit) in an EditAst rich body with
+  a clear Reject reason; ACCEPTS an allowlisted body.
+- A field typed =richtext= drives the admin to render the block editor.
+- A rich body with =<strong>=, =<a>=, an =<img src=$.image>=, and a block-level
+  @reveal round-trips edit→persist→render.
+
+* Related
+- docs/specs/spacetime-cms-stage2-3.md §"VEIN 2"
+- docs/CONTENT_EDITING.md (provenance + __content path)
+- src/html/treesink.rs, src/ir/code.rs (HtmlExpr/AttrPart), src/sync/handlers.rs
+  (handle_edit_ast), src/sync/protocol.rs
+- stdlib/__dev__/primitives/dev-save.st (__stSanitizeContentHtml — the regex seed)
+
+NOTE [2026-06-04]: IMPLEMENTED (Stage-2 W3, commits f234c92e + 0f74d2f0). src/sync/richtext.rs: lol_html allowlist sanitizer (ALLOWED_TAGS=structure+inline+span, ALLOWED_ATTRS incl. data-st-*; disallowed tags unwrapped, rawtext/script/svg/math dropped whole; on*=/style stripped; js:/data:/vbscript: URLs dropped; fail-closed has_dangerous_residue escapes whole value on residue). Enforced server-side on ALL persist paths: handle_edit_json (sanitize_value_html, recursive), EditJsonArray Insert, EditAst __content. richtext type -> {type:string,x-st-richtext:true} -> widget richtext. SECURITY REVIEW (reviewer agent, adversarial) found + I fixed 4 real bypasses: P0 unclosed-tag gate, P0 mXSS rawtext-unwrap, P1 array-insert gap, P1 EditAst gap. 11 sanitizer + 3 persist tests; 128 sync tests green. REMAINING for W4: the block-editor UI (richtext widget renders a structured block editor; currently the widget is signaled but renders via default until W4).

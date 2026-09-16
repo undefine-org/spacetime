@@ -1,0 +1,63 @@
+#+TITLE: Nested project-local macro dropped inside stdlib macro body
+#+STATE: DONE
+#+SESSION_ID: 151314b62976ac5e
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-22T11-35-50-693Z_151314b62976ac5e.jsonl]]
+#+CUSTOM_ID: BUG-140-nested-project-local-macro-dropped-insid
+
+* Initial Message
+
+create a new demo that showcases the power of the 3d module by replicating ALL of https://everswap.com/ very faithfully (with your own additions if you want, list them)
+
+You will probably have to improve or refine the 3d module syntax, which is fine. List the effects (both the 3d in the background and what is done to the insides of each section, section by section), and tell me how you would modularise each of them into a motion design language that makes sense?
+
+This will be in projects/everswap-clone, and everswap-clone will be tracked as its own .git (not a submodule).
+
+First start with a deep investigation. Use puppeteer for maximal visibility and investigation
+
+* Summary
+A project-local `%macro` (defined in a site's own files, e.g. `projects/everswap-clone/lib/layer.st`)
+is SILENTLY DROPPED when used as a child directive nested INSIDE a stdlib macro
+body that captures `$children*` (e.g. `@stage { @layer(...) }`). The same macro
+works as a top-level sibling. Stdlib child macros (e.g. `@object`) nest fine.
+
+Symptom: the nested directive's `%binds` primitive never runs; its `%emit js`
+never reaches the bundle; the scene/page is missing that element with NO compile
+error.
+
+* Root cause
+`src/parser/mod.rs::rematch_with_user_macros_in` (and its twin `rematch_with_registry`)
+re-extract FormMatches with an AUGMENTED registry (stdlib + user macros), then
+diff against a STDLIB-ONLY parse to find "new" matches — keeping only matches
+whose (start,end) span is absent from the stdlib parse.
+
+When a user `@layer` nests inside stdlib `@stage`:
+- augmented parse correctly absorbs `@layer` into `@stage`'s `$children*` Block,
+  so `@layer` is NOT a top-level match — it lives inside the `@stage` match.
+- `@stage`'s span EXISTS in the stdlib parse (stdlib knows `@stage`), so the
+  enriched `@stage` match (now carrying the `@layer` child) is filtered out by
+  the span-only diff → the children block built by the augmented parse is discarded.
+- ∴ nested user matches vanish. Top-level siblings survive (genuinely new span).
+
+* Fix
+Index stdlib matches by span -> nested-match COUNT (`count_nested_matches`).
+For each augmented match sharing a stdlib span, if its nested-match count GREW,
+REPLACE the stale match in-place across the AST (`replace_match_by_span`:
+flat `matches` + every scope/nested-scope `matches`), preserving the selector.
+Genuinely-new spans still flow through the existing assignment path.
+
+Applied to BOTH `rematch_with_user_macros_in` (main-page path) and
+`rematch_with_registry` (fragment/test path).
+
+* Test (RED -> GREEN)
+`src/parser/mod.rs` test `nested_user_macro_inside_stdlib_body_survives_rematch`:
+a `%macro widget` nested inside stdlib `@media("...") { @widget(n:7) }` must
+survive `rematch_with_user_macros`. Verified RED on the old span-only filter
+(panics), GREEN with the fix. Full suites: parser 303, metasystem 220,
+pipeline 227 — all pass, zero regressions.
+
+* Discovered by
+Building projects/everswap-clone (@layer inside @stage). See
+research/everswap-clone-investigation.org.
+
+* Files
+- src/parser/mod.rs (count_nested_matches, replace_match_by_span, both rematch fns, regression test)

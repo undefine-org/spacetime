@@ -1,0 +1,121 @@
+#+TITLE: CDP test backend: harness never becomes available (__spacetime_run_tests not injected)
+#+STATE: DONE
+#+SESSION_ID: 1511009590860ad7
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-20T20-50-56-706Z_1511009590860ad7.jsonl]]
+#+CUSTOM_ID: PLAN-056-cdp-test-backend-harness-never-becomes-a
+
+* Initial Message
+
+why is drag and drop not even being triggered in @demos/liveview-kanban/
+
+* Problem
+
+The `--cdp` (Chromium/chromiumoxide) test backend fails to run ANY test in this
+environment: every test errors with
+
+  test harness (__spacetime_run_tests) never became available
+
+after ~12s, preceded by repeated:
+
+  chromiumoxide::handler WS Connection error:
+    Serde(Error("data did not match any variant of untagged enum Message"))
+
+Reproduced on a known-good test (tests/unit/runtime/color.test.st --cdp), so it
+is the backend, not a specific test.
+
+* Context
+
+- Chromium IS present (`chrome`, `chrome-headless-shell` in ~/.cache/puppeteer).
+- docs/testing/CDP_BACKEND.md notes the chromiumoxide 0.7 "data did not match any
+  variant" WS log is benign and silenceable — but here the harness genuinely
+  never loads (the page's `__spacetime_run_tests` global is never injected/ready),
+  so it is more than log noise.
+
+* Impact
+
+Layout/timing/paint assertions and real-DOM-only APIs (document.elementFromPoint,
+getBoundingClientRect geometry) cannot be tested. Concretely this blocks a real
+hit-test test for `ST.dropTarget` (PLAN-055) — currently covered by a LinkeDOM
+mock + the live demo instead.
+
+* Likely causes to investigate
+
+- chromiumoxide 0.7 protocol/message schema mismatch vs the installed Chromium
+  revision (the untagged-enum deserialize failure may be dropping the CDP event
+  that signals page-load / runtime-ready, so the harness-injection step never
+  fires).
+- The harness-injection waits on a load/lifecycle event that the deserialize
+  failure swallows. Consider bumping chromiumoxide, or pinning a Chromium rev
+  known to match, or making the readiness wait resilient to the unparsed message.
+
+* Acceptance
+
+`cargo run --features cdp -- test tests/unit/runtime/color.test.st --cdp` runs the
+test (pass/fail), and a real-DOM ST.dropTarget hit-test (geometry, not mocked)
+can be added.
+
+Files: the CDP backend harness (chromiumoxide driver + harness injection),
+docs/testing/CDP_BACKEND.md.
+
+═══════════════════════════════════════════════════════
+RESOLVED (2026-06-22) — CDP backend fully working
+═══════════════════════════════════════════════════════
+Two independent root causes, both fixed:
+
+1. **chromiumoxide 0.7 event-deserialize crash (the WS noise was fatal, not benign).**
+   0.7's CDP types expected snake_case field names for some Page.* events while
+   Chrome sends camelCase (e.g. Page.frameRequestedNavigation `frameId` vs
+   `frame_id` — upstream issue mattsse/chromiumoxide#266). The untagged-enum
+   deserialize failure KILLED the handler connection, so every subsequent
+   `page.evaluate` silently returned nothing → harness never loaded. Fix: bumped
+   to chromiumoxide **0.9.1** (Cargo.toml both dep lines). 0.9 dropped the
+   `tokio-runtime` feature (tokio now baked into async-tungstenite) → declared
+   `default-features = false` with no feature list. Lockfile updated.
+
+2. **Inline <script> truncation by a `</script` in the runtime (the real harness-never-loads cause).**
+   Even after the version bump, the page rendered (title/DOM present) but NO inline
+   script executed — only our injected __ST_DRIVEN global existed. Probing showed
+   `eval(script[0].textContent)` → "Unexpected end of input": the first <script>
+   block was truncated. Cause: `editable.js:975` contains the literal string
+   `<script>alert(1)</script>` in a sanitizer comment; when the test HTML is parsed
+   by a REAL HTML parser (Chromium), that `</script>` closes the inline <script>
+   element early, truncating the runtime mid-source. The V8 `logic` backend evals
+   the JS directly (no HTML parse) so it never hit this. Fix:
+   `src/test_runner.rs::escape_script_close` escapes `</script` → `<\/script`
+   (JS-identical, HTML-safe) on all three embedded JS strings (st_runtime,
+   test_runtime, all_js). Unit-tested (test_escape_script_close).
+
+Additional hardening:
+- **file:// instead of top-level data: URL** (src/cdp.rs::HtmlFileGuard). Modern
+  Chrome refuses to run inline scripts in a top-level data: document (opaque
+  origin). Stage HTML to a temp file, navigate file://, remove on Drop. (The
+  escape fix alone makes data: work too, but file:// is the correct origin model
+  and avoids the whole class of data:-URL script-execution caveats.)
+- **Auto-discover Puppeteer Chrome** (src/cdp.rs::find_puppeteer_chrome). find_chrome
+  now falls back to ~/.cache/puppeteer/chrome/<rev>/ (highest revision; Linux +
+  macOS), so --cdp works out-of-the-box with no SPACETIME_CHROME on CI/dev boxes
+  that have a puppeteer Chromium but no system Chrome.
+- **Shared dev-hooks extractor** (test_runner::dev_hooks_js, pub). Both backends
+  (V8 logic in main.rs + Chromium HTML) seed __stDebugHook/__ST_DEBUG__ from the
+  ONE primitive source; appended to full_st_runtime(). main.rs delegates to it
+  (removed the headless-only duplicate).
+
+Test-contract fix surfaced by real Chromium:
+- tests/unit/primitives/smooth-scroll.test.st — two tests mounted `<body class=…>`
+  nested in a fixture <div> (invalid HTML). linkedom kept it leniently (fake green,
+  the primitive never actually ran on document.body); Chromium correctly stripped
+  it. Rewrote to valid `<div>` elements (they only assert init-doesn't-crash);
+  true viewport-scroll targeting is a @drive page-level concern.
+
+VERIFICATION:
+- `cargo run --features cdp -- test tests/ --cdp` → **611 passed, 0 failed, 2 skipped**
+  (the 2 skips are 0-test files, pre-existing). The 15 layout/timing rung tests that
+  the logic backend defers now RUN FOR REAL on Chromium and pass.
+- `cargo test --features cdp --test cdp_runner_test` → 2/2 (out-of-the-box, no env).
+- No regressions: headless 598/0/15, lib 2503/0, integration 181/0.
+- The acceptance criterion is met: `cargo run --features cdp -- test
+  tests/unit/runtime/color.test.st --cdp` runs (11 passed). A real-DOM ST.dropTarget
+  hit-test can now be added (separate follow-up).
+
+Files: Cargo.toml, Cargo.lock, src/cdp.rs, src/test_runner.rs, src/main.rs,
+docs/testing/CDP_BACKEND.md.

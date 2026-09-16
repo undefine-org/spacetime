@@ -1,0 +1,133 @@
+#+TITLE: Static export drops non-index .st pages — clean-path routes 404 on deploy
+#+STATE: DONE
+#+SESSION_ID: 153d8ede25f7aff7
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-25T11-25-45-495Z_153d8ede25f7aff7.jsonl]]
+#+CUSTOM_ID: BUG-218-static-export-drops-non-index-st-pages-c
+
+* Initial Message
+
+https://ys2olone710qdtvpcgfny.preview.spacetime.undefine.org/brand isn't owkring but it is there in local. Why?
+
+* Symptom
+https://ys2olone710qdtvpcgfny.preview.spacetime.undefine.org/brand -> 404
+(also /process -> 404), while `cargo run -- serve projects/backdesk-new/`
+serves both at 200. "Works locally, 404 deployed."
+
+Observed (2026-07-25):
+- dev server  : GET /brand 200 (14231B), /process 200 (9924B), /missing 404
+- deployed edge: GET /brand 404, /brand/ 404, /process 404;
+                 /spacetime.js 200 (736529B), /spacetime.css 200 (23527B)
+- `cargo run -- build projects/backdesk-new/` -> "Pages: 1";
+  dist/ contains ONLY index.html. brand.st and process.st produce NOTHING.
+
+* Root cause (two independent gaps, both required for the 404)
+
+1. EXPORT never discovers sibling `.st` pages.
+   src/export/discover.rs::collect_st_dirs only records directories that
+   contain an `index.st` (`st_dirs`). A sibling page like `<site>/brand.st`
+   is therefore not a bundle, gets no compile, and src/export/emit.rs has
+   no route to emit for it. FEAT-093 taught the DEV SERVER to resolve a
+   clean path `/p` -> `p.st` then `p/index.st`
+   (src/server.rs::try_serve_st_page) but the STATIC EXPORT path was never
+   taught the same resolution -> dev and deploy disagree. This violates the
+   deploy-parity rule stated in discover.rs itself and in
+   docs/deploy/ARTIFACT.md: "what `spacetime serve` serves, the edge serves".
+
+2. EDGE has no clean-URL convention for an extensionless path.
+   Split out to =commercial/host= BUG-034 (separate repo, separate deploy):
+   `normalize_pathname` appended `index.html` only for a trailing slash or
+   the empty path, so `/brand` looked up the key `{project}/{hash}/brand` —
+   a key no export writes. Fixed there; needs the Worker redeployed.
+
+3. A THIRD defect surfaced while verifying gap 1 and is filed as BUG-219:
+   the export compiled every entry WITHOUT `site_dir`, so `@doc(src:)` and
+   SSG `@each` resolved their build-time file reads against the process CWD.
+   The deployed /brand rendered "Document not found" where dev rendered the
+   real 1898-char guideline. Independent root cause, same dev/deploy
+   divergence class. Both must be fixed for the page to be correct.
+
+* Fix
+Gap 1 (this repo): generalize export discovery from "dirs with index.st"
+to "route dir -> entry .st", so a sibling `p.st` becomes route dir `p`
+with entry `p.st`, reusing the SAME resolution order as the dev server
+(`p.st` wins over `p/index.st`). Emit then needs no new branch: the
+existing `.st`-only synthesis loop (emit.rs, FUP-039) already turns a
+bundle with file-scope markup and no authored `.html` into a page —
+it just never received these bundles. Page-vs-module is decided by the
+existing criterion (empty compiled `html` => not a page), and bundle
+assets are written only for bundles something actually references, so
+`modules/*.st` fragments emit nothing instead of a 740KB junk bundle each.
+
+Gaps 2 and 3 are tracked and fixed under BUG-034 (host repo) and
+BUG-219 respectively.
+
+* Staging
+Export fix alone makes `/brand/` (trailing slash) work on the current
+edge. `/brand` needs the edge Worker redeployed.
+
+* Acceptance — VERIFIED (observed, not inferred)
+- `cargo run -- build projects/backdesk-new/` -> "Pages: 3"; dist/ holds
+  index.html + brand/index.html + process/index.html; brand/ and process/
+  each carry their own spacetime.{js,css}; NO modules/*/ bundle written. ✓
+- `cargo run -- build demos/spacetime-docs/` -> "Pages: 2"
+  (index + reference/index.html). ✓
+- Markup parity dev-vs-export, measured by extracting every non-`st-`
+  class from both and comparing the SEQUENCES (the `st-` prefix covers the
+  dev-only host/inspector/migration dock widgets, absent from a build by
+  design):
+    /        dev 97 classes == export 97, identical ✓
+    /brand   dev 71 classes == export 71, identical ✓
+    /process dev 18 classes == export 18, identical ✓
+- Browser-driven, both sides live (dev server + `python3 -m http.server`
+  over dist/): body element counts, computed background (the theme
+  actually applied), swatch/pillar/faq/ledger counts all match. ✓
+- 7 unit tests in src/export/emit.rs (`bug218_clean_path_export_tests`):
+  sibling page -> own route; nested sibling at depth; `p.st` beats
+  `p/index.st`; module fragment emits neither page nor bundle;
+  `_`-prefixed sibling is not a route; authored `.html` still wins for a
+  sibling route; @doc resolves against site_dir (BUG-219's guard). ✓
+- `cargo test --lib export::` -> 56 passed, 0 failed. ✓
+
+* Design notes (why this shape)
+- ONE resolution rule, two callers. `st_dirs: BTreeSet<dir>` became
+  `st_entries: BTreeMap<route dir -> entry .st>`, and the sibling form is
+  collected BEFORE the recursive descent so `p.st` wins over `p/index.st`
+  exactly as `try_serve_st_page`'s candidate array does. Dev and export
+  cannot drift because they now encode the same order.
+- NO new emit branch. The existing `.st`-only synthesis loop (FUP-039)
+  already turned "bundle with file-scope markup and no authored .html"
+  into a page; it simply never received these bundles. Discovery was the
+  whole defect.
+- Page-vs-fragment uses the criterion already in the code: empty compiled
+  `html` => not a page. `modules/theme.st` is styles, so it emits nothing
+  — without this, each of 11 modules would have shipped a ~700KB runtime
+  bundle under a URL nothing links to.
+- `_`-prefixed siblings are partials by the SAME naming convention
+  `path::is_denylisted` already applies to directories — reused, not
+  reinvented.
+- Compile diagnostics are still reported for EVERY entry, page or not: a
+  fragment that fails to compile breaks the pages importing it, and
+  silence there is how a broken build looks green.
+
+* Related
+FEAT-093 (dev-side clean paths, DONE — this is its missing export half)
+PLAN-005 / docs/deploy/ARTIFACT.md (deploy parity rule)
+PROJ-007 (backdesk-new, the site that surfaced it)
+
+NOTE [2026-07-25]: DONE in commit c5c0ae96. discover.rs st_dirs -> st_entries
+(route dir -> entry .st), sibling collected before descent so `p.st` beats
+`p/index.st` as in try_serve_st_page. emit reuses the FUP-039 synthesis loop
+unchanged; bundles written only for pages, so 11 module fragments emit nothing
+instead of ~700KB each. backdesk-new Pages 1 -> 3, spacetime-docs 1 -> 2.
+Browser-verified dev/export parity on all three pages. 7 regression tests.
+Gates: lib 2787/0, integration 200/0, v8 438/0, headless 656/0.
+Edge half: commercial/host BUG-034 (needs Worker redeploy for the no-slash form).
+
+NOTE [2026-07-25]: the full chain that made /brand work end to end was FOUR
+defects, not one: BUG-218 (export never discovered sibling .st pages),
+BUG-219 (export compiled without site_dir, so @doc read against the CWD),
+BUG-220 (literate .st.md pages vanished; a module with markup became a route),
+BUG-227 (stdlib resolved against the CWD, so push shipped a 0-byte runtime),
+plus commercial/host BUG-034 (the edge had no clean-URL convention). Each was
+found only by verifying the LIVE result rather than trusting the previous
+fix's green build.

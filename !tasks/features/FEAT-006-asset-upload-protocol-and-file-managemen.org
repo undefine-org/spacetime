@@ -1,0 +1,89 @@
+#+TITLE: Asset upload protocol and file management endpoint
+#+STATE: DONE
+#+SESSION_ID: 14a73642da0c17db
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-03-30T14-30-47-693Z_14a71735234c17b2/19-CreateFeat3.jsonl]]
+#+CUSTOM_ID: FEAT-006-asset-upload-protocol-and-file-managemen
+#+EFFORT: M
+#+PRIORITY: #B
+#+LAYER: server
+
+NOTE [2026-03-30]: Implemented POST /__spacetime/dev/upload with blake3 content-hashing, MIME validation, 10MB size limit, and deduplicating writes to assets/uploads/.
+
+* Scope
+
+** In scope
+- HTTP POST endpoint for file uploads at ~/__spacetime/dev/upload~
+- Asset directory convention: ~{site_dir}/assets/uploads/{hash}.{ext}~
+- Content-hash naming using blake3 for deduplication
+- MIME type validation (images: png, jpg, gif, webp, svg; configurable)
+- File size limit (default 10MB, configurable)
+- Return relative path suitable for JSON data fields
+
+** Out of scope
+- UI for image picking/uploading (separate item)
+- Image optimization/thumbnails (FUP)
+- Asset deletion/cleanup
+
+** Boundary rationale
+The upload endpoint is shared infrastructure used by both the media picker UI and the admin panel asset browser.
+* Tests
+
+** Rust unit tests (~src/assets.rs~ or ~src/server.rs~ inline)
+- Upload valid PNG: file written to correct path, content-hash name matches
+- Upload valid JPG, GIF, WebB, SVG: all accepted
+- Upload invalid MIME type (e.g., .exe): rejected with clear error
+- Upload exceeding size limit: rejected with 413 status
+- Duplicate upload: same content produces same hash, no duplicate file
+- Path traversal prevention: filename with ~../~ does not escape assets dir
+- Missing/empty multipart body: rejected with 400
+
+** Integration test
+- POST multipart file to running dev server, verify 200 response with path, verify file exists on disk
+- GET the returned path from the dev server, verify file served correctly
+* Implementation
+
+** Prerequisites (first step)
+- Add ~multipart~ feature to axum in Cargo.toml: ~axum = { version = "0.8", features = ["ws", "multipart"] }~
+- Add ~blake3~ crate to Cargo.toml for content-hash naming
+- Configure ~axum::extract::DefaultBodyLimit~ for upload size
+
+** Step 1: Asset module (~src/assets.rs~ new file)
+#+begin_src rust
+pub struct AssetConfig {
+    pub upload_dir: PathBuf,      // {site_dir}/assets/uploads/
+    pub max_size: usize,          // 10MB default
+    pub allowed_mimes: Vec<String>,
+}
+
+pub fn save_asset(data: &[u8], filename: &str, config: &AssetConfig) -> Result<String, AssetError> {
+    // 1. Validate MIME type from extension
+    // 2. Validate size
+    // 3. Compute blake3 hash of content
+    // 4. Write to upload_dir/{hash}.{ext}
+    // 5. Return relative path: "assets/uploads/{hash}.{ext}"
+}
+#+end_src
+
+** Step 2: Upload endpoint (~src/server.rs~)
+- Add route: ~.route("/__spacetime/dev/upload", post(upload_handler))~
+- Handler extracts multipart form, reads file field, calls save_asset
+- Returns JSON: ~{ "path": "assets/uploads/abc123.png", "size": 12345 }~
+- Dev-mode only: guard with same debug_config check as other dev routes
+
+** Step 3: Static serving
+- Ensure the assets/uploads/ directory is served by the existing static file handler
+- The catch_all_handler in server.rs already serves files from site_dir, so ~assets/uploads/~ files should be served automatically. Verify this.
+* Edge Cases
+- Upload with no file field: return 400 with descriptive error
+- Upload with multiple files: accept first only (or batch upload?)
+- Empty file: reject with error
+- Very long filename: truncate original name in metadata, hash is the canonical name
+- Disk full: handle IO error gracefully
+- Concurrent uploads of same file: blake3 hash means same content = same file, safe for concurrent writes
+* Acceptance Criteria
+- ~cargo test --lib~ passes with upload handler tests
+- POST to /__spacetime/dev/upload with PNG returns 200 + path
+- File exists at {site_dir}/assets/uploads/{hash}.png
+- Invalid MIME type returns 400/415
+- Oversized file returns 413
+- Returned path is servable via dev server

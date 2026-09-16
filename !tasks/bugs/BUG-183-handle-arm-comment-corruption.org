@@ -1,0 +1,186 @@
+#+TITLE: A comment inside an @handle receive arm body can silently corrupt/null the whole arm, no diagnostic
+#+STATE: DONE
+#+SESSION_ID: 153115a0b151f3c0
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse-commercial-host/2026-07-15T18-54-16-774Z_153115a0b151f3c0.jsonl]]
+#+CUSTOM_ID: BUG-183-handle-arm-comment-corruption
+
+* Initial Message
+
+ok back to the host work, can you tell me what you did, what was left, what is now possible?
+
+* Found by
+Live user report this session: the `__host__` widget's device-flow login
+worked visibly (WorkOS's own popup correctly showed "Confirm this code
+is shown on your device" through to "You are all set!") but the token
+was never actually retrieved -- traced to `$startLogin`'s `@handle`
+block in `stdlib/__host__/index.st` never running its own effect
+statements. Root-caused via a from-scratch minimal reproduction and
+character-by-character bisection, not assumed.
+
+* Reproduction (two INDEPENDENT trigger shapes confirmed)
+
+Minimal repro file:
+#+begin_src text
+@handle $go {
+  receive {
+    Started(body) => {
+      $noop <- 1;
+      // <COMMENT WITH TRIGGER TEXT HERE>
+      $noop <- 2;
+    }
+    Failed(_) => { }
+  }
+}
+#+end_src
+
+** Trigger 1 -- bare apostrophe
+A comment containing a single apostrophe anywhere in its text (e.g.
+=// serde's default=) placed INSIDE the arm body above nulls the WHOLE
+arm: the compiled output is =var handleArms = null || [];= instead of
+a real arms array -- confirmed via direct inspection of the compiled
+=spacetime.js= output. NO compile error, NO warning; =cargo run --
+check= reports success. At runtime, `ST.getSignalCall`'s registered
+fire function correctly fires and the reply event correctly dispatches
+with the right decoded variant/body -- but nothing consumes it, since
+`handleArms` is empty. Silent no-op all the way through.
+
+Verified via bisection: =// serde default derive object secs nanos
+fields= (identical wording, apostrophe removed) compiles fine and the
+arm fires correctly. Adding the apostrophe back (=serde's=) alone
+reproduces the null.
+
+** Trigger 2 -- bare double-colon
+A SEPARATE, independently-reproducing corruption: a comment containing
+=::= (e.g. a Rust path like =std::time::Duration= or
+=spacetime_host_core::auth::DeviceFlowStart=) placed inside the arm
+body does NOT null the arm, but instead SPLICES the comment text into
+the arm's own body-capture as bogus, garbled object structure --
+confirmed via direct inspection of the compiled output, which showed
+literal comment fragments becoming stray JSON-like object keys/values
+mid-structure, and the arm's REAL trailing statement being truncated
+out of the captured body entirely.
+
+Neither trigger produces a compile-time diagnostic of any kind.
+
+* Impact
+Any `.st` file with a `//` comment inside an `@handle` receive arm's
+`{ ... }` body containing either a bare apostrophe OR a `::` sequence
+silently loses part or all of that arm's effect statements at runtime,
+with zero indication anything is wrong -- the compiler reports success,
+the signal correctly fires and correctly decodes its reply, but the
+consuming `@handle` arm simply never runs (or runs a truncated/garbled
+version of its intended statements). This is exactly the shape of bug
+that survives code review (the source reads correctly) and passes a
+naive "does it compile" check, only surfacing via an actual runtime
+click-through -- which is how this was found.
+
+* Likely root cause (not confirmed against the parser/lexer source directly this session -- inferred from black-box behavior)
+A raw text-based capture (likely the `handle_arm`/`balanced('}')`
+capture-type machinery in `stdlib/capture-types/handle-block.st`, or
+whatever backs it in the meta-AST layer) appears to scan arm-body text
+in a way that is NOT genuinely comment-aware for string/structural
+purposes -- i.e. it may be treating `'` as if it could open a string
+literal (even inside a `//` line comment) and/or treating `:` sequences
+as structurally significant (object key/value separators) regardless
+of comment context. Two DIFFERENT failure shapes for two DIFFERENT
+trigger characters suggests two related but distinct code paths are
+affected, or one shared scanner with two different failure modes
+depending on what it \"recovers\" into after losing sync.
+
+* Workaround applied this session
+`stdlib/__host__/index.st`: every `@handle` receive arm body in this
+file now contains ONLY statements, zero comments. All explanatory
+comments moved to immediately ABOVE the `@handle` block instead
+(confirmed via the same live bisection methodology to always compile
+correctly regardless of content -- comments outside an arm body are
+never affected by either trigger). This is a real, durable, low-cost
+workaround, not a suppression: verified via a live browser test that
+the previously-broken `$startLogin` handler now correctly opens the
+WorkOS device-confirm popup, displays the confirm code, polls
+`/api/v1/auth/exchange` to completion, and persists the resulting
+token to disk on a full end-to-end run.
+
+* New regression tests
+=tests/integration/handle-arm-comment-corruption.test.st= -- 2 tests,
+one per trigger shape, both currently passing (they exercise the
+WORKAROUND, i.e. assert a comment-free arm body fires correctly; they
+do NOT yet assert that a comment WITH the trigger char correctly fires
+too, since that is the actual compiler bug still open). A future fix
+attempt should extend this file with a third test asserting a handle
+arm WITH an apostrophe-or-double-colon-containing comment inside its
+body ALSO fires correctly -- that test should currently FAIL against
+the un-fixed compiler, proving the bug is real and pinning the target
+behavior for the fix.
+
+* Fix required
+1. Locate the actual capture/lexer code responsible for `handle_arm`'s
+   body capture (or whatever shared raw-text-scanning machinery both
+   trigger shapes route through) and make it genuinely comment-aware:
+   a `//` (or `/* */`) comment's content must never be scanned for
+   string-literal-opening or structural-separator characters.
+2. Add the third regression test described above (comment WITH trigger
+   char, inside an arm body, still fires correctly) to
+   =tests/integration/handle-arm-comment-corruption.test.st= once
+   fixed, and remove the "zero comments inside handle arm bodies"
+   workaround from `stdlib/__host__/index.st` (restore the fuller
+   inline documentation those arms previously had, if desired) once
+   the compiler no longer requires it.
+
+NOTE [2026-07-17]: COMPILER FIX LANDED (this session, resuming from the workaround-only state).
+
+Root-caused to TWO independent bugs, both in
+`src/syntax/events/extractors/custom.rs`:
+
+1. `BalancedExtractor`'s byte-scanner (the machinery behind `balanced(')`
+   captures like `handle_arm`'s `$body:balanced('}')` in
+   `stdlib/capture-types/handle-block.st`) had zero comment-awareness — a
+   `'` or `::` inside a `//`/`/* */` comment was scanned as if it could open
+   a string literal or matter structurally (quote-depth / bracket-depth /
+   delimiter), desyncing the scan. Fixed: the scanner now detects and skips
+   a whole `//` line comment or `/* */` block comment BEFORE considering any
+   quote/bracket/delimiter character, so comment CONTENT is never
+   structurally significant.
+
+2. Even with (1) fixed, `handle_arm`'s captured `body`/`stmt` field stayed a
+   raw `CapturedValue::Expr`. Codegen's Expr branch
+   (`captured_to_js_with_registry` in `src/pipeline/expand.rs`) splices
+   `Expr` text UNQUOTED into the generated JS object literal (correct for
+   typical arm text, which was meant to read as inline JS) — but once that
+   text contains a genuine `//`/`/* */` comment, the raw splice corrupts the
+   surrounding codegen (the comment eats the rest of the emitted source
+   line, desyncing everything after it — matches this bug's reported
+   "splices garbled object structure" symptom exactly).
+   Fixed: added a `handle_arm` reifier (`reify_handle_arm` in
+   `custom.rs`, registered via the existing `wrap_reifier` kinds-as-data
+   dispatch — no new subsystem, no Rust match-arm-per-case) that retags
+   `body`/`stmt` from `Expr` to `CapturedValue::String`. Codegen's String
+   branch quotes+escapes it as opaque text — which is what it always was at
+   runtime: `stdlib/primitives/signal-handler.st`'s `runStmts` splits it on
+   `;` and interprets each statement via `ST.runMutations`, never runs it as
+   raw inline JS.
+
+Verified via:
+- 6 new/updated Rust unit tests in
+  `src/syntax/events/extractors/custom.rs` (isolated BalancedExtractor
+  behavior + full `parse_matches` pipeline, both trigger chars, block +
+  line comments).
+- Full existing suite: `cargo test --lib` — 2610 passed (2 pre-existing,
+  unrelated snapshot failures in `stdlib/primitives/animation/drivers.st`
+  territory, confirmed present before this session's edits).
+- `cargo test --test integration_tests` — 189 passed, 0 failed.
+- Headless end-to-end: extended
+  `tests/integration/handle-arm-comment-corruption.test.st` with a THIRD
+  test (the actual fix pin per this bug's own "Fix required" §2) — a
+  comment containing BOTH trigger characters INSIDE an arm body, with a
+  trailing statement after it. All 3 tests pass under
+  `cargo run --features headless -- test tests/integration/handle-arm-comment-corruption.test.st --headless`.
+- Removed the now-unnecessary "zero comments inside @handle arm bodies"
+  workaround language from `stdlib/__host__/index.st` (3 call sites:
+  $startLogin, $initDeploy, $promote) — comments are safe inside arm
+  bodies again; `cargo run -- check stdlib/__host__/index.st` still
+  passes.
+
+NB: a duplicate stale org item existed at
+`BUG-100-handle-arm-comment-corruption` (same title/body, STATE: ITEM,
+pre-dating this item's own rename to BUG-183) — deleted as a duplicate of
+this (already-existing, now fully DONE) item.

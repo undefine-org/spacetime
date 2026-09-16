@@ -1,0 +1,35 @@
+#+TITLE: Reactive signal in CSS-property position emits setAttribute not style.setProperty
+#+STATE: DONE
+#+SESSION_ID: 14fc108ed3772fa8
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-04T14-32-37-965Z_14fc108ed3772fa8.jsonl]]
+#+CUSTOM_ID: BUG-091-reactive-signal-in-css-property-position
+
+* Initial Message
+
+what will this look like in the end? why are you saying that EditJson stays out of AST? Think about this: what if the tokens were never in json in the first place? AP1 and AP2 need structural fixes, not this, I think you are not going very far in envisioning this as a full meta-language. What is the ideal syntax and DX and UX?
+
+* Problem
+`.hero { background: $brand.scarlet; }` (a reactive signal/member-access in a
+CSS-property declaration) emits a binding that does
+`node.setAttribute("background", __v)` — an HTML ATTRIBUTE write — instead of
+`node.style.setProperty("background", __v)`. So the style never paints.
+Browser-confirmed: SpacetimeLocal['brand'].scarlet = "#FF0020" but the .hero
+element has no inline style and getComputedStyle shows transparent bg.
+
+* Exact site (oracle 65-BrandSingletonScope)
+src/compiler.rs ~1180, emit_reactive_binding_js final `else` branch: a reactive
+`:` declaration whose property is not .class/--prop/text/content emits
+setAttribute(property, __v). This fn's ONLY caller is emit_scope_css_inner over
+css_declarations (compiler.rs:~1240) — the `:` surface, which is ALWAYS CSS.
+The attribute-injection surface is the SEPARATE `<-` arrow (parser/mod.rs:5055),
+so there is no ambiguity: at this site it must be node.style.setProperty.
+
+* Fix
+Change the else-branch from setAttribute(property,__v) to
+node.style.setProperty(property, __v). Add a browser-DOM assertion that a
+`.hero { background: $sig.member }` actually paints (getComputedStyle bg).
+
+* NB
+Orthogonal to the brand singleton's admin pane (which reads $brand as a value,
+no CSS-var needed). Unblocks the "reference tokens as $-values in CSS" half of
+the brand vision.

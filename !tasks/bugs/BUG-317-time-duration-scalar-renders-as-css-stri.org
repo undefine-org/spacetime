@@ -1,0 +1,53 @@
+#+TITLE: :time/:duration scalar renders as CSS string in emit JS, breaking JS-numeric consumers (setTimeout NaN)
+#+STATE: ITEM
+#+SESSION_ID: 154d91ed9602d93c
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-08-06T12-08-13-733Z_154d0baaa942d918/12-W3Resume.jsonl]]
+#+CUSTOM_ID: BUG-317-time-duration-scalar-renders-as-css-stri
+
+* Initial Message
+
+Discovered during W3 (PLAN-137) while fixing the on-sig-change `@wait_for_signal` test files. The malformed `timeout 1500` bare spellings were corrected to `timeout 1500ms` (the grammar's canonical unit-full spelling), which surfaced a PRE-EXISTING regression: the `:time`/`:duration` scalar value renders as its SOURCE STRING ("1500ms") when spliced into `%emit js`, so every JS-numeric consumer computes NaN.
+
+* Repro
+
+```
+@import "stdlib/testing/test"
+@test "t" {
+  @wait 500ms
+  @wait_for_signal $x on .a to_equal 1 timeout 1500ms
+}
+```
+
+Emitted JS:
+- `@wait`: `Math.min("500ms", 250)` → NaN → setTimeout 0ms.
+- `@wait_for_signal`: `const __timeout = "1500ms";` → `setTimeout(fn, "1500ms")` → NaN → immediate timeout. Error message reads `Timeout after 1500msms waiting ...` (string "1500ms" + template suffix "ms").
+
+* Root cause
+
+The scalar migration (PLAN-122 W4 f0099c1c, FEAT-168 2d82722c) made `time`/`duration` stdlib `%scalar_type`s whose value IS their source text (ScalarSourceTextExtractor in src/syntax/events/extractors/custom.rs). Before that, `:time` produced `CapturedValue::Time(ms)` — a NUMBER. The JS-numeric splice consumers (`%$timeout`/`%$duration` in `@wait`, `@wait_for_signal`, `@wait_for_signal_truthy`, `@wait_for_state`, `@wait_until`, `@wait_for`) were never updated to convert the string back to ms.
+
+`stdlib/primitives/signal.st` already defines a LOCAL `parseMs(v)` and correctly uses `var timeoutMs = parseMs(%timeout)` — that is the established conversion pattern, but it is scoped to signal.st.
+
+* Impact
+
+- `@wait_for_signal`/`@wait_for_state`/`@wait_until` with a unit-full timeout resolve immediately (NaN) → `Timeout after ...msms` false failures.
+- `@wait Nms` in browser waits 0ms (NaN), not Nms — timing is only masked headless by the frozen clock (BUG-313 item 3).
+- Blocks W3 gates: tests/unit/templates/on-sig-change-head.test.st (2) and tests/unit/animations/on-sig-change-mutation.test.st test 5 (debounce: 120ms) timeout at 0ms.
+- `@on $sig.change` itself is CONFIRMED WORKING headless (tests/on-sig-change-semantics.test.st passes 3/3 after spelling corrections) — this bug is in the assertion macros, not the signal rail.
+
+* Suggested fix
+
+Give the JS-numeric consumers a conversion, not the scalar repr (the string is correct for CSS/display contexts). Expose a global duration parser (the signal.st `parseMs` pattern) and have the wait-family macros call it, e.g. `const __timeout = parseMs(%$timeout);`. Then `@wait 500ms` → `Math.min(parseMs("500ms"), 250)`.
+
+* Evidence
+
+Built with CARGO_TARGET_DIR=/home/user/w3-target `cargo build --features headless`:
+- `grep -oE "const __timeout = [^;]*;"` over the semantics build → `const __timeout = "1500ms";`
+- `grep -oE "Math.min\([^)]*250[^)]*\)"` over a `@wait 500ms` build → `Math.min("500ms", 250)`
+- Headless run of on-sig-change-semantics: 3 passed, 0 failed (semantics correct; failures are the timing-dependent head/mutation-debounce cases hitting the NaN timeout).
+
+* Repro files
+
+- tests/repro/gh-36-wait-until-optional/ (P3, wait_until affected)
+- tests/unit/assertions/binding.test.st, state.test.st (wait-family macros)
+- tests/unit/templates/on-sig-change-head.test.st, tests/unit/animations/on-sig-change-mutation.test.st

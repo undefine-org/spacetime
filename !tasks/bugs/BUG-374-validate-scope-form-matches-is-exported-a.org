@@ -1,0 +1,62 @@
+#+TITLE: validate_scope_form_matches is exported and never called
+#+STATE: TODO
+#+PRIORITY: #B
+#+CUSTOM_ID: BUG-374-validate-scope-form-matches-is-exported-a
+
+* Summary
+
+=src/metasystem/validate.rs:1450::validate_scope_form_matches= is =pub=,
+re-exported from =src/metasystem/mod.rs:44=, and called by nothing — not by the
+compiler, not by a test, not by a binary.
+
+This is the fourth layer of the BUG-367 defect, recorded there and deliberately
+NOT bundled into that fix (a deletion in an unrelated module has no business in
+a commit whose stated purpose is the function-call validator; see BUG-367's
+resolution notes).
+
+* Measurement
+
+    $ grep -rn 'validate_scope_form_matches' src/ tests/
+    src/metasystem/validate.rs:1450:pub fn validate_scope_form_matches(   ← definition
+    src/metasystem/mod.rs:44:pub use validate::validate_scope_form_matches; ← re-export
+
+Two hits. One is the definition, the other is the re-export that makes it
+public. Zero call sites.
+
+Note the re-export is what hides it: =rustc='s =dead_code= lint does not fire on
+a =pub= item reachable from the crate root, so this cannot be found by the
+compiler — only by asking "who calls this?".
+
+* Why it is the BUG-367 class
+
+The function validates that a scope's form matches its declared grammar. If it
+is correct, then some class of malformed scope is currently accepted silently.
+If it is obsolete, it is 100+ lines of misleading code implying a check that the
+compiler does not perform. Either way the current state is the worst one: the
+code reads as coverage, and provides none.
+
+* Resolution — decide which, then act
+
+  1. Read the function and determine whether the check it performs is
+     ALREADY performed elsewhere (the metasystem grew a lot of form validation;
+     this may be a superseded duplicate, in which case: delete).
+  2. If not duplicated, construct a source file that SHOULD trip it, and confirm
+     via the CLI (=cargo run -- check=) that the malformed input is currently
+     accepted. That is the RED test.
+  3. Then either wire it into the pipeline where forms are matched, or delete it
+     and record what stopped being checked.
+
+Per BUG-367: the test must assert through
+=spacetime::analysis::diagnostics::collect_document_diagnostics=, never by
+calling the function directly. A test that calls the validator itself cannot
+distinguish "validates correctly" from "validates correctly and never runs" —
+that is precisely how this survived.
+
+* Related
+
+  - BUG-367 (DONE) — the same pathology, three layers, =0d1ce6ae=
+  - BUG-373 — 32 diagnostic codes that can never fire
+
+* Found by
+
+Dead-code sweep following BUG-367.

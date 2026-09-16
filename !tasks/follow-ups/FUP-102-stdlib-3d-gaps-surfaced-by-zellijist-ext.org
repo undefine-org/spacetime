@@ -1,0 +1,93 @@
+#+TITLE: stdlib/3d gaps surfaced by zellijist: extrude/shape geometry, per-object scroll keyframes, shadow control, multi-material
+#+STATE: ITEM
+#+SESSION_ID: 15219c677c4613e6
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-03T18-27-25-809Z_15219c677c4613e6.jsonl]]
+#+CUSTOM_ID: FUP-102-stdlib-3d-gaps-surfaced-by-zellijist-ext
+
+* Initial Message
+
+~/Downloads/WhatsApp_Video_2026-07-03_at_16.22.08.mp4
+
+^^ look at this video and break it down. I'd like you to procedurally generate the exact model of tile that is in the video (down to the roughness etc) and to create a scroll-based animation of what you see in the video using the latest spacetime 3d module and stuff, in projects/zellijist. You can add more copy and turn the final outline of the spaced out tiles into a Z logo and introduce the company (feel free to invent whatever you want)
+
+If you need anything that isn't yet implemented in Spacetime, let me know, or implement it as a projects/zellijist/lib/ stuff. Do a deep analysis and explain the motion and visual experience you intend on creating.
+
+* stdlib/3d capability gaps surfaced building projects/zellijist (FEAT-143)
+
+Building the Zellijist scroll experience required a project-local `lib/three-zellij.st`
+primitive because the stdlib `@`-surface can't express several things a rich 3D scene
+wants. Filed so the surface can grow (each would let a future site DELETE custom lib code
+and author pure macros — the harmonious end state).
+
+** Gaps (each verified against stdlib/3d/{macros,primitives}/*.st source)
+1. *No triangle / extrude / custom geometry.* `@object` shape ∈ {icosahedron, sphere,
+   box, torus, torusknot, cone, cylinder, plane}. No triangle, no `THREE.Shape` +
+   `ExtrudeGeometry`, no way to pass vertex data. Zellijist needed thin triangular prisms.
+   → Proposal: `@object(shape: "extrude", path: "M0,0 L1,0 L1,1 Z", depth:, bevel:)` or a
+     dedicated `@shape` macro wrapping ExtrudeGeometry (three r184 has it on the namespace).
+2. *One material per mesh.* `@object` binds a single material. A real ceramic tile is TWO
+   surfaces — glossy glaze cap + matte clay rim (three supports a material array over
+   geometry groups; `ExtrudeGeometry` already emits cap/wall groups).
+   → Proposal: allow `material:` to take a second `edgeMaterial:` (cap vs wall), or a
+     material list.
+3. *No per-object scroll keyframing.* `@scroll-3d(drive: …)` maps scroll→ONE global param
+   (dollyZ|spinY|morph|camY). No way to keyframe N objects independently across scroll
+   sub-ranges (home→spread→wall). Zellijist hand-rolls the whole timeline in JS.
+   → Proposal: a keyframe form, e.g. `@scroll-3d { &tile at 0: {pos} at 0.5: {pos} at 1: {pos} }`
+     or let the 2D `@scroll` timeline target three.js object transforms.
+4. *No shadow control.* `@light` exposes no `castShadow` / shadow-map / soft-shadow params,
+   and `@stage` doesn't enable the shadow map or offer a receiver plane. Contact shadows are
+   essential for a "flat on a lit bed" read. Zellijist enables `renderer.shadowMap` + adds a
+   shadow-casting light + receiver bed by hand in the primitive.
+   → Proposal: `@light(… , shadow: true, shadowSoftness:)` + `@stage(shadows: true)` +
+     maybe `@ground(color:, receiveShadow: true)`.
+5. *No instancing.* Each `@object` is a separate mesh/draw call; a loop makes N meshes, not
+   an InstancedMesh. Zellijist's ~260 tiles are individual meshes (fine at this count, but a
+   larger field would want instancing with per-instance transforms).
+
+** Also: `%emit js` statement-splitter bug (BLOCKS clean primitive authoring)
+While writing the primitive, the `%emit js` block's naive statement splitter MANGLED
+C-style `for (a; b; c)` loops when two `for` headers appeared close together / nested on
+compressed lines — it split on `;` inside the `for(...)` header, emitting
+`for (let r = 0;; 
+ r < ROWS; 
+ r++)` → a JS SyntaxError that only surfaced at runtime
+(the served bundle 500'd / stage never booted). Workaround: rewrite those loops as `while`
+loops (committed in three-zellij.st). Repro: two sibling/nested `for (let i=0;i<N;i++)` in
+one `%emit js`. This is a real emitter bug worth a minimal RED test + fix independent of the
+3D surface.
+
+** Provenance
+All five 3D gaps are additive extensions of the EXISTING macro grammar (new params /
+one new shape kind / a keyframe sub-block), not a new subsystem — they meet the AGENTS
+"elegance bar" for eventual stdlib adoption. The `%emit js` splitter bug is a straight
+defect. None block Zellijist (it ships via the sanctioned project-local `lib/` primitive),
+but closing them would let the page author pure `@`-macros.
+
+** Status
+OPEN — filed from FEAT-143. Not scheduled.
+
+* Update — projects/zellijist-2 (FEAT-146)
+
+Built a second, from-scratch experience (`projects/zellijist-2/`) to a fully
+MEASURED spec of the reference film, per explicit instruction to reuse
+stdlib/3d as much as possible and avoid new primitives where feasible. Result:
+gaps *1 (extrude/triangle geometry)*, *2 (two-material tiles)*, and
+*4 (shadow control)* remain genuine, confirmed gaps — `lib/three-tile-field.st`
+fills exactly them and NOTHING else (no camera code, no fill lights, no env
+map — those are 100% stdlib `@stage`/`@light`/`@env` calls, unmodified). This is
+the leanest possible project-local primitive given the current stdlib surface;
+closing 1/2/4 in stdlib would let a future build delete this file entirely.
+
+Gap *3 (per-object scroll keyframes)* is still hand-rolled in the primitive
+(the FLUSH→SEPARATE→LIFT→SCATTER choreography) — `@scroll-3d` still only drives
+one global param. Gap *5 (instancing)* remains moot at this scale (12 tiles).
+
+Also surfaced a NEW, more serious, general defect while building this — filed
+separately as *BUG-145*: named macro-call arguments silently bind to the wrong
+param (falling back to the primitive's default with no error) when the call's
+argument order doesn't match the `%form` declaration order. This is NOT a 3D-
+specific issue (confirmed independently against `demos/3d/scroll-tunnel`'s
+`@object(... emissiveIntensity: ...)`) — it's a core macro-binding defect
+affecting all of stdlib. See BUG-145 for root cause + repro. Workaround in use
+in zellijist-2: match `%form` declaration order at every call site.

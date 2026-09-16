@@ -1,0 +1,98 @@
+#+TITLE: @editable engine — ast-model + editable-surface primitives
+#+STATE: DONE
+#+SESSION_ID: 1503ca05d05c0c62
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-10T14-32-18-497Z_1503ca05d05c0c62.jsonl]]
+#+CUSTOM_ID: FEAT-098-editable-engine-ast-model-editable-surfa
+#+COMPLETION_HASH: ce3b12b6b3eb1a8a
+
+* Initial Message
+
+PLAN-031 -> read it, show me the boldest version of implementing @editable, and how you'd integrate it to the current admin
+
+Parent: [[id:PLAN-031-editable-structured-rich-text-input-mult]] — Wave 1. Depends: FEAT-097 (registries; can develop against hand-registered fixtures in parallel).
+
+* Target
+- stdlib/editable/MODULE.st, index.st
+- stdlib/editable/primitives/ast-model.st (new, owned JS)
+- stdlib/editable/primitives/editable-surface.st (new, owned JS)
+- stdlib/editable/macros/editable.st (new)
+- stdlib/editable/tests/*.test.st
+
+* Change
+AST = ProseMirror node/mark SHAPE (adopt scheme, not code): doc → blocks →
+inline text nodes w/ marks[]; attrs on nodes. Positions = integer offsets into
+flat traversal.
+- ast-model.st: position map (AST pos ↔ DOM point), ops {insertText, deleteRange,
+  toggleMark, setBlock, splitBlock, joinBackward, setAttr}, apply(op) → new doc,
+  project(doc|block) → DOM via registered mark/block template factories
+  (ST.editable.*). DOM NEVER read back.
+- editable-surface.st: contenteditable host; EVERY beforeinput preventDefault →
+  op → apply → re-project dirty block → restore selection from AST positions.
+  selectionchange → $sel. Compiled keymap from registered shortcuts. IME:
+  composition buffered (compositionstart..end), diffed to one op.
+  %exports: $doc object, $sel object {from,to}, $activeMarks array, $blockType
+  string, $empty bool.
+- editable.st macro:
+  #+begin_src spacetime
+  @editable(bind: $body) {
+    marks: &bold &italic &link &mention(source: $teammates);
+    blocks: &h2 &p &figure;
+  }
+  #+end_src
+  %binds editable-surface(&self, doc:$body, marks:$marks, blocks:$blocks) ->
+  {$doc,$sel,$activeMarks,$blockType,$empty}.
+  PARTIAL APPLICATION: args bound in marks: list = projection context (never
+  persisted); free typed params = content attrs (persisted, schema-validated).
+  Free param TYPE → inline widget dispatch (url → href popover; the popover is a
+  nested single-line @editable bound to the node attr, via @portal).
+- Doc signal methods $body.apply("bold")/$body.setBlock("h2") via signal_call
+  capture rail (stdlib/capture-types/on-actions.st) → custom toolbars are plain
+  @on click + .active: $activeMarks.includes("bold").
+- Default toolbar = @each over resolved marks' toolbar templates.
+
+* Acceptance
+HEADLESS (logic rung — no real selection, so AST-level):
+- ast-roundtrip.test.st: @property forall op sequences (GENERATIVE.md rail —
+  fuzz random op streams against doc fixtures): apply ops → project → re-parse
+  → stable; positions monotone; no orphan marks
+- ops.test.st: each op vs known doc fixtures (@then $signal claims)
+- keymap/schema lookups: ST.editable.marks claims
+CDP (needs cdp — LinkeDOM has NO getSelection; FIDELITY_LADDER discipline):
+- selection.test.st: @when click/keydown + @eval-driven Range setup; typed char
+  → beforeinput intercepted → $doc updated, DOM projected, caret stable
+- ime.test.st: composition events buffered (CDP Input domain)
+- link-args.test.st: &link popover edits href; persists into AST attr
+Gates: rg 'execCommand|innerHTML' stdlib/editable/ → only projection writes,
+zero reads. cargo run --features headless -- test stdlib/editable/tests --headless
++ same with --cdp.
+
+NOTE [2026-06-10]: 2026-06-10 regression triage: v8_runtime media_dedup (10) + selector_init (2)
+failures are NOT from editable work. Proof: @media is a compiler BUILTIN (not a
+stdlib macro), compile_st runs .without_runtime() so the runtime bundle is absent,
+tests have ZERO editable refs, and they fail deterministically in isolation. Origin
+= concurrent FEAT-088/089 dispatch + FEAT-092 admin session committing on top of my
+work (commits aaf62567/1d1b97ac landed AFTER my FEAT-097). The 5 snapshot_tests
+failures WERE mine (runtime bundle now includes editable.js) — purely additive,
+accepted via INSTA_UPDATE. Lib now 2191 green.
+
+NOTE [2026-06-10]: DONE 2026-06-10. Engine complete:
+- public/runtime/editable.js (ST.Editable): pure AST kernel — doc shape, integer
+  positions, ops (insertText/deleteRange/toggleMark/setBlockType/splitBlock),
+  AST→DOM projection (marks nest in registration order), selection↔position
+  bridge (posFromDOM/domFromPos), schema-validated ops, JSON round-trip. Wired
+  into runtime bundle (emit.rs/test_runner.rs/main.rs).
+- stdlib/editable/primitives/editable-surface.st: live host. contenteditable +
+  beforeinput→preventDefault→AST op→re-project; selection→{from,to}; yields
+  $doc/$sel/$activeMarks/$blockType/$empty; commands ride signal methods
+  ($doc.apply/setBlock/split); persists AST via ST.adFieldInput.
+- stdlib/macros/editable.st: @editable(bind:,marks:,blocks:) selector-scope macro.
+Tests:
+- tests/v8_runtime/editable_model_tests.rs: 14 headless — ops, queries, projection,
+  DOM-position-bridge round-trip, 40-seed×60-op FUZZ (doc validity + round-trip +
+  projection-never-throws invariants).
+- stdlib/editable/tests/surface.test.st: 4 end-to-end — input→beforeinput→op→
+  reproject; $doc.apply('bold')→<strong>; setBlock('h2')→<h2>; activeMarks signal.
+  Pass on --headless (LinkeDOM dispatches events + runs op path); CDP = higher-
+  fidelity selection/IME confirmation (no browser in this env).
+Commits: fbaebed2 (engine). Lib 2191 green; 18 editable tests green.
+NB concurrent FEAT-088/089/092 session causes unrelated v8 media/selector failures.

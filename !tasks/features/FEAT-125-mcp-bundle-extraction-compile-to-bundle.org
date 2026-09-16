@@ -1,0 +1,34 @@
+#+TITLE: MCP bundle extraction (compile_to_bundle)
+#+STATE: DONE
+#+CUSTOM_ID: FEAT-125-mcp-bundle-extraction-compile-to-bundle
+#+DEPENDS: PLAN-041-plan-039-unified-live-mcp-environment-or
+#+LAYER: mcp
+#+PRIORITY: A
+
+* Parent
+[[id:PLAN-041-plan-039-unified-live-mcp-environment-or][PLAN-041]] Wave 1 (substrate, parallel with FEAT-127/129).
+
+* Summary
+A Rust API =compile_to_bundle(source, ws_root) -> Bundle= that compiles a .st source and returns a portable bundle = per-template {name, body(html/builder/states/exports/refs/matches), params, animations} + css + contract, WITHOUT emitting a page. The bundle is the unit the unified env registers into a live page at runtime. Reuses the existing World-A template-scope serialization (FEAT-119 W4) — exposes what the page-load register-template path already produces.
+
+* Why
+Today a compiled function becomes a standalone page (artifacts + a URL). The unified env needs the SAME content as a portable, registerable bundle. The structured body object already exists in the compiler (=component_payload_to_js= / =component_body_to_js_from_scope=, src/syntax/form_match.rs); CSS is already a separate CompiledSpacetime field. Extraction = expose what's there; no new lowering.
+
+* Target
+- =src/mcp/bundle.rs= (or extend =src/mcp/state.rs=) — =pub fn compile_to_bundle(source: &str, ws_root: &Path) -> Result<Bundle, CompileError>=.
+- =Bundle { templates: Vec<TemplateBundle { name, body, params, animations }>, css: String, contract: Contract, diagnostics, has_errors }=.
+
+* Change
+Run the existing pipeline through World-A scope construction; for each =@template:<name>= scope, serialize the body via the existing helpers; collect css from CompiledSpacetime.css; derive minimal contract from param specs.
+
+* Edge
+- Source with no templates -> empty templates vec + still return css/diagnostics (a chrome source).
+- Source with file-scope HTML outside templates -> ignored in v1 ([[id:FUP-061-file-scope-constructs-in-mcp-bundles-template][FUP-061]]), warn.
+- Multiple templates -> all in the vec; one mounted per region by name.
+- Compile errors -> diagnostics populated + has_errors flag; do NOT panic.
+
+* Acceptance
+- Unit: compile a known =@template &card($title){ ... }=; assert bundle has template name "card", param $title, non-empty html + builder, css present.
+- Unit: source with two templates -> vec len 2.
+- Unit: source with a compile error -> diagnostics populated, no panic.
+- =cargo test --lib= green.

@@ -1,0 +1,50 @@
+#+TITLE: test_stdlib_resolution passes alone, fails in the full run — shared stdlib cache is order-dependent
+#+STATE: ITEM
+#+PRIORITY: B
+#+CUSTOM_ID: BUG-346-stdlib-resolution-order-dependent
+
+* Symptom
+
+`lsp::workspace::import_resolver::tests::test_stdlib_resolution` FAILS in a full
+`cargo test --lib` run (3165 passed / 10 failed, 2026-08-07) but PASSES every way it is run in
+isolation:
+
+  cargo test --lib import_resolver                      -> 8/0 ok
+  cargo test --lib import_resolver -- --test-threads=1  -> 8/0 ok
+  cargo test --lib lsp::                                -> 127/0 ok
+
+So it is order/parallelism dependent: some earlier test in the full run leaves shared state that
+changes how stdlib resolution answers. Running the whole `lsp::` module does NOT reproduce it, so
+the polluter lives OUTSIDE `lsp::`.
+
+* Why it matters more than a flaky test
+
+The resolver was changed by the BUG-339 fix (commit 28d7cd3b): `resolve_stdlib` now consults the
+FILESYSTEM first and the embedded module index second. That fix is correct and independently
+verified. But it means resolution now depends on process-wide state (a stdlib root / cached index)
+that tests can perturb — which is exactly what an order-dependent failure looks like.
+
+A test that passes alone and fails in company is not noise; it is the suite reporting that the
+mechanism under test has hidden shared state. Left alone it will be re-classified as "known
+baseline" and stop being read at all.
+
+* Investigate
+
+1. Bisect the polluter: run the full suite with `--test-threads=1` and see whether it still fails
+   (ordering vs. genuine concurrency).
+2. Find what caches the stdlib index/root across tests (a `OnceLock`/`lazy_static`/`static` in the
+   resolver or MetaRegistry) and whether any test mutates the cwd or a stdlib-root env var.
+3. Decide the contract: either resolution is pure w.r.t. process state (inject the root), or the
+   cache is explicitly resettable and tests reset it.
+
+* Accept
+
+`cargo test --lib` green for this test in a FULL run, with the fix being an actual removal of the
+shared-state dependency — not `#[serial]` or an ignore attribute, which would hide it.
+
+* Not to be confused with
+
+The other 9 standing failures in the same run are the parallel session's hard-cutover churn
+(5 snapshot_tests, signal_emits_policy_and_lifecycle) and 3 long-known stale tests for retired
+syntax (test_matches_include_scoped_directives, a_value_position_call_without_a_trailing_member_stays_an_arg_list,
+test_component_body_known_directive_stays_silent_with_registry).

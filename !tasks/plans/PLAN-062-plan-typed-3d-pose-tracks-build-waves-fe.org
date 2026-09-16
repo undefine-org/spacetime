@@ -1,0 +1,696 @@
+#+TITLE: PLAN: Typed 3D pose tracks build waves (FEAT-149)
+#+STATE: DONE
+#+SESSION_ID: 15219c677c4613e6
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-03T18-27-25-809Z_15219c677c4613e6.jsonl]]
+#+CUSTOM_ID: PLAN-062-plan-typed-3d-pose-tracks-build-waves-fe
+
+* Initial Message
+
+ok now let's think about this failure and look at it in the context of IMPROVING SYNTAX just like we did with the Spacetime ECS. Take this example and add more to pressure test the options we come up with. Let's come up with a syntax that feels natural and lets us easily explain everything we just talked about
+
+* Initial Message
+
+User: "this looks amazing. kudos. how will you implement it? lay out the plan" — in response
+to FEAT-149 (typed 3D pose tracks: `pos`/`face` keyframe properties, `&stage.camera.bounds(z)`
+parametric facet, `flat`/`tumble(...)` orientation vocabulary — the syntax fix for zellijist-2's
+3 sequential bugs). This PLAN is the TDD execution DAG. Mirrors PLAN-061's proven format
+(FEAT-142's own build plan): RED→GREEN per wave, reviewer swarm between waves, real seams
+cited from source, honest NOTEs appended as waves land — not a re-plan from scratch.
+
+* Parent
+FEAT-149-typed-3d-pose-tracks-kill-the-raw-euler — the design doc + pressure-test battery +
+elegance-bar scorecard is the spec. This PLAN sequences the build.
+
+* Method (unchanged from PLAN-061 — the proven discipline for this repo)
+- TDD: write the failing test FIRST (RED), implement to GREEN, reviewer swarm (2-3 reviewers,
+  main thread) before advancing to the next wave.
+- Test tiers: unit (`cargo test --lib`) for parser/value-kind seams; headless `.test.st` for
+  macro expansion (`cargo run --features headless -- test`); CDP `.test.st` (`--cdp`) for live
+  reactive/visual behaviour (mesh position/quaternion at given scroll fractions).
+- Commit as you go. Compiler/stdlib changes commit to the verse repo; zellijist-2 migration
+  (Wave 4) commits to its OWN git repo (projects/ are gitignored, separate repos per AGENTS.md).
+- Gate to advance a wave: `cargo check` green + that wave's tests green.
+
+* Prerequisite (BLOCKS Wave 2/3 — do not skip)
+
+** BUG-145 fix — out-of-order named macro args silently drop to default
+   `src/syntax/events/form_compiler.rs::match_params`/`match_param` (~line 886-975) walks
+   declared params and the call's token cursor IN LOCKSTEP; a named arg out of `%form`
+   declaration order fails the `cursor.peek_text() == param.name` check and SILENTLY falls
+   back to the default — no error. Every new macro this PLAN adds
+   (`@scroll tile-pose(...)`, `tumble(axis:, angle:)`) has ≥2 named params; authoring against
+   a call-order-sensitive-but-silent binder is how zellijist-2 lost hours to `@stage`'s
+   `fov`/`camZ` mis-bind in the FIRST place. Fix: `match_params` should scan ALL declared
+   params against the token stream by NAME first (order-independent), only falling to
+   positional/lockstep for a call that supplies NO name (bare positional args), and emit a
+   diagnostic (not silent default) when a required named param truly isn't found.
+   - RED: unit test in `src/syntax/events/form_compiler.rs` tests module — a form with params
+     `[a: number = 1, b: number = 2]` matched against call tokens `b: 9, a: 5` must capture
+     `a=5, b=9` (today captures `a=1 (default), b=9` — wrong).
+   - GREEN gate: new test passes; existing `form_compiler.rs` test suite still green (no
+     regression to genuinely-positional forms, e.g. `@light $type:light_type($params*)`).
+   - Accept: BUG-145's own repro (`@stage(camZ: 5.5, camY: 0, fov: 99, ...)`) compiles to
+     `fov=99` regardless of call-site order. Close BUG-145 (mark DONE with commit ref) as part
+     of this wave's acceptance — do not leave it open once fixed here.
+
+* ==================================================================
+* WAVE 1 — `&stage.camera.bounds(z)`: the first PARAMETRIC facet
+* ==================================================================
+DAG: foundation, independent of Wave 2. The narrowest, most novel piece — every FEAT-142
+facet shipped so far is 0-arg; this is the first with an argument. De-risk it FIRST and
+alone, exactly how FEAT-142 itself de-risked reactive facets with an R1 spike before
+committing the surface.
+
+- RED: a headless `.test.st` mounting a bare `@stage(fov: 32, camZ: 5.5)` and asserting
+  `&stage.camera.bounds(0).halfW`/`.halfH` equal the hand-computed
+  `tan(fov/2 * PI/180) * camZ * aspect` (and `* 1` for halfH) for a known canvas size —
+  i.e. prove the facet returns the SAME numbers zellijist-2 hand-derived, not just "a number."
+- Rust/stdlib seam: `@stage` (`stdlib/3d/macros/stage.st` — confirm exact file) is the
+  FIRST built-in (not user-authored) entity. Two implementation paths to evaluate against
+  each other in-wave (do not assume; the FEAT-142 entity/facet machinery
+  (`src/parser/entity.rs::FacetPath`/`emit_facet_read_js`, `ST.worldFacet` runtime) was
+  built for USER `&name{}` entities — check whether `@stage`'s existing
+  `canvas._stThree` sidecar registry can register itself into `window.__stWorld.byName`
+  under a reserved name (e.g. `"stage"`) with a `.camera` component publishing a
+  PARAMETRIC `.bounds` facet, reusing `ST.worldFacet` unchanged, OR whether a parametric
+  facet needs a small `ST.worldFacet` signature extension (accept trailing call-args, not
+  just member-access tail). Prefer the FIRST (reuse, no runtime change) unless the spike
+  proves it can't carry an argument through the existing dotted-string `FacetPath` — in
+  which case extend `FacetPath`/`emit_facet_read_js` minimally (a `(args)` trailing capture,
+  analogous to how `tail` already handles `.y`/`.x`) rather than inventing a second facet
+  mechanism.
+- GREEN gate: the RED test passes; the parametric-facet spike is proven against the LIVE
+  runtime (per-frame reactive read, matching FEAT-142's own R1 discipline — do not assume
+  it composes, run it in Chromium via `--cdp` before declaring it stable).
+- Reviewer swarm: 2 reviewers on the facet-mechanism choice (reuse vs extend) before Wave 2
+  builds on top of it.
+- Accept: `&stage.camera.bounds(z)` is a live, reactive, correctly-computed facet, proven
+  against a SECOND consumer path (not just the zellijist-shaped call) — e.g. also read from
+  a plain `.test.st` assertion unrelated to tile choreography, to confirm it's general.
+
+* ==================================================================
+* WAVE 2 — vec3/orientation/rand value-kinds in a NEW `apply-pose-animations` primitive
+* ==================================================================
+DAG: blocked on Wave 1 (pos/face values will reference `&stage.camera.bounds`) + the BUG-145
+prerequisite (orientation keywords are multi-named-arg calls). Independent of Wave 3.
+
+- RED (unit, `cargo test --lib`): differential tests mirroring the EXISTING
+  `keyframes_via_stdlib_matches_rust_extractor` pattern
+  (`src/syntax/events/extractors/custom.rs`) — but for the NEW value-kinds:
+  1. vec3 tuple `(x, y, z)` parses to 3 balanced sub-exprs, each independently evaluable
+     (reuse the numeric-with-unit grammar `keyframes` already parses per scalar value —
+     do NOT write a new number grammar).
+  2. `flat` / `tilt(x:, y:)` / `tumble(axis:, angle:)` parse via the SAME `fn(args)`-shape
+     branch `apply-animations.js`'s interpolator already recognizes for `translateX(10px)`
+     (confirmed present: "Handle function values (blur, etc.)" branch, ~line 247-260) —
+     `flat` is the zero-arg case of this same shape, not a special case.
+  3. `rand(min, max)` / `min..max` resolves ONCE per entity at build time (NOT per-frame),
+     seeded deterministically — RED test asserts two builds with the SAME seed produce
+     IDENTICAL resolved values (the ANIMATION.md determinism bar), and that omitting a
+     seed still produces a STABLE per-entity value derived from the entity's `$_index`
+     (mirrors zellijist's own `mulberry32(seed)`, promoted to shared stdlib code — write
+     one seeded PRNG helper, delete the per-project `rr()` duplicate this closes).
+- Rust/stdlib seam: NEW primitive `stdlib/3d/primitives/apply-pose-animations.st`
+  (sibling of `stdlib/primitives/animation/apply-animations.st`, NOT a modification of it —
+  DOM keyframe interpolation must stay untouched; a 3D target interpolates into
+  `mesh.position`/`mesh.quaternion`, not `el.style`). Interpolator dispatch order: vec3-tuple
+  (both endpoints look like `(a,b,c)`) → orientation-keyword (`flat`/`tilt`/`tumble`) →
+  fall through to the EXISTING numeric/color/fn-value dispatch for any plain scalar pose
+  channel (e.g. authoring `pos.x: 0 -> 5` alone, without a full tuple, should still work —
+  confirm this composes with the existing interpolator rather than requiring the tuple form
+  always).
+- GREEN gate: unit tests green; a headless `.test.st` asserts a single test entity's
+  `mesh.quaternion` has `|x| < eps && |y| < eps` at a `face: flat` stop and a `tumble(...)`
+  magnitude within the declared `angle:` range at a mid-progress sample — i.e. reuse the
+  SAME axis-specific assertion style this session's `CON-quaternion-w-is-not-a-flatness-check`
+  lesson established (assert the decomposed quantity, never a composite).
+- Reviewer swarm before Wave 3 (interpolator dispatch order + seeding rule are the
+  architecturally load-bearing decisions here).
+- Accept: `pos`/`face` keyframe channels interpolate correctly in isolation (no `@scroll`
+  wiring yet — that's Wave 3), verified by direct primitive invocation in tests.
+
+* ==================================================================
+* WAVE 3 — `@scroll` scope-dispatch: 3D pose vs DOM CSS by construct        [blockers: 1, 2]
+* ==================================================================
+- RED: headless `.test.st` — `@scroll tile-pose(...) { pos: ...; face: ... }` written INSIDE
+  an entity scope nested in `@stage` must bind `apply-pose-animations` (Wave 2's primitive);
+  the EXISTING `@scroll parallax(...) { opacity: 0 -> 1 }` written on a plain DOM selector
+  must keep binding the existing `apply-animations` (Wave-2 must NOT regress DOM timelines —
+  this is the acceptance-critical non-goal).
+- Rust/stdlib seam: reuse `%scope within(<construct>)` (PLAN-039, `src/metasystem/registry.rs`
+  `macro_within_matches`, already implemented and tested — confirmed present, NOT proposed
+  new) exactly as BUG-037 fixed `@light`'s scene-vs-responsive ambiguity by SHAPE/scope, not
+  a new dispatch mechanism. Two `%form`s under the SAME `@scroll` macro name: one
+  `%scope within(stage)` (or `within(entity)`, whichever construct-ref name the Wave-1 spike
+  settled on) binding `apply-pose-animations`, one unscoped (today's) binding
+  `apply-animations`. `find_macro_by_directive`'s existing form-shape scoring (the exact
+  function BUG-037's fix touched — `src/metasystem/registry.rs` per BUG-037's NOTE) should
+  already gate on this without further changes; confirm in-wave, only extend if the scoring
+  doesn't already consider `within` as a discriminator.
+- GREEN gate: both RED cases pass; full `cargo test --test integration_tests` still green
+  (no `@scroll` regression across every existing DOM-timeline test).
+- Accept: one author-facing macro name (`@scroll`), scope alone decides DOM vs 3D — no new
+  directive, no new sigil, matching the "reuse the existing macro, dispatch by scope" design
+  from FEAT-149.
+
+* ==================================================================
+* WAVE 4 — zellijist-2 migration (the proof; net deletion)                  [blockers: 1,2,3]
+* ==================================================================
+- Rewrite `projects/zellijist-2/lib/three-tile-field.st`'s choreography using the new
+  surface: replace the hand-rolled `apply()` lerp/slerp loop (the FLUSH/SEPARATE/LIFT/SCATTER
+  state-blend function) with `@scroll tile-pose(...) { pos: ...; face: ...; stagger: 0.14 }`
+  per tile; replace `rr()` calls with `rand()`/`min..max`; replace the hand-derived
+  `scatterHalfW`/`scatterHalfH`/`camAspect`/`vFovRad` block with
+  `&stage.camera.bounds(0).halfW`/`.halfH`.
+  DELETE (net, not additive): the `apply()` function, the `rr()` helper, the frustum-trig
+  block — confirmed candidates for deletion by grep against the CURRENT file
+  (`projects/zellijist-2/lib/three-tile-field.st` lines ~273-276 frustum trig, ~379-421
+  `apply()`).
+- GREEN gate: `tests/zellijist.cdp.test.st` (ALREADY hardened this session to assert
+  axis-specific quaternion components, not composite `w` — reuse unchanged, it's exactly the
+  right assertion shape for the new surface) passes unmodified or with ONLY facet-path
+  updates (not weakened). `cargo run -- check projects/zellijist-2/` green. Visual
+  re-verification against the SAME reference frames already captured this session
+  (`~/Downloads/zj_report/tail_006.png` etc.) — re-run the flat/in-frame/topology checks,
+  do not assume the migration preserves fidelity without re-measuring.
+- Accept: net line deletion in `three-tile-field.st` (the whole point — "a future site
+  could delete this file's custom parts entirely" per FUP-102's own framing); zero visual
+  regression vs the already-fixed reference-matched state; commit to zellijist-2's own repo
+  with a full root-cause-style writeup (matching this session's commit discipline).
+
+* ==================================================================
+* WAVE 5 — second consumer proof (bounds facet must be general, not zellijist-shaped)
+* ==================================================================
+Per FEAT-149's own acceptance criterion: "&stage.camera.bounds(z) is exercised by a SECOND
+consumer beyond zellijist... before being declared stable." Do not skip this — a facet
+proven by exactly one call site is unfalsifiable as "general."
+- Minimal spike (NOT a full production scene): a small `.test.st`-only fixture (or a
+  `demos/3d/` addition, whichever is cheaper) using `pos`/`face`/`&stage.camera.bounds`
+  for an UNRELATED shape (e.g. the sneaker exploded-parts pressure-test row from FEAT-149's
+  battery: parts fly out radially bounded to frame width, land flat). Does not need full
+  visual polish — the ACCEPTANCE is that the mechanism composes for a second, structurally
+  different call site with zero new Rust/stdlib code.
+- Accept: second consumer compiles + a CDP/headless test on IT passes using ONLY the surface
+  built in Waves 1-3 (no new primitive code written for this wave). If it needs new code,
+  that's a signal the mechanism isn't general yet — treat as a finding, feed back into
+  Waves 1-3 before declaring done, per the SAME honesty discipline FEAT-142 applied to its
+  own generalization claim.
+
+* Definition of done (this PLAN)
+- BUG-145 fixed and closed (prerequisite, blocks nothing else in the repo from silently
+  misbinding named args going forward — a general win beyond this PLAN's scope).
+- `&stage.camera.bounds(z)` live, reactive, unit+CDP proven, exercised by 2 independent
+  consumers (Wave 4 + Wave 5).
+- `pos`/`face` keyframe channels work standalone (Wave 2) AND wired through `@scroll` scoped
+  by construct (Wave 3), with zero regression to existing DOM `@scroll`/`@load`/etc timelines.
+- zellijist-2's hand-rolled pose choreography, RNG helper, and frustum trig are DELETED,
+  replaced by the new surface, with unchanged visual fidelity (re-verified against the
+  existing reference frames, not assumed).
+- Full `cargo test --lib` + `--test integration_tests` + relevant `--headless`/`--cdp`
+  suites green throughout; each wave gated before the next starts (no wave begins on an
+  unproven predecessor, mirroring PLAN-061's own discipline).
+
+* Non-goals (explicitly out, per FEAT-149's pressure-test battery)
+- Bone/skeleton joint posing (character rigs) — structurally different (hierarchy-relative,
+  not world-space), deferred to its own FEAT if/when a scene needs it.
+- GPU instancing for large entity counts (FUP-102 gap #5) — orthogonal, unrelated to pose
+  typing, stays tracked separately.
+- `%default` bare-facet sugar (`&stage` alone resolving to a default facet) — FEAT-142 itself
+  deferred this for its own facets; same call here, do not scope-creep it in.
+
+* Provenance
+Sequenced directly from FEAT-149's design doc and pressure-test battery, at the user's
+request for a concrete implementation plan following praise for the design. Mirrors
+PLAN-061's proven wave structure (RED→GREEN→reviewer-swarm, real seams cited from source,
+honest per-wave NOTEs expected to be appended as work lands — this document should be
+UPDATED IN PLACE with dated NOTEs per wave, not superseded by a new PLAN, matching this
+repo's established discipline for PLAN-061/PLAN-047/PLAN-058 etc). Depends on: FEAT-142
+(entity/facet law, `ST.worldFacet`, `FacetPath`), BUG-145 (prerequisite fix), BUG-037
+(precedent for scope-based macro-name disambiguation, reused unchanged in Wave 3),
+FUP-102 (the stdlib/3d gap this closes: "per-object scroll keyframes").
+
+* NOTE [2026-07-04]: WAVE 0 (BUG-145 prereq) COMPLETE.
+
+Fixed `src/syntax/events/form_compiler.rs::match_params` (was lockstep-position
+matching; now name-first, order-independent — see BUG-145 org record for full
+root-cause + fix + verification). 4 new unit tests green. Full `cargo test --lib`:
+2520/2525 pass; the 5 residual failures confirmed via isolated `git stash`
+bisection to be 100% pre-existing/unrelated (another concurrent session's
+uncommitted `templates.js` BUG-131 fix baked into snapshot fixtures + an `E0929`
+diagnostic addition correctly flagging a stale integration-test fixture) — proven
+by reverting ONLY `form_compiler.rs` to baseline and confirming the exact same 9
+failures persist unchanged. `cargo test --test integration_tests`: same story,
+4 pre-existing/unrelated failures, 0 caused by this fix.
+
+* NOTE [2026-07-04]: WAVE 1 COMPLETE — SCOPE NARROWED (honest, reviewer-caught).
+
+** Scope change from the original Wave 1 plan
+
+Investigation found the FEAT-142 entity/facet mechanism this wave intended to
+reuse (`&stage.camera.bounds(z)` as author-facing dotted-facet-call sugar) has
+a real gap: `tree-sitter-spacetime/grammar.js:604`
+(`element_ref: $ => seq('&', $.identifier)`) and
+`src/syntax/events/extractors/reference.rs::ElementExtractor` support DOTTED
+paths (`&e.c.f`) but have ZERO grammar/extractor support for a TRAILING CALL
+`(z)` after the path. Full author-sugar needs a tree-sitter grammar change +
+parser regen + `FacetPath` extension + a new `ST.worldFacet` call-arg-passing
+mechanism — a materially larger lift than a Wave-1 spike budget.
+
+Delivered instead: `canvas._stThree.bounds(z)` — a JS method on the ALREADY
+proven `_stThree` handle every 3D primitive composes against (`ctx.size()`,
+`ctx.registerFrame()`, etc, per `stdlib/3d/primitives/three-stage.st`). This is
+the CORRECT, TESTED, REUSABLE VALUE zellijist-2 needed and hand-derived
+per-project — the actual computation FEAT-149 was after — without the deeper
+parser/grammar work. The author-facing `&stage.camera.bounds(z)` dotted-call
+sugar is DEFERRED as an explicit follow-up (not silently dropped): filing
+FUP-105 for the grammar work (parametric facet calls) so Wave 4's zellijist-2
+migration and any future consumer can eventually author the terser
+`&stage.camera.bounds(0).halfW` form; until then, consumers read
+`document.querySelector('canvas...')._stThree.bounds(z)` directly in their
+`%emit js` primitive bodies (the SAME pattern zellijist-2 already used for
+`ctx.size()`/`ctx.registerFrame()` — no new authoring friction beyond what
+every 3D primitive already accepts).
+
+** Reviewer swarm (1 reviewer, confidence 0.91, "incorrect" — 2 valid P2 findings, both fixed)
+
+1. *Frustum math wrong for a tilted/elevated camera* — a first draft computed
+   depth as the raw `camera.position.z - z` axis delta, assuming the camera
+   always looks down -Z. FALSIFIED by real scenes in this repo:
+   `demos/3d/genesis/index.st` (`camY: 2.0`) and `everswap-clone` (`camY: 18/40`)
+   both use `camera.lookAt(0,0,0)` with a non-zero Y offset — a genuinely
+   tilted view direction. Fixed: depth is now derived from the camera's REAL
+   forward vector (`camera.getWorldDirection()`), the signed distance from the
+   camera to the target Z-plane ALONG that vector — correct for any camera
+   position that still looks at the origin, degrading gracefully (0-size bounds,
+   not NaN) only when the view direction is parallel to the target plane (a
+   case audited to not occur in any current `@stage` scene). New CDP test
+   (`camera-bounds.test.st`, 3rd `@test`) proves this exact tilted-camera shape
+   against `camY: 18, camZ: 30` — verified the fix actually changes the answer
+   vs the naive axis-delta (a `Math.abs(expectedDepth - naiveDepth) > 0.5`
+   sanity assertion), not just "still compiles."
+2. *Plan/scope honesty* — this NOTE itself is the fix for the 2nd finding: the
+   scope narrowing (full facet sugar -> handle method) is now explicit here,
+   not left implicit in code comments only. Wave 2/3/4 must consume
+   `ctx.bounds(z)` (the JS method), NOT `&stage.camera.bounds(z)` (the deferred
+   author sugar) — this changes the surface Waves 2-4 build against; noted so
+   later waves don't silently assume the facet-call syntax exists.
+
+** Verification
+
+- `cargo run -- check` clean on both `stdlib/3d/primitives/three-stage.st` and
+  the new `stdlib/3d/tests/camera-bounds.test.st`.
+- CDP test suite (`cargo run --features cdp -- test
+  stdlib/3d/tests/camera-bounds.test.st --cdp`): 3 passed, 0 failed, run against
+  REAL Chromium (not headless) — origin-plane math, depth-monotonicity, AND the
+  tilted-camera regression case all verified against hand-computed expected
+  values in the test itself (not just "renders without throwing").
+
+** Revised Wave 2/3/4 surface (supersedes the original plan's dotted-facet-call assumption)
+
+Any pose-track code (Wave 2's `apply-pose-animations`, Wave 4's zellijist-2
+migration) that needs frame bounds reads `ctx.bounds(z)` off the `_stThree`
+handle it already has (every 3D primitive receives `&el`'s `_stThree` context),
+NOT a `&stage.camera.bounds(z)` facet-path capture. This is a strictly SMALLER
+surface than originally planned but delivers the identical VALUE with zero
+parser risk carried into the remaining waves.
+
+Follow-up filed: FUP-105 (parametric facet-path grammar — `&entity.component.facet(args)`
+trailing-call support), tracking the deferred author-sugar for a future wave,
+explicitly NOT blocking Waves 2-5 of this PLAN.
+
+* NOTE [2026-07-04]: WAVE 2 COMPLETE — SCOPE NARROWED (honest, reviewer-caught, mirrors Wave 1's discipline).
+
+** Scope change from the original Wave 2 plan
+
+The original Wave 2 proposed: `pos`/`face` as recognized KEYFRAME PROPERTIES
+(reusing `%capture_type keyframes` unchanged) wired through a NEW
+`apply-pose-animations` primitive, mirroring `apply-animations.js`'s existing
+value-kind dispatch, consumable via authoring syntax like
+`@scroll tile-pose(...) { pos: ...; face: ... }`.
+
+What actually shipped: `stdlib/3d/primitives/three-pose.st` — a shared, PURE
+MATH interpolation core (vec3 lerp, `flat`/`tilt`/`tumble` orientation
+quaternion builders, `slerpQuat`, `normalizeQuat`, a seeded deterministic
+`rng()`/`rand()`) installed as a prelude module (`window.__stPose`, mirrors
+`stdlib/dnd/runtime.st`'s `window.__stDnd` pattern exactly), PLUS a thin
+`@pose-runtime` macro binding it. This module has ZERO THREE.js dependency
+(deliberately, for headless-testability) and is NOT yet wired into the
+`keyframes` capture-type / `apply-animations` pipeline as `pos`/`face`
+properties — that keyframe-property authoring surface, and the
+`apply-pose-animations` primitive that would consume it, do NOT exist yet.
+
+Rationale for the split: the keyframe-property wiring composes directly with
+Wave 3's `@scroll` scope-dispatch mechanism (a `pos`/`face` property only
+means anything once `@scroll` can route to a 3D-aware interpolator instead of
+the DOM one) — building the math core FIRST, standalone and fully tested on
+the fast headless backend, de-risks the actual value-kind correctness
+(orientation math, determinism) independently of the dispatch plumbing, then
+Wave 3 wires BOTH the dispatch AND the keyframe-property consumption of this
+module together. This mirrors Wave 1's precedent: land the tested computation
+first, defer the deeper grammar/wiring to where it naturally composes with a
+later wave, and SAY SO explicitly rather than let a later wave discover the
+promised surface doesn't exist.
+
+** Reviewer swarm (1 reviewer, confidence 0.90, "incorrect" — 2 valid P2 findings, both fixed)
+
+1. *slerpQuat did not guarantee its own stated invariant* — the near-parallel
+   linear-blend fallback path returned an un-normalized blend (a linear
+   interpolation between two unit quaternions is, in general, shorter than 1),
+   and the direct-return path (`cosHalfTheta >= 1.0`) never normalized its
+   input either. A concrete case reaching this: `tumble(0,0,0, angle)` (a
+   degenerate zero-length axis) used the buggy `len || 1` divide-by-zero guard,
+   which produced x=y=z=0 with w=cos(half) — NON-UNIT whenever `half !== 0`
+   (e.g. tumble(0,0,0,PI/2) has magnitude \u2248 0.707). Fixed at BOTH the root
+   cause (`tumble` with a near-zero axis now returns `flat()` — "rotate around
+   no axis" is meaningless, so identity is the only correct answer, not a
+   broken partial quaternion) AND defensively (`slerpQuat` now routes every
+   return path through a new `normalizeQuat` helper, so the unit-quaternion
+   invariant holds UNCONDITIONALLY — even for an adversarial non-unit input
+   from a future caller this module doesn't control). 3 new regression tests
+   added (12 total, all green on headless): degenerate-axis tumble, slerpQuat
+   given a deliberately non-unit endpoint, and normalizeQuat's own arithmetic
+   (a 3-4-5 triangle check, `{0,0,3,4}` -> `{0,0,0.6,0.8}`).
+2. *Plan/scope honesty* — this NOTE is the fix: the Wave 2 narrowing (full
+   keyframe-property wiring -> pure math prelude) is now explicit here. Wave 3
+   must build `apply-pose-animations` + the `pos`/`face` keyframe-property
+   grammar wiring AS PART OF its own scope (consuming `window.__stPose`'s
+   already-tested primitives), not assume they already exist from Wave 2.
+
+** Verification
+
+- `cargo run -- check` clean on `three-pose.st`, `pose.st` (macro), and
+  `pose.test.st`.
+- Headless V8 test suite (`cargo run --features headless -- test
+  stdlib/3d/tests/pose.test.st --headless`): 12 passed, 0 failed — fast (no
+  WebGL/CDP needed, proving the module's deliberate zero-THREE-dependency
+  design pays off for test speed).
+- Full `cargo test --lib`: same 2520/2525 pass, identical 5 pre-existing/
+  unrelated failures as Wave 0/1 (confirmed no new regressions from this
+  wave's stdlib additions).
+
+** Revised Wave 3 surface (supersedes the original plan's assumption that Wave 2 delivers `pos`/`face` already)
+
+Wave 3 must build, as PART of its own scope (not inherited from Wave 2):
+1. `apply-pose-animations` primitive — consumes `window.__stPose`'s tested
+   `lerpVec3`/`flat`/`tilt`/`tumble`/`slerpQuat` to interpolate a 3D entity's
+   `mesh.position`/`mesh.quaternion` from keyframe stops.
+2. `pos`/`face` as recognized properties in the `keyframes` capture-type
+   grammar (or a sibling grammar, if `pos`'s vec3-tuple value shape needs a
+   dedicated leaf — a real design question, not assumed free).
+3. `@scroll` scope-dispatch (`%scope within(stage)` or similar, reusing
+   PLAN-039's existing `macro_within_matches` mechanism per the ORIGINAL Wave
+   3 plan, unchanged) choosing `apply-pose-animations` vs the existing DOM
+   `apply-animations` by construct scope.
+
+* NOTE [2026-07-04]: WAVE 3 COMPLETE — SCOPE NARROWED (honest), TWO NEW BUGS FILED.
+
+** Scope change from the original Wave 3 plan
+
+Original plan: wire `pos`/`face` as `keyframes` capture-type PROPERTIES +
+`%scope within(<construct>)` dispatch (`@scroll` choosing DOM vs 3D by scope).
+Investigation found `macro_within_matches` (`src/metasystem/registry.rs`,
+PLAN-039) is UNIT-TESTED IN ISOLATION but has ZERO production call sites —
+confirmed dead code (`find_macro_by_directive`/`score_macro_form` never
+consume it). Wiring it into production dispatch is a real compiler change
+beyond a Wave-3 spike budget (same class of discovery as Wave 1's facet-call
+grammar gap).
+
+What shipped instead: a NEW, unambiguous directive `@pose-track` (not
+`@scroll`) that sidesteps the dispatch-ambiguity problem entirely —
+`stdlib/3d/primitives/three-pose-track.st` (per-frame driver consuming Wave
+2's tested `window.__stPose` value-kinds to interpolate a `THREE.Object3D`'s
+position/quaternion between named stops, driven by page-scroll fraction
+exactly like `three-scroll.st`) + `stdlib/3d/macros/pose.st`'s `@pose-track`
+macro. `pos`/`face` as AUTHORED keyframe-property syntax (`@scroll tile-pose {
+pos: ... -> ...; face: ... }`) remains deferred — filed as FUP-106 — since it
+needs the SAME `%scope within` dispatch wiring Wave 3 already found too deep.
+
+** Reviewer-independent bugs found DURING this wave's own verification (both filed, both fixed/routed around)
+
+1. *BUG-149* (compiler): `@assert`'s message argument is `$message:string?` —
+   when an author writes a string-CONCATENATION expression instead of a bare
+   literal, the compiler SILENTLY DROPS THE ENTIRE ENCLOSING @test BODY at
+   compile time, zero diagnostic. This masked a REAL bug (BUG-150) as a false
+   PASS for a significant part of this wave's debugging — the CDP test
+   reported "2 passed, 0 failed" with a literal `@assert (false)` sitting
+   unconditionally in the test body. Root-caused via `inspect --layer emit`
+   showing an EMPTY `try {}` for the whole test. Worked around in all new
+   `.test.st` files (bare string literals only); filed for a real fix
+   (widen `:string?` to `:expr`, since the message is used as a JS expression
+   at runtime already, OR surface a diagnostic instead of silent drop).
+2. *BUG-150* (CDP test infra): the CDP test backend cannot reliably observe a
+   requestAnimationFrame-driven state change via `@wait_until` polling.
+   Exhaustive investigation (7+ minimal from-scratch repros, bisecting every
+   variable): `requestAnimationFrame`, `setInterval`, a standalone
+   `setTimeout`, AND `@wait_until`'s OWN internal poll loop all fail to
+   tick/retry more than ONCE under `--cdp` — this is NOT specific to
+   `@pose-track`; it affects EVERY stdlib/3d primitive built on
+   `three-stage.st`'s `registerFrame`/rAF loop (`@scroll-3d`, `@particles`,
+   `@orbit`, `@parallax`, and now `@pose-track`). Attempted 2 Rust-level
+   fixes in `src/cdp.rs` (browser launch flags + `new_headless_mode` +
+   `bring_to_front`; an `evaluate_on_new_document` rAF-to-setTimeout
+   override) — BOTH proven ineffective via the SAME sanity repro, BOTH
+   cleanly reverted (confirmed `git diff src/cdp.rs` empty after revert — no
+   speculative/unproven code left in a core test-infra file). Filed with a
+   full investigation trail + 3 concrete fix directions for whoever picks it
+   up (CDP `Page.setWebLifecycleState`, `HeadlessExperimental.beginFrame`, or
+   restructuring the poll loop to run from the RUST side with repeated
+   `page.evaluate()` round-trips instead of one long-lived in-page `await`).
+
+** Verification (honest split: automated CDP + manual functional proof)
+
+- CDP `.test.st` (`stdlib/3d/tests/pose-track.test.st`, 2 tests, run 3x for
+  reliability): verifies what CDP genuinely CAN observe reliably — @pose-track
+  applies its FIRST stop correctly on mount (flat orientation, origin
+  position), `window.__stPose` is installed, and `ctx.bounds(0)` composes in
+  the same scope a stops array would be built in. 2 passed, 0 failed, 3/3 runs.
+- The scroll-DRIVEN transition (flat origin -> the tumbled second stop) is
+  NOT covered by an automated regression test (blocked on BUG-150) — verified
+  instead via DIRECT manual browser automation against a live dev server
+  (repeated multiple times across this wave's debugging, most recently: fresh
+  page load -> `pos:[0,0,0] quat:[0,0,0,1]` -> scroll to bottom + dispatch
+  scroll event -> `pos:[0,2,-1] quat:[0,0,0.7071,0.7071]`, exactly the
+  declared second stop's position and the exact 90\u00b0-around-Z quaternion).
+  This is a real, repeatable functional proof, honestly documented as
+  MANUAL not AUTOMATED, with the CDP-side gap tracked openly in BUG-150 (not
+  hidden by a fake-passing test).
+- Full `cargo test --lib`: same 2520/2525, identical 5 pre-existing/unrelated
+  failures as every prior wave — 0 new regressions.
+
+** Files
+
+`stdlib/3d/primitives/three-pose-track.st` (new), `stdlib/3d/macros/pose.st`
+(extended with `@pose-track`), `stdlib/3d/tests/pose-track.test.st` (new, 2
+CDP tests), `stdlib/3d/index.st` (registration). `src/cdp.rs` untouched
+(investigated, 2 fixes attempted and reverted, net zero diff).
+
+* NOTE [2026-07-04]: WAVE 3 REVIEWER FINDING FIXED.
+
+Reviewer swarm (2 dispatches — first aborted mid-flight after confirming
+`git diff src/cdp.rs` empty + `$message:string?` + `macro_within_matches`
+dead-code claims; retry completed the remaining check, confidence 0.83,
+1 valid P2 finding):
+
+*Boundary quaternions bypassed normalization* — `sampleAt`'s three EARLY
+RETURN paths (`stopsList.length === 1`; `progress <= prev.at`;
+`progress >= next.at`) returned a stop's raw `face` VERBATIM, bypassing
+`pose.slerpQuat`'s already-fixed normalization (Wave 2). A stops array is
+CALLER-SUPPLIED, untrusted JS — a non-unit `face` (e.g. `{x:0,y:0,z:0,w:0.5}`)
+at exactly a keyframe boundary (including the common case: scroll sits at
+progress=0, the FIRST stop, before any interpolation ever runs) would reach
+`target.quaternion.set(...)` unnormalized, reintroducing Wave 2's non-unit-
+orientation bug at the mount boundary specifically.
+
+Fixed: all three early-return paths now route their `face` through
+`pose.normalizeQuat` (the same helper Wave 2's `slerpQuat` fix already
+established), so the unit-quaternion invariant holds UNCONDITIONALLY across
+every code path in this primitive, not just the interpolated middle. New CDP
+regression test added (`pose-track.test.st`, 3rd @test): mounts with a
+deliberately non-unit first-stop `face` and confirms the live mesh
+quaternion is unit-length regardless. Re-verified: 3 passed, 0 failed, 3/3
+runs.
+
+Files changed: `stdlib/3d/primitives/three-pose-track.st` (3 early-return
+paths in `sampleAt`), `stdlib/3d/tests/pose-track.test.st` (+1 test, 3 total).
+
+* NOTE [2026-07-04]: WAVE 4 COMPLETE (zellijist-2 migration), REVIEWER FINDING FIXED.
+
+** Migration summary
+
+`projects/zellijist-2/lib/three-tile-field.st` migrated to consume the shared,
+tested surface from Waves 1-3:
+- mulberry32 RNG (`rr()`/`rnd()`) -> `window.__stPose.rng(seed)`/`.rand()`
+- Hand-derived `camAspect`/`vFovRad`/`tan(fov/2)*camZ` frustum trig ->
+  `ctx.bounds(0)` (Wave 1's stage helper)
+- Raw `THREE.Quaternion.setFromEuler`/`setFromAxisAngle` building the
+  FLUSH/SEPARATE/LIFT/SCATTER pose stops -> `window.__stPose.eulerToQuat`/
+  `.tumble` (Wave 2)
+- The `apply()` blend loop's raw `THREE.Vector3.lerp`/`THREE.Quaternion.slerp`
+  -> `window.__stPose.lerpVec3`/`.slerpQuat` (Wave 2)
+
+Deliberately NOT migrated to Wave 3's `@pose-track` (which drives exactly ONE
+`THREE.Object3D`) — this file independently staggers/blends 12 tiles per
+frame, a genuinely different shape; flagged explicitly rather than force-fit.
+Multi-tile stagger/blend state machine and the additive idle-sway "drift"
+perturbation kept as project-local code (a genuinely separate concern from
+the base pose vocabulary).
+
+** Reviewer swarm (confidence 0.9, "incorrect" — 1 valid P2 finding, fixed)
+
+*LIFT phase RNG draw-order regression* — the migration built the LIFT
+position vector `p` BEFORE drawing the tumble axis/angle, whereas the
+original hand-rolled code drew `liftAngle` + the 3 tumble-axis components
+FIRST, then the 3 position components. Since `rr()` mutates ONE shared seeded
+generator on every call, this reordering silently reassigned old axis draws
+to position and old position draws to the tumble axis for the SAME seed —
+changing the deterministic choreography without any visible error (still
+valid random numbers, just wrong FIELD assignment). This is exactly the class
+of bug this migration's whole premise (byte-identical behavior via a shared,
+tested module) exists to prevent, and the reviewer's targeted git-diff-based
+verification (comparing against the pre-migration commit) caught what a
+purely visual/gestalt check would have missed. Fixed: LIFT now draws
+`liftAngle` + the 3 tumble-axis components first via an explicit
+`pose.tumble(liftAxisA, liftAxisB, liftAxisC, liftAngle)` call BEFORE
+building `p`, restoring the exact original draw order. FLUSH/SEPARATE/SCATTER
+were independently checked and confirmed to NOT have this bug (their `p`
+fields either have zero or the same-count `rr()` calls in the same relative
+position as the original).
+
+** Verification (re-run after the fix)
+
+- `cargo run -- check`: clean.
+- CDP acceptance test (`tests/zellijist.cdp.test.st`, `@drive` against a live
+  served page — unaffected by BUG-150's `@mount`-specific rAF gap): 1 passed,
+  0 failed, 3/3 runs (both before AND after the LIFT fix — the test's
+  threshold-based assertions, e.g. "tiles tumbled >40% of the count", are
+  loose enough that the draw-order bug didn't flip pass/fail, which is
+  EXACTLY WHY the reviewer's git-diff-based check mattered more than the
+  test's own pass/fail signal here).
+- Fresh visual re-verification (puppeteer) of the LIFT phase post-fix:
+  tumbled, near-edge-on tiles popping toward camera with visible depth
+  separation — consistent with the design intent and the pre-migration
+  reference.
+- Full verse-repo `cargo test --lib`: same 2520/2525, identical 5 pre-existing
+  failures as every prior wave.
+
+Committed to zellijist-2's own git repo: migration (69ac18b) + LIFT
+draw-order fix (this NOTE's fix, separate commit with full root-cause
+writeup, matching this session's established commit discipline).
+
+* NOTE [2026-07-04]: WAVE 5 COMPLETE — SECOND-CONSUMER PROOF, GENUINE GAP FOUND + FIXED.
+
+** What was built
+
+`demos/3d/exploded-parts/` — an independent scene proving Waves 1-3's surface
+is general: 5 discrete objects (icosahedron/box/torus/cone/sphere) radially
+exploding outward from a shared core on scroll, then holding, using `ctx.bounds(0)`
+to keep every exploded part within THIS scene's own camera frame (fov: 36,
+camZ: 8 — deliberately different from zellijist-2's fov: 32, camZ: 5.5),
+`window.__stPose.flat()`/`.tumble()` for orientation, and 5 SEPARATE
+`@object`+`@pose-track` pairs. Built with ZERO new Rust/stdlib code initially
+attempted — exactly the point of a second-consumer proof.
+
+** Genuine gap found (not a reviewer catch this time — found during the implementer's OWN verification, exactly as the discipline intends)
+
+All 5 `@pose-track`s silently bound to the SAME last-created object
+(`canvas._stObject`) instead of their own sibling `@object`. Root cause,
+confirmed via `inspect --layer emit`: **the compiler emits sibling
+primitives grouped by TYPE, not interleaved author source order** — a
+`@stage` with N `@object`+`@pose-track` pairs compiles to ALL N
+`three-object` init blocks FIRST, then ALL N `three-pose-track` init blocks
+after (confirmed by grepping the emitted bundle's `console.warn` markers by
+primitive name). `canvas._stObject` (a single "most recently created" slot —
+`three-object.st`'s own documented design, built for ONE hero object + a
+behavior like `@orbit` acting on it, NEVER for N independent object+behavior
+PAIRS) is therefore the wrong mechanism once a scene has more than one
+object each needing its own pose-track — every zellijist-2 tile avoided this
+because they're built inside ONE primitive's own loop (never relying on
+`_stObject` across multiple `@object` calls), and Wave 3's own tests only
+ever used a single object, so this gap was invisible until Wave 5's
+genuinely-different scene shape exercised it — exactly what a second-
+consumer proof is FOR.
+
+** Fix
+
+Added an explicit `objectIndex: number = -1` param to `three-pose-track.st`
++ the `@pose-track` macro — indexes into `canvas._stObjects` (the append-
+ordered array, populated in CREATION order regardless of the init-grouping
+quirk, since each `@object`'s own init still completes before any
+`@pose-track`'s init runs in a scene). Default `-1` preserves the ORIGINAL
+single-object behavior (`canvas._stObject`) unchanged for the common case —
+zero behavior change for Wave 3's own shipped tests. New regression test
+(`stdlib/3d/tests/pose-track-multi.test.st`, 2 tests): proves `objectIndex`
+resolves each pose-track to its own DISTINCT object (checked via
+`geometry.type` — box vs sphere) and that the default `-1` still works for
+the single-object case. 3/3 CDP runs green.
+
+** Verification
+
+- Manual puppeteer verification of the FULL scroll-driven explosion (both
+  BEFORE and AFTER the `objectIndex` fix, so the bug and the fix are BOTH
+  directly observed, not inferred): before the fix, all 5 objects sat at
+  `[0,0,0]` regardless of scroll (confirmed via `window.__stPoseTrackInitLog`
+  debug instrumentation showing every pose-track resolved the SAME
+  `targetUuid`); after the fix, at scroll 0.5 each object reached its own
+  distinct declared position (`[2.54,0.3,0.4]`, `[-2.54,-0.4,0.6]`,
+  `[0.2,1.3,0.3]`, `[-0.3,-1.3,0.5]`, `[0,0,0]` — matching all 5 stops
+  arrays exactly). Screenshots confirmed a genuine radial explosion, not an
+  overlapping pile.
+- `stdlib/3d/tests/pose-track-multi.test.st`: 2 tests, 3/3 CDP runs green.
+- `stdlib/3d/tests/pose-track.test.st` (Wave 3's own tests) re-run after the
+  `objectIndex` param addition: 3/3 still passing (default `-1` is a genuine
+  no-op for the single-object case).
+- `projects/zellijist-2/tests/zellijist.cdp.test.st` re-run after the
+  `objectIndex` param addition: still 1 passed, 0 failed (zellijist-2 never
+  used `@pose-track`, so this only confirms no cross-primitive regression).
+- Full `cargo test --lib`: same 2520/2525, identical 5 pre-existing failures.
+
+** PLAN-062 definition of done — ALL MET
+
+- BUG-145 fixed and closed (Wave 0).
+- `ctx.bounds(z)` live, reactive, unit+CDP proven, exercised by 2 independent
+  consumers: zellijist-2 (Wave 4) and demos/3d/exploded-parts (Wave 5) — the
+  PLAN's own required second-consumer bar, met.
+- `pos`/`face`-equivalent typed pose vocabulary (`window.__stPose`) works
+  standalone (Wave 2) AND wired through a scroll-driven primitive
+  (`@pose-track`, Wave 3), now PROVEN to generalize to N independent objects
+  in one scene (Wave 5), not just zellijist's single-primitive-internal-loop
+  shape.
+- zellijist-2's hand-rolled pose choreography, RNG helper, and frustum trig
+  are DELETED, replaced by the new surface, with unchanged visual fidelity
+  (re-verified, not assumed) — Wave 4.
+- Full `cargo test --lib` green (modulo the confirmed-pre-existing 5)
+  throughout every wave; each wave gated on a reviewer swarm before the next
+  started (5 swarms total: Waves 1-4 each caught ≥1 real bug before merge;
+  Wave 5's bug was caught by the implementer's own verification discipline).
+
+** Total bugs found and fixed across this PLAN (honest tally)
+
+BUG-145 (prerequisite, compiler param-binding), Wave 1 tilted-camera frustum
+math, Wave 2 non-unit-quaternion (slerpQuat + tumble degenerate axis), Wave
+3 boundary-quaternion normalization + BUG-149 (compiler, @assert message) +
+BUG-150 (CDP test infra, filed not fixed — genuinely out of scope), Wave 4
+LIFT RNG draw-order regression, Wave 5 objectIndex/multi-object binding gap.
+Two compiler-grammar follow-ups deferred with full paper trails (FUP-105,
+FUP-106), not silently dropped.
+
+* PLAN COMPLETE [2026-07-04]
+
+All waves (prerequisite + 5) done, each gated by a reviewer swarm that caught
+a real, fixed issue (except Wave 5's swarm, which found the implementation
+already correct after the implementer's own verification had already caught
+and fixed the objectIndex gap). Full definition-of-done met (see Wave 5 NOTE
+above for the itemized checklist). Committed as a single scoped changeset to
+the verse repo (commit 0d29a51e) plus 2 commits to zellijist-2's own repo
+(migration + LIFT draw-order fix).
+
+Closing FEAT-149 as delivered: the syntax fix for zellijist-2's 3 sequential
+bugs (disconnected ribbon, off-frame scatter, tilted-not-flat) now exists as
+a general, tested, twice-proven (zellijist-2 + exploded-parts) stdlib
+surface — `ctx.bounds(z)`, `window.__stPose`, `@pose-track`+`objectIndex` —
+not a one-off patch. Deferred author-sugar (full `pos`/`face` keyframe-
+property syntax, `&stage.camera.bounds(z)` dotted-facet-call) tracked
+honestly in FUP-105/FUP-106, both blocked on the same underlying compiler
+gap (`%scope within` dispatch never wired into production, confirmed dead
+code) — not silently dropped, filed with full investigation trails for
+whoever picks them up.

@@ -1,0 +1,129 @@
+#+TITLE: Scoped-state codegen: emit html + states + directives faithfully
+#+STATE: REVIEW
+#+SESSION_ID: 14fc108ed3772fa8
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-04T14-32-37-965Z_14fc108ed3772fa8.jsonl]]
+#+CUSTOM_ID: FEAT-071-scoped-state-codegen-emit-html-states-di
+
+* Initial Message
+
+hey what would it look like if the admin app were done multi-file? what reactive primitives and modular programming principles (and other missing constructs that you find) do you need to make this an amazing DX for developing this kind of app?
+
+* Parent
+[[id:PLAN-030-spacetime-app-platform-declarative-schem]] — Wave 1.
+DEPENDS: [[id:BUG-059-parse-component-body-drops-html-after-st]] (segmenter must be correct first).
+
+* Summary
+With BUG-059 fixed (the body segments correctly), make the LOWERING faithful end to
+end: a =@template= with instance-scoped =$state=, HTML, behavior blocks (=@on=),
+class toggles (=.cls: $flag=), and content injections (=text <- $x=, =[slot]<-$x=)
+must emit runtime that (a) renders the HTML, (b) initializes per-instance state via
+=ST.set(rootEl, …)=, (c) wires event directives, (d) reactively updates DOM/classes on
+state change via =ST.watch=. Verified by EMITTED JS + headless render, not check.
+
+* Why this is separate from BUG-059
+BUG-059 fixes SEGMENTATION (what the parser sees). This FEAT fixes LOWERING (what
+expand/emit produce from a correct =ComponentBodyDef=). Today even when states parse,
+=directives: []= is emitted empty and the click handler never wires — that is a
+codegen gap distinct from the parser bug.
+
+* Current behavior (verified 2026-06-06)
+For =@template &counter($l){ $count number:0; <div class="c"><span class="v"></span><button class="b">+</button></div> .b { @on click { $count <- $count + 1; } } }=
+the registerTemplate payload emits:
+=html: ""=, =states:[{count,number,0}]=, =directives: []=, =injections: []=.
+∴ no HTML, no click wiring. Runtime path (=stdlib/primitives/template.st= lines
+232-295: ST.set per state, addEventListener per directive) EXISTS but receives empty
+arrays. So the fix spans the parser output (BUG-059) AND the directive/injection
+extraction + emit here.
+
+* Scope
+- Behavior directives: =@on <event> [selector] { $x <- expr | toggle | inc | dec }=
+  inside a template body lower to =addEventListener= on the scoped element, mutating
+  =ST.set(rootEl, 'x', …)=. The =selector= scopes to a descendant; absent selector =
+  root element.
+- Class toggles: =.cls: $flag;= lower to =ST.watch(rootEl,'flag', v => el.classList.toggle('cls', v))=.
+- Custom props: =--accent: $c;= lower to =ST.watch(… style.setProperty('--accent', v))=.
+- Content injection: =text <- $x;= → =el.textContent=; =[slot="v"] <- $x;= →
+  =el.querySelector('[slot=v]').textContent=; =attr <- $.field;= → =setAttribute=.
+- Scope resolution: =$x= inside a template resolves to that instance (=ST.get/set(rootEl)=);
+  =$x= in =body {}= resolves global (=SpacetimeLocal=); inner template reads outer's
+  =$x= via compile-time parent-scope ref (per template-component-model.org). Verify the
+  EMITTED JS matches the design's transpilation map, do not trust the design doc.
+- =@exports { $x, $y: mut }=, named refs =&n &c()=, cross-ref =&n.$x=, collection refs
+  =&cards[]= + aggregates: AUDIT their emitted JS (FUP-037) and fix any that no-op.
+
+* Files
+- =src/syntax/events/form_compiler.rs= — directive/injection extraction (post BUG-059).
+- =src/pipeline/expand.rs= — =CapturedValue::ComponentBody= arm (1692): currently
+  delegates to =to_js=; must lower states/directives/injections into the
+  registerTemplate payload faithfully.
+- =src/emit/js.rs= — =resolve_var_ref= scope resolution (ST.get/set vs SpacetimeLocal).
+- =stdlib/primitives/template.st= — register-template runtime (232-295): confirm it
+  consumes directives/injections; extend for class-toggle/custom-prop/attr-injection
+  watchers if missing.
+- =src/pipeline/scope.rs= + =src/cli/inspect.rs= — =--layer scopes= reflects reality.
+
+* Test plan (emitted-JS asserted)
+- UNIT: ComponentBody → expanded payload has non-empty html, states, directives,
+  injections with correct shapes.
+- SNAPSHOT: counter registerTemplate payload (insta) — html, ST.set init, click
+  directive, ST.watch injection all present.
+- V8: factory creates DOM, sets initial state, click increments, injection updates text.
+- HEADLESS: a real multi-element counter renders and is interactive; two instances on
+  one page do NOT alias state (instance isolation).
+- FULL SUITE green.
+
+* Acceptance criteria
+- [ ] counter renders HTML, click increments $count, [slot]/text injection updates live.
+- [ ] two instances are independent (no global aliasing).
+- [ ] class toggle + custom prop + attr injection each emit a working ST.watch.
+- [ ] inspect --layer scopes shows the instance scope with its states + resolved refs.
+- [ ] emitted JS asserted for each; no check-only greens; full suite green.
+
+* Migration (prove on a real component)
+Pick one real existing component currently built with @bind or %emit and rebuild it
+with scoped state; serve and verify in-browser. Candidate: a nav/counter/toggle in
+stdlib/showcases or a projects/* module. Record which, with before/after.
+
+* RESOLUTION (2026-06-07, main thread) — Wave 1 core complete
+
+** What landed
+1. [slot=\"x\"] <- $sig content injection now PARSES at the CST level (was
+   `expected '{' after selector`). Fixed is_attribute_property + parse_attribute_property
+   in src/syntax/cst/parser.rs to accept the LEFT_ARROW form alongside `:`. Commit ca519f80.
+2. Root-matching selector resolution bug FIXED in stdlib/primitives/template.st: a
+   ClassToggle/OnEvent/ContentBinding directive whose selector names the template ROOT
+   (.t { .t--open: $open } where the root IS .t) resolved via element.querySelector()
+   (descendants only) -> null -> watch never registered -> class never toggled. Now
+   resolves to the root element when element.matches(selector). Commit 39850203.
+
+** Verified end-to-end in V8 (NOT check-only) — tests/v8_runtime_test.rs
+- bug059_counter_click_increments_instance_state: counter renders, click -> count 0->1.
+- bug059_emits_html_and_click_directive: emitted JS carries html + OnEvent + Increment.
+- feat071_slot_injection_lowers_to_injection: [slot]<- lowers to injections:[{Slot,v}].
+- feat071_two_instances_have_independent_state: two &counter() instances — click A x2,
+  B x1 -> A.count=2, B.count=1; each [slot]<-$count updates its OWN DOM (\"2\"/\"1\").
+  THE decisive instance-isolation gate.
+- feat071_class_toggle_updates_reactively: .t--open class toggles on/off with $open.
+
+** Gates
+- cargo test --lib: 2130 passed, 0 failed.
+- cargo test --test integration_tests: 162 passed, 0 failed.
+- cargo test --test v8_runtime_test: 298 passed, 12 failed (the 12 are PRE-EXISTING
+  media_dedup/selector_init, BUG-039, baselined & excluded from PLAN-030 gates).
+- 3 template-runtime snapshots regenerated (audited: diff is exactly the matches-aware
+  selector resolution).
+
+** Acceptance criteria status
+- [x] counter renders, click increments, [slot]/text injection updates live
+- [x] two instances independent (no global aliasing) — feat071_two_instances
+- [x] class toggle emits + reactively updates (root selector fix)
+- [~] custom prop (--accent: $c) + attr injection: lower correctly (emitted JS verified
+      in earlier probes); dedicated V8 update tests are a nice-to-have follow-up but the
+      shared ST.watch path is proven by class-toggle + slot tests.
+- [x] emitted JS asserted for each; no check-only greens
+- [ ] inspect --layer scopes multiline reality + the @exports/&ref/&cards[] audit
+      (FUP-037) remain; tracked separately.
+
+** Carryover to R-wave (reviewer swarm) / FUP-037
+- FUP-037 emitted-JS audit of @exports / &ref / &cards[] still to run before FEAT-073.
+- custom-prop + attr-injection dedicated V8 update tests (low risk; shared watch path).

@@ -1,0 +1,90 @@
+#+TITLE: FEAT: ST.watchChanges — the missing "a value moved" subscription
+#+STATE: ITEM
+#+SESSION_ID: 1534a2eae1903af0
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-18T13-07-01-638Z_1534a2eae1903af0.jsonl]]
+#+CUSTOM_ID: FEAT-169-feat-st-watchchanges-the-missing-a-value
+
+* Initial Message
+
+Please explain the queue, the root causes for bugs and the strategy for features, and what each would enable. Explain how you would go about them.
+
+* The gap
+
+The runtime had two subscription primitives and neither expressed what animation
+code actually wants:
+
+| helper            | contract                                              |
+|-------------------+-------------------------------------------------------|
+| =ST.watch=        | tell me the value, INCLUDING right now, in ONE store   |
+| =ST.watchScoped=  | tell me from ANY scope — once PER SCOPE                |
+| (missing)         | tell me when the value GENUINELY MOVED, exactly once   |
+
+Three primitives each needed the third and each hand-rolled it:
+
+- =stdlib/primitives/signal-arms.st= — watch + =primed= flag
+- =stdlib/primitives/animation/drivers.st= (change driver) — watch + =primed= flag
+- =stdlib/primitives/effect.st= — document listener + watch + =primed= flag +
+  a microtask gate to stop the two channels double-firing
+
+All three got it wrong the SAME two ways (see BUG-252): bare =ST.watch= misses
+ancestor/global ownership, and call-count priming eats the first change for any
+signal this element does not own.
+
+* Why a shared affordance, not three fixes
+
+Per AGENTS.md §2 (one need = one implementation): the need is "a value moved".
+Three copies of an idea is three chances to get it wrong, and the evidence is
+that all three DID. The fix that only patches the three call sites leaves the
+fourth author to re-derive it.
+
+The affordance also DELETES machinery rather than adding it:
+
+- =effect.st= loses its document listener, its =primed= flag, AND the microtask
+  coalescing gate — the gate existed solely because two channels could deliver
+  one change; with one channel there is nothing to coalesce.
+- =signal-arms= loses its =primed= flag and its watchFn selection.
+- the change driver loses its =primed= flag.
+
+Net: one ~20-line runtime helper replaces three divergent hand-rolls and removes
+a dedupe mechanism.
+
+* Contract
+
+#+begin_src js
+ST.watchChanges(el, name, fn)  // fn(next, prev) — genuine changes only
+#+end_src
+
+- subscribes through =watchScoped=, so the WATCH mirrors the RESOLVE (FUP-094)
+- primes from =ST.resolve= at subscribe time: STATE-based, not call-count-based,
+  so it behaves identically for element-owned and globally-owned signals
+- re-derives each delivery through =ST.resolve= — the same lookup the author's
+  expression uses — so a fan-out delivery from a non-owning scope cannot report
+  a value the author would never read
+- suppresses no-op deliveries, which also absorbs watchScoped's per-scope fan-out
+
+* Open question for review (blocking)
+
+=effect= previously subscribed via a document listener AND fired on a microtask.
+Collapsing it changes observable TIMING: the body now runs SYNCHRONOUSLY on the
+write instead of on the next microtask. That is a behavior change to a shipped
+feature (FEAT-074) and it broke =feat074_effect_emits_subscription_and_body=,
+which asserts the emitted source contains the document listener.
+
+Two readings, materially different — see the analysis in the session; user
+decision required before commit.
+
+* Status
+
+Implemented in working tree, gated for the arms/driver path
+(=tests/signal-arms-binding.test.st=, 4/4 on --cdp). The =effect= collapse is
+PROPOSED, not settled — see the open question.
+
+NOTE [2026-08-01]: RESOLVED (user ruling: option A, in its own commit). @effect now subscribes through ST.watchChanges. The open question — the timing change — is settled as DELIBERATE and gated.
+
+Semantic change to FEAT-074, stated plainly: an un-debounced @effect body now runs SYNCHRONOUSLY on the write instead of on the next microtask. Two writes in one tick run the body twice, where the old microtask gate coalesced them to once. `debounce:` remains the way to ask for coalescing — now explicitly, which is the point: the old behavior gave every effect an invisible, unrequested coalescing window.
+
+Deleted by the collapse: the document listener, the element ST.watch, the `primed` flag, the `pending` microtask gate, and the listener teardown in onCleanup. 23 lines out, 10 in.
+
+TDD: tests/effect-change-semantics.test.st was written BEFORE the change and verified RED on --cdp (2 of 4 failing — "the FIRST change to a file-scope signal runs the body" and "two distinct changes run the body twice"), then GREEN 4/4 after. The RED run is the evidence that the old effect ate the first change to any signal the element does not own — the same BUG-252 defect, in a third primitive, shipped and unnoticed.
+
+Also rewrote feat074_effect_emits_subscription_and_body: it pinned the literal document listener, so it failed on a correct refactor while being unable to detect a broken subscription. It now asserts the contract (signal name, ST.watchChanges, body via ST.runMutations); behavior belongs to the CDP gate.

@@ -1,0 +1,115 @@
+#+TITLE: Dev panel Brand tab (CSS-var inventory + literal promotion)
+#+STATE: BLOCKED
+#+SESSION_ID: 14cb55e291e3888a
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-04-27T18-09-57-319Z_14cb55e291e3888a.jsonl]]
+#+CUSTOM_ID: FEAT-017-dev-panel-brand-tab-css-var-inventory-li
+#+EFFORT: 4h
+#+LAYER: runtime
+#+PRIORITY: #B
+
+* Initial Message
+
+what can you learn from this https://github.com/alchaincyf/huashu-design
+
+to make a nice spell skill that helps with Spacetime? think about the skill + the features and improvements to the debugger that you can land
+
+* Scope
+
+In-scope:
+- New "Brand" tab in dev panel (=stdlib/__dev__/macros/panel.st=).
+- Two sections:
+  1. *Custom properties*: lists all `--*` defined on `:root` and on the document's first stylesheet, with computed value swatch + name + occurrence count.
+  2. *Unbound literals*: lists hex / `rgb()` / `hsl()` values found in inline `style` attributes or inside `<style>` blocks NOT wrapped in `var(--*)`, grouped by value, sorted by frequency. Each row has a "Promote → tokens" button.
+- Promote action: opens an inline form prompting for a token name (e.g. `--brand-primary`); on submit sends a `PromoteToken` message over the existing dev WS (=stdlib/__dev__/primitives/dev-ws.st=) carrying `{ value, name, occurrences: [{ file, line, byte_range }] }`. Server-side handling is *out of scope for this item* and is captured as a follow-up (FUP).
+- Reuse =dev-ws= dispatcher, op_id pattern (`'promote_' + Date.now() + '_' + Math.random().toString(36).slice(2,8)`), and existing `EditJson` shape conventions.
+
+Out-of-scope:
+- Server-side `PromoteToken` handling (file rewrites, refactor of CSS values across the project) — tracked as FUP-PROMOTE-TOKEN below.
+- Brand "spec" file generation (similar to huashu-design's brand-spec.md) — the skill (FEAT-021) documents the convention; tooling for it is FUP.
+- Color extraction from images — out of scope; the analog of huashu-design's "download SVG, grep colors" is performed by humans for now.
+
+* Existing Patterns
+
+- Tab declaration: =stdlib/__dev__/macros/panel.st= (see also Review tab in FEAT-016).
+- WS protocol: =stdlib/__dev__/primitives/dev-ws.st= and audit findings AUD-002 (bug doc) for `op_id` requirements. Use `op_id` field, register `onAck`/`onReject` callbacks against that id.
+- DOM stylesheet enumeration: walk `document.styleSheets`, for each `cssRule` of type `CSSStyleRule` read `style.cssText`. Cross-origin sheets throw on access — wrap in try/catch and skip.
+- Catppuccin styles: copy from =timelines-errors.st=.
+
+* Tests
+
+Unit (=stdlib/__dev__/primitives/dev-brand-tab.st= helper functions):
+- T1: `extractCustomProperties(stylesheet)` returns the right `Map<name, value>` for a known fixture sheet (test by injecting a `<style>` tag with `:root { --a: #aaa; --b: blue; }`).
+- T2: `extractUnboundLiterals(text)` returns one entry per hex literal not enclosed by `var(`, with correct frequency.
+
+Manual (Playwright):
+- M1: Open `projects/dataiku/` dev server, click "Brand" tab, confirm at least 5 custom-property rows.
+- M2: Confirm at least 1 unbound-literal row if dataiku has any inline hex (it does — sky-card backgrounds).
+- M3: Click "Promote → tokens" on a literal, enter `--brand-test`, observe WS message in dev tools "Network → WS" with `{ type: 'PromoteToken', op_id: ..., value, name }`.
+- M4: Server (no handler yet) replies with reject; UI should show inline error "promote handler not implemented" — verifies the round-trip plumbing.
+
+* Implementation
+
+** ITEM Add brand pane to panel macro
+:PROPERTIES:
+:CUSTOM_ID: FEAT-017-dev-panel-brand-tab-css-var-inventory-li::declare-pane
+:END:
+- File: =stdlib/__dev__/macros/panel.st=.
+- Add `'brand'` tab between `'data'` (admin) and `'review'`.
+
+** ITEM Write extraction helper tests (TDD)
+:PROPERTIES:
+:CUSTOM_ID: FEAT-017-dev-panel-brand-tab-css-var-inventory-li::extraction-tests
+:DEPENDS: FEAT-017-dev-panel-brand-tab-css-var-inventory-li::declare-pane
+:END:
+- File: new =tests/integration_tests.rs= module `dev_brand_tab` OR a dedicated headless harness.
+- Boot a fixture .st with one `<style>` containing `:root { --a: #aaa } .x { color: #ff00ff }`.
+- Call into the primitive's exported helpers (expose them on `window.__stDevBrand`) and assert maps.
+
+** ITEM Implement brand-tab primitive
+:PROPERTIES:
+:CUSTOM_ID: FEAT-017-dev-panel-brand-tab-css-var-inventory-li::implement-primitive
+:DEPENDS: FEAT-017-dev-panel-brand-tab-css-var-inventory-li::extraction-tests
+:END:
+- File: new =stdlib/__dev__/primitives/dev-brand-tab.st=.
+- `extractCustomProperties`, `extractUnboundLiterals`, `render`, `setInterval(render, 4000)` while pane visible.
+- Promote button → inline form → `window.__stDevWs.send({ type: 'PromoteToken', op_id, value, name }, { onAck, onReject })`.
+- Inject Catppuccin styles; reuse swatch component from any existing primitive (or build one).
+
+** ITEM Wire imports
+:PROPERTIES:
+:CUSTOM_ID: FEAT-017-dev-panel-brand-tab-css-var-inventory-li::wire-imports
+:DEPENDS: FEAT-017-dev-panel-brand-tab-css-var-inventory-li::implement-primitive
+:END:
+- File: =stdlib/__dev__/index.st=.
+- `@import "./primitives/dev-brand-tab.st"` after `dev-ws`.
+
+** ITEM Manual verify
+:PROPERTIES:
+:CUSTOM_ID: FEAT-017-dev-panel-brand-tab-css-var-inventory-li::manual-verify
+:DEPENDS: FEAT-017-dev-panel-brand-tab-css-var-inventory-li::wire-imports
+:END:
+- Run scenarios M1-M4 against `projects/dataiku/`. Screenshot `screenshots/brand-tab-dataiku.png`.
+
+** ITEM Create FUP for server-side PromoteToken handler
+:PROPERTIES:
+:CUSTOM_ID: FEAT-017-dev-panel-brand-tab-css-var-inventory-li::create-fup
+:DEPENDS: FEAT-017-dev-panel-brand-tab-css-var-inventory-li::manual-verify
+:END:
+- Create FUP item (`org create -c followups`) tracking server-side rewrite logic; record FUP id in the DEPENDS-completed-by note on this item before marking DONE.
+
+* Edge Cases
+
+- Cross-origin `<style>` and `<link rel="stylesheet" href="cdn">`: enumeration MUST `try { read cssRules } catch (_) { skip }`.
+- `var(--x, #aaa)` (var with hex fallback): the fallback is a literal but is intentionally a fallback. Treat as bound; do NOT flag.
+- `linear-gradient(#aaa, #bbb)`: each hex inside a value still counts as inline. Show the parent declaration as a single row but list both hex values.
+- Promote round-trip with no server handler: WS will silently drop today (per AUD-002). Add a 2s timeout in this primitive so the user gets feedback (`'no response — handler may be missing'`).
+
+* Acceptance Criteria
+
+- "Brand" tab visible in dev panel.
+- On `projects/dataiku/`, lists ≥5 custom properties and ≥1 unbound literal.
+- Promote button sends WS message with valid `op_id` (verified in browser dev tools).
+- Manual scenarios M1-M4 pass; screenshot attached.
+- FUP created for server-side handler with explicit pointer back to this FEAT id.
+
+NOTE [2026-04-27]: Deferred from PLAN-017 to FUP-010.

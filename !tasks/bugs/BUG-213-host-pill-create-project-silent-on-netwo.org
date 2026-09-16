@@ -1,0 +1,81 @@
+#+TITLE: Host pill create-project silent on network-level failure
+#+STATE: DONE
+#+SESSION_ID: 153ce343c8186c95
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-24T22-56-00-800Z_153ce343c8186c95.jsonl]]
+#+CUSTOM_ID: BUG-213-host-pill-create-project-silent-on-netwo
+#+COMPLETION_HASH: 464c580414fc43f6
+
+* Initial Message
+
+i can't host backdesk-new :( when I click on create project in the host pill it does nothing
+
+* Report
+
+Live user report (2026-07-24): "i can't host backdesk-new :( when I click on
+create project in the host pill it does nothing".
+
+* Diagnosis (verified this session, live browser against `serve projects/backdesk-new`)
+
+Two stacked causes:
+
+** 1. Environment: orchestrator unreachable (the actual hosting blocker)
+
+`spacetime.undefine.org` resolves to 178.105.176.219 (direct IP, NOT the
+Cloudflare-proxied `undefine.org` = 188.114.96.5/97.5). TCP connect to
+:443/:80 times out (~135s), ping 100% loss. General connectivity is fine
+(google/undefine.org reachable). The widget's `POST /api/v1/projects` can
+therefore never succeed from this machine until that server is back up (or
+`SPACETIME_HOST_ENDPOINT` points at a live instance -- src/server.rs::host_api_base).
+
+** 2. Widget bug: network-level failure is INVISIBLE (the "does nothing")
+
+Verified live: the click DOES fire (instrumented `window.fetch` -- the request
+to `https://spacetime.undefine.org/api/v1/projects` appears), the fetch
+rejects (`TypeError: Failed to fetch`), and then... nothing renders.
+
+Chain:
+- stdlib/primitives/signal.st: a network-level rejection never builds a reply
+  envelope -- `runWithRetry` catches, sets the internal `error`, and
+  `yieldState()` publishes ONLY the `_pending`/`_error` yields (BUG-197 made
+  those real). No `signal:<name>:reply` event fires, BY DESIGN.
+- stdlib/__host__/index.st `@handle $createProject` has only reply arms
+  (Created/Rejected/Failed) => none run => `$createProjectError` stays `""`
+  => `.st-host-widget__create-project-error` stays hidden.
+- The widget does NOT consume `$createProject_error` -- unlike push-preview,
+  which already established the pattern after the SAME bug class
+  (line ~943: `$pushPreviewErrorText : ($pushPreviewMessage || $pushPreview_error || "")`).
+- Compounding: `$createProject` declares `policy latest` with NO timeout, so
+  against a black-holed host the fetch hangs for the browser's full TCP
+  timeout (order of minutes) before even the `_error` yield fires.
+
+Same latent gap in the write-back half: `$initDeploy`'s `$writeBackFailed` is
+only set by its Failed arm -- a network-level rejection of the LOCAL write-back
+call would also be silent.
+
+* Fix (stdlib/__host__/index.st only -- platform rails are already correct)
+
+1. Fold the `_error` yield into the create-project error surface, mirroring
+   push-preview verbatim:
+   - `@data derive $createProjectErrorText string : ($createProjectError || $createProject_error || "");`
+   - `$hasCreateProjectError` now tests `$createProjectErrorText`
+   - error <p> renders `$createProjectErrorText`
+2. Same for write-back: derive a boolean that also tests `$initDeploy_error`
+   gating `.st-host-widget__write-back-error`.
+3. `policy latest timeout 15s` on `$createProject` (grammar:
+   stdlib/capture-types/signal-receive.st `policy $mode ("timeout" $dur)?`)
+   so a dead host surfaces in 15s, not minutes.
+
+* Test
+
+tests/bugs/BUG-213-create-project-network-error-silent.test.st -- replica
+convention (host-badge-union.test.st precedent: __host__/index.st is not
+importable standalone due to __SPACETIME_HOST_* placeholders), pins the fixed
+derive chain against a rejected fetch. Keep in lockstep with the widget.
+
+* Verification
+
+- headless: `cargo run --features headless -- test tests/bugs/BUG-213-create-project-network-error-silent.test.st --headless`
+- live: click "Create project" against the dead host -> error line renders
+  within the 15s timeout window.
+
+NOTE [2026-07-24]: Fixed + verified. (1) stdlib/__host__/index.st: $createProjectErrorText folds the $createProject_error yield (push-preview pattern), $showWriteBackError folds $initDeploy_error, `policy latest timeout 15s` on $createProject. (2) stdlib/primitives/signal.st: deadline abort re-branded from AbortError to plain Error — pre-fix, `timeout` under policy:latest was a silent forever-hang (runWithRetry swallows latest+AbortError as "superseded"). Tests: tests/bugs/BUG-213-create-project-network-error-silent.test.st, 4/4 green headless; regression suites (BUG-197 pending-yield, signal-body-template, host-badge-union, handle-arm) 11/11 green. Live-verified in browser: click → "request timed out after 15000ms" renders in the pill. NB the underlying hosting blocker remains ENVIRONMENTAL: spacetime.undefine.org (178.105.176.219) is down/unreachable — widget now says so instead of nothing.

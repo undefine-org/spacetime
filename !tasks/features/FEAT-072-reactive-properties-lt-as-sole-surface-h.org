@@ -1,0 +1,91 @@
+#+TITLE: Reactive properties (: / &lt;-) as sole surface — hard-kill @bind
+#+STATE: DONE
+#+SESSION_ID: 14fc108ed3772fa8
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-04T14-32-37-965Z_14fc108ed3772fa8.jsonl]]
+#+CUSTOM_ID: FEAT-072-reactive-properties-lt-as-sole-surface-h
+#+COMPLETION_HASH: c1e745a682c1dc14
+
+* Initial Message
+
+hey what would it look like if the admin app were done multi-file? what reactive primitives and modular programming principles (and other missing constructs that you find) do you need to make this an amazing DX for developing this kind of app?
+
+* Parent
+[[id:PLAN-030-spacetime-app-platform-declarative-schem]] — Wave 2.
+DEPENDS: [[id:FEAT-071-scoped-state-codegen-emit-html-states-di]] (the : / <- lowering
+must work inside template bodies first).
+
+* Summary
+Establish two operators as the ONE reactive-property surface, then HARD-DELETE the
+=@bind=/=@show=/=@input=/=@if-block= macros (no back-compat; Spacetime is pre-release).
+User decision 2026-06-06: hard cutover in a single wave.
+
+| syntax                | operator | domain | lowers to                                  |
+|-----------------------+----------+--------+--------------------------------------------|
+| =.open: $flag;=       | =:=      | CSS    | =classList.toggle('open', v)=              |
+| =--accent: $c;=       | =:=      | CSS    | =style.setProperty('--accent', v)=         |
+| =color: red;=         | =:=      | CSS    | static stylesheet (passthrough, no $)      |
+| =text <- $v;=         | =<-=     | DOM    | =el.textContent = v=                       |
+| =[slot="x"] <- $v;=   | =<-=     | DOM    | =slotEl.textContent = v=                   |
+| =src <- $.url;=       | =<-=     | DOM    | =el.setAttribute('src', …)=                |
+| (two-way input)       | —        | —      | =value <- $x= + =@on input { $x <- value }= sugar |
+
+Detection rules (from template-component-model.org, VERIFY against emitted JS):
+- =:= with =$var= in value → reactive CSS binding (auto-detected).
+- =<-= always → DOM content/attr injection.
+- =:= without =$var= → static CSS passthrough.
+- All reactive values REQUIRE the =$= sigil.
+
+* Blast radius (verified 2026-06-06)
+=@bind= appears in 68 occurrences across 20 files (=grep -rln '@bind\b' stdlib projects
+examples tests | grep -v dist | grep -v .git=). =@show=/=@input=/=@if-block= add more.
+Every one must be migrated, then the macros deleted.
+
+* Files
+- =stdlib/macros/reactive-props.st= — NEW: the : / <- author surface (the macros that
+  bind to bind-text/bind-class/bind-style/bind-attr primitives, reused from data.st).
+- =stdlib/macros/data.st= — DELETE =@bind=, =@show=, =@if-block= macro bodies; keep the
+  underlying primitives (bind-text/bind-class/bind-style/bind-visible/bind-input).
+- =stdlib/macros/bindings.st= — keep =localStorage()=; remove any @bind glue.
+- =stdlib/primitives/data/*= — bind-* primitives are REUSED (do not delete).
+- ALL 20 files using @bind/@show/@input — migrate to : / <-.
+- Parser: confirm =<-= injection + =.cls: $flag= toggle parse at FILE/selector scope (not
+  only in template bodies). BUG-059 fixes body scope; this ensures top-level scope too.
+
+* Migration procedure (per file)
+1. =@bind(text: $x)= → =text <- $x;=
+2. =@bind(class: "c", when: $cond)= → =.c: $cond;=
+3. =@bind(style: "--v", value: $x)= → =--v: $x;=
+4. =@bind(attr: "src", value: $.url)= → =src <- $.url;=
+5. =@show(when: $c)= → =.hidden: !$c;= (or a =visible <- $c= injection — pick ONE, document it)
+6. =@input(bind: $x, debounce: t)= → =value <- $x;= + =@on input.debounce(t) { $x <- value }=
+7. =@if($c)= (mount/unmount) → keep as @if control-flow (NOT a reactive prop); only the
+   =@if-block= reactive-attr macro is deleted. Clarify the two @if meanings in docs.
+
+* Edge cases
+- =:= disambiguation: =.c: $flag;= (reactive class, leading dot + $) vs nested selector
+  =.c { ... }= (brace) vs CSS custom prop =--v: $x;= vs static =color: red;=. The
+  parser already does some of this (parse_class_toggle); verify ALL four cases by
+  emitted JS at BOTH file scope and template-body scope.
+- =<-= with pipe: =text <- $cartTotal | currency("$");= must route through the value-fn.
+- Negative/expr conditions: =.hidden: !$open;=, =.big: $count > 10;=.
+- Attribute vs property: =value <- $x= on an input sets =.value=, not textContent —
+  target-type-aware lowering.
+
+* Test plan (emitted-JS asserted)
+- UNIT/SNAPSHOT: each row of the table → exact emitted JS.
+- INTEGRATION: a fixture using every form compiles; @bind/@show/@input/@if-block are
+  GONE from the grammar (using them is now an error, asserted).
+- HEADLESS: a migrated real site (pick one of the 20) renders + behaves identically
+  to pre-migration (visual + interaction parity).
+- REPO INVARIANT: =grep -rn '@bind\b|@show\b|@input\b' stdlib projects examples tests
+  | grep -v dist= returns ZERO (CI-style assertion in a test).
+- FULL SUITE green.
+
+* Acceptance criteria
+- [ ] reactive-props.st is the sole : / <- surface; all 7 forms emit correct JS.
+- [ ] zero @bind/@show/@input/@if-block in the repo (asserted by a test).
+- [ ] the deleted macros error if used.
+- [ ] at least one migrated real site verified in-browser for parity.
+- [ ] full suite green; emitted JS asserted; no check-only greens.
+
+NOTE [2026-06-09]: DONE (commits b1dc4b0c BUG-068, a23882b2 FEAT-072 cutover, 14398693 BUG-071). The `:` / `<-` operators are the SOLE reactive-property surface, parser-native (no macros). @bind/@show/@input deleted from data.st (bind-* primitives retained); tombstone %form decls keep them recognized so a use is a hard E0910 error + migration hint (never silent). Selector-scope completeness fixed: BUG-068 (`.cls: $c`→classList.toggle, `--p: $v`→setProperty) + BUG-071 (`text <- $v`→textContent, `src <- $u`→setAttribute — were silently dropped). All sites migrated (examples + ora-ventures/hermes projects). Repo-invariant test (bind_cutover_invariant) enforces zero killed-macros in tracked .st. Reviewer swarm (3 lenses) found BUG-071 P1 + 3 P2s, all fixed mid-flight. Gates: lib green (−5 pre-existing BUG-069-stale snapshots, not ours), integration 168/0, v8 317/12 (pre-existing media cluster), headless 358/251 (+3 vs baseline).

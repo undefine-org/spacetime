@@ -1,0 +1,68 @@
+#+TITLE: GH-14 docs half: @object doc examples don't compile (leading-bareword + nested-body spellings)
+#+STATE: ITEM
+#+SESSION_ID: 154d91ed9602d93c
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-08-06T12-08-13-733Z_154d0baaa942d918/12-W3Resume.jsonl]]
+#+CUSTOM_ID: BUG-319-gh-14-docs-half-object-doc-examples-dont
+
+* Initial Message
+
+Follow-up to the W3 (PLAN-137) consume-or-refuse fix for GH-14. The leading-bareword
+`@object torusknot(size: 1.2, ...)` and nested-body `@object icosahedron(...) { material: glass(...) spin: [...] }`
+spellings are now DIAGNOSED (E0946) — the consume-or-refuse half is done. This item is the
+DOCS half: stdlib doc examples must compile.
+
+stdlib/3d/macros/object.st doc comment shows `@object torusknot(size: 1.2, color: #c0c5ff,
+roughness: 0.15, metalness: 1, spinY: 0.4)` and `@object icosahedron(detail: 6, size: 1.4,
+material: glass, ...)` — both leading-bareword, and the latter uses `material:` as a bare param
+word (the form expects `material: $material:string` — `glass` after `material:` is fine). But
+the %form declares `@object(shape: $shape:string = "icosahedron", ...)` — the shape is a PARAM
+inside the parens, so the leading-bareword spelling matches no form.
+
+Options (decide):
+- (A) Support the leading-bareword spelling: add a `%form` variant `@object $shape:string(...)`
+  or a bareword-→shape binding, so the documented spellings compile.
+- (B) Change the doc examples to the supported `@object(shape: "torusknot", ...)` spelling and
+  enforce stdlib doc examples compile in the suite.
+
+The nested-body form (`{ material: glass(...) spin: [...] }`) also needs a decision: the %form
+reserves `{ $children* }` for child DIRECTIVES, so `material: glass(...)` lines inside the body
+are not the shape the grammar wants.
+
+Gate idea (from PLAN-137 W3): move @object's examples into a literate `.st.md` or
+`@doc(src:)`-referenced file so a drifted example fails the build — a doc example that was
+never compiled is how GH-14 existed at all.
+
+Current state (W3 landed): `@object torusknot(size: 1.2)` is E0946-diagnosed, not silently
+defaulted. This item tracks making the DOCUMENTED spellings actually compile.
+
+NOTE [2026-08-07]: RESOLVED (commit bd9080a9) — the consume-or-refuse half of GH-14 landed.
+
+The W3 revert note said the diagnosis "needs a mechanism that RESPECTS a form's %drops".
+That is exactly what shipped: CompiledForm now carries the macro's declared `%drops`, and
+step 2b's tolerance reads the declaration instead of inferring from `num_inline > 0`.
+One rule, both cases, no per-macro Rust special case.
+
+Verified on the freshly built binary (/home/user/.cache/cargo-target/debug/spacetime):
+- `@object torusknot(size: 1.2)` → error[E0946] (was: compiled clean, emitted default icosahedron)
+- `@object(shape: "torusknot", …)` → compiles, emits torusknot
+- `@value-change(duration: 500ms)` (the form every real caller uses) → still compiles
+- examples/value_change_demo.st → still passes
+- tests/repro/gh-14-object-bareword-shape/check-contract.sh → RED to GREEN
+- cargo test --lib 3134/3 (same three BUG-314 tests), integration 199/8, lsp 173/0 — no regressions
+
+Two things the investigation corrected, both of which had been asserted wrongly in prose:
+
+1. The `%drops ( _ )` that justified the old tolerance is on the migration REWRITE, not on
+   `%macro value-change-timeline`. The bareword `@value-change count(...)` was therefore
+   never declared anywhere — it survived purely on the accidental gate. Nothing authored
+   uses it; the single Rust test pinning it was asserting a shape the language never had.
+   That test now asserts the named form.
+
+2. The docs half of this bug is the ROOT of it: `@object`'s docstring taught
+   `@object <shape>(…)`, a grammar the `%form` never implemented. Doc examples are only as
+   trustworthy as the last time someone compiled them. Rewrote them to the real named form
+   and verified the rewritten example compiles.
+
+Also corrected two stale deprecation claims found en route: the on-cutover migration header
+asserted "@value-change stays CURRENT" while the same file rewrites it to `@on &.text-change`,
+and stdlib/index.st's import banners still advertised all eight retired directives.

@@ -1,0 +1,86 @@
+#+TITLE: MCP instance routes have zero static-asset passthrough -- any relative asset ref 404s under st_mount
+#+STATE: ITEM
+#+SESSION_ID: 15251010f7982b56
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-06T10-48-12-510Z_15251010f7982b56.jsonl]]
+#+CUSTOM_ID: BUG-164-mcp-instance-routes-have-zero-static-ass
+
+* Initial Message
+
+kk launch it and show me the link to access to drive it! thx
+
+* Found via
+Live-driving Forge Deck (FEAT-151) through `st_mount`: rail/log rendered
+correctly (BUG-155/156/158 fixes confirmed live) but the composed 3D preview
+stage's `<canvas>` was blank -- `@gltf(src: "models/step-4.glb?v=1")` never
+loaded.
+
+* Repro
+1. `st_fn_put { source: forge-preview.st, env: <env> }` -- a function whose
+   body does `@gltf(src: "models/step-4.glb")` (a workspace-relative model
+   path, exactly the idiom every `demos/3d/*/index.st` uses).
+2. `st_mount { fn_id, host: <mission-control instance>, region: "stage",
+   input: {"glbPath": "models/step-4.glb?v=1", ...} }`.
+3. Open the mounted instance URL. Browser devtools: `fetch("models/step-4.glb")`
+   from the page -> `404` against
+   `http://127.0.0.1:<port>/__mcp/instance/<id>/models/step-4.glb`.
+4. The IDENTICAL `.st` source + IDENTICAL relative path resolves and loads
+   fine under `cargo run -- serve <dir>` (confirmed side-by-side).
+
+* Root cause
+`src/mcp/live.rs`'s instance router registered exactly five routes for an
+instance: `/`, `/input.json`, `/css`, `/js`, `/bundles`. There was NO
+static-asset passthrough at all -- unlike `src/server.rs`'s dev-serve
+`catch_all_handler`, which explicitly resolves `.glb`/`.gltf`/`.bin`/
+`.ktx2`/`.hdr`/`.exr`/`.draco`/images/video/fonts against `site_dir` (see
+the big `path.ends_with(...)` dispatch chain there, ~line 1072). Every
+relative asset reference a mounted function's markup makes (any `stdlib/3d`
+`@gltf`, any `<img src="...">` pointing at a repo-relative file, any
+`@import`-adjacent binary) silently 404s the moment it's driven through
+`st_mount` instead of `cargo run -- serve`.
+
+This wasn't a "the fix workaround-hacked it" situation -- the underlying
+mechanism (`FunctionRecord.resolve_root`, already tracked per-function
+precisely so `@import`s and the `/bundles` recompile resolve against the
+right root) already had EXACTLY the information needed. The route surface
+had simply never been extended to serve raw bytes from that root.
+
+* Fix
+Added `GET /__mcp/instance/{id}/{*path}` (axum wildcard catch-all,
+registered AFTER the five literal routes -- axum resolves literal segments
+before wildcards, so `/css`/`/js`/`/bundles`/`/input.json` are unaffected)
+-> `instance_asset`: looks up the instance's `FunctionRecord.resolve_root`
+(the SAME root the function's own `@import`s already resolve against),
+guards against `..` path-traversal components, reads the file as raw bytes,
+and returns it with a MIME type from a small extension table mirroring
+`server.rs`'s existing dispatch (`.glb`->`model/gltf-binary`, `.gltf`->
+`model/gltf+json`, images/video/fonts/etc.) -- not a new mechanism, just
+extending the existing route surface with the existing root-resolution
+convention.
+
+* Files
+- `src/mcp/live.rs`: added `instance_asset` handler + `guess_asset_mime`
+  helper; registered `/__mcp/instance/{id}/{*path}` route.
+
+* Verification
+- `cargo build --bin spacetime` clean (default target dir).
+- NOT YET verified against the harness-managed `spacetime mcp` process:
+  that process (PID 3081060, port 37065) is running a STALE deleted-inode
+  binary from before this fix -- confirmed via `/proc/3081060/exe` showing
+  `(deleted)` and `ss -ltnp` mapping the listening port to that PID.
+  Rebuilding on disk (even into the MCP-specific `CARGO_TARGET_DIR=
+  ~/.cache/cargo-target-mcp`) does not hot-swap a running process's loaded
+  code -- a restart is required, and the user was asked/deferred rather than
+  restarting a harness-managed process without permission. User elected to
+  receive the current (unfixed-live) link rather than restart now.
+- Fix will self-verify the next time the `spacetime mcp` process restarts
+  (naturally, at a future session) -- re-check Forge Deck's 3D viewport
+  renders the bronze medallion at that point to close this ticket.
+
+* Follow-up
+No regression test added yet (needs an MCP-server-level integration test
+harness -- `tests/` currently has no coverage of the `/__mcp/instance/*`
+route surface at all; this ticket's fix is the FIRST behavior change to
+that surface this session). Consider a follow-up ticket for MCP
+instance-route integration tests generally (asset passthrough, `..`
+traversal rejection, MIME correctness) once a decision is made on how to
+spin up an in-process axum test server for `src/mcp/live.rs` routes.

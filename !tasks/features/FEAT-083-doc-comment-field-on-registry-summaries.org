@@ -1,0 +1,45 @@
+#+TITLE: Doc-comment field on registry summaries (shared introspection surface)
+#+STATE: DONE
+#+SESSION_ID: 14f94e45c6c3f247
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-02T11-06-49-499Z_14f94e45c6c3f247.jsonl]]
+#+CUSTOM_ID: FEAT-083-doc-comment-field-on-registry-summaries
+#+LAYER: introspection
+#+COMPLETION_HASH: 982bc37f35687e8d
+
+* Initial Message
+
+can you write docs for them and feature the link to that prominently in AGENTS.md?
+
+first do a markdown version (in .md files) for the content. keep it short and concise, but complete, and focused on the testing infra for now.
+
+then tell me how you'd make a Spacetime-based documentation generator that also acts as a showcase for the features of Spacetime. I want something that really slaps. You can use the latest %capture_type, %primitive, %form, and %macro and whatnot to really really slap (give me your ideas). you can test drive that
+
+GOAL: the `///` doc-comment that precedes every `%primitive`/`%macro` becomes STRUCTURED DATA on the registry summary, so it can feed LSP hover, `--coverage` "undocumented" reports, the W4 generator, and the docs gallery from ONE source.
+
+TODAY (verified): `inspect --layer registry --format json` emits
+  primitive: { name, params[], js_emit_count, css_emit_count, exports[] }
+  macro:     { name, form, binds, derives_count, has_states, scopes }
+The leading `///` doc-comment is DROPPED — there is nowhere to read a human description from. (This is what forced the docs-site gallery to hand-write blurbs.)
+
+CHANGE:
+- Capture the contiguous `///` comment block immediately preceding a `%primitive`/`%macro` definition at parse time (CST already has comments; attach the joined text to MacroDefAst / PrimitiveDefAst as `doc: Option<String>`).
+- Surface it on the summaries in src/cli/inspect.rs: add `doc: Option<String>` to PrimitiveSummary (line ~152) and MacroDefSummary (line ~158); populate in the builders (~962).
+- Parse the doc body for the lightweight `@param`/`@yields`/`@example` tags pretext-style macros already use (see stdlib/text/primitives/measure-text.st) into optional structured sub-fields (params_doc[], yields_doc[], examples[]) — OR keep raw and let consumers parse. Decision: ship RAW `doc` first (one field), add structured tags as a fast-follow only if a consumer needs them.
+
+WHY DRY / anti-rot: this is the SAME introspection surface the W6 coverage work
+needs (Spacetime.forms / iter_macros). Capturing doc once means LSP hover, the
+docs gallery (@data registry, FEAT-next), coverage's "you shipped @clock but
+never documented it", and the generator all read one description. The doc cannot
+drift from the code because it travels WITH the definition through the registry.
+
+ACCEPTANCE:
+- `inspect --layer registry --format json` includes a non-empty `doc` for a
+  primitive/macro that has a `///` block (e.g. measure-text → its summary).
+- absence of a comment → `doc: null` (no crash, no empty-string noise).
+- a unit test asserting doc capture for a fixture primitive + a macro.
+- NO Rust special-case for specific primitives; the capture is generic over the
+  comment-before-definition CST shape.
+
+DEPENDENCY: none (foundational). BLOCKS: @data registry gallery + @reference.
+
+NOTE [2026-06-09]: Done (commit e4081a67). doc:Option<String> on PrimitiveDefAst/MacroDefAst; collect_doc_comment walks prev siblings (single blank-gap-before-def allowed); surfaced on summaries. 140 macros + 140 prims now carry doc in registry JSON. 4 unit tests.

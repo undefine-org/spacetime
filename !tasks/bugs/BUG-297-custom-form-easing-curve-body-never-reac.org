@@ -1,0 +1,58 @@
+#+TITLE: Custom `@form easing` curve body never reaches the runtime — silent linear fallback
+#+STATE: DONE
+#+SESSION_ID: 1534a2eae1903af0
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-18T13-07-01-638Z_1534a2eae1903af0.jsonl]]
+#+CUSTOM_ID: BUG-297-custom-form-easing-curve-body-never-reac
+#+COMPLETION_HASH: cb1cc371037b8c40
+
+* Initial Message
+
+I want you to look at how demos/spacetime-docs uses registries to load macros and their definitions. I would like to do the same kind of thing with forms, and have some sort of globally imported brand attributes so that we can have an automatically generated catalog with a sidebar, etc. with a mix of .st.md files and the auto-generated element showcase from the registry. Explore first to understand what I mean. This would also mean changing the style of the showcases to leverage --form a lot, lot more, which might unearth some bugs with using the video and score and other Spacetime affordacnes within the `@form`, but we can do it
+
+* Symptom
+
+#+begin_src
+@form easing --custom-smooth { cubic-bezier(0.4, 0, 0.2, 1) }
+.card { @on &.scroll(name: r, start: 0, end: 1) { opacity: 0 -> 1; easing: --custom-smooth; } }
+#+end_src
+
+compiles GREEN. The emitted JS contains `defaultEasing = "custom-smooth"`, but
+the CURVE BODY (`cubic-bezier(0.4, 0, 0.2, 1)`) is emitted nowhere. The runtime
+(`public/runtime/easing.js`) resolves `easings[name] || easings.linear` → the
+animation runs LINEAR. Verified empirically 2026-08-05 (/tmp/formprobe).
+
+Silent wrong-motion: the author declared a curve, the page ships a different
+one, nothing complains. The existing gate
+(`tests/sip001_easing_forms_test.rs::custom_form_easing_reaches_emitted_js`)
+asserts only that the NAME reaches JS — a source assertion that cannot see
+the missing body (BUG-252's exact failure mode).
+
+* Fix (PLAN-135 W3)
+
+Collect `@form easing` declarations from the merged AST; emit a runtime
+registration so the easing map gains the declared curve (camelCase key per
+easing.js convention; cubic-bezier → factory, spring(...) if supported).
+An easing reference with NO declaration and NO runtime-map entry → loud
+compile error, never a silent linear fallback.
+
+* Gate
+
+CDP: element animated with `--custom-smooth` has a mid-flight progress value
+that differs from linear (discrimination), and matches the declared
+cubic-bezier (approx). RED first: today the value equals linear.
+
+NOTE [2026-08-06]: RESOLVED 2026-08-05 (W3 of PLAN-135). Full delivery chain, each hop verified:
+
+1. COMPILE: `easing_registrations_js(ast)` (src/compiler.rs) emits one `ST.registerEasing(name, curve)` per `@form easing` declaration (page + imports + project overlay), PREPENDED to site JS (animation setup reads ST.easings eagerly). Overlay-sourced registrations emit first → page overrides global (CSS-like precedence). Body `expr` capture arrives brace-wrapped; stripped. `cubic-bezier(a,b,c,d)` and `spring(...)` bodies supported.
+2. RUNTIME (public/runtime/easing.js): `ST.cubicBezier` (Newton+bisection x-solve, CSS-true: (0.4,0,0.2,1)(0.5)=0.776 — verified live), `ST.springCurve`, `ST.registerEasing`. STDLIB_FORM_DECLARATIONS in src/syntax/stdlib_registry.rs parses presets.st.
+3. ENGINE HOP (stdlib/primitives/animation/apply-animations.st `getEase`): the baked local subset was the ONLY lookup — a second silent-linear point (even stdlib curves outside the subset linearized). Now: local → ST.easings (kebab + camel) → scope default → linear. Avoids ST.getEasing's own linear fallback so per-scope defaultEasing still applies.
+4. DEV-SERVER REGRESSION (found while verifying): the dev server loads 5 bundles sharing window.ST (site, comments, migrations, inspect, host); each vendored easing.js re-assigned `ST.easings` wholesale, WIPING the site's registrations (host loads last). easing.js now merges: fresh stdlib defs win, prior custom registrations survive. Regression test: tests/v8_runtime/easing_tests.rs::test_reloading_easing_js_preserves_page_registrations (RED-checked without the merge).
+5. HARD ERROR: unknown `--name` easing reference is E0962 (E0961 was taken by FEAT-166), validated at both consumption sites (keyframe easing strip in expand_body + driver settings chain in expand_one, src/pipeline/drivers.rs `ensure_easing_form_declared`). Trap found: on expansion error the failed bind decl was dropped, leaving bind_decls empty → resolve RESURRECTED it from the macro def → E0956 "Unknown primitive: drive-body" masked E0962. Fixed by setting `ev.binds_consumed = true` on the error arm (same rule as the E0951 score path).
+
+Gates: tests/bug_297_easing_form_body_test.rs (5), tests/easing/custom-form-curve.test.st (runtime-resolution behavior gate, headless), tests/v8_runtime/easing_tests.rs (3). END-TO-END in a real browser (dev-served page, puppeteer scroll): at scroll 50% the custom element read opacity 0.776 (exact curve value), linear sibling 0.500.
+
+HARNESS GAPS found while gating (each blocks a mid-animation behavior assertion; filed separately):
+- one-shot `@on visible` timelines do not tick mid-run under `@clock advance` (@record-timeline captured 0 samples; gh-6 passes only via run-to-end snap)
+- CDP backend never fires IntersectionObserver (gh-6 fails under --cdp)
+- headless has no scroll model (window.scrollTo undefined) — no scroll-driver behavior test exists anywhere in the suite
+- playback-driver mid-playhead assertions are ALREADY RED under --cdp (2/4 failing pre-existing)

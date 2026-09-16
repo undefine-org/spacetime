@@ -1,0 +1,69 @@
+#+TITLE: Headless @each-over-data-signal renders empty holes (nested + flat)
+#+STATE: ITEM
+#+SESSION_ID: 150ccb99745d347e
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-17T14-25-31-601Z_150ccb99745d347e.jsonl]]
+#+CUSTOM_ID: FUP-064-headless-each-over-data-signal-renders-e
+
+* Initial Message
+
+continue
+
+* Summary
+On the headless V8 backend, a runtime =@each($data as $row) { ... }= over a data
+signal (whether the body is inline HTML or a template ref =&card($row)=) renders
+the element shells but leaves every =`$row.field`= hole EMPTY — both flat
+(=$row.name=) and nested (=$row.origin.kind=, =$row.compile.html_len=).
+
+* Evidence
+- Reproduced on the current branch AND on pure HEAD (swapped the runtime trio +
+  template.st/view.st) → PRE-EXISTING, not introduced by PLAN-041 W2/W3.
+- The pre-existing 251-failure headless baseline already includes
+  =tests/unit/templates/collection-ref-each.test.st= (the @each-over-data path).
+- Compile-time SSG unroll (=@data dispatch $macros= → static HTML) renders nested
+  holes fine (=data_dispatch_injects_signature_catalog= passes); only the RUNTIME
+  @each-over-signal path is affected.
+
+* Impact
+- The MCP workbench cards (=stdlib/__mcp__/workbench/cards.st=) render their data
+  fields (=$fn.compile.html_len=, and the FEAT-128 =$fn.origin.kind= chip) via this
+  exact path. They are compile-verified and unit-verified at the data layer
+  (FunctionRecord::to_json + the $macros dispatch row both carry origin), but a
+  HEADLESS render assertion of the chip currently cannot pass because the whole
+  @each-over-signal render path is dark on the logic backend.
+
+* Hypothesis (unverified)
+The runtime @each subscribes to a data-registry signal that the headless harness
+does not populate the same way a live page's =@mcp-input= / =@data inline= seed
+does; or =ST.resolveTemplateArg= / the hole resolver does not deep-resolve in the
+@each→row scope under LinkeDOM. Needs tracing on a real serve vs headless.
+
+* Acceptance
+- A headless test mounts =@each($rows as $r) { <span data-o="`$r.origin.kind`">`$r.name`</span> }=,
+  seeds =$rows= the way the live page does, and the rendered span carries the
+  correct =data-o= + text.
+- =tests/unit/templates/collection-ref-each.test.st= passes headlessly.
+- The FEAT-128 origin chip then gets a headless render assertion.
+
+* Origin
+Surfaced during PLAN-041 W3 (FEAT-128) while trying to add a headless render test
+for the origin chip. Data rails are done + tested; only the headless render proof
+is blocked by this pre-existing limitation.
+
+NOTE [2026-06-18]: SCOPE CORRECTION (W4): the runtime @each-over-data-signal renders CORRECTLY on a live serve — verified by driving the MCP workbench via puppeteer: dispatching `local:mcpFunctions:updated` (detail=array) renders origin-chip cards, and `local:mcpContractParams:updated` renders the inspector param rows. The render trigger is the `data:{src}:loaded` / `local:{src}:updated` CustomEvent with the array in `e.detail` (see stdlib/primitives/data/each.st:179-188). The earlier headless failures were because the TEST HARNESS seeded `window.SpacetimeLocal.x` / `ST.set(body,...)` instead of dispatching that event — so the @each never re-rendered. So this FUP is narrower than first written: it is about giving the headless harness a way to drive @each data sources (dispatch the documented event, or a @drive helper), NOT a runtime rendering bug. The collection-ref-each.test.st failures likely share this harness-seeding gap. Re-scope acceptance accordingly.
+
+NOTE [2026-06-18]: CORRECTION (2026-06-18, PLAN-042 FUP-064 execution): the prior re-scope ("narrower than first written — only a harness-seeding gap") is PARTLY WRONG. Two distinct things were conflated:
+
+(1) The @each-over-data DRIVE contract is REAL and now PROVEN headless. A PLAIN selector-scoped @each inside a @template body — `.sel { @each($src as $i) { &row($i) } }` — compiles to the @each primitive and renders headlessly when seeded the live-page way: mount → init → `ST.setData(name, array)` (dispatches `data:name:loaded`), and re-renders on `local:name:updated`. NEW TEST `tests/unit/templates/each-data-drive.test.st` (2 tests) pins this and PASSES headless. The original failing shape was a bare `window.SpacetimeLocal.x = [...]` assignment, which never dispatches the event — so the @each never rendered. ST.setData-after-mount is the documented, faithful fix. This satisfies FUP-064's achievable acceptance ("seed the way the live page does; assert rendered output; document the convention").
+
+(2) BUT `tests/unit/templates/collection-ref-each.test.st` does NOT pass with seeding alone, because it uses the COLLECTION-REF form `&cards[] .cref-cards { @each(...) }` inside a @template body. PROVEN via `cargo run -- inspect --layer emit`: that template's emitted body payload carries `refs: []` and NO @each primitive — the collection-ref @each is silently dropped from the per-instance builder, so nothing renders on ANY backend (V8 or CDP), not a headless-only issue. This is the BUG-085 class, whose STRUCTURAL fix is the in-progress PLAN-039 ("Unify nested constructs in component bodies", STATE: DOING). collection-ref-each.test.st is therefore correctly a PIN for PLAN-039, not a harness bug. Annotated the test header accordingly + corrected its syntax (plain sigils, ST.setData-after-mount seeding) so the ONLY remaining failure is the PLAN-039 builder gap.
+
+Evidence boundary (inspect --layer emit, grep `sourceName = "x"`):
+- template + `.sel { @each($x as $i) }`            → emits each primitive → renders ✓
+- template + `&cards[] .sel { @each($x as $i) }`   → NO each primitive → fails everywhere ✗ (PLAN-039)
+- `@each(\`$x\` as \`$i\`)` backtick-hole form       → NO each primitive → fails everywhere ✗ (see new syntax FUP)
+
+NEW ACCEPTANCE (split):
+- DONE: each-data-drive.test.st green headless (the achievable drive contract). Commit in PLAN-042.
+- DEFERRED to PLAN-039: collection-ref-each.test.st green (needs the collection-ref builder fix).
+
+So FUP-064's drive-contract half is satisfied; the collection-ref half folds into PLAN-039. Recommend closing FUP-064 once PLAN-042 commit lands, with collection-ref-each tracked under PLAN-039.

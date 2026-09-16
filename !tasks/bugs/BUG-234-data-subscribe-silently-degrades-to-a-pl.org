@@ -1,0 +1,72 @@
+#+TITLE: @data subscribe silently degrades to a plain local when its shape doesn't match (no error)
+#+STATE: DONE
+#+SESSION_ID: 153c9c68ea93c166
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-24T17-46-26-602Z_153c9c68ea93c166.jsonl]]
+#+CUSTOM_ID: BUG-234-data-subscribe-silently-degrades-to-a-pl
+#+COMPLETION_HASH: 50370825b64c24f6
+
+* Initial Message
+
+please exlain all you deferred and file with root causes and impacts and fix steps and opportunities
+
+Surfaced by FUP-144 / PLAN-118 probe (2026-07-24). Filed as own item at close.
+
+* Symptom
+A `@data subscribe` whose token shape does NOT match the subscribe %form falls
+through to a PLAIN LOCAL binding — no `__stLiveSubscriptions` setter is emitted,
+no live channel is wired, and NO error/warning is raised. `cargo run -- check`
+passes. The page compiles, boots, and simply never receives server diffs for
+that assign. The failure surfaces only at runtime as a dead binding.
+
+* Concrete evidence (from the FUP-144 baseline probe)
+BEFORE the FUP-144 type slot existed:
+:   @data subscribe $form Env from $h : form ;
+had an extra token (`Env`) before `from`, did NOT match the subscribe %form, and
+degraded to a plain local — 0 `__stLiveSubscriptions` emitted, check GREEN, no
+diagnostic. (FUP-144 W1 then made THIS exact shape match by adding the type
+slot, which is why the regression was invisible before — the grammar accepted it
+as *something*, just the wrong thing.)
+
+* Why it matters
+This is the "silent-degrade" class: a malformed live-data declaration produces a
+DEAD page feature with zero compiler feedback. It is the same failure family the
+bridge thesis condemns ("a disagreement that only surfaces in the browser =
+a missing check"). Any future typo in a subscribe clause (wrong keyword order,
+missing `from`, stray token) will silently produce a non-subscribing local.
+
+* Root cause (hypothesis, to verify)
+The @data directive dispatch tries the subscribe %form; on no-match it does NOT
+fail — it falls back to a generic `@data`/local binding path. There is no
+"looked like a subscribe but didn't match any subscribe shape → error" guard.
+The dispatcher treats subscribe as one optional shape among several, and the
+local binding is the permissive catch-all.
+
+* Fix direction
+When the `subscribe` KEYWORD is present, the clause MUST match a subscribe shape
+or be a hard error — never degrade to a plain local. Options:
+1. In the @data dispatcher, if the first sub-token is `subscribe`, commit to the
+   subscribe family: no matching subscribe %form → raise E09xx "malformed @data
+   subscribe: expected `$name <type>? from $host : <assign>`" pointing at the
+   clause. (Preferred — keyword commits, elegance-bar friendly, data-driven.)
+2. A lint that flags a `@data … subscribe …` that emitted no subscription marker.
+   Weaker (post-hoc, emit-layer).
+
+RECOMMEND option 1: keyword-commit in the dispatcher.
+
+* RED→GREEN test
+`@data subscribe $x zzz zzz : q ;` (deliberately malformed, missing `from`) must
+FAIL compile with a subscribe-specific message — today it passes and emits a
+plain local. GREEN = hard error naming the expected subscribe shape.
+
+* Acceptance
+- A malformed subscribe (missing `from`, wrong order, stray token) → hard
+  compile error, not a silent plain local.
+- Well-formed untyped/typed/seeded subscribes (FUP-144) still compile unchanged
+  (byte-stable emission).
+
+* Relation
+FUP-144 (added the type slot; this hardens the dispatch around it). FUP-143
+(Erlang-side seam — same "no silent runtime-only failure" principle). Sibling to
+the general "unmatched directive silently dropped" family (BUG-216, BUG-133).
+
+NOTE [2026-07-26]: DONE 2026-07-24 via PLAN-119 W4 (commit 64226ae2). A malformed @data subscribe (missing `from`) fell through match_sink.rs to a plain local (0 subscription markers, check GREEN). Now the `subscribe` keyword commits: MatchSink surfaces the failure, parser converts it to a hard E0945 naming the expected shape `$name <type>? from $host : <assign>`, CLI maps E0945. RED→GREEN: `@data subscribe $x zzz : q ;` went from silently accepted → hard error. Well-formed subscribes byte-stable (counter=3, board=4, signup=3 markers). Test: parser::tests::malformed_data_subscribe_is_a_hard_error.

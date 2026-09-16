@@ -1,0 +1,57 @@
+#+TITLE: @test name string truncated at first colon — %$name emission drops everything from ':' onward (unterminated JS string literal)
+#+STATE: DONE
+#+SESSION_ID: 150e2db01d01263f
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-18T16-12-33-780Z_150e2db01d01263f.jsonl]]
+#+CUSTOM_ID: BUG-109-test-name-string-truncated-at-first-colo
+#+COMPLETION_HASH: fb1a98d78b933014
+
+* Initial Message
+
+open BUG-107 and understand it deeply
+
+* Summary
+A `:` inside a `@test "…"` (or any `$name:string`-captured) name string TRUNCATES the emitted JS string literal at the first colon, dropping the remainder AND the closing quote. The result is an unterminated string literal that aborts the whole file's JS with `Uncaught SyntaxError: Invalid or unexpected token`, so EVERY test in the file silently fails to run (0 passed / 0 failed under `--headless`).
+
+* Severity / impact
+- P2 author-surface compile bug. Colons are natural in test names ("setup: drives X", "GET /api: returns 200", time strings, ratios). An author writing one gets a non-obvious whole-file failure with a generic V8 SyntaxError — no diagnostic pointing at the name. Discovered while authoring BUG-107 isolation fixtures; worked around there by removing the colon, but the underlying capture/emit bug remains.
+- Not runtime: purely compile-time codegen of the captured name into the `%emit js` template.
+
+* Root cause (confirmed via emitted-JS dump, not guessed)
+The `@test` macro form is `@test $name:string { $body:block }` and emits `window.__spacetime_register_test(%$name, async () => { … })` (stdlib/testing/test.st ~L152). The `%$name` interpolation re-emits the captured string literal, but truncates it at the first `:`.
+
+Proven by compiling two near-identical files and dumping `compiled.js`:
+- name "iso A ST.setData"                          => `window.__spacetime_register_test("iso A ST.setData", async () => {`   (correct)
+- name "iso A: ST.setData drives @each render (3 items)" => `window.__spacetime_register_test("iso A, async () => {`   (TRUNCATED at ':' — note the missing closing quote)
+
+So the captured `$name:string` value (or its `%$name` re-emission) splits on `:` — almost certainly the `value:type` / `key: value` colon handling leaking into a STRING-literal capture context where the colon is just data. The closing quote is lost too, which is what makes it a hard SyntaxError rather than a wrong-but-valid name.
+
+* Reproduction (deterministic, single file)
+#+begin_src sh
+cat > /tmp/colon.test.st <<'EOF'
+@import "stdlib/testing/test"
+@test "iso A: ST.setData drives render" {
+  @fixture { <div class="host-r"></div> }
+  @eval (document.querySelector('.host-r').appendChild(document.createElement('ul')))
+  @then .host-r should exist
+}
+EOF
+cargo run --features headless -- test /tmp/colon.test.st --headless
+#   => ✗ JS error … Uncaught SyntaxError: Invalid or unexpected token ; 0 passed, 0 failed
+# Remove the colon from the name => 1 passed, 0 failed.
+#+end_src
+
+Minimal note: a bare `@test "a: b" { @fixture{…} @then … }` did NOT reproduce in a quick reduction (it passed), so the truncation is sensitive to the surrounding captured content/length — the reliable trigger is the full body shape above. The emitted-JS dump (the two register_test lines) is the definitive evidence and isolates the defect to name emission regardless of when the SyntaxError surfaces.
+
+* Fix direction
+Treat a `$name:string` capture as an OPAQUE string literal end-to-end: `%$name` must re-emit the full captured token (properly JS-quoted/escaped), never re-interpret its interior `:` as a value/type separator. Likely sites: the `$name:string` form-capture (does it stop at `:`?) and/or `%$name` interpolation in the `%emit js` template (stdlib/testing/test.st L152/196/225/250 and the test-needs variant). A correct emit is `JSON.stringify(name)`-equivalent quoting of the WHOLE captured string.
+
+* TDD (RED→GREEN)
+1. RED unit/integration: compile `@test "a: b: c" { @assert (1===1) "ok" }`, assert `compiled.js` contains the full quoted literal `"a: b: c"` (and is balanced). Today it emits `"a` truncated.
+2. Fix the capture/emit so the colon is data.
+3. GREEN: the repro file above reports `1 passed, 0 failed`; emitted JS contains the complete `register_test("iso A: ST.setData drives render", …)`.
+4. Guard: keep a colon-in-name test in the testing-stdlib test set so a regression of name emission fails loudly.
+
+* Provenance
+Discovered 2026-06-18 while landing BUG-107 (headless per-file isolation). The isolation fixtures (tests/fixtures/isolation/iso-file-{a,b}.test.st) originally used colon test names and failed to compile; root-caused here to name-string truncation (not the isolation work). Files: stdlib/testing/test.st (`@test` form + `%emit js` `%$name`, ~L138-175 and the assertion-emit variants), plus the `$name:string` form-capture in the metasystem capture engine.
+
+NOTE [2026-06-19]: FIXED 2026-06-19. Root cause: `clean_param_value_structured` (src/emit/metasystem_codegen.rs) stripped `name: Type` annotations but did NOT exempt quoted string literals, so a `$name:string` capture value like "iso A: ST.setData..." truncated at the first `:` when the after-colon token was uppercase. Fix: exempt values starting with `"`/`'` (opaque string data) alongside the existing `{`/`[` object/array exemption. Tests: unit tests test_clean_param_value_{strips_type_annotation,preserves_quoted_string_with_colon} in metasystem_codegen.rs; st-level guard tests/unit/macros/test-name-colon.test.st (2 colon-named tests must RUN). Verified: repro /tmp/colon.test.st 1 passed; emitted JS contains full `register_test("a: b: c GET /api: 200", ...)`; lib 2363 passed.

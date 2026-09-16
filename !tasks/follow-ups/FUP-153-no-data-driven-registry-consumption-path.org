@@ -1,0 +1,64 @@
+#+TITLE: `%registers` records have no generic compile-time CONSUMPTION path
+#+STATE: ITEM
+#+CUSTOM_ID: FUP-153-no-data-driven-registry-consumption-path
+
+* What W2.1 assumed, and what is actually there
+
+PLAN-121 W2.1 ("projection registry as DATA") assumed driver members could be
+registry entries, so that adding a driver requires ZERO Rust. Measured
+(2026-07-26):
+
+**The DECLARATION half exists and works.** =%registers <category>($key) { … }=
+is real, used by =@preset=, =@template=, =@editable=, and a spike declaring
+=@driver visible kind gate seekable false= compiles clean, with the record
+carrying arbitrary fields.
+
+**The CONSUMPTION half does not.** Nothing reads a =%registers= record back
+generically at compile time. =MetaRegistry= exposes only
+=registers_category()= (a NAME lookup: "which category does this macro
+register?") and =get_runtime_registry()= (used by two tests and nothing in the
+pipeline). There is no "give me all entries of category X and their fields".
+
+∴ a registered record is compiler-VISIBLE in principle but compiler-INERT in
+practice: today each consumer is hardcoded in Rust.
+
+* The evidence that this is rot, not merely absence
+
+=@preset= — the closest analogue to a projection registry, and the one whose
+shape SIP-001 borrows — resolves through a CLOSED RUST ENUM:
+
+#+begin_src rust
+// src/parser/ast.rs:229
+pub enum PresetType { Easing, Scroll, Animation, Load }
+#+end_src
+
+So `%preset` LOOKS data-driven (`@preset easing ~x: v` — the category is a
+capture) but a category outside those four cannot work, and nothing enforces
+the correspondence. AGENTS.md names this exactly: *"a closed Rust enum whose
+arms the runtime doesn't all enforce is rot — prefer a registry-keyed reference
+(kinds-as-data) over growing the enum."*
+
+* Consequence for SIP-001
+
+The design's claim that driver variants are DATA is not achievable by
+declaration alone. Either:
+
+1. **Build the missing read-back** — a generic `entries_of(category) ->
+   [record]` on MetaRegistry, consumed by the driver resolver. This is the fix
+   AGENTS.md's kinds-as-data rule implies, and it would let `@preset`'s enum be
+   deleted too (one mechanism replacing two). Bigger, but it is the thing that
+   makes "adding a driver requires zero Rust" TRUE rather than aspirational.
+2. **Accept a Rust-side driver table for now** and drop the zero-Rust claim
+   from SIP-001, marking it a follow-up.
+
+(1) is preferred and is the honest reading of the elegance bar: the mechanism
+earns its place only if it DELETES a special case, and it deletes `PresetType`.
+But it is a genuine subsystem addition and must not be smuggled in as "part of
+W2" without being named.
+
+* Acceptance
+
+- A generic category read-back exists, with a test registering a NEW category
+  from a fixture and reading its fields with zero Rust changes.
+- `PresetType`'s closed enum is deleted, or a follow-up records why it stays.
+- SIP-001's "variants are DATA" claim is either satisfied or amended.

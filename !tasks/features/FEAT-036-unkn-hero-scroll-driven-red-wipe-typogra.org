@@ -1,0 +1,241 @@
+#+TITLE: UNKN hero — scroll-driven red wipe + typography cross-fade
+#+STATE: DONE
+#+SESSION_ID: 14cedfd0e21b5609
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-04-30T12-08-01-672Z_14cedfd0e21b5609.jsonl]]
+#+CUSTOM_ID: FEAT-036-unkn-hero-scroll-driven-red-wipe-typogra
+#+DEPENDS: FEAT-034-unkn-home-foundation-reset-tokens-assets
+#+EFFORT: 3h
+#+LAYER: frontend
+#+PRIORITY: #A
+
+* Initial Message
+
+can you tell me how you use the spacetime design skill?
+
+* Intention & Purpose
+
+Implement signature motion #2: as the visitor scrolls past the hero, a solid red rectangle wipes upward from the bottom edge — height proportional to scroll progress (=scrub: true=) — sitting above the hero background but beneath the typography/lockup. By exit, the entire hero frame is solid scarlet. Typography cross-fades from ink-black to paper-cream to maintain legibility against the rising red.
+
+* Context & Narrative
+
+The current =modules/_hero.st= hero is static cream paper with a =@scroll hero-monogram-drift= effect on the lockup and a words-split =@reveal= on the lede. The reference manifesto specifies a scroll-bound color wipe — *the* signature hero motion — that's completely missing. The hero also has copy duplication ("Where Talent Moves Culture" appears as both meta and headline) and a structurally wrong =unkn-hero__tag= split.
+
+This item rewrites =_hero.st= to match the PDF spec (single headline, single meta line, two CTAs, optional est line right of headline) and adds the scroll-driven wipe + typography cross-fade as two coordinated =@scroll= timelines on the hero element.
+
+The wipe is implemented as an absolutely-positioned full-width =<div class="unkn-hero__wipe">= inside the =<section class="unkn-hero">=, with =bottom: 0; left: 0; right: 0; height: 0= as start state and =height: 100%= as end state, animated via stdlib =@scroll wipe(start: 0, end: 1, scrub: true) { height: 0% -> 100%; }=. Z-index ordering: =.unkn-hero { isolation: isolate }= creates a stacking context; wipe gets =z-index: 1=; typography children get =z-index: 2=.
+
+Typography cross-fade is a sibling =@scroll= timeline on the typography wrapper: =color: var(--unkn-ink) -> var(--unkn-paper);= scrubbed from start: 0.3, end: 0.85 (so color is full ink while wipe is below 30% scroll, transitioning to full paper by 85% — when wipe is high enough that ink against red is hard to read).
+
+* Scope
+
+In-scope:
+- Rewrite =projects/unkn/modules/_hero.st= to match PDF structure: meta line ("Global Talent Agency · Est. 2025"), display headline ("Where Talent" + script "Moves Culture."), lede paragraph, two CTAs ("Find Out More" / "View Talent").
+- Add =.unkn-hero__wipe= element + scroll-driven height fill via stdlib =@scroll=.
+- Add typography cross-fade via second stdlib =@scroll= timeline (offset start so ink is full at wipe start).
+- Adjust =.unkn-nav= z-index/blend so it sits *over* the hero (currently has its own =border-bottom= which divides; remove that, use =background: transparent= over hero, fall back to cream when scrolled past hero).
+- Reduced-motion fallback: =@media (prefers-reduced-motion: reduce)= disables wipe (=height: 0= permanent) AND typography stays =--unkn-ink=. Hero exits as static cream.
+- Mobile: same wipe behavior but scaled timing — height fill maps to a shorter scroll distance proportional to viewport height.
+- =modules/_hero.st= cleanup: delete =unkn-hero__monogram= class and its scroll drift (out of spec).
+- =patterns/_motion.st= cleanup: delete =.unkn-hero__monogram= block.
+- =patterns/_reveals.st= adjustment: remove word-split on lede (interferes with the cross-fade since each word becomes its own element with its own color).
+
+Out-of-scope:
+- A `%primitive` for the wipe — pure stdlib =@scroll= covers it; no need to compose a project-level primitive.
+- Animated red gradient or texture (manifesto says solid red).
+- Hero video background.
+
+* Existing Patterns
+
+- =@scroll= macro: =stdlib/macros/timeline.st= form =@scroll $name (start, end, scrub, easing) { keyframes }=. Supports color animations (CSS color is interpolatable in modern browsers via =@scroll= driver's apply-animations primitive — verify).
+- Hero structural template: existing =&unkn-section-hero()= in =index.st=. Refactor in place.
+- Z-index isolation: =isolation: isolate= on =.unkn-hero= prevents the wipe escaping into the strip section's stacking context.
+- Reduced-motion: =projects/unkn/patterns/_reduced-motion.st= already imported via =_shared.st=. Append a =.unkn-hero__wipe { animation: none; height: 0 !important; }= rule and a =.unkn-hero__copy { color: var(--unkn-ink) !important; }= rule.
+- Existing =.unkn-hero { padding-top: clamp(8rem, 14vw, 12rem) }= clears the fixed nav. Keep.
+
+* Tests
+
+Compile-time:
+- T1: =cargo run -- check projects/unkn/= passes.
+- T2: =Spacetime.review()= dim "animation" reports zero "0-element timeline" findings (every =@scroll= block resolves to its target).
+- T3: =Spacetime.review()= dim "brand" still 0 unbound literals.
+
+Visual + interaction:
+- M1: Load =/= at 1440x900. Hero is solid cream. Scroll down 1px — wipe becomes visible at hero's bottom edge with height ≈ 1% of hero height.
+- M2: At 50% hero scroll-out, wipe height ≈ 50%; typography color is ink-black.
+- M3: At 80% hero scroll-out, wipe height ≈ 80%; typography color is mostly paper-cream (cross-fade triggered between 30% and 85%).
+- M4: At 100% hero scroll-out (hero just exited viewport), wipe height = 100% solid red; typography color = full paper-cream.
+- M5: Scroll back up — wipe recedes; typography reverses to ink. Scrub is bidirectional.
+- M6: Reduced-motion mode: hero stays cream throughout scroll; no wipe; typography stays ink.
+
+Layout:
+- M7: Mobile (360x640): hero takes full viewport height; wipe still works; CTAs stack vertically.
+- M8: Hero exits viewport via standard scroll within ~85% of viewport height of scroll distance.
+
+Z-stacking:
+- M9: DevTools elements panel: =.unkn-hero__wipe= z-index 1; =.unkn-hero__copy= and children z-index 2; nav z-index =--unkn-z-nav= (50). Order is correct: wipe BEHIND typography, typography BEHIND nav.
+
+Accessibility:
+- M10: =aria-hidden="true"= on =.unkn-hero__wipe= so screen readers ignore the decorative div.
+- M11: Hero headline is exactly one =<h1>= (single landmark, accessible).
+
+* Implementation
+
+** ITEM Rewrite modules/_hero.st structure
+:PROPERTIES:
+:CUSTOM_ID: FEAT-036-unkn-hero-scroll-driven-red-wipe-typogra::rewrite-hero-template
+:END:
+
+- File: =projects/unkn/modules/_hero.st=
+- Replace existing =@template &unkn-section-hero()= with:
+  =@template &unkn-section-hero() {=
+  =  <section class="unkn-hero" data-cursor>=
+  =    <div class="unkn-hero__wipe" aria-hidden="true"></div>=
+  =    <div class="unkn-hero__shell">=
+  =      <div class="unkn-hero__copy">=
+  =        <p class="unkn-hero__est">Global Talent Agency &middot; Est. 2025</p>=
+  =        <h1 class="unkn-hero__headline">Where Talent <span class="unkn-hero__headline-script">Moves Culture.</span></h1>=
+  =        <p class="unkn-hero__lede">We represent a new generation of influence, built on authenticity, creativity and cultural power.</p>=
+  =        <div class="unkn-hero__ctas">=
+  =          <a class="unkn-cta unkn-cta--solid" href="#about">Find Out More</a>=
+  =          <a class="unkn-cta" href="/talent">View Talent</a>=
+  =        </div>=
+  =      </div>=
+  =    </div>=
+  =  </section>=
+  =}=
+- Note structural changes from current:
+  - Removed the redundant =.unkn-hero__meta= / =.unkn-hero__tag= / =.unkn-hero__tag-script= block.
+  - Single =.unkn-hero__est= line for "Global Talent Agency · Est. 2025".
+  - Added =.unkn-hero__wipe= div as first child of =.unkn-hero=.
+  - Wrapped all typographic content in =.unkn-hero__copy= for the cross-fade timeline.
+- Also remove =&unkn-section-strip()= references inside hero (it's a separate section).
+
+** ITEM Author CSS for hero + wipe + cross-fade
+:PROPERTIES:
+:CUSTOM_ID: FEAT-036-unkn-hero-scroll-driven-red-wipe-typogra::author-hero-css
+:DEPENDS: FEAT-036-unkn-hero-scroll-driven-red-wipe-typogra::rewrite-hero-template
+:END:
+
+- File: =projects/unkn/modules/_hero.st= (same file, after template).
+- CSS:
+  - =.unkn-hero { position: relative; isolation: isolate; min-height: 100vh; background: var(--unkn-paper); padding-top: clamp(8rem, 14vw, 12rem); padding-bottom: var(--unkn-space-xl); display: flex; align-items: flex-end; }=
+  - =.unkn-hero__wipe { position: absolute; left: 0; right: 0; bottom: 0; height: 0; background: var(--unkn-accent); z-index: 1; pointer-events: none; }=
+  - =.unkn-hero__shell { width: 100%; max-width: var(--unkn-content-max); margin-inline: auto; padding-inline: var(--unkn-gutter); position: relative; z-index: 2; }=
+  - =.unkn-hero__copy { display: grid; gap: var(--unkn-space-md); }=
+  - =.unkn-hero__est { font-family: var(--unkn-font-body); font-size: var(--unkn-text-xs); font-weight: 700; letter-spacing: var(--unkn-tracking-meta); text-transform: uppercase; color: var(--unkn-ink-muted); }=
+  - =.unkn-hero__headline { font-family: var(--unkn-font-display); font-size: var(--unkn-text-display); line-height: var(--unkn-leading-display); letter-spacing: var(--unkn-tracking-tight); max-width: 14ch; }=
+  - =.unkn-hero__headline-script { display: block; font-family: var(--unkn-font-script); color: var(--unkn-accent); font-size: var(--unkn-text-script-lg); line-height: 0.92; margin-top: -0.1em; margin-left: 0.4em; }=
+  - =.unkn-hero__lede { font-family: var(--unkn-font-body); font-size: var(--unkn-text-lg); line-height: 1.5; max-width: 38ch; }=
+  - =.unkn-hero__ctas { display: flex; gap: var(--unkn-space-sm); flex-wrap: wrap; }=
+- Mobile breakpoint:
+  - =@media("max-width: 720px") { .unkn-hero { min-height: auto; padding-top: clamp(6rem, 18vw, 9rem); padding-bottom: var(--unkn-space-lg); } .unkn-hero__ctas { flex-direction: column; align-items: stretch; } }=
+- Verify: visual inspection at 1440x900 — hero fills viewport, copy stack lower-left, est above headline, CTAs below lede.
+
+** ITEM Author scroll-driven wipe timeline
+:PROPERTIES:
+:CUSTOM_ID: FEAT-036-unkn-hero-scroll-driven-red-wipe-typogra::author-wipe-timeline
+:DEPENDS: FEAT-036-unkn-hero-scroll-driven-red-wipe-typogra::author-hero-css
+:END:
+
+- File: =projects/unkn/modules/_hero.st= (continue).
+- Add:
+  =.unkn-hero__wipe {=
+  =  @scroll wipe(start: 0, end: 1, scrub: true, easing: linear) {=
+  =    height: 0% -> 100%;=
+  =  }=
+  =}=
+- The =@scroll= driver's =scope: cover= default means start: 0 = section enters viewport; end: 1 = section fully exits viewport. That maps perfectly: wipe begins growing the moment hero starts scrolling out, completes at full exit.
+- Verify: scroll page, wipe height tracks scroll position.
+
+** ITEM Author typography cross-fade timeline
+:PROPERTIES:
+:CUSTOM_ID: FEAT-036-unkn-hero-scroll-driven-red-wipe-typogra::author-crossfade-timeline
+:DEPENDS: FEAT-036-unkn-hero-scroll-driven-red-wipe-typogra::author-wipe-timeline
+:END:
+
+- File: =projects/unkn/modules/_hero.st= (continue).
+- Add timeline that drives a CSS variable (rather than directly animating each child's color):
+  =.unkn-hero__copy {=
+  =  --unkn-hero-fg: var(--unkn-ink);=
+  =  color: var(--unkn-hero-fg);=
+  =  @scroll hero-fg(start: 0.3, end: 0.85, scrub: true, easing: ease-in-out) {=
+  =    --unkn-hero-fg: var(--unkn-ink) -> var(--unkn-paper);=
+  =  }=
+  =}=
+- Cascade: =.unkn-hero__copy=, =.unkn-hero__est=, =.unkn-hero__lede= all inherit =color: var(--unkn-hero-fg)=. =.unkn-hero__headline-script= retains =color: var(--unkn-accent)= (script accent stays red against red — visible because of font weight + slight value difference; the only element NOT cross-fading).
+- Decision: also cross-fade =.unkn-hero__headline-script= from =--unkn-accent= → =--unkn-paper= over the same range so it remains visible against the red wipe (otherwise it disappears at high wipe). Add second timeline:
+  =.unkn-hero__headline-script {=
+  =  @scroll hero-script-fg(start: 0.3, end: 0.85, scrub: true, easing: ease-in-out) {=
+  =    color: var(--unkn-accent) -> var(--unkn-paper);=
+  =  }=
+  =}=
+- Verify: scrolling, typography color smoothly transitions from ink+accent to paper+paper.
+
+** ITEM Adjust nav over hero
+:PROPERTIES:
+:CUSTOM_ID: FEAT-036-unkn-hero-scroll-driven-red-wipe-typogra::adjust-nav
+:DEPENDS: FEAT-036-unkn-hero-scroll-driven-red-wipe-typogra::author-crossfade-timeline
+:END:
+
+- File: =projects/unkn/modules/_nav.st=
+- Current: =background: var(--unkn-paper); border-bottom: 1px solid var(--unkn-rule);=
+- Change: nav starts =background: transparent; border-bottom: 0;= and becomes opaque only after scroll past hero.
+  - Use =@scroll nav-bg(start: 0.5, end: 0.95, scrub: true) { background-color: transparent -> var(--unkn-paper); border-bottom-color: transparent -> var(--unkn-rule); }= bound to =.unkn-nav= — but =.unkn-nav= isn't a scroll target relative to hero. Use a body-level scroll observer instead, OR keep nav transparent over hero and rely on visibility of nav links via their own color cross-fade matching the hero copy:
+- Simpler decision: nav stays =background: var(--unkn-paper)= but add =backdrop-filter: blur(8px); background-color: rgba(245, 240, 230, 0.85);= so the nav remains legible with a frosted-glass effect when red wipe peeks through (during scroll-out the wipe is below the nav z-index, so this is moot — but the visual nicety is worth it).
+- Decision recorded: keep nav =background: var(--unkn-paper)= (opaque), drop =border-bottom=. Nav remains a clean cream bar above everything. Wipe is constrained to hero section only; never touches nav.
+
+** ITEM Cleanup orphaned hero motion + reveals
+:PROPERTIES:
+:CUSTOM_ID: FEAT-036-unkn-hero-scroll-driven-red-wipe-typogra::cleanup-orphans
+:DEPENDS: FEAT-036-unkn-hero-scroll-driven-red-wipe-typogra::adjust-nav
+:END:
+
+- File: =projects/unkn/patterns/_motion.st=
+- Delete =.unkn-hero__monogram= block (no longer in markup).
+- File: =projects/unkn/patterns/_reveals.st=
+- Remove the =@reveal= words-split on =.unkn-hero__lede= (interferes with the cross-fade — each word would become a sub-element with potentially overridden color). Keep =.unkn-identity__title= reveal.
+- Replace lede reveal with simpler =@on visible(800ms) { opacity: 0 -> 1; translate-y: 16px -> 0; }= on =.unkn-hero__copy= as a whole (single reveal of the copy stack on first paint).
+
+** ITEM Reduced-motion fallback
+:PROPERTIES:
+:CUSTOM_ID: FEAT-036-unkn-hero-scroll-driven-red-wipe-typogra::reduced-motion
+:DEPENDS: FEAT-036-unkn-hero-scroll-driven-red-wipe-typogra::cleanup-orphans
+:END:
+
+- File: =projects/unkn/patterns/_reduced-motion.st= (or inline at end of =_hero.st=).
+- Add:
+  =@media (prefers-reduced-motion: reduce) {=
+  =  .unkn-hero__wipe { display: none; }=
+  =  .unkn-hero__copy { --unkn-hero-fg: var(--unkn-ink); }=
+  =  .unkn-hero__headline-script { color: var(--unkn-accent); }=
+  =}=
+- Verify: in DevTools rendering pane → "prefers-reduced-motion: reduce", load =/=, scroll. Wipe is invisible; typography stays ink throughout.
+
+** ITEM Manual verify
+:PROPERTIES:
+:CUSTOM_ID: FEAT-036-unkn-hero-scroll-driven-red-wipe-typogra::manual-verify
+:DEPENDS: FEAT-036-unkn-hero-scroll-driven-red-wipe-typogra::reduced-motion
+:END:
+
+- Run =cargo run -- doctor projects/unkn/ --format pretty=. Score ≥ 6 across all dims for =/=.
+- Manual scenarios M1-M11 above. Capture =screenshots/hero-wipe-50pct.png=, =screenshots/hero-wipe-100pct.png=, =screenshots/hero-reduced-motion.png=.
+
+* Edge Cases
+
+- *Browser color interpolation*: Chrome and Firefox interpolate CSS =color= via RGB linear; Safari may differ. Test all three. Worst case: typography color jumps mid-cross-fade. Mitigation: use the CSS-variable-driven approach (animate the var, not the color directly) so the interpolation happens on a custom-property string transition (browsers handle this consistently as discrete... actually no, custom-prop transitions are also browser-dependent unless typed via =@property=). Mitigation: register the var via =@property --unkn-hero-fg { syntax: '<color>'; inherits: true; initial-value: #0D0D0D; }= which forces consistent color interpolation in supporting browsers, and degrades to a snap transition in non-supporters (acceptable).
+- *Hero shorter than viewport*: at very tall mobile devices, hero may be < 100vh because of =padding-bottom=. =scope: cover= still maps correctly. Verify at iPhone Pro Max (430x932) viewport.
+- *Anchor scroll into hero*: if a future link points to =#hero=, the section may snap into view skipping the entrance reveal. Acceptable — entrance reveal triggers on next scroll.
+- *Wipe overshooting hero bottom*: =bottom: 0= anchors wipe to section bottom; =height= grows upward. If section box-shadow or margin extends below =bottom: 0=, wipe aligns to padding-box. Use =bottom: 0= on the absolute element with =position: absolute= relative to =.unkn-hero { position: relative; }=.
+- *Performance*: animating =height= triggers layout. For 60fps, =height= should ideally be replaced by =transform: scaleY()= with =transform-origin: bottom=. *Decision*: use =transform: scaleY(0) -> scaleY(1)= for performance; no layout thrash. Update CSS accordingly: =.unkn-hero__wipe { position: absolute; inset: 0; transform: scaleY(0); transform-origin: bottom; will-change: transform; }= and timeline =transform: scaleY(0) -> scaleY(1);=.
+
+* Acceptance Criteria
+
+- =cargo run -- check projects/unkn/= exits 0.
+- =cargo run -- doctor projects/unkn/ --format json= for route =/= reports score ≥ 6 across 7 dims.
+- Loading =/=: hero renders with single =<h1>=, single est line, lede, two CTAs.
+- Scrolling: red wipe grows from bottom, scaleY-driven, scrub-bound to scroll progress; typography cross-fades from ink to paper between 30% and 85% scroll progress.
+- At hero exit (scroll progress = 1): full red rectangle covers hero with paper-cream typography overlaid.
+- Reduced-motion mode: no wipe, typography stays ink.
+- Mobile (360x640): hero one-screen-tall, CTAs stacked, wipe behavior identical.
+- =@property --unkn-hero-fg= declared (or graceful fallback documented).
+- Screenshots attached.

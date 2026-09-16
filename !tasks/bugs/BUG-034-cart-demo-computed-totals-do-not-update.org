@@ -1,0 +1,43 @@
+#+TITLE: cart-demo computed totals do not update live
+#+STATE: DONE
+#+SESSION_ID: 14f48ced503111a7
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-05-29T18-28-09-664Z_14f48ced503111a7.jsonl]]
+#+CUSTOM_ID: BUG-034-cart-demo-computed-totals-do-not-update
+#+EFFORT: 3h
+#+LAYER: coding-agent
+#+COMPLETION_HASH: 29b43161a67b470b
+
+* Initial Message
+
+my friend, I want you to do two things that are quite related to each other:
+1. look at projects/unkn for the way it structures its files and tell me how you would have structured it
+2. look up reactive bindings and how they are done in Spacetime (the $ sigil), as well as full-spacetime work (as in, not using index.html, only index.st and generating the html from it by putting the html inline).
+
+The goal is to build a project that showcases reactive bindings, so that websites can start dealing with userland values instead of just animation-specific values (although one of the strengths of Spacetime is its ability to bring reactive bindings to the animation sphere).
+
+The goal of this is both to make a showcase demo (in demos/) and to use that to find all the BUGs and FEATs and REFACTORs that we need to implement. Do NOT use the 'emacs' way of managing tasks; only the Spell-native way. Think a bit about the type of demo that would make sense to showcase reactive bindings; get inspiration by choosing from awwwards.com too
+
+* Source
+Verifying BUG-033 end-to-end. The file-scope reactive binding feature itself works (fsdemo: .tot 0->30, .cnt 0->3 live). But in examples/cart-demo, after add-to-cart, cart ITEMS render (@each, 0->2) yet .total-amount stays "$0" and .cart-count stays empty.
+
+* Evidence
+- emitted JS DOES contain the binding: querySelectorAll(".total-amount") + addEventListener("local:cartTotal:updated", render). So the file-scope binding (BUG-033) is correctly emitted.
+- A minimal fsdemo with the SAME shape ($cart state + @computed $cartTotal from $cart + .tot { text: $cartTotal }) updates live. So the binding mechanism works.
+- Difference in cart-demo: mutation is event-delegated (`.product-grid { @on click [data-add-to-cart] { $cart <- $cart.concat([{ ..., price: +$.closest('product-card').dataset.price, ... }]) } }`) and prices come from dataset string coercion.
+
+* Hypotheses to check
+1. @computed $cartTotal does not re-dispatch local:cartTotal:updated when $cart changes in cart-demo (computed-source dispatch chain), OR
+2. the concatenated item has NaN price (dataset coercion) so cartTotal=NaN and the binding is skipped (apply() returns NaN -> but textContent would show NaN, not stay $0 -> suggests binding never fires -> points to #1), OR
+3. script execution order: binding addEventListener registered after computed's only dispatch.
+
+* Repro
+cargo run -- serve examples/cart-demo/ ; click an Add to Cart button; observe items render but total stays $0.
+
+* Acceptance
+- After add-to-cart, .total-amount shows the summed price and .cart-count shows item count, updating live on every add/remove.
+- Root cause fixed at the mechanism level (likely @computed dispatch), not patched in the example.
+
+* Note
+Separate from BUG-033 (file-scope binding emit, DONE+verified). This is about the @computed -> local:NAME:updated dispatch chain (or cart-demo data).
+
+NOTE [2026-05-30]: FIXED + verified live (commit 01b6baa4). Root cause was hypothesis #1: @computed compute() did ST.set(el,'value') only, never publishing to the global store nor dispatching local:<name>:updated, so file-scope bindings (BUG-033) could not react. Fix in stdlib/primitives/data/computed-source.st: after %yield, write window.SpacetimeLocal[computedName]=value + dispatch CustomEvent(`local:${computedName}:updated`). Also hardened source subscription to register both ST.afterData (remote) and local:<src>:updated (local) listeners unconditionally (the prior single-branch form dropped local mutations at init; also removed a non-existent ST.getData call that threw and broke page init). TDD: test_computed_publishes_global_signal_and_dispatches (RED proven by stdlib revert, GREEN after). LIVE: cart-demo click Rug($299)->total 299; +Lantern($149)->448, count 2; .total-amount/.cart-count update on every add. Makes @computed a first-class chainable signal.

@@ -1,0 +1,24 @@
+#+TITLE: Unify `check` and `build` compile paths (divergent validation surfaces)
+#+STATE: ITEM
+#+SESSION_ID: 1508cbf54b12d2b0
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-14T11-53-10-188Z_1508cbf54b12d2b0.jsonl]]
+#+CUSTOM_ID: FUP-058-unify-check-and-build-compile-paths-dive
+
+* Initial Message
+
+The other agent is done, so please do FUP-057 and run the full test suite once all of Cluster A is done and clean and refactored, that all the examples work well and are tested ideally using .test.st, that the docs in demos/spacetime-docs are updated with the new capabilities of the @use, and that you're ready to go back to Cluster B (explain all that you'll do in Spell then and the integration points with Spacetime). You have unlimited time budget to really go all the way with the Spacetime side
+
+PROBLEM (discovered during FEAT-118 FUP-057): `spacetime check` and `spacetime build` run DIFFERENT compile paths, so diagnostics diverge — a class of bug that is structurally easy to reintroduce.
+
+- `build` (src/compiler.rs `compile_pipeline` → `pipeline::compile_verbose`) threads the full pipeline: CompileContext with `import_scope`, the canonical-qualifier pass, and ALL `check_*` diagnostic passes (E0926 unbound qualifier, E0927 visibility, E0924 ambiguity, etc.).
+- `check` (src/main.rs `check_file`) runs a SEPARATE `CompileAnalysis` path (analyze_types/data_sources/locals/scopes/dispatch/visual) that NEVER builds the ImportScope or calls compile_verbose. ∴ FEAT-118 import diagnostics (E0926/E0927) and alias resolution are INVISIBLE to `check` — only `build` surfaces them.
+
+EVIDENCE: `@scene/badge` with `@use "./badge.st"` → `build` reports E0926; `check` reports "✓ All passed". Same file, opposite verdict.
+
+WHY IT MATTERS: `check` is the dev-facing fast validation command (editor integration, CI lint). Any new pipeline diagnostic must be MANUALLY re-wired into the CompileAnalysis path or it silently won't fire in `check`. Two parallel validation surfaces = drift by construction.
+
+DESIRED: ONE compile/validation path both commands share. `check` = `build` minus codegen/emit (diagnostics only). Concretely: route `check_file` through `pipeline::compile_verbose` (or a `validate_only` entry that runs Layers -1..N diagnostics and skips emit), building the CompileContext with `with_imports`/`with_scopes` exactly as `compile_pipeline` does. Delete the parallel CompileAnalysis diagnostic logic OR make it a thin consumer of the same pass set. Acceptance: a single test matrix asserts `check` and `build` produce the SAME diagnostic codes for the same fixture (esp. the FEAT-118 E0924/E0926/E0927 cases).
+
+SCOPE/RISK: `CompileAnalysis` has lints `build` may not run (visual W2xx, orphan detection) — unification must PRESERVE those (move them into the shared pass set, or run check = shared-pipeline-diagnostics ∪ check-only-lints). Medium effort; touches src/main.rs check_file + src/compiler.rs + possibly a new pipeline `diagnostics_only` entry. Belongs to the Cluster B "L0 hygiene — unify parsers onto one registry" family (one-source-of-truth theme).
+
+PARENT: FEAT-118. Raised by user during FUP-057 ("add an FUP to unify build and check's path so these kinds of errors are structurally impossible to make").

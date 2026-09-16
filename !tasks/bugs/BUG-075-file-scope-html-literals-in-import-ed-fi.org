@@ -1,0 +1,54 @@
+#+TITLE: File-scope HTML literals in @import-ed files dropped from compiled.html
+#+STATE: ITEM
+#+SESSION_ID: 14fc108ed3772fa8
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-04T14-32-37-965Z_14fc108ed3772fa8.jsonl]]
+#+CUSTOM_ID: BUG-075-file-scope-html-literals-in-import-ed-fi
+
+* Initial Message
+
+what do you need from me to implement FEAT-076 fully and in a Spacetime-y way? I am going to sleep so you'll auto-accept the most ambitious and Spacetime-y choice every time (unlimited budget). Ask me questions one last time, if needed, before going off
+
+* BUG — imported-file file-scope markup does not reach compiled.html
+
+** Parent
+[[id:FEAT-076-rebuild-the-cms-admin-multi-file-the-pro]] W1. BLOCKS the multi-file admin rebuild (markup must split across imported files).
+
+** Symptom (RED, reproduced)
+A full-Spacetime page whose entry `index.st` does `@import "./body.st"`:
+- entry-file file-scope markup (`<div class="entry-shell">…`) → appears in compiled.html ✓
+- imported-file file-scope markup (`<div class="imported-shell">…` in body.st) → DROPPED ✗
+Served body shows only the entry markup. Minimal repro:
+  index.st:  @import "./body.st"  +  <div class="entry-shell"><h1>Entry</h1></div>
+  body.st:   <div class="imported-shell"><h2>Imported</h2></div>
+Served HTML body contains entry-shell but NOT imported-shell.
+
+Contrast: an imported file's @data / @template / selector-scope behavior (@each, @on, :,
+<-) DOES merge and work (the admin rail's @template + @each from rail.st register fine).
+Only file-scope HTML LITERAL blocks (the `<tag>` sigil markup) are lost on import.
+
+** Impact
+Multi-file Spacetime apps cannot split their PAGE MARKUP across files — all file-scope
+`<tag>` markup must live in the single entry file. This defeats modular composition for
+any app with a non-trivial shell (the CMS admin: shell in app.st, rail skeleton in rail.st,
+drawer in drawer.st, …). FEAT-076's multi-file mandate depends on this.
+
+** Likely root cause (to confirm)
+merge_ast (import merge) collects meta_defs / data / templates / selector scopes from
+imported files but does NOT collect their file-scope html_blocks into the root entry's
+html-block list. emit_html_blocks (src/compiler.rs ~728) then only sees the entry file's
+blocks. Grep: how html_blocks are gathered pre-emit, and whether merge_ast carries an
+html-blocks vec across the import boundary.
+
+** Fix plan (RED → GREEN, structural)
+1. RED: integration test — compile a 2-file page (entry @imports body.st; body.st has
+   file-scope `<section class="imported">`), assert compiled.html contains "imported".
+2. GREEN: ensure merge_ast (or the html-block collection step) concatenates imported
+   files' file-scope html_blocks into the root in import+source order, so emit_html_blocks
+   sees the full set. Preserve ordering (imports before the entry's own trailing markup, or
+   document the order). NO Rust special-casing of constructs — this is AST merge plumbing.
+3. Verify hydration holes + selector-init still bind across the boundary.
+
+** Acceptance
+- [ ] Imported file-scope markup appears in compiled.html in deterministic order.
+- [ ] RED test GREEN; existing single-file pages unaffected (ssg-list still emits its body).
+- [ ] Admin shell (app.st) markup renders when imported by app/index.st.

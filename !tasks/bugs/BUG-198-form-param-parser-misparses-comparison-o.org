@@ -1,0 +1,42 @@
+#+TITLE: %form param parser misparses comparison operators (>=) into bogus defaults; Comparison element variant has no constructor
+#+STATE: ITEM
+#+SESSION_ID: 1534a246b3aa1d15
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-18T13-04-13-518Z_1534a246b3aa1d15.jsonl]]
+#+CUSTOM_ID: BUG-198-form-param-parser-misparses-comparison-o
+
+* Initial Message
+
+i want us to design a system where the stdlib has 'migrations', i.e. a macro that takes old st syntax and turns it to new st syntax. the macro should include the date so that we can order the migrations by syntax and apply syntax waves. It should be shown in all dev environments next to the current host pill, in the same style as the host pill
+
+* Found
+During PLAN-076 W1 review-swarm fixes: `collect_form_capture_names` needed a
+`FormInlineElement::Comparison` arm, but writing a test for it revealed the
+variant can never be CONSTRUCTED through the `%form` param parser.
+
+* Symptoms
+1. `%form { @show(when: $n:number >= $min:number) }` — `parse_form_params`
+   (src/parser/mod.rs ~6347) does `primary_str.find('=')`, hits the `=` inside
+   `>=`, and parses `"$min:number"` as a DEFAULT VALUE via
+   `parse_param_default`. `$min` is silently lost as a capture; the param
+   becomes `$n:number` with a bogus default.
+2. `FormInlineElement::Comparison { operator, capture }` (meta_ast.rs:377)
+   has CONSUMERS (src/syntax/events/form_compiler.rs:542, form_scoring,
+   signature, treesitter walker) but NO construction site anywhere in src/.
+   Dead producer path — exactly the "closed enum arm the runtime doesn't
+   enforce is rot" pattern from AGENTS.md.
+
+* Impact today
+None live: zero stdlib `%form` patterns use comparison operators in params
+(grepped). It bites only when someone authors such a form — silent misparse
+instead of an error.
+
+* Fix direction (when scheduled)
+- In `parse_form_params`, don't treat `=` as a default-introducer when it's
+  part of a comparison operator (`>=`, `<=`, `!=`, `==`) — scan for a
+  whitespace-delimited `=` token instead of `find('=')`.
+- Then parse the remainder after the first capture into additional elements:
+  `Literal(">=")` + `Capture($min)` — OR construct the real
+  `FormInlineElement::Comparison { operator, capture }` the consumers expect
+  (decide ONE: either wire the variant or delete it; AGENTS rot rule).
+- Tests: RED→GREEN `%form` param with `>=` producing the comparison
+  elements, plus a plain `= default` param regression test.

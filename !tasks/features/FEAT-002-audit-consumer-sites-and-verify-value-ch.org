@@ -1,0 +1,77 @@
+#+TITLE: Audit consumer sites and verify value-change visual behavior
+#+STATE: DONE
+#+SESSION_ID: 14a6f40c6aa9910b
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-03-30T11-18-58-449Z_14a6eb4da46990fa/9-CreateFEAT3.jsonl]]
+#+CUSTOM_ID: FEAT-002-audit-consumer-sites-and-verify-value-ch
+#+EFFORT: 2h
+#+PRIORITY: #B
+#+LAYER: site
+
+NOTE [2026-03-30]: Completed. Audited all consumer sites (ora-ventures.com, web/index.st, zeystudios, backdesk-dashboard, examples). No workaround CSS found on any @value-change targets — old hacks were internal to driver. Added emoji grapheme test. V8 headless DOM test failure is pre-existing (V8 lacks DOM APIs), not a regression."
+
+* Scope
+** In-scope
+- Audit all @value-change consumer sites for obsolete CSS workarounds
+- Remove any workaround CSS that is now unnecessary (translateZ(0), will-change hacks, forced GPU promotion)
+- Add headless test for emoji grapheme handling in value-change
+- Visual verification in Chrome and Firefox via dev server
+- Consumer sites to audit:
+  - =ora-ventures.com/index.st= and =ora-ventures.com/modules/_hero.st=
+  - =web/index.st= (line 487)
+  - =examples/value_change_demo.st=
+  - Any other files found via =grep -r 'value-change' site/ *.st=
+** Out-of-scope
+- Modifying the value-change-driver primitive (done in previous item)
+- Modifying the Spacetime runtime (done in previous item)
+- RTL text support (pre-existing limitation, not a regression)
+** Rationale
+The driver rewrite changes overflow handling and removes font-kerning/letter-spacing workarounds. Consumer sites may have CSS that was working around driver bugs. With those bugs fixed, the workaround CSS may be unnecessary or interfere with the new approach.
+
+* Tests
+** =tests/unit/animations/value-change.test.st= — new test
+#+begin_src spacetime
+@test "value-change handles emoji graphemes correctly" {
+  @fixture {
+    <div class="vc-emoji">hello</div>
+  }
+  @given .vc-emoji {
+    @value-change(duration: 100ms, stagger: 10ms) {
+      :entering { opacity: 0 -> 1; }
+      :exiting { opacity: 1 -> 0; }
+    }
+  }
+  @eval (eval("document.querySelector('.vc-emoji').textContent = '👋🌍'"))
+  @wait 300ms
+  @then .vc-emoji should have_text "👋🌍"
+  @assert (eval("document.querySelector('.vc-emoji').querySelectorAll('span').length === 0")) "should be plain text after emoji animation"
+}
+#+end_src
+** Visual verification checklist (manual)
+- =cargo run -- serve ora-ventures.com/= → watch 5+ flap cycles in Chrome (no visual artifacts)
+- Same in Firefox (no rectangular flashes, no letter-spacing compression)
+- Verify enter chars slide in from above (clip-path expands correctly)
+- Verify exit chars slide out below (within clip area)
+- Verify height transitions smoothly when text wraps differently
+
+* Implementation
+** Step 1: Audit consumer sites
+For each file using @value-change:
+- Check for =overflow: hidden= on the target element — this is fine, the driver handles it
+- Check for =translateZ(0)=, =will-change=, =backface-visibility: hidden= — these may be workarounds
+- Check for =font-kerning=, =letter-spacing= overrides near the animated element
+- Remove anything that was working around the old driver's bugs
+** Step 2: Add emoji test
+Add the test above to =tests/unit/animations/value-change.test.st=
+** Step 3: Visual verification
+Run =cargo run -- serve ora-ventures.com/= and verify in both Chrome and Firefox.
+Document any visual regressions.
+
+* Edge Cases
+- Some consumer sites may rely on =overflow: hidden= for layout purposes beyond animation clipping. The driver temporarily sets =overflow: visible= during animation but restores after. If a site depends on overflow: hidden during animation (e.g., to clip unrelated sibling content), the temporary override may cause a brief visual glitch.
+- Sites with =translateZ(0)= on @value-change targets should have it removed — it was causing Firefox compositing flashes with the old driver and is unnecessary with the new approach.
+
+* Acceptance Criteria
+- [ ] =cargo run --features headless -- test tests/unit/animations/ --headless= — all tests pass including new emoji test
+- [ ] No obsolete GPU-promotion workarounds remain on @value-change target elements across audited sites
+- [ ] Visual verification in Chrome: 5+ flap cycles with zero artifacts
+- [ ] Visual verification in Firefox: 5+ flap cycles with zero rectangular flashes

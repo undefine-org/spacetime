@@ -1,0 +1,181 @@
+#+TITLE: The pill's Saved/error line never displayed — %binds output aliases were dropped after the first
+#+STATE: DONE
+#+CUSTOM_ID: FUP-138-primitive-exports-never-reach-file-sco
+#+PRIORITY: #B
+
+* Summary
+
+A `%primitive`'s `%exports` publish onto the ELEMENT the primitive is bound to:
+`%yield statusText -> $status` compiles to `ST.set(el, "status", statusText)`.
+Those element-scoped values only cross into the file-scope signal plane when
+something registers the name via `ST._bridgeExport` — and the emitter does that
+for a SELECTOR-SCOPE listener (`src/emit/html_reactive.rs`, the
+`SignalScope::Global` arm) but NOT for a file-scope `@data derive`.
+
+So a file-scope reference to a bound export name resolves to nothing, silently.
+
+* Confirmed instance
+
+The inspector pill's status line. `stdlib/__inspector__/primitives/inspect-write.st`
+binds `$status as $insWriteStatus`, and `stdlib/__inspector__/index.st` reads
+`$insWriteStatus` at file scope to render "Saving…" / "Saved". That line has NEVER
+displayed — not since the pill shipped. The same applies to `$insWriteError`, and
+to the new `inspect-data-write.st` rail added in FEAT-163.
+
+Verified live (2026-07-24, `projects/backdesk-new`):
+
+: ST.get(editorsEl, 'status')        → "Saved"      // the primitive works
+: window.SpacetimeLocal.insWriteStatus → undefined   // never bridged
+: panel status element                → ""           // stays blank, `.is-hidden`
+
+The write itself succeeds — server logs `EditJson … ok` and the file changes. Only
+the acknowledgement is invisible.
+
+* Why it went unnoticed
+
+No test covers the status/error surface. The pill's suite asserts tree rendering,
+selection, editor projection, and write-request construction — never that a
+successful write is REPORTED. A user gets no confirmation and, more seriously, no
+visible error when a write is REJECTED (a stale hash, a disconnected dev socket):
+the panel looks identical to a successful edit.
+
+That is the real severity here. A silent rejection is indistinguishable from a
+silent success.
+
+* Root cause detail
+
+- `%yield` → `ST.set(el, name, value)` (see any primitive, e.g.
+  `stdlib/primitives/data/source.st`).
+- `ST.set` bridges to `window.SpacetimeLocal[name]` ONLY when
+  `ST._bridgedExports.has(name)` (`public/runtime/st.js`, the `_bridgedExports`
+  guard).
+- `ST._bridgeExport(name)` is emitted from `src/emit/html_reactive.rs` (the
+  `SignalScope::Global` dep loop) and `src/emit/html_hydrate.rs` — both listener
+  paths.
+- A `@data derive` that references the name produces no such registration, so the
+  name never bridges and the derive reads `undefined`.
+
+* Approaches already tried and REVERTED (do not retry blindly)
+
+All four were attempted during FEAT-163 and none worked; each was reverted rather
+than committed unproven:
+
+1. `@data derive $insStatusText : ($insWriteStatus || $insDataWriteStatus)` —
+   the original form. Resolves to nothing (this is the bug).
+2. A runtime helper reading the host elements directly
+   (`ST.insPanelStatus()` → `ST.get(editorsEl,'status')`). The helper returned
+   "Saved" when called by hand, but the derive that wrapped it never RE-RAN: its
+   arguments were the write-request objects, whose identity does not change when
+   the ack later arrives. A derive is not a polling mechanism.
+3. Moving the second primitive onto its own selector, on the theory that two
+   `%exports`-bearing primitives on one selector collided. It did not help — and
+   the theory was wrong, since the single-primitive case fails identically.
+4. Selector-scope assignment (`.editors { $insStatusText <- $insWriteStatus; }`).
+   Still blank; the source name is unbridged at the point of read.
+
+* Fix directions (pick deliberately)
+
+a. Register the bridge for any file-scope binding that references a bound export
+   name — i.e. extend the `_bridgeExport` emission beyond listener scopes. Most
+   general; needs care that the emitter knows a name IS an export.
+b. Make `%binds`'s rename (`$status as $insWriteStatus`) itself emit the bridge
+   registration. Arguably where it belongs: the rename is the declaration that
+   this export is consumed under a file-scope name.
+c. Document that exports are element-scoped and require a selector-scope
+   consumer — and then make a file-scope reference to an unbridged export a
+   compile ERROR rather than a silent `undefined`. Weakest as a fix, but note
+   it composes with (a)/(b) and is independently worth having: this is the same
+   silent-resolution class as BUG-216.
+
+Per the house Elegance bar, prefer whichever expresses the rule once in the
+existing emit/bind machinery over a new special-case.
+
+* Tests to write
+
+- A primitive exporting a value, consumed by a file-scope `@data derive`, makes
+  that value readable — the direct regression.
+- The pill shows "Saved" after an accepted write.
+- The pill shows the rejection reason after a REJECTED write (stale hash and
+  disconnected socket both). This is the assertion whose absence hid the bug.
+
+Sabotage-verify each: with the bridge removed, they must fail.
+
+* Related
+
+BUG-216 (an unmatched directive is dropped silently) is the same family: a
+reference that cannot resolve produces nothing instead of an error. Fixing either
+one's diagnostic story makes the other easier to find.
+
+* RESOLVED (2026-07-25, commit 8f6b9e26) — and the cause above was WRONG
+
+Everything from "* Summary" down to here is the hypothesis I filed WITHOUT
+reading the code that would have falsified it. Kept deliberately as a record of
+a misdiagnosis, because the shape of the error is the lesson: I observed a
+file-scope read returning nothing, reached for a plausible mechanism (scope
+planes), and wrote it up with the confidence of something verified.
+
+** What was actually true
+
+`derived-signal.st:175` has called `ST._bridgeExport(d)` for every dep since
+BUG-197. The bridge was never the problem. The name being bridged simply did not
+exist, because of a defect four layers upstream:
+
+`parse_bind_outputs` (`src/parser/mod.rs`) split its output list on `,` alone,
+and the bind-line accumulator above it joins physical lines with a SPACE before
+that point. So a one-per-line `%binds` block:
+
+:   $error as $insWriteError
+:   $status as $insWriteStatus
+
+arrived as ONE run and parsed as a SINGLE output whose alias was the entire rest
+of the text (`insWriteError $status as $insWriteStatus`). That is not a plain
+identifier, so resolve.rs's gate correctly refused it, no remap was recorded, and
+`%yield` fell back to writing the RAW export name — `ST.set(el, "status", …)`.
+`$insWriteStatus` was never written by anything, at any scope. BUG-154's alias
+rail was intact the whole time; it was never reached.
+
+Blast radius measured across stdlib/src: exactly 2 sites, both mine. Every other
+multi-output `%binds` in the tree uses commas, which is why a defect this
+fundamental survived unnoticed.
+
+** Three further breaks were stacked behind it
+
+Each masked the next, so fixing only the first still showed a blank line:
+
+1. `$a <- $b` in a selector block is NOT a reactive link. `<-` is a MUTATION
+   (valid in an `@on`/`@effect` body, or as `text <- $sig` where `text` is a DOM
+   target). My two assignments parsed and registered ZERO watchers. The construct
+   that links signals by name is `@data derive`.
+2. `__ST_DEV__` was set only by the debug PANEL (gated on `@debug {{ show_panel:
+   true }}`), though it means "a dev SERVER is serving this page". On an ordinary
+   `spacetime serve` it was false, so `@each` stamped no rows and FEAT-163's pick
+   had nothing to address. Now set by the dev dock, which every dev-served page
+   gets.
+3. The pill imported `dev-ws` but never BOUND it — importing a primitive does not
+   run it. No `window.__stDevWs` existed, so every write reported "Dev WebSocket
+   is disconnected". Added `@inspector-dev-bridge`.
+
+** Verified
+
+Driven in Chromium against `projects/backdesk-new`: "Saving…" during the write,
+"Saved" after (server `EditJson … ok`, bytes changed on disk), and on a forced
+rejection "File not found: data/__nope__.json" WITH the status cleared. That last
+state is the one that matters — a rejected write was previously indistinguishable
+from a successful one.
+
+** Tests
+
+2 parser, 2 integration (`tests/fup_138_binds_output_alias_emission_test.rs`),
+1 headless (success + rejection + status-clearing). All sabotage-verified.
+
+Note which layer caught it: the parser and resolver unit tests both PASSED
+throughout, because neither ran the whole path. The integration test asserts the
+OBSERVABLE end — which key reaches the emitted `ST.set` — and is the only one
+that fails when the bug is reintroduced. Layer tests agreeing is not evidence the
+layers compose.
+
+** Approaches previously listed as "tried and reverted"
+
+All four failed for the same reason: every one assumed the alias existed. None
+would have worked, and none were wrong in themselves. Disregard that section as
+guidance — it is a record of debugging a symptom.

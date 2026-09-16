@@ -1,0 +1,280 @@
+#+TITLE: value-change-driver char-layer letter-spacing and containerWidth ancestor-constraint bugs
+#+STATE: DONE
+#+SESSION_ID: 152939d2e5b25e66
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-09T16-24-34-454Z_152939d2e5b25e66.jsonl]]
+#+CUSTOM_ID: BUG-178-value-change-driver-char-layer-letter-sp
+#+Layer: stdlib/animation
+
+* Summary
+
+Two independent, live-verified defects in the PLAN-072 line-aware rewrite of
+value-change-driver (stdlib/primitives/animation/drivers.st), found via
+fresh CDP/puppeteer DOM sampling per user report ("still looks weird... text
+goes from one line then jumps to two"). Both DONE: root-caused, fixed,
+live-verified with before/after numbers, covered by new Rust unit tests.
+
+** Bug A -- buildCharLayer doesn't apply letter-spacing to its char spans
+
+Each grapheme in a word becomes its own display:inline-block span (so it can
+animate independently during the split-flap enter/exit). Per-element
+inline-block boxes do NOT inherit letter-spacing across their combined width
+the way a single text run does -- splitting a word into N separate atomic
+inline boxes with letter-spacing set nowhere removes N-1 of the
+letter-spacing gaps a real text run would have.
+
+Root cause proof (direct DOM construction test against the live
+ora-ventures.com hero, letter-spacing -1.911px, word "stalls"):
+- single span text node, letter-spacing applied: 232.19px
+- buildCharLayer pre-fix construction (no ls anywhere): 245.20px
+- letter-spacing set on the LAYER WRAPPER (the fix): 233.75px
+
+233.75 vs 232.19 is the SAME ~1.5px baseline inline-block overhead present
+even at letter-spacing 0 (245.20 vs 243.66 = 1.54px) -- the fix closes the
+letter-spacing gap exactly, leaving only pre-existing baseline noise.
+
+This mismatch was between the width buildCharLayer ACTUALLY renders at and
+the width ALL of the driver's own layout math (measureNatural, layoutLines,
+positionWords) assumes via pretext's native letterSpacing option. The two
+numbers only converged the instant cleanup swapped the DOM back to real
+textContent -- producing a visible width snap at the end of every
+transition, worse with more/longer changed words. Distinct from BUG-176
+(BUG-176 fixed pretext's own canvas-measurement blindness to
+letter-spacing; this bug is pretext's fix never reaching the rendered
+char-layer DOM).
+
+*** Fix
+
+buildCharLayer now takes a third parameter letterSpacingPx and applies
+layer.style.letterSpacing on the LAYER WRAPPER (not each character span)
+when non-zero. All 4 call sites (single-line path enter/exit words, reflow
+path add/remove words) thread the driver's letterSpacingPx local through.
+
+** Bug B -- containerWidth classifies wrap-eligibility by the element's OWN display, missing ancestor-constrained inline elements
+
+The prior containerWidth fix used: containerWidth = elIsBlockLevel ?
+clientWidth : Infinity -- reasoning an auto-width inline-level element never
+force-wraps ITSELF. True in isolation, but misses that the element can
+still SIT inside an ancestor that constrains where its own line runs.
+Exactly the ora-ventures.com hero's shape: .ora-hero__flap is inline-block,
+but display:block siblings force it onto its own line inside an h1 whose
+width IS constrained by .ora-hero__content's max-width (or viewport at
+narrow widths). The flap genuinely wraps when narrow enough, but the
+driver always computed containerWidth=Infinity for it, always designing a
+single-line transition -- the instant cleanup ran, the browser's REAL
+(already-wrapped) layout snapped into view.
+
+*** Root cause proof
+
+Live CDP/puppeteer, .ora-hero__content constrained to 340px:
+1. Ground truth: forcing display:block; white-space:normal directly on the
+   flap -> clientWidth 340, real height 300.9375 (3 wrapped lines).
+2. Driver's actual computed containerWidth pre-fix for this element:
+   Infinity (inline-block, not in the block-level set).
+3. Live rAF sampling across 12 real transition cycles at this width
+   (pre-fix): 12 discontinuous height jumps, each exactly +-100.3125px or
+   +-200.625px within a single ~17-18ms frame -- an instant snap at
+   transition start and the mirror snap at cleanup.
+
+*** Fix
+
+Replaced the display-type heuristic with a direct measurement of the real
+constraining ancestor via a display/white-space toggle: force
+display:block + white-space:normal on the element alone (at its actual DOM
+position), read clientWidth, revert both inline styles immediately. The
+ONE legitimate remaining Infinity case is the element's own RESTING
+(author-set) white-space:nowrap -- an explicit opt-out of wrapping.
+Verified this technique is a safe no-op for the already-correct
+block-level case (synthetic 400px padded div: direct clientWidth 360px,
+toggle-measured 360px, exact match).
+
+currentWidth/targetWidth for an auto-width element were also updated: now
+uses the widest LINE of the real (line-count-aware) layout instead of
+measureNatural alone (which assumed exactly one unwrapped line).
+
+*** Post-fix verification
+
+Live CDP/puppeteer, same 340px-constrained container, same rAF sampling,
+clean isolated capture across 12+ transitions (strict >8px discontinuity
+threshold): 0 jumps (vs 12 pre-fix). All height changes during a
+transition are smooth ~3-4px/frame eases. At normal (900px) desktop width
+the fix is a correct no-op.
+
+* Verification data
+
+Bug A -- rAF sampling of flap width at the exact end-of-transition
+cleanup boundary, 6 transitions post-fix: deltas of 0.03px, 0px, 0.02px,
+0px, 0.03px, 0px (all sub-pixel WAAPI settle noise).
+
+Bug B -- discontinuous height jumps (>5px) across 12 sampled transitions:
+12 pre-fix -> 0 post-fix (>8px threshold, clean isolated capture).
+
+* Regression coverage
+
+src/pipeline/integration_tests.rs:
+- test_value_change_driver_applies_letter_spacing_to_char_layer (new)
+- test_value_change_driver_measures_real_wrap_constraint_not_display_heuristic (new)
+- test_value_change_driver_guards_container_width_by_display_level (updated -- old assertions matched the exact buggy line this bug fixes)
+- test_value_change_driver_computes_real_line_layout_before_dom_mutation (updated similarly)
+
+Both updated tests were RED against the pre-fix code (asserted the literal
+buggy elIsBlockLevel line the fix replaces) -- confirmed by running cargo
+test --lib immediately after the drivers.st edit but before updating the
+tests, which failed exactly these two tests, then GREEN after updating.
+
+Full suite re-verified:
+- cargo test --lib: 2599 passed, 0 failed
+- cargo test --test integration_tests: 189 passed, 1 ignored, 0 failed
+- cargo test --test value_change_test: 20 passed, 0 failed
+- spacetime test tests/ --headless: 617 passed, 0 failed, 19 skipped
+- spacetime test tests/unit/animations/value-change.test.st --headless: 5 passed, 0 failed
+- spacetime test tests/fixtures/native-template/value-change-inline-width-wrap.test.st --cdp (BUG-172's original regression fixture): 1 passed, 0 failed
+
+* Files touched
+
+- stdlib/primitives/animation/drivers.st -- buildCharLayer signature +
+  letter-spacing application (4 call sites); containerWidth computation
+  replaced (measureRealConstraint helper, resting-white-space gate,
+  degenerate fallback); currentWidth/targetWidth now via widestLine helper.
+- src/pipeline/integration_tests.rs -- 2 new tests, 2 updated tests.
+
+* Relationship to prior bugs in this primitive
+
+Fourth and fifth distinct defects found in value-change-driver this session
+(after BUG-172 width-animation-missing, BUG-175 baseline-flip, BUG-176
+pretext-letter-spacing-blindness -- all fixed in the box-hack era -- then
+the PLAN-072 line-aware rewrite itself, which this bug's two defects were
+found IN). Both caught the same way as every prior bug this session: fresh
+live CDP/puppeteer DOM sampling with precise before/after numbers per user
+report, never a guess-and-patch.
+
+* Follow-ups considered, not filed
+
+None -- both defects fully resolved within this bug's scope.
+
+NOTE [2026-07-11]: Follow-up (same session): user reported "there's still a slight jump" after the
+initial fix, and asked "why not just make the letter splitting always the
+case even when it's at rest?" — investigated from scratch rather than
+guessing.
+
+** Why "always split at rest" was rejected
+
+Kerning (glyph-pair shaping between ADJACENT glyphs in one continuous
+inline run) is structurally impossible to reproduce once graphemes are
+split into separate `inline-block` boxes — confirmed empirically (`(canvas
+font-kerning:none)` on both sides collapses the width delta to ~0, proving
+the residual after the original BUG-178 fix was kerning loss, not leftover
+letter-spacing). "Always split, even at rest" would make the site's actual
+resting typography (site-wide, not just during a 400ms transition)
+permanently un-kerned — a real, visible degradation on a 95px hero
+headline (T/A/V/W/Y-class pairs) — while STILL not fully closing the gap,
+since pretext's own layout math (`measureNatural`/`layoutLines`) computes
+KERNED widths regardless. Also breaks text selection/copy semantics
+(spaces become literal `\u00A0` per-char spans) and would need a shadow
+real-text node for accessibility. Rejected; pursued a surgical fix
+instead.
+
+** Two additional defects found via the same live-CDP-first methodology
+
+*** Defect 1 — exit layer's explicit `width` pinned it to the WRONG (kerned) value
+
+`buildCharLayer`'s exit-layer (`exit.layer`, the single-line fast path's
+absolutely-positioned OLD-word rendering) had `exit.layer.style.width =
+measureNatural(oldWord, font, letterSpacingPx) + 'px'` — pinning its box
+to pretext's KERNED measurement, while its actual rendered content
+(char-split, un-kerned) is WIDER. This clipped the tail of the exit
+layer's OWN text against the flap's clip-path for the animation's entire
+duration, not just at the boundary — verified live: word pairs like
+"AVAV"/"WAWA" lose 8-16px to kerning; a real transition on the hero
+showed a fully-opaque "L" character clipped 114px past the flap's
+boundary.
+
+Root cause of the pin itself: `exit.layer` is already `display:inline-
+block` + `position:absolute`, so it ALREADY shrink-wraps to its own
+rendered content width — the explicit `width` was both unnecessary AND
+wrong. Fix: removed the explicit width entirely; the layer now correctly
+auto-sizes to its real (un-kerned) rendered width.
+
+*** Defect 2 — word-container box ignores its absolutely-positioned exit layer's width entirely
+
+Separate, more severe defect, pre-existing since the PLAN-072 rewrite
+(confirmed via an isolated worktree build at commit 5ee30f3b, BEFORE any
+of this session's BUG-178 changes — same magnitude of overflow reproduced
+there). Each word-container (`wc`) is `display:inline-block`; its own box
+width comes ONLY from its in-flow child (the enter layer). The exit layer
+is `position:absolute` specifically so enter/exit can cross-fade in place
+without pushing layout — but that also means it does NOT contribute to
+`wc`'s box width AT ALL. When a word shrinks or a word is removed
+outright (e.g. cycling "misses the P&L." [3 words] → "never ships." [2
+words]), the enter layer is narrow/empty while the exit layer still
+paints the FULL old word — with nothing reserving space for it. Verified
+live: the third word-container's exit layer ("P&L") painted 114px past
+the flap's clip-path boundary, fully opaque, genuinely clipped (not
+animation-in-flight noise — confirmed via `opacity` check ≥0.3 and cross-
+checked against a pre-fix isolated worktree build).
+
+Two fix attempts:
+1. REJECTED: `minWidth` reservation on each `wc` (set to
+   `Math.max(exitLayerWidth, enterLayerWidth)` read via
+   `getBoundingClientRect()` right after DOM attach). Live-verified WRONG:
+   the outer box (`%&el`) legitimately eases its own width via WAAPI from
+   `currentWidth` toward `targetWidth`; forcing the wrapper's rendered
+   content to stay at its full original width fights that shrink — the
+   visible clipped-overflow gap GREW monotonically as the box narrowed
+   (measured 3.6px → 168px within a single transition, worse than before
+   the "fix").
+2. ADOPTED: widen the clip-path pad to the REAL measured overflow instead
+   of reserving space. `position:absolute` elements don't contribute to
+   ANY ancestor's `getBoundingClientRect()` (not `wc`'s, not `wrapper`'s),
+   so the true painted extent is read from the LEAF (grapheme) spans
+   directly — the widest left/right excursion across all of them relative
+   to `wrapper`'s own left edge — then used to grow the flap's
+   `clipPath` horizontal inset beyond the baseline `overflowPad`, compared
+   against the NARROWER of `currentWidth`/`targetWidth` (the WAAPI tween's
+   worst-case endpoint). This lets the box keep tweening on its correct
+   (kerned) width trajectory while ensuring nothing paintable is ever
+   clipped.
+
+** Post-fix verification
+
+Live CDP/puppeteer, same rAF-sampling methodology as the original BUG-178
+verification, but this time explicitly walking every LEAF grapheme span
+(not just the outermost word-container, which the first two verification
+passes wrongly used and which produced false "0 breach" / false "still
+114px breach" readings before this was caught):
+- 0 clip-boundary breaches across 1201 samples / ~20s spanning multiple
+  full word-count-varying transition cycles (down from 217 breach events,
+  max 114px, before this follow-up fix; the rejected minWidth attempt
+  measured a GROWING 3.6px→168px breach within one transition, worse than
+  baseline).
+- Width-boundary delta at cleanup (the original BUG-178 metric) remained
+  intact post-follow-up: 0-0.063px across 6 sampled transitions (sub-pixel
+  WAAPI settle noise), confirming the follow-up fix didn't regress the
+  original fix.
+
+Also investigated and RULED OUT a third apparent visual artifact
+("overlapping garbled text", e.g. "missesdies thein P&Ldecks.") — this
+turned out to be `flap.textContent`'s natural concatenation of the enter-
+layer's and exit-layer's text during a legitimate cross-fade (both are
+real simultaneous DOM children during a split-flap transition, purely a
+`.textContent` string-concat artifact of my measurement script, not a
+rendering bug). Confirmed present identically on the pre-BUG-178 isolated
+worktree build too, i.e. pure test-harness noise, not a defect — not
+fixed, not filed, correctly excluded from scope.
+
+** New regression tests
+
+src/pipeline/integration_tests.rs:
+- `test_value_change_driver_exit_layer_has_no_explicit_kerned_width` (new)
+- `test_value_change_driver_widens_clip_pad_to_real_leaf_span_overflow`
+  (new) — also asserts the REJECTED minWidth approach is absent, so a
+  future regression back to that broken approach fails loud.
+
+Full suite re-verified after follow-up: cargo test --lib → 2603 passed (0
+failed); cargo test --test integration_tests → 189 passed, 1 ignored;
+cargo test --test value_change_test → 20 passed; spacetime test tests/
+--headless → 617 passed, 0 failed, 19 skipped; CDP fixture (BUG-172
+original regression) → 1 passed, 0 failed.
+
+Files touched (follow-up): stdlib/primitives/animation/drivers.st (exit
+layer width removal, leaf-span-based dynamic clip-pad),
+src/pipeline/integration_tests.rs (2 new tests).

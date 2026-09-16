@@ -1,0 +1,113 @@
+#+TITLE: A CSS property cannot be mutated in an @on body — `mutation` requires a literal "$"
+#+STATE: DONE
+#+SESSION_ID: 153497be379ff5cc
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-18T12-18-12-318Z_153497be379ff5cc.jsonl]]
+#+CUSTOM_ID: BUG-346-a-css-property-cannot-be-mutated-in-an-o
+#+COMPLETION_HASH: 20998d1a8a077bc9
+
+* Initial Message
+
+please review the failures now and tell me what is left open that will fix it, and let's plan the corresponding PLN
+
+* Symptom
+
+The documented event-mutation form does not compile:
+
+: button.primary { @on &.click { opacity <- 0.8; } }
+: error[E0946]: directive does not match its declared grammar:
+:   Expected capture `$body:body` but no tokens remaining
+
+A SIGNAL mutation in the same position is fine:
+
+: $n number: 0;
+: button.primary { @on &.click { $n <- 1; } }   ✓ compiles
+
+So `<-` works, the driver works, the body works — only a CSS PROPERTY target fails.
+
+* Root cause
+
+`stdlib/capture-types/on-actions.st:40`
+
+: %capture_type mutation {
+:     "$" $target:ident "<-" $expr:expr ";"?
+: }
+
+The `"$"` is a LITERAL, so the type only ever matches a signal. `on_motion_body`
+(`stdlib/macros/on.st:190`) offers `$mut:mutation` as its mutation alternative,
+and no other alternative accepts `<-`. A property mutation therefore matches
+NOTHING, the body capture ends with tokens remaining, and the failure surfaces
+as the confusing "no tokens remaining" rather than "a property cannot be mutated".
+
+`stdlib/macros/on.st:42` declares a second, identical `on_mutation` with the same
+literal `"$"` — the duplicate is worth collapsing while here.
+
+* Provenance — NOT the @on cutover
+
+Verified by testing the pre-cutover spelling `@on click { opacity <- 0.8; }`
+against today's binary: E0946, identical. Both spellings fail the same way, so
+the sigil cutover is not implicated.
+
+The snapshot test carrying this source
+(=compiler::snapshot_tests::snapshot_mixed_file_level_and_selector_scoped=) has
+asserted =pipeline_errors.is_empty()= since =10c81726=, so either the grammar
+regressed long ago or the test never passed after `mutation` was tightened.
+
+* Why it matters
+
+"Set a CSS property when clicked" is the most elementary reactive thing a
+stylesheet-shaped language can do, and it is unreachable. Worse, the diagnostic
+blames the BODY capture rather than naming the unsupported target, so an author
+sees "no tokens remaining" for a line that looks exactly like the docs.
+
+* Decision needed before fixing
+
+Two readings, materially different:
+
+1. *Property mutation SHOULD work* → widen `mutation` to accept a property
+   target (`$prop:ident "<-" $expr`) and lower it to a style write. The grammar
+   change is small and lives in the capture type (DATA, not a Rust arm).
+
+2. *Property mutation is DELIBERATELY not a thing* — the language wants
+   `opacity: 0 -> 1` (a transition, which DOES compile) and signals as the only
+   mutable cells. Then the fix is a DIAGNOSTIC: name the unsupported target and
+   point at the transition form; and the snapshot test's source is simply wrong
+   and must be rewritten.
+
+Reading 2 is the more likely design intent — `->` already covers "change a
+property" and the signal restriction keeps one mutable-cell concept. But that
+must be confirmed against the docs, not assumed.
+
+* Acceptance
+
+- A RED test reproducing `opacity <- 0.8` inside `@on &.click`, seen failing.
+- Under reading 1: it compiles and emits the style write, gated under --cdp
+  (the property actually changes in a browser).
+- Under reading 2: E0946 is replaced by a diagnostic naming the property and
+  recommending `->`, and the snapshot test is corrected.
+- Either way `mutation`/`on_mutation` collapse to ONE declaration.
+
+NOTE [2026-08-08]: RESOLVED as REFUSE, not widen (69464506 + c685605f).
+
+Decision evidence: `ST.runMutations` has no style-write path; `opacity: 0 -> 1`
+already expresses the intent; no doc shows `<prop> <- value` in an @on body; and
+every real `<prop> <- $sig` in the repo is a selector-scope reactive binding — a
+different, working surface. Signals stay the ONE mutable-cell concept.
+
+Implementation: `%capture_type property_mutation_invalid` in
+stdlib/capture-types/on-actions.st, wired as the LAST alternative of
+`on_motion_body`, plus an E0955 arm in `expand_body` (src/pipeline/drivers.rs).
+The diagnostic names the property and points at both real surfaces.
+
+A first attempt as a sibling %macro produced NONDETERMINISTIC form-scoring —
+binds flipped between three primitives across identical runs — because
+`on_motion_body` is a `( … )*` that matches empty. Documented in the capture-type
+doc comment so nobody retries that shape.
+
+Also fixed the SILENT-DROP face reviewers caught: nested motion scopes
+(`.child { … }`, `& { … }`) still dropped the mutation until both loops were
+routed through one shared `property_mutation_error()`. Verified across 10 probe
+paths (top-level, nested, `as`, `$sig.change`, mixed, file scope, @score, arms,
+timeline).
+
+NB a concurrent session later filed a DIFFERENT BUG-346 (order-dependent stdlib
+resolution). Same number, unrelated defect.

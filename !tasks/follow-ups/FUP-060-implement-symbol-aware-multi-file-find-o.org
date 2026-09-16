@@ -1,0 +1,67 @@
+#+TITLE: Implement symbol-aware multi-file find output in pi harness
+#+STATE: ITEM
+#+SESSION_ID: 150a981da51e09f3
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-15T21-23-37-748Z_150a981da51e09f3.jsonl]]
+#+CUSTOM_ID: FUP-060-implement-symbol-aware-multi-file-find-o
+#+LAYER: tooling
+#+PRIORITY: B
+#+SOURCE_FEAT: FEAT-121-design-multi-file-find-symbol-hit-output
+
+* Initial Message
+
+i want the find tool to output symbols also during multi-file hits, and efficiently, and consistently across the variatns.
+
+e.g. first line i
+
+/.../...rs
+::Symbol (if several lines hit or several symbols hit within one file, otherwise full codepath on one line)
+<lineno>: ...
+
+or something like that. what do you think?
+
+Context from FEAT-121-design-multi-file-find-symbol-hit-output (2026-06-15): user requested `find` output include enclosing symbols for multi-file hits, efficiently and consistently across variants.
+
+Decision/design:
+- Add symbol-aware rendering for multi-file location/hit output.
+- Preferred shape:
+
+```
+path/to/file.rs
+::SymbolName
+  42: matching line
+  47: another hit
+
+::OtherSymbol
+  91: matching line
+```
+
+- Singleton shortcut is acceptable only for exactly one symbol group + one hit in that file:
+
+```
+path/to/file.rs::SymbolName
+  42: matching line
+```
+
+- Top-level/no-symbol hits should be explicit and copy-pasteable-ish:
+
+```
+path/to/file.rs
+::<file>
+  12: top-level hit
+```
+
+Implementation constraints:
+- Do not reparse per hit.
+- During the existing per-file parse/outline phase, build or reuse an interval index of named symbols: `(start_byte,end_byte,symbol_codepath)` sorted by start/end.
+- For each rendered hit/range, choose the smallest enclosing named symbol; fallback to nearest named parent or `::<file>`.
+- Apply the same grouping path to all multi-file location-style variants: line grep (`::§line[...]`), structural node hits, diagnostics, and graph edge results rendered as locations.
+- Ordering must remain stable: file order → symbol start position → hit line/range.
+- Symbol headers should use the same path syntax returned by outlines so users can copy `path + ::Symbol` into a follow-up query/edit.
+
+Current repo finding:
+- The Spacetime workspace does not contain the pi `find`/CodePath formatter implementation (`packages/coding-agent/src/prompts/tools/find.md` is referenced by `pi://find-tool-reference.md`, but no `packages/` tree is present here).
+- Observed current output with `src/**/*.rs::§line[text~="pub fn"]`: multi-file output uses file headers + raw `line: text`, no enclosing symbols.
+
+Acceptance when implemented in the harness repo:
+- Targeted formatter tests cover: multiple hits in one symbol, hits in multiple symbols in one file, singleton compact behavior if retained, top-level fallback, and at least two variants (line grep + structural or diagnostics).
+- A manual `find` query over a Rust fixture shows symbol grouping without noticeable per-hit overhead.

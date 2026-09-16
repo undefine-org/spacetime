@@ -1,0 +1,190 @@
+#+TITLE: The MCP workbench selection-to-edit path has no integration test
+#+STATE: DONE
+#+CUSTOM_ID: FUP-135-workbench-selection-edit-path-has-no-i
+#+PRIORITY: #B
+
+* Summary
+
+PLAN-112 W5 replaced the MCP workbench's bespoke parameter-row templates with the shared =field-*= widgets. The production path now begins with the workbench snapshot's =stage_node_params= and =stage_node_bindings= arrays, projects the selected node's rows into client-owned descriptors, dispatches each descriptor through =ST.adFieldTemplate=, and commits through the MCP action bridge.
+
+The only automated workbench coverage is a direct helper/template seam test. It builds one color descriptor with =ST.fieldEditorRows= and manually invokes the resolved template. It does not mount the workbench, seed either server array, select a node through either supported gesture, commit an edit, deliver a poll response, or prove that a focused editor survives that poll. A regression in any omitted link can therefore leave the current test green.
+
+* Why this matters
+
+This is a latent regression gap, not a confirmed current user failure. PLAN-112 W5 was manually verified in one live MCP-mounted workbench, but that result is not repeatable protection against later edits to the workbench's selection, action, polling, or editor ownership path.
+
+The concrete risk is a silently unusable builder inspector: a navigator or canvas click can select the wrong node or no node; the workbench can render a generic text input instead of the typed color control; an edit can stop reaching =mcp_node_param=; or a one-second equal-valued poll can replace a focused control and discard its caret or unfinished text. The affected surface is the MCP workbench rather than ordinary served pages, so priority =#B= is appropriate; it blocks reliable source editing in a developer-facing tool but has no established production-page blast radius.
+
+* Evidence
+
+** Existing automated coverage stops at the helper/template seam
+
+=stdlib/__mcp__/tests/workbench.test.st= is the only file under =stdlib/__mcp__/tests/= (verified directory listing). Its sole test, ="workbench color param row resolves and renders the shared color field"=, directly creates and mounts one descriptor:
+
+#+begin_src st
+@eval (eval("window.__mcpColorRow=ST.fieldEditorRows([{node_id:'node-1',param:'accent',value:'#FF0020',type:'color',widget:'color',source_hash:'snapshot',span_start:12,span_end:30,file:'page.st',span_text:'&card(accent: \"#FF0020\")'}])[0];document.querySelector('.mcp-workbench-test-host').appendChild(Spacetime.invokeTemplate(window.__mcpColorRow.tpl,window.__mcpColorRow));"))
+#+end_src
+
+The assertions verify exactly four local facts: =tpl === ST.adFieldTemplate('color')=, the mounted result contains =.st-fld-color-text=, it does not contain the deleted =.mcp-node-param-input=, and the color text control retains =data-param="accent"= plus =data-st-payload-span-start/end="12"/="30"=. It neither initializes =$mcpStageNodeParams= or =$mcpStageNodeBindings= nor mounts =env.st='s navigator, stage, host bridge, or poll primitive. It also sends no =mcp-action= and does not assert focus, caret, or in-progress input state after a poll.
+
+** The real workbench sources and signal contract
+
+=stdlib/__mcp__/workbench/data.st= declares =@mcp-input(refresh: 1000);= and the two server-owned row arrays:
+
+#+begin_src st
+@data inline $mcpStageNodeParams : [];
+@data inline $mcpStageNodeBindings : [];
+#+end_src
+
+Its comments define the parameter records as node-param rows with =node_id=, =param=, =value=, =type=, =span_start=, and =span_end=, and identify the binding rows as per-element rows filtered by =$selectedNode=. The corresponding publisher in =stdlib/__mcp__/primitives/host.st:537-539= maps snapshot fields =data.stage_node_params= and =data.stage_node_bindings= to the exact signal names =mcpStageNodeParams= and =mcpStageNodeBindings=.
+
+The workbench selection state lives in =stdlib/__mcp__/env.st=: =$selectedNode=, =$activeParams=, and =$activeBindings=. At =env.st:384-389=, a =.mcp-nav-node= click reads =$.closest('[data-st-node]').dataset.stNode=, copies matching binding rows through =ST.bindingEditorRows=, copies matching parameter rows through =ST.fieldEditorRows=, and opens =$drawer <- "inspector"=. At =env.st:399-405=, the delegated stage handler =.mcp-stage[data-st-region="stage"] { @on click [data-st-node] { ... } }= performs the same node-id and row projections, then also sets =$selected <- "stage"=.
+
+The retained navigator and detail templates are real and deliberately separate from the deleted row templates. =stdlib/__mcp__/workbench/cards.st:45= defines =&mcp-structure-node($node)= as a =button.mcp-nav-node= with =data-st-node="`$node.id`"=. =cards.st:63= defines =&mcp-node-detail($node)= as the selected-node summary. =stdlib/__mcp__/workbench/lists.st= renders the navigator from =$mcpStageStructure= through =&mcp-structure-node= and filters the inspector detail to the one =$node.id == $selectedNode= before rendering =&mcp-node-detail=.
+
+The editor lists are instead driven by the client-owned snapshots:
+
+#+begin_src st
+.mcp-node-params {
+  @each($activeParams as $p) { &$p.tpl($p); }
+}
+.mcp-node-bindings {
+  @each($activeBindings as $b) { &$b.tpl($b); }
+}
+#+end_src
+
+These are the =.mcp-node-params= and =.mcp-node-bindings= DOM classes styled in =stdlib/__mcp__/workbench/styles.st:379-381=. The Inspector drawer holds both containers in =stdlib/__mcp__/env.st:281-286=.
+
+** Shared typed-widget and action rails
+
+=public/runtime/st.js:2950-2996= establishes the shared projection contract. =ST.fieldEditorRows= retains each source row, derives =widget= from =row.widget= or its type, resolves =tpl: ST.adFieldTemplate(widget)=, preserves the source addressing fields, and maps a non-null =source_hash= to =addr=. =ST.insEditorRows= delegates to that helper after node filtering, while =ST.bindingEditorRows= delegates with =paramKind= ="binding"=. Thus the workbench and pill share the same descriptor-to-template resolver rather than two row implementations.
+
+=stdlib/fields/macros/widgets.st:32-47= confirms the expected color result: =&field-color= emits a =.st-fld-color-swatch= and =.st-fld-color-text=, both carrying =data-widget="color"=, =data-param=, =data-param-kind=, =data-st-payload-span-start/end=, and =data-addr-*= attributes. A color regression must therefore be detected at the workbench-mounted DOM, not only by manually mounting a descriptor.
+
+=stdlib/__mcp__/workbench/actions.st:41-57= attaches =@mcp-action(action: "mcp_node_param", targetAttr: "data-param", on: "change")= to node-param widget controls, plus =input= listeners for =[data-range-twin]= and =.st-fld-color-text=. Bindings use the distinct =mcp_param= rail at =actions.st:25-37=. The generic host primitive emits the event type ="mcp-action"= and forwards =data-st-payload-*= as snake-case payload fields; =stdlib/__mcp__/primitives/host.st= documents and implements that behavior in =mcp-action-event=. These are the real signal/action names the integration test must observe.
+
+** BUG-151 poll-survival guarantee
+
+The workbench's intended guarantee is explicit in =env.st= and =lists.st=: selection copies server rows into =$activeParams= and =$activeBindings=, and the editor =@each= blocks iterate only those client-owned signals. A server poll may update the source arrays, but it must not re-render the selected editor list. =lists.st= calls this a snapshot copy and states that its purpose is to prevent a focused input being destroyed by the one-second poll.
+
+There is a second protection at the publishing boundary. =stdlib/__mcp__/primitives/host.st:500-506= fingerprints each source with =JSON.stringify(value)= and returns without =ST.set= / =ST.setData= if its newly fetched value is byte-identical to the last publish. The two stage arrays are then published at =host.st:537-539=. Replacing the poll arrays with fresh but equal-valued responses must therefore leave the editor DOM untouched.
+
+The Inspector pill demonstrates the required property more directly. =stdlib/__inspector__/index.st:145-151= runs =ST.insRefreshCredentials($, $insParams, $insSelectedNode)= on every poll and explicitly says "patch the addresses IN PLACE — never re-render". =public/runtime/st.js:2785-2820= confirms the mechanism: =ST.insRefreshCredentials= mutates only =data-addr=, =data-addr-kind=, =data-addr-file=, =data-addr-start=, and =data-addr-end= on existing controls, and deliberately does not refresh values because in-progress text must win. The workbench test must prove the same externally observable BUG-151 promise: retained DOM identity/focus/caret/value after an equal poll, not merely that the poll handler ran.
+
+** Read-only source rows
+
+=ST.fieldEditorRows= at =public/runtime/st.js:2956-2974= sets =writable = row.source_hash != null= and writes an empty =addr= plus empty =addrKind= when no verified hash exists. The no-write behavior must be checked on the workbench action path: a row with =source_hash: null= may be displayed but must not cause an editable/write-capable control or an =mcp_node_param= dispatch.
+
+* Root cause
+
+The gap was introduced by a deliberately narrow regression test after W5 convergence. The current test instantiates =ST.fieldEditorRows= and a resolved shared template directly, so it establishes descriptor/template compatibility only. It bypasses every workbench-owned integration boundary: snapshot publication, navigator and stamped-canvas events, =$selectedNode= filtering, client session snapshots, delegated =@mcp-action= wiring, and the poll lifecycle.
+
+This cause is established by the lone test's fixture and assertions together with the production paths cited above. It is not a claim that those production paths are currently broken.
+
+* Fix plan
+
+1. Extend =stdlib/__mcp__/tests/workbench.test.st=, or add a focused sibling workbench integration test file if the first-party test runner requires isolation. Mount =stdlib/__mcp__/env.st= through the same workbench test harness used for production Spacetime directives; do not substitute hand-written HTML or direct =Spacetime.invokeTemplate= calls for the selection path.
+2. Seed the actual published sources =mcpStageStructure=, =mcpStageNodeParams=, and =mcpStageNodeBindings= with a two-node fixture. Give both row arrays entries for both node ids so filtering can prove that only the selected node renders. Include an editable color node-param and at least one binding row; every actionable node-param row must contain =node_id=, =param=, =value=, =type=, =widget=, =source_hash=, =span_text=, =span_start=, =span_end=, and =file=.
+3. Create or mount a stamped stage element whose =data-st-node= equals the fixture node id, and a navigator row generated from the same structure record. Drive the actual =.mcp-nav-node= click and the actual delegated =.mcp-stage [data-st-node]= click. Observe =$selectedNode= indirectly through the selected detail/editor DOM and assert both paths resolve the same id.
+4. Capture =mcp-action= calls through the real host bridge/signal sink. Commit an editable typed control and assert the event has action =mcp_node_param=, target equal to the parameter name, and the span payload fields. Do not add page-authored JavaScript; test instrumentation belongs in the first-party fixture/host mechanism.
+5. Replace the backing poll response with newly allocated, equal-valued =stage_node_params= and =stage_node_bindings= arrays. While a selected text editor has focus, a nonzero selection/caret offset, and an unsaved value, deliver the poll and assert the same element remains active, its selection range is unchanged, and its in-progress value is unchanged. This is the regression proof for BUG-151.
+6. Add a null-=source_hash= fixture row and assert it remains display-only and produces no write request/action on attempted edit. Preserve the single shared =ST.fieldEditorRows= implementation and existing MCP rails; this is coverage work, not a new rendering or parser mechanism.
+
+* Test plan
+
+The following cases are W5R's required integration net. Every case must use realistic production-shaped fixtures and must be sabotage-verified before it is accepted.
+
+** 1. Seed both server row arrays
+
+Seed =$mcpStageNodeParams= and =$mcpStageNodeBindings= through the workbench poll/publication path. Include at least two node ids. Each relevant parameter row must include =node_id=, =param=, =widget=, =value=, =type=, =source_hash=, =span_text=, =span_start=, =span_end=, and =file=. Include a =widget: "color"= parameter with a valid hex value. Include binding rows with their own =node_id=, =param=, =value=, =type=, and a non-null =source_hash= so their separate =mcp_param= rail is genuinely exercised.
+
+Assert that the fixture reaches the production source signals rather than a test-only descriptor variable.
+
+Sabotage verification: remove either =setSource('mcpStageNodeParams', data.stage_node_params || [])= or =setSource('mcpStageNodeBindings', data.stage_node_bindings || [])= from the test fixture path, or seed only one array. The test must fail because the missing family of selected rows cannot render. This proves both arrays are load-bearing rather than incidental data.
+
+** 2. Exercise navigator and stamped-canvas selection
+
+Render a structure row through =&mcp-structure-node= and a stage element stamped with the same =data-st-node= value. Click =.mcp-nav-node=, then click the stamped element under =.mcp-stage[data-st-region="stage"]=. After each gesture, assert the selected detail identifies the same node id and the selected editor set corresponds to that id. The canvas assertion must use a nested click target too, proving the production =closest('[data-st-node]')= resolution rather than only a direct-element listener.
+
+Sabotage verification: change either selection handler's read from =dataset.stNode= to a wrong/missing dataset key, or remove the stage delegated handler. The affected gesture must fail while the other can still pass, demonstrating that both directions are independently covered.
+
+** 3. Render only selected typed controls
+
+After selecting node A, assert that node A's parameter controls are present and node B's parameter and binding labels/controls are absent. Assert the color parameter renders =.st-fld-color-swatch= and =.st-fld-color-text= with =data-widget="color"=, not a generic input or the deleted =.mcp-node-param-input= class. Also assert a binding row uses its binding addressing/rail and does not appear when its owner node is unselected.
+
+Sabotage verification: replace =ST.adFieldTemplate(widget)= in =ST.fieldEditorRows= with the text template resolver, or render =mcpStageNodeParams= directly instead of =$activeParams=. The test must respectively fail its color-widget assertion or selected-only assertion. This proves the W5 convergence rather than generic DOM rendering.
+
+** 4. Commit an edit and survive an equal poll
+
+Focus a selected editable text control, set an in-progress value that differs from its seeded server value, and place the caret at a nonzero offset. Commit a separate selected control through the real delegated action path; assert the captured event is =type: "mcp-action"= with =payload.action: "mcp_node_param"=, the expected =target=, =value=, =span_start=, and =span_end=. Then deliver a freshly allocated response whose two server row arrays are equal-valued to the original response. Assert the focused editor is still =document.activeElement=, has the same =selectionStart= / =selectionEnd=, retains the exact in-progress value, and is the same DOM node if identity can be asserted in the harness.
+
+Sabotage verification: reintroduce the old poll-owned editor list by changing =.mcp-node-params= to iterate a filtered =$mcpStageNodeParams= array, or remove the per-source fingerprint early return in =mcp-input=. The poll must replace/repaint the editor and fail focus, caret, value, or identity assertions. Separately, remove the =mcp_node_param= action binding to prove the commit assertion fails rather than only testing a local input mutation.
+
+** 5. Reject null-hash source rows
+
+Seed a selected node-param row with =source_hash: null= and valid-looking =span_text= / span coordinates. Assert the rendered row is visibly display-only according to the shared descriptor contract (empty write address), and that attempting its control event emits no =mcp_node_param= action or source write request. Assert a sibling non-null-hash row remains writable so the test does not pass merely because the whole action bridge is disconnected.
+
+Sabotage verification: change =var writable = row.source_hash != null= to unconditional writable in =ST.fieldEditorRows=, or fill =addr= / =addrKind= for the null-hash row. The test must fail by observing a write-capable address/control or an emitted node-param action. This proves that an unverifiable snapshot cannot be written.
+
+* Non-goals and risks
+
+- Do not reintroduce =&mcp-node-param-row= or =&mcp-node-binding-row=, duplicate typed widgets, or a second row projection. The follow-up protects the shared =ST.fieldEditorRows= / =ST.adFieldTemplate= cutover.
+- Do not add hand-written page JavaScript. The workbench remains declarative Spacetime; any test-only host/signal capture must use the existing testing and MCP primitive seams.
+- Do not add a Rust parser, fallback, or workbench-specific widget resolver. Widget dispatch is stdlib/runtime data and already has one shared implementation.
+- An equal-valued fresh poll is intentional: it tests reference replacement and the poll publisher's fingerprint/session-ownership guarantee, not only a no-network condition. If the test injects state without exercising the poll boundary, it would repeat the current false confidence.
+- Focus and selection APIs can be sensitive to headless test timing. The test must wait for the real rendered control and set focus/caret after rendering; it must not weaken the assertion to checking only that a value string remains somewhere in the DOM.
+- A source edit may cause genuine changed server data later. This follow-up only requires preservation for the BUG-151 equal-valued poll case; define changed-server conflict behavior separately rather than silently retaining stale values or re-rendering during typing.
+- Do not use git stash, reset, revert, or checkout as part of implementing this follow-up.
+
+* RESOLVED (2026-07-25, PLAN-113 W2.2)
+
+`stdlib/__mcp__/tests/workbench-selection.test.st` — 5 tests covering the links the
+existing helper/template test bypassed. All four mechanisms sabotage-verified:
+
+| sabotage                                   | result           |
+|--------------------------------------------+------------------|
+| null-hash row gets credentials anyway      | 1 test fails     |
+| every widget resolves to `text`            | 3 tests fail     |
+| bindings lose their `paramKind`            | 1 test fails     |
+| poll re-renders the editor DOM             | 1 test fails     |
+
+** Covered
+
+1. *Node filtering across BOTH arrays.* Rows for the unselected node must not
+   project, and params/bindings filter independently — seeding only one array, or
+   filtering on the wrong id, is observable.
+2. *Shared widget resolution.* `tpl` must come from `ST.adFieldTemplate`, not a
+   workbench-local table. The colour row must resolve the colour template and the
+   string row the text one — sabotaging the resolver fails 3 tests.
+3. *The full addressing rail reaches the DOM.* `data-param`,
+   `data-st-payload-span-start/end`. A regression dropping any of these still
+   renders a plausible editor whose edits address nothing.
+4. *Display-only rows.* A null `source_hash` blanks `addr`/`addrKind`, and an
+   otherwise-identical row WITH a hash carries them — proving the blanking is
+   caused by the missing hash rather than a malformed row.
+5. *BUG-151 poll survival, as the property that matters:* same element, same focus,
+   same in-progress text after an equal-valued poll. Sabotaged by re-rendering the
+   container; the test fails, so it is testing DOM identity and not merely that the
+   poll ran.
+
+** Correction made during the work
+
+The display-only test first asserted `row.writable === false`. That field does not
+exist on the descriptor — `writable` is internal to `ST.fieldEditorRows`; the guard
+IS the blank `addr`/`addrKind`, since those are what a commit reads. The assertion
+happened to fail rather than pass vacuously, but a typo'd field name generally
+yields `undefined` and reads as "absent = safe". Replaced with the writable/
+non-writable comparison described above.
+
+** Deferred from the plan, with reasons
+
+Steps 3 and 4 of the fix plan — driving the real `.mcp-nav-node` and delegated
+`.mcp-stage [data-st-node]` clicks, and capturing `mcp-action` through the live
+host bridge — need the workbench MOUNTED with its poll primitive and host bridge
+active. The headless backend has no MCP host to answer that bridge, so such a test
+would assert against a stub of the very thing under test. That belongs on `--cdp`
+against a real mounted workbench; filed as FUP-139 rather than faked here.
+
+The projection, filtering, widget resolution, addressing, credential-blanking and
+poll-survival links ARE covered, and those are where the W5 convergence actually
+changed behaviour.

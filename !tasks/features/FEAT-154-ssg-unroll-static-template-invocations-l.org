@@ -1,0 +1,94 @@
+#+TITLE: SSG-unroll static @template invocations (literal args, static body) — unroll == hydrate for components
+#+STATE: ITEM
+#+SESSION_ID: 152939d2e5b25e66
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-09T16-24-34-454Z_152939d2e5b25e66.jsonl]]
+#+CUSTOM_ID: FEAT-154-ssg-unroll-static-template-invocations-l
+
+* Initial Message
+
+can dom-refs (`&my-template(..., ...) { ... }`) contain all of ST? As in, html, CSS, ST syntax through macros, etc. and then it gets its scope solved to be within the template? Or does it have some special case?
+
+The goal is to empower the 'element-ref as function' way of creating Spacetime affordances the most blessed way to build encapsulation and whatnot. I would like to do that for Ora Ventures, whose website we want to rewrite completely to be attractive to Chief AI Officers at big groups in emerging markets, as well as capital-rich SMBs that want to be more dynamic and competitve. That website should be sober, have crisp but minimal copy, and showcase Spacetime features in a way that is unique and helps us convert more (so think of advanced interactions and motions in terms of high-convertion)
+
+Come back with your plan, sources, inspirations, for the copy
+Come back with your analysis for the &... thing
+
+* Motivation
+Template-as-function analysis (research/spacetime-template-as-function-analysis.org, GAP-5).
+=&card("Title");= currently renders CLIENT-SIDE ONLY: served HTML has an empty
+container (selector-scope invocation) or a =<span data-st-hole="0"></span>=
+marker (inline-hole invocation). A crawler / JS-disabled client sees nothing.
+This forces SEO-critical copy to stay page-level HTML and caps the
+"element-ref as function" blessing: components can't own content, only
+interactivity. The ora-ventures rewrite (PLAN filed alongside) works AROUND
+this today; this FEAT removes the workaround class.
+
+* Design principle (existing, extend it)
+=docs/language/data-and-rendering.md= §6 already defines the contract for
+=@each= over =@data inline=: the STATIC fact drives compile-time unrolling into
+served HTML, and =unroll == hydrate= (runtime re-render produces identical DOM
+→ no flash, no duplication). =src/html/ssg_unroll.rs::unroll_static_each= is
+the precedent implementation. Template invocations are the same shape one
+level up: a factory + args, static iff every input is static.
+
+* Staticity rule for an invocation
+An invocation =&name(args)= / =&name(args) { body }= is STATIC iff:
+- every arg is a literal (string/number/bool) OR a reference to an =@data
+  inline= source (the =static: true= kind — same fact =@each= consumes), and
+- the template body contains no dynamic-only construct that cannot be
+  hydrated idempotently (state decls are FINE — they render their initial
+  value, exactly like =@data inline= holes at page level; =fetch=/=query=
+  sources render their =initial=).
+Nested static invocations unroll recursively. Anything non-static keeps
+today's behavior (empty container + runtime mount). This mirrors the §6 note
+that transitive staticity is a planned refinement — implement the direct
+case, leave derive/query-transitive for the follow-up it names.
+
+* Implementation sketch (CodePaths)
+1. =src/html/ssg_unroll.rs=: new =unroll_static_invocations(ast, blocks,
+   site_dir)= called from =src/compiler.rs= (~L835) beside
+   =unroll_static_each=. It needs: the template registry (populated by
+   =stdlib/macros/template.st= %registers), the invocation records
+   (=invoke-template= binds from =template-invoke= / =template-invoke-bare= /
+   =template-invoke-named= / the inline-hole form), and an HTML renderer for a
+   body given bound args.
+2. Rendering: reuse the SAME body→HTML machinery the factory builder is
+   compiled from (=src/syntax/form_match.rs= component payload/builder emit,
+   ~L1199–L1556 region) — do NOT write a second renderer. The unroller binds
+   args → substitutes holes with static values → serializes. Holes bound to
+   non-static params render their initial/empty exactly as the hydrate path
+   does, so DOM equality holds.
+3. Hydration parity: the runtime invocation path
+   (=stdlib/primitives/template.st= mount, ~L368+) must detect an
+   already-unrolled container (e.g. a =data-st-ssg= marker attribute emitted
+   by the unroller) and ADOPT instead of appending — same idempotency
+   discipline =@each= hydrate uses. Verify no double-render.
+4. Body-slot form =&card("T") { <p>x</p> }=: the body HTML is a compile-time
+   literal — binds to the first unbound &param during unroll, same as runtime.
+
+* Acceptance
+1. Fixture: =@template &card($t) { <article><h3>`$t`</h3></article> }= +
+   =.page { &card("Hello"); }= → served =dist/index.html= contains
+   =<article><h3>Hello</h3></article>= inside =.page=. No-JS curl test.
+2. Hydration parity: with JS enabled the DOM after load is IDENTICAL
+   (=--cdp= test asserting no duplicate article, no text flash — the
+   =unroll == hydrate= invariant, docs/testing/FIDELITY_LADDER.md discipline).
+3. Interactive template (=$open bool= + =@on click= toggle) unrolls its
+   initial state AND stays interactive after hydration (CDP click claim).
+4. Non-static arg (=&card($fetched)=) keeps current behavior (empty + runtime
+   mount) — fixture asserting the container is empty in served HTML.
+5. Inline-hole form =`&card("x")`= unrolls in place (no data-st-hole span in
+   served output for static case).
+6. =@each= body invoking a static template (=&t($item);= over =@data inline=)
+   unrolls both levels — the composition case.
+7. Docs: =docs/language/data-and-rendering.md= §6 updated to state the
+   invocation rule (colocate doc with impl commit per AGENTS).
+
+* Related
+- research/spacetime-template-as-function-analysis.org (GAP-5)
+- BUG-165 / BUG-166 / BUG-167 (template-body hardening — same PLAN)
+- FUP-062 (scoped CSS — orthogonal, composes)
+- docs/language/data-and-rendering.md §6 (the contract being extended)
+
+* Parent
+[[id:PLAN-070-template-as-function-hardening-close-the][PLAN-070]] W4. Blocked by BUG-165, BUG-166, BUG-167 (unroller must render the hardened body surface).

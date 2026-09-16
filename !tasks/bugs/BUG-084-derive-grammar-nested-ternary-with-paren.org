@@ -1,0 +1,45 @@
+#+TITLE: derive grammar: nested ternary with parenthesized branch fails to parse
+#+STATE: ITEM
+#+SESSION_ID: 14fc108ed3772fa8
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-04T14-32-37-965Z_14fc108ed3772fa8.jsonl]]
+#+CUSTOM_ID: BUG-084-derive-grammar-nested-ternary-with-paren
+
+* Initial Message
+
+ok dude I want you to focus on FEAT-092. Give me your boldest vision for it, and explain what's separating us from it. Do a deep review of what's available and how to do it
+
+* Symptom
+A @data derive whose value is a NESTED ternary where a branch is parenthesized
+fails to parse:
+  @data derive $a : $pane === "theme" ? "tok" : ($pane === "palette" ? "tpl" : "mot");
+errors with "expected '{' after selector" / "expected scope block…". The
+single-level ternary `$pane === "x" ? "a" : "b"` parses fine; a parenthesized
+SINGLE value `: ("mot")` parses fine; only the nested-ternary-in-parens form
+(common for 3-way string selection) breaks.
+
+* Likely cause
+Same family as BUG-077/BUG-083 (paren handling in directive value grammar).
+A `(` appearing AFTER the value-colon but mid-expression (the `:` branch of a
+ternary, not the leading token) is not routed through the balanced
+inline-value path — the events grammar / CST parser treats the inner `?`/`:`
+or the trailing `.member`/`)` as a new selector. The BUG-083 fix only covers a
+value-colon IMMEDIATELY followed by `(`; here the `(` follows the ternary `:`.
+
+* Workaround in use
+FEAT-092 W4 tool panes route 3-way presentation-string selection through a
+shaping helper (ST.adToolTitle/adToolSub/adToolEmptyText) instead of a nested
+ternary derive — cleaner anyway (presentation strings belong in the
+data-shaping seam). So W4 is unblocked; this bug tracks the underlying grammar
+gap for a proper fix.
+
+* Repro
+$pane string: "list";
+@data derive $a : $pane === "theme" ? "tok" : ($pane === "palette" ? "tpl" : "mot");
+.x { text <- $a; }
+<div class="x"></div>
+→ spacetime check: parse errors.
+
+* Acceptance
+- [ ] The nested-ternary-in-parens derive parses + emits the whole expr
+- [ ] RED→GREEN parser test (both CST + events grammar)
+- [ ] The W4 shaping-helper workaround can optionally revert to inline ternary

@@ -1,0 +1,24 @@
+#+TITLE: @score &.loop palindromes: inherits loop-driver's pingpong default instead of restarting the arrangement
+#+STATE: DONE
+#+SESSION_ID: 154a974abe45a002
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-08-04T14-22-49-081Z_154a974abe45a002.jsonl]]
+#+CUSTOM_ID: BUG-277-score-loop-palindromes-inherits-loop-dri
+
+* Initial Message
+
+can you tell me which examples and demos use `@score`? I want to test drive the video creation. And create a catalog that lets us see the new opportunities provided to us by this new feature
+
+* Symptom
+Every `@score &.loop(Ns)` playhead ran as a TRIANGLE wave (forward then backward, period 2N) instead of a sawtooth (restart, period N). Verified by sampling `--st-__score_*` on the live page: all six scores on the demo ping-ponged. Consequence: every clip's window ran IN REVERSE on the second half-cycle — a title card that wiped in wiped back out — and a rendered film would palindrome instead of cutting to its first frame.
+
+* Root cause
+`loop-driver` (stdlib/primitives/animation/drivers.st) defaults `mode: "pingpong"` — the old `@loop` pulse surface's choice. The score lowering (src/pipeline/score.rs) never passed `mode`, so the primitive default won. For a score, a loop is a cycle OF THE ARRANGEMENT: the playhead must restart at 0.
+
+* Why the gates didn't catch it
+The reel/rate/two-pole CDP gates passed under pingpong by luck: window-membership assertions at fixed waits land on plateaus that hold under either playhead shape, and a late assert lands in the REVERSED phase where the clip is at its end value — which reads as "window closed, rested". The demo's own film section was the first surface where the palindrome was visible (sc1 animating backward), found by sampling the live page, not by a gate.
+
+* Fix
+score.rs: when the score's driver primitive declares a `mode` param and the author did not supply one, inject `mode: "restart"` (same data-driven rail as the `.steps` `count` injection). `&.loop(12s, mode: "pingpong")` still says what it means; `@loop` macro behavior unchanged.
+
+* Gate
+tests/score/score-launch-film.test.st's sampler asserts are phase-honest under restart (a fixed @wait cannot know a restarted loop's phase — mount overhead lands anywhere in the cycle — so the gates sample a trace and assert over it).

@@ -1,0 +1,109 @@
+#+TITLE: Every literate .st.md document fails to compile: unknown primitive doc
+#+STATE: DONE
+#+SESSION_ID: 154d0baaa942d918
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-08-06T12-08-13-733Z_154d0baaa942d918.jsonl]]
+#+CUSTOM_ID: BUG-338-every-literate-st-md-document-fails-to-c
+
+* Initial Message
+
+exlpain #30, and for #14 and #11, does the new @on's text-change facet solve this?
+
+#+STATE: ITEM
+#+PRIORITY: A
+
+* Symptom
+
+EVERY `.st.md` literate document fails, including the shipped tutorial
+`demos/starter-pack/index.st.md` and a minimal three-line file:
+
+#+begin_src markdown
+# Title
+
+Some prose.
+
+```st src
+<p class="x">hi</p>
+```
+#+end_src
+
+  $ spacetime check index.st.md
+  error[E0956]: unknown primitive: doc
+
+Literate documents render their prose via `@doc`, which the tangling pass synthesizes
+(`src/literate.rs:458` prepends `@import "stdlib/md"` for any document containing prose). So
+this is not an authoring mistake — no `.st.md` file can compile.
+
+* Not the tangler, and not the macro
+
+- The synthesis is correct and fires: `src/literate.rs:452-459` prepends the import whenever the
+  document has prose and does not already import it.
+- `%macro doc` (stdlib/md/macros/doc.st:22) is correct: it binds `render-markdown`, which is
+  declared at stdlib/md/primitives/render-markdown.st:17.
+
+The failure is that the directive `@doc` resolves to a PRIMITIVE named `doc`, which does not
+exist, rather than through the macro that binds `render-markdown`. Reproduces with an EXPLICIT
+import too, so the import is not the missing link:
+
+  @import "stdlib/md"
+  <p class="x">hi</p>
+  .x { @doc(content: "# hi") }
+  -> error[E0956]: unknown primitive: doc
+
+* Not caused by the PLAN-141 work (checked, not assumed)
+
+Reproduced identically against the stdlib at commit ae58e040 (before W5's import-resolver
+change) using a git worktree. So this predates the LSP/import work and is not fallout from it.
+
+Same SHAPE as BUG-336 (`@script` resolving to a nonexistent primitive named `script` while its
+macro binds others), which suggests one underlying cause: a directive whose macro is not loaded
+falls through to a primitive lookup by the directive's own name. If so, fixing that one
+mechanism closes both.
+
+* Why it matters
+
+`.st.md` is a headline feature — "the tutorial IS the program it teaches" — and the flagship
+example of it does not compile. Any demo written as literate Spacetime is currently unbuildable,
+which is how it was found: writing `demos/showcase-graphql/index.st.md` for PLAN-141 W1.3.
+
+It also means no test in the suite compiles a literate document, or this would have been caught.
+That gap is worth closing with the fix.
+
+* Fix direction
+
+Find why `@doc` resolves to a primitive lookup rather than through `%macro doc`. Check whether
+`stdlib/md` is reachable from the module index at all (`stdlib/index.st` does not import it —
+it is demand-loaded), and whether the macro registry sees the module when the import is present.
+
+Compare with BUG-336: both are "macro exists, directive resolves to a primitive of the same
+name, E0956".
+
+* Gate
+
+A `.test.st` (or repro contract) that COMPILES a minimal literate document with prose and one
+`st` fence. The absence of such a gate is why a headline feature could break unnoticed.
+
+
+* RESOLVED (verified 2026-08-07, commit 28d7cd3b)
+
+Root cause was ONE mechanism, shared with BUG-336/338/340: `resolve_stdlib` consulted the
+EMBEDDED module index BEFORE the filesystem. `build_stdlib_index` indexes every .st under
+stdlib/ by bare name, so `stdlib/md/index.st` registered the name "md"; the embedded branch
+matched and returned `ResolvedImport::Stdlib`, which `resolve_imports` skips as "handled by
+MetaRegistry" — and MetaRegistry only loads STDLIB_DIRS. So an opt-in module's file on disk was
+never read and its %macro set never registered. Fix: filesystem first, embedded name as fallback.
+No module-name special-casing in Rust.
+
+Independently re-verified by the orchestrator (not taken on the agent's word):
+- tests/repro/bug-339-submodule-alone/check-contract.sh — GREEN (RED against 1b24e320^).
+- The two gates this bug MASKED are both GREEN again: gh-12-stage-non-canvas,
+  bug-333-undeclared-element-ref. Neither was ever regressed.
+- `cargo test --lib snapshot_tests` 14 failures -> 5; `cargo test --lib bug220` 6/0.
+- The 5 residual snapshot failures are the CONCURRENT session's runtime-JS change
+  (semicolon-joined mutation-body splitting) — 4 of the 5 diffs literally contain that comment.
+  Their snapshots to accept, not ours.
+
+Literate .st.md no longer fails with E0956 unknown primitive: doc. NOT fully clear, though:
+`spacetime check demos/starter-pack/index.st.md` now reports a DIFFERENT and real error —
+error[E0408]: Signal 'demo-reveal' is used but not defined (index.st.md:219) — plus a pending
+syntax migration. That is a genuine content bug in the demo, newly VISIBLE because the file now
+compiles far enough to typecheck. Reopen scope: fix the demo's signal, not the loader.

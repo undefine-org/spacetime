@@ -1,0 +1,202 @@
+#+TITLE: UNKN scrolling image strip — hover-pause + reveal category word
+#+STATE: DONE
+#+SESSION_ID: 14cedfd0e21b5609
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-04-30T12-08-01-672Z_14cedfd0e21b5609.jsonl]]
+#+CUSTOM_ID: FEAT-035-unkn-scrolling-image-strip-hover-pause-r
+#+DEPENDS: FEAT-034-unkn-home-foundation-reset-tokens-assets
+#+EFFORT: 3h
+#+LAYER: frontend
+#+PRIORITY: #A
+
+* Initial Message
+
+can you tell me how you use the spacetime design skill?
+
+* Intention & Purpose
+
+Implement signature motion #1 from =projects/unkn/_references/Spacetime Movement effect - UNKN website.md=: an infinite horizontal conveyor of square talent thumbnails with a 7-category sequence (Fashion, Beauty, Lifestyle, Entertainment, Sport, Travel, Food). Hovering any image pauses the entire row and fades out that single image to reveal its category word centered in the empty square; un-hovering resumes from the paused position.
+
+This is the *first* below-fold motion the visitor experiences. It must feel constant, unhurried, and tactile.
+
+* Context & Narrative
+
+Current build has a static =unkn-talent-grid= (8 cream tiles, no motion, decorative-only) sitting in the wrong place in the section order (between statement and identity instead of directly under the hero). That static grid will be deleted; this section replaces it with a dedicated =modules/_strip.st= that owns the marquee.
+
+The motion is best authored *pure-CSS-first* using a single =@keyframes= track animation + =animation-play-state: paused= on parent =:hover=. This pattern natively pauses the entire row when any descendant is hovered (because all descendants trigger the parent's =:hover=), preserves position on resume (no JS state management), and degrades automatically with =@media (prefers-reduced-motion: reduce)=. A custom =%primitive= would add cost without benefit here — Spacetime macros are for reactive bindings, not cosmetic CSS animation.
+
+Per-cell behavior (image fades + word appears) is also pure CSS using =:hover= transitions on opacity. No JavaScript at all.
+
+The seamless conveyor effect requires two duplicates of the cell list inside the =__track= so that when the track has translated by exactly =-50%=, the second copy is in the position of the first — looping the keyframe back to =0%= produces no visual jump.
+
+* Scope
+
+In-scope:
+- New module =projects/unkn/modules/_strip.st= owning marquee CSS + section template + cell template.
+- New =@template &unkn-strip-cell($t, $category)= that renders a single =[image][category-word]= square.
+- New =@template &unkn-section-strip()= that renders the section wrapper with =__track= + 2x14 cells = 28 cells (14 unique × 2 copies for seamless loop).
+- =@import "./modules/_strip.st"= added to =projects/unkn/index.st=.
+- Root-level =@each= over =$talents= to populate cell pairs (pair-cycling: cell N gets categories[(N % 7)] from the fixed sequence).
+- =modules/_mission.st= cleanup: delete the now-orphaned =&unkn-section-talent-grid()= template and its CSS.
+- =index.st= page composition update: place =&unkn-section-strip()= between =&unkn-section-hero()= and =&unkn-section-statement()=; remove =&unkn-section-talent-grid()= call.
+- Reduced-motion: =@media (prefers-reduced-motion: reduce)= ⇒ =animation: none=, cells visible as a static row (overflow-x: auto for accessibility), category words always visible underneath images.
+- Mobile responsive: at ≤720px, smaller square size (40vw → 28vw), faster loop (24s vs 40s desktop), tap-to-pause via =:active= state since hover doesn't apply.
+
+Out-of-scope:
+- Touch/swipe drag-to-scrub (would require JS).
+- Auto-detection of image categories (categories assigned positionally per manifesto spec — not derived from talent.categories[]).
+- Strip on sub-routes (home only).
+
+* Existing Patterns
+
+- Module structure: every existing =modules/_*.st= follows =@template &unkn-section-*()= + section CSS in same file. Mirror this.
+- Image asset path: deployed in FEAT-034 to =/assets/images/talent-01..09.jpg=. Strip uses this set rotating to fill 14 slots.
+- Section spacing: =--unkn-space-2xl= block-padding for major sections; this section is *tight* — 0 padding-top (sits flush against hero bottom edge), small padding-bottom.
+- Reduced-motion pattern: =projects/unkn/patterns/_reduced-motion.st= already imported via =_shared.st=. Don't reinvent; add a section-specific override there or inline.
+- Stdlib =@each=: =index.st= already iterates =$stats=, =$services=, =$reasons= at root level. Same pattern.
+
+* Tests
+
+Compile-time:
+- T1: =cargo run -- check projects/unkn/= passes after import + index composition + new module.
+
+Visual + interaction (manual headless via doctor):
+- M1: Boot dev server, scroll to strip. Track translates leftward at constant rate (visible motion).
+- M2: After ~40s, no visible seam (loop is seamless).
+- M3: Hover any cell — entire track stops within 1 frame; that cell's image opacity transitions to 0 over =--unkn-dur-mid= (320ms); category word becomes opacity 1 in same window.
+- M4: Move cursor off cell — image fades back in; track resumes from paused position (NOT from start).
+- M5: Hover sequentially across multiple cells — only the actively-hovered cell shows its word; others remain image-on.
+- M6: =prefers-reduced-motion: reduce= via DevTools rendering pane — track animation disabled; cells visible as scrollable row; categories visible permanently below images.
+
+Layout:
+- M7: At 1440px viewport, 5–6 cells visible across; cell aspect-ratio 1:1.
+- M8: At 720px, 2.5 cells visible; touch-scroll horizontally still works in reduced-motion mode.
+
+Accessibility:
+- M9: Each cell has =aria-label= naming the talent ("Talent thumbnail: Carolina Mendes — Fashion") so screen readers announce something useful.
+- M10: Keyboard tab order skips the decorative track (=role="presentation"= or hidden from tab focus); strip is opt-in non-essential content.
+
+* Implementation
+
+** ITEM Author modules/_strip.st module
+:PROPERTIES:
+:CUSTOM_ID: FEAT-035-unkn-scrolling-image-strip-hover-pause-r::author-strip-module
+:END:
+
+- File: new =projects/unkn/modules/_strip.st=
+- Template =&unkn-strip-cell($t, $category, $idx)= structure:
+  =<div class="unkn-strip__cell" data-cat="$category" aria-label="Talent thumbnail: $t.name — $category">=
+  =  <img class="unkn-strip__image" src="$t.image" alt="">=
+  =  <span class="unkn-strip__category">$category</span>=
+  =</div>=
+- Template =&unkn-section-strip()= structure:
+  =<section class="unkn-strip" aria-label="Talent disciplines">=
+  =  <div class="unkn-strip__viewport">=
+  =    <div class="unkn-strip__track" role="presentation">=
+  =      <!-- two copies of the cell list, populated by root-level @each -->=
+  =    </div>=
+  =  </div>=
+  =</section>=
+- CSS:
+  - =.unkn-strip { width: 100%; background: var(--unkn-paper); padding-block: var(--unkn-space-md) var(--unkn-space-lg); border-block: 1px solid var(--unkn-rule-soft); }=
+  - =.unkn-strip__viewport { overflow: hidden; width: 100%; }=
+  - =.unkn-strip__track { display: flex; gap: 0; will-change: transform; animation: unkn-strip-drift 40s linear infinite; }=
+  - =.unkn-strip:hover .unkn-strip__track { animation-play-state: paused; }=
+  - =.unkn-strip__cell { flex: 0 0 clamp(180px, 22vw, 320px); aspect-ratio: 1 / 1; position: relative; background: var(--unkn-paper-warm); }=
+  - =.unkn-strip__image { width: 100%; height: 100%; object-fit: cover; transition: opacity var(--unkn-dur-mid) var(--unkn-ease); }=
+  - =.unkn-strip__category { position: absolute; inset: 0; display: grid; place-items: center; font-family: var(--unkn-font-display); font-size: clamp(1.6rem, 2.6vw, 2.4rem); color: var(--unkn-ink); text-transform: uppercase; letter-spacing: var(--unkn-tracking-eyebrow); opacity: 0; transition: opacity var(--unkn-dur-mid) var(--unkn-ease); pointer-events: none; }=
+  - =.unkn-strip__cell:hover .unkn-strip__image { opacity: 0; }=
+  - =.unkn-strip__cell:hover .unkn-strip__category { opacity: 1; }=
+  - =@keyframes unkn-strip-drift { from { transform: translateX(0); } to { transform: translateX(-50%); } }=
+  - Mobile: =@media("max-width: 720px") { .unkn-strip__track { animation-duration: 24s; } .unkn-strip__cell { flex-basis: 40vw; } }=
+  - Reduced motion: =@media (prefers-reduced-motion: reduce) { .unkn-strip__track { animation: none; flex-wrap: nowrap; overflow-x: auto; } .unkn-strip__cell { scroll-snap-align: start; } .unkn-strip__category { opacity: 1; background: rgba(245, 240, 230, 0.85); } }=
+- Verify token references resolve and CSS lints clean.
+
+** ITEM Wire @each cells in index.st
+:PROPERTIES:
+:CUSTOM_ID: FEAT-035-unkn-scrolling-image-strip-hover-pause-r::wire-each-cells
+:DEPENDS: FEAT-035-unkn-scrolling-image-strip-hover-pause-r::author-strip-module
+:END:
+
+- File: =projects/unkn/index.st=
+- After existing root-level =@each= blocks, add a section that emits 14 unique cells × 2 copies = 28 cells. Two approaches:
+  (a) Loop twice over =$talents=, with category index =((i + offset) % 7)= mapping to =["Fashion","Beauty","Lifestyle","Entertainment","Sport","Travel","Food"]=. Spacetime =@each= supports =index= as a binding.
+  (b) Simpler: hand-author a category list of 14 items (= 2 cycles of the 7-list) and =@each= talents twice; but talent count is 9, so use index modulo to wrap: cell N → =$talents[N % 9]=, =categories[N % 7]=.
+- Implementation:
+  =.unkn-strip__track {=
+  =  @each($talents as $t, key: $t.id, index: $i) { &unkn-strip-cell($t, "Fashion", $i); }=  <-- placeholder; refine via category list literal
+  =}=
+- Final, decided approach: declare a project-level =@const STRIP_CATEGORIES = ["Fashion","Beauty","Lifestyle","Entertainment","Sport","Travel","Food"];= near the top of =index.st=, then iterate twice with explicit category injection. If Spacetime doesn't support module-level constants, inline the array literal at the =@each= call site.
+- Confirm Spacetime's =@each= can index into an inline array; if not, fallback: 14-row =@data strip-row[]= JSON listing =[talentId, category]= pairs and iterate that directly.
+- *Decision recorded*: use the JSON-row fallback (=data/strip.json=) to keep authoring simple and avoid stretching =@each=. Each row references talent by id and a category string. =data/strip.json= contains 14 rows; index.st iterates twice over rows for the 28-cell track.
+
+** ITEM Author data/strip.json (14 rows × 2 = 28 cells)
+:PROPERTIES:
+:CUSTOM_ID: FEAT-035-unkn-scrolling-image-strip-hover-pause-r::strip-data
+:DEPENDS: FEAT-035-unkn-scrolling-image-strip-hover-pause-r::author-strip-module
+:END:
+
+- File: new =projects/unkn/data/strip.json=
+- Schema: =StripRow { talentId: string; category: string; }=
+- Add =@type StripRow= and =@data stripRows: StripRow[] { src: "/data/strip.json"; }= in =index.st=.
+- 14 rows:
+  | row | talentId       | category        |
+  | 1   | carolina-mendes | Fashion         |
+  | 2   | rafaella-maia   | Beauty          |
+  | 3   | gabbi           | Lifestyle       |
+  | 4   | sofi-adams      | Entertainment   |
+  | 5   | talent-05       | Sport           |
+  | 6   | talent-06       | Travel          |
+  | 7   | talent-07       | Food            |
+  | 8   | talent-08       | Fashion         |
+  | 9   | talent-09       | Beauty          |
+  | 10  | carolina-mendes | Lifestyle       |
+  | 11  | rafaella-maia   | Entertainment   |
+  | 12  | gabbi           | Sport           |
+  | 13  | sofi-adams      | Travel          |
+  | 14  | talent-05       | Food            |
+- Iterate-twice in index.st emits 28 cells. Track =transform: translateX(-50%)= aligns cell 15 with original cell 1 position.
+
+** ITEM Hook strip into page composition + remove old talent-grid
+:PROPERTIES:
+:CUSTOM_ID: FEAT-035-unkn-scrolling-image-strip-hover-pause-r::compose-page
+:DEPENDS: FEAT-035-unkn-scrolling-image-strip-hover-pause-r::strip-data
+:END:
+
+- File: =projects/unkn/index.st=
+- In =main { ... }= body:
+  - Replace =&unkn-section-talent-grid();= (currently after statement) with nothing — delete that line.
+  - Insert =&unkn-section-strip();= between =&unkn-section-hero();= and =&unkn-section-statement();=.
+- File: =projects/unkn/modules/_mission.st=
+- Delete =@template &unkn-section-talent-grid()= block and its CSS (=.unkn-talent-grid=, =.unkn-tile=, =.unkn-tile--bars=, =.unkn-tile--cream=, =.unkn-tile--rule=, =.unkn-tile--script=, =.unkn-tile__text=). These are no longer referenced anywhere on the home.
+- File: =projects/unkn/modules/_shared.st=: confirm =&unkn-section-talent-grid()= isn't called from sub-routes (grep before delete).
+
+** ITEM Manual verify with doctor
+:PROPERTIES:
+:CUSTOM_ID: FEAT-035-unkn-scrolling-image-strip-hover-pause-r::manual-verify
+:DEPENDS: FEAT-035-unkn-scrolling-image-strip-hover-pause-r::compose-page
+:END:
+
+- Run =cargo run -- doctor projects/unkn/ --format pretty=. Strip section route =/= must score ≥ 6 across all 7 dimensions.
+- Manual scenarios M1-M10 above; capture =screenshots/strip-paused-cell.png= and =screenshots/strip-reduced-motion.png=.
+
+* Edge Cases
+
+- *Image fail-to-load*: if a talent image 404s, =img.onerror= isn't accessible without JS. Mitigation: cell background is =--unkn-paper-warm=; if image fails, the warm cream square shows; category word still reveals on hover. Acceptable degradation.
+- *Cell width drift*: if Spacetime's CSS doesn't preserve =flex: 0 0 ...= width on different browsers, the loop won't be seamless. Mitigation: =flex-shrink: 0; flex-grow: 0; flex-basis: clamp(...); width: clamp(...);= belt-and-braces.
+- *Hover during transition*: hovering and unhovering quickly should not stutter. CSS transitions handle this naturally; verify.
+- *Tab focus*: keyboard users can't trigger =:hover=. Add =:focus-within= sibling: =.unkn-strip__cell:focus-within .unkn-strip__image { opacity: 0; } .unkn-strip__cell:focus-within .unkn-strip__category { opacity: 1; }= and make cells =tabindex="-1"= so they're not in tab order but =:focus-within= still works for screen-reader tools that probe focus. Decision: keep cells out of tab order; reduced-motion mode already shows categories permanently.
+- *RTL languages*: animation direction would be wrong. Out of scope (UNKN is English-only) but document in brand-spec.md.
+- *iOS Safari =position: sticky= bug + animation*: not used here, but if any parent has sticky, animation can stutter. None of the home parents are sticky.
+- *Loop seam visible at low-res devices*: if device pixel ratio causes =-50%= to land on a sub-pixel boundary, a 1px gap can appear. Mitigation: add =margin-right: -1px= on every cell EXCEPT the last in each copy; or use =transform: translate3d(-50%, 0, 0)= for sub-pixel rendering. Use the translate3d approach.
+
+* Acceptance Criteria
+
+- =cargo run -- check projects/unkn/= exits 0.
+- =cargo run -- doctor projects/unkn/ --format json= for route =/= reports score ≥ 6 across 7 dims.
+- Loading =/= in dev server: strip element exists between hero and statement section in DOM order.
+- Strip animates leftward at constant speed; loops without visible seam (verify with 60s session).
+- Hovering any cell: track pauses across the entire row; that cell's image fades to opacity 0; that cell's category word becomes visible.
+- Hovering moves between cells: previous cell restores; new cell reveals.
+- Reduced-motion mode: track is static; categories permanently visible.
+- Mobile (320px viewport, touch device): strip becomes scrollable, no animation.
+- Screenshot =screenshots/strip-paused-cell.png= attached.

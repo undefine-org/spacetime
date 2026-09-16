@@ -1,0 +1,113 @@
+#+TITLE: Spacetime CMS V1 — Local Content Admin (zero-config, type-derived)
+#+STATE: DONE
+#+SESSION_ID: 14f7fa4f27a46bb4
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-01T10-21-30-142Z_14f7fa4f27a46bb4.jsonl]]
+#+CUSTOM_ID: PROJ-004-spacetime-cms-v1-local-content-admin-zer
+#+DEPENDS_INIT: PROJ-094, PROJ-107
+#+GOAL: Ship a local, --debug-gated content admin at /__spacetime/admin/ that auto-derives collections and schema-driven forms from a project's @type/@data graph, persists via the existing WS edit protocol, and manages unkn's talent JSONs in a surface separate from the debug panel — no CMS config, no server, no auth.
+#+SPEC: docs/specs/spacetime-cms.md
+#+COMPLETION_HASH: 8a740132c7d3fd0b
+
+* Initial Message
+
+ok let's think deeply deeply. What would a headless CMS for Spacetime look like? like a headless CMS that has all the nice features of a headless CMS and the power of Spacetime combined. Look at the stdlib and the __dev__ to understand some of the pre-existing experiments, and do a research on the state of headless CMSes, before coming back with your THOUGHTS AND REFLECTIONS (no decisions yet)
+
+* PLAN-110 Spacetime CMS V1 — Local Content Admin
+
+Full design context: [[file:../../docs/specs/spacetime-cms.md]] (read §2, §4, §4.8 before starting).
+Follow-ups created with the spec: [[id:FUP-macro-body-scope]] · [[id:FUP-macro-namespaces]].
+
+** Thesis (one paragraph)
+
+The admin is GENERATED from the project's own =@type=/=@data= definitions: zero
+config, zero schema registration. It is itself a Spacetime site (primitives +
+metasystem, no custom JS), served full-window at =/__spacetime/admin/=, distinct
+from the =__dev__= debug overlay, sharing the existing WebSocket edit protocol.
+V1 manages =projects/unkn/data/*.json= (6 types, 6 sources). It uses the
+EXISTING client-side =@each= re-render for preview feedback; compile-time
+hydration is explicitly deferred.
+
+** Locked decisions (do not relitigate)
+
+1. Surface: separate full-window route =/__spacetime/admin/=; shares WS protocol.
+2. Display: optional =@cms= hint macro with convention fallback (works on unkn untouched).
+3. Hydration: keep client-side =@each= re-render (=DataUpdate= -> =ST.setData=); defer compile-time hydration.
+4. Stdlib placement: admin lives in its OWN folder =stdlib/__admin__/= (sibling to =__dev__=), NOT under macros/ or primitives/.
+
+** What already exists (reuse, do not rebuild) — verify each path
+
+- =/__spacetime/dev/types.json= (=src/server.rs::dev_types_handler=) — @type -> JSON-schema.
+- =/__spacetime/dev/site.json= (=src/server.rs::dev_site_handler=) — pages/data/locales.
+- =EditJson= / =EditJsonArray= (Insert/Delete/Reorder) — =src/sync/handlers.rs= + =protocol.rs=.
+- =/__spacetime/dev/upload= (=upload_handler=) + =dev-media-picker.st=.
+- =dev-save.st= (=window.__stDevSave=, op_id/ack/reject/optimistic) — the save orchestration.
+- =ST.setData(source, data)= on =DataUpdate= — reactive @each re-render.
+- =src/type_system/= (=TypeRegistry::from_form_matches=, =generate_json_schema=).
+
+** KNOWN HAZARDS (from audit AUD-002 — must address or route around in V1)
+
+1. =dev_types_handler= keys schemas by =@type= NAME but data editor looked up by
+   SOURCE filename — they never match. V1 MUST resolve =@data <name>: <Type>= ->
+   Type, so a source (=talent=) maps to its type (=Talent=). (AUD-002 #8)
+2. =dev_types_handler= parses only =index.st=, NOT =@import=-ed files, so types in
+   modules are invisible. unkn defines types in =index.st= (OK for V1) but the
+   handler should move to the full compile pipeline to resolve imports. (AUD-002 #12)
+3. Every =EditJson= MUST carry =op_id= or serde rejects it server-side. Reuse
+   =dev-save.st='s op_id generation; do NOT hand-roll EditJson in the admin. (AUD-002 #2,3,4)
+4. =dev_types_handler= re-parses on each request — fine for V1, note for later. (AUD-002 #11)
+
+** Out of scope (later layers — see spec §8)
+
+auth/identity, multi-editor/CRDT, draft/publish, hosting/CI-CD, remote upload.
+Forward-compat hygiene: admin writes through the same verbs a server would expose
+(GET types · GET/PUT data/* · POST build); the EditJson/op_id/ack protocol already
+has this transport-agnostic shape.
+
+** Definition of Done
+
+Open =/__spacetime/admin/= while serving =unkn= with =--debug= ->
+Talents/Services/Work/Reasons/Stats/Strip auto-listed with counts -> click a talent
+-> edit name/headline/image/categories in a GENERATED form -> add/delete/reorder
+talents -> live page reflects every change. No =.st= edits required; =@cms= available
+to refine display roles.
+
+** Execution manifest
+
+See the wave-based todo roster for this PLAN. Waves:
+- W0 Foundation: type<->source resolution + @cms macro + types.json+ endpoint.
+- W1 Generation: schema->form widget engine + display-role inference.
+- W2 Admin site: stdlib/__admin__/ collections rail + list + entry drawer.
+- W3 Wiring: /__spacetime/admin/ route + persistence integration + media.
+- W4 Verify: unkn end-to-end, mockup-validated UX, tests.
+
+
+*** Wave DAG (15 tasks, 5 waves)
+
+#+BEGIN_SRC
+W0 Foundation
+  w0-type-source   @data source -> @type map; surface in site.json   [FIX AUD-002#8]
+  w0-imports       types.json resolves @import-ed types  (← w0-type-source) [FIX AUD-002#12]
+  w0-cms-macro     @cms hint macro in stdlib/__admin__/  (← w0-type-source) [FUP-macro-body-scope]
+W1 Generation
+  w1-display-infer convention + @cms display roles  (← w0-cms-macro, w0-imports)
+  w1-widget-engine schema -> widget recursion        (← w1-display-infer)
+W2 Admin site  (stdlib/__admin__/)
+  w2-shell  full-window three-pane     (← w1-widget-engine)
+  w2-rail   collections+pages rail      (← w2-shell)
+  w2-list   editable rows               (← w2-rail, w1-widget-engine)
+  w2-drawer entry editor drawer         (← w2-list)
+W3 Wiring
+  w3-route   /__spacetime/admin/ --debug gated  (← w2-drawer)
+  w3-persist EditJson/Array via __stDevSave      (← w3-route)  [op_id reuse, AUD-002#2-4]
+  w3-media   media field via /upload             (← w3-persist)
+W4 Verify
+  w4-mockups GenerateUIScreen + user sign-off    (← w2-drawer)
+  w4-e2e     unkn DoD walkthrough  [CLOSES PLAN] (← w3-media, w3-persist, w4-mockups)
+  w4-tests   resolution/inference/widget/route + AUD-002 regression guards (← w3-media)
+#+END_SRC
+
+Gates: w0-type-source (site.json contains resolved type) · w4-e2e (cargo check unkn,
+closes PROJ-004) · w4-tests (cargo test --lib + integration). Mockups validated by
+user before implementation polish (design principle #1).
+
+NOTE [2026-06-01]: V1 shipped + verified end-to-end on unkn. All 15 tasks (W0-W4) complete. Zero-config admin at /__spacetime/admin/ auto-derives 6 collections + schema forms from @type/@data; edits/add/delete/reorder/media persist to disk via WS EditJson protocol; @cms override works live. 8 new tests; lib 2068 + integration 139 green. Screenshot: screenshots/cms-v1-admin-unkn.png.

@@ -1,0 +1,97 @@
+#+TITLE: Scroll-driven element does not hold its first keyframe at progress 0
+#+STATE: ITEM
+#+SESSION_ID: 153497be379ff5cc
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-18T12-18-12-318Z_153497be379ff5cc.jsonl]]
+#+CUSTOM_ID: BUG-343-scroll-driven-element-does-not-hold-its
+
+* Initial Message
+
+can you list all the migratins, and what needs to be done, and what root causes they share, and what your plan is? then keep going autonomously until the end (use the todo tool to record everything)
+
+* Summary
+
+A `@on &.scroll(...)` animation does not paint its FIRST keyframe before the
+scroll driver has advanced. At rest (progress 0) the element shows a
+partially-advanced value instead of the declared start value.
+
+Under `--cdp`, 6 of the 7 failures are the same assertion:
+
+#+begin_example
+✗ in/out scroll animations: initial state uses first animation value
+    Expected .comp-target to have opacity: 0, got 0.441667
+✗ in/out composition with multiple properties preserves initial state
+    Expected .multi-target to have opacity: 0, got 0.353333
+✗ single scroll animation applies initial state normally
+    Expected .single-target to have opacity: 0, got 0.276667
+✗ single scroll animation with multiple properties
+    Expected .sm-target to have opacity: 0, got 0.265556
+✗ multi-keyframe initial state uses first keyframe value for opacity
+    Expected .mk-initial to have opacity: 0, got 0.51
+✗ two-keyframe initial state uses first keyframe value
+    Expected .mk-two-kf to have opacity: 0, got 0.83
+#+end_example
+
+The 7th is adjacent but distinct and may have its own cause:
+
+#+begin_example
+✗ scroll animation respects start parameter
+    Timeline "delayed" not registered
+#+end_example
+
+The observed values are non-deterministic across runs (0.44, 0.35, 0.27,
+0.51, 0.83) — consistent with the element being sampled while the driver is
+mid-advance, i.e. the animation is running on wall-clock/RAF before scroll
+progress is bound, rather than being pinned to progress 0.
+
+Visible consequence: any scroll reveal flashes a partially-faded element on
+load instead of starting from its declared first keyframe.
+
+* Provenance — PRE-EXISTING, exposed not caused
+
+Found while migrating the `@scroll` corpus to `@on &.scroll` (AUD-009).
+
+Verified NOT caused by the migration: restored the three pre-migration files
+from git (`git show HEAD:tests/unit/primitives/<f>` into scratch/) and ran
+them under `--cdp`. Result: **the same 7 failures, with identical failure
+text**, from the old `@scroll` spelling. So this is a real behavior bug on
+both the retired and current surface.
+
+Why it was never seen: these files did not compile (E0956, see 47f87f69), so
+the runner discovered ZERO tests and exited 0. Post-migration they run —
+99 passed / 7 failed under `--cdp` for `tests/unit/primitives/`.
+
+Note the fidelity ladder did its job here: these claims are `needs layout`,
+so `--headless` SKIPS them and reports `0 failed`. Only `--cdp` sees this.
+Do not conclude anything about this bug from a headless run.
+
+* Reproduce
+
+#+begin_src sh
+cargo run --features cdp -q -- test tests/unit/primitives/ --cdp
+#+end_src
+
+Affected files (all migrated, all green except these claims):
+- tests/unit/primitives/scroll-composition.test.st
+- tests/unit/primitives/scroll-multi-keyframe.test.st
+- tests/unit/primitives/scroll-driver.test.st
+
+* Investigation starting points
+
+NOT YET VERIFIED — these are leads, not findings:
+
+- the scroll driver's initial sample: is the first paint driven by progress,
+  or does an animation start unpinned and get corrected on first scroll event?
+- `apply-animations` initial-state application for a progress-domain driver
+  (contrast with an event driver, where "initial state" means something else)
+- whether `fill: backwards`-equivalent semantics are emitted for the
+  progress-driven case
+- the "Timeline not registered" failure suggests registration ordering may be
+  involved for the `start:` parameter path specifically
+
+* Acceptance
+
+- at scroll progress 0 the element paints EXACTLY its first keyframe value
+- deterministic across runs (the current values vary run to run)
+- all 7 claims pass under `--cdp`
+- must be seen FAILING before the fix and PASSING after (a headless run
+  proves nothing here — it skips)

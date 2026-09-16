@@ -1,0 +1,41 @@
+#+TITLE: @data src: inline; value:[...] parsed as filename (E0504)
+#+STATE: DONE
+#+SESSION_ID: 14f48ced503111a7
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-05-29T18-28-09-664Z_14f48ced503111a7.jsonl]]
+#+CUSTOM_ID: BUG-027-data-src-inline-value-parsed-as-filename
+#+EFFORT: 2h
+#+LAYER: coding-agent
+#+COMPLETION_HASH: ff159fb829d4170b
+
+* Initial Message
+
+my friend, I want you to do two things that are quite related to each other:
+1. look at projects/unkn for the way it structures its files and tell me how you would have structured it
+2. look up reactive bindings and how they are done in Spacetime (the $ sigil), as well as full-spacetime work (as in, not using index.html, only index.st and generating the html from it by putting the html inline).
+
+The goal is to build a project that showcases reactive bindings, so that websites can start dealing with userland values instead of just animation-specific values (although one of the strengths of Spacetime is its ability to bring reactive bindings to the animation sphere).
+
+The goal of this is both to make a showcase demo (in demos/) and to use that to find all the BUGs and FEATs and REFACTORs that we need to implement. Do NOT use the 'emacs' way of managing tasks; only the Spell-native way. Think a bit about the type of demo that would make sense to showcase reactive bindings; get inspiration by choosing from awwwards.com too
+
+* Source
+Found while compiling examples/cart-demo/index.st (the canonical reactive example) and verifying reactive-binding patterns from docs/DATA_BINDING_GUIDE.md.
+
+* Problem
+`@data products: P[] { src: inline; value: [ {...} ]; }` fails with:
+  error[E0504]: Data source file not found: inline; value: [ {...} ]
+The `inline` keyword + `value:` clause is treated as a file path instead of an inline data source. Documented in DATA_BINDING_GUIDE.md and used by examples/cart-demo/index.st.
+
+* Repro
+  @type P { id: string; }
+  @data products: P[] { src: inline; value: [ {"id":"p1"} ]; }
+  .g { @each($products as $p) { } }
+  => cargo run -- check  => E0504
+
+* Expected
+`src: inline` with a `value:` literal loads the array at compile time (no file read). DataSource analysis already has a Runtime/inline notion (src/analysis/mod.rs analyze_data_sources) — wire the `inline` source + `value:` capture through the data loader instead of resolving it as a path.
+
+* Acceptance
+- examples/cart-demo/index.st no longer emits E0504.
+- A check-level test asserts `src: inline; value: [...]` compiles and the data is available to @each.
+
+NOTE [2026-05-29]: Fixed in commit 6f2e8a1c. Added value: capture to @data form, DataSource::Inline variant, src==inline macro branch (data/source.st primitive already handled srcValue==='inline'). Verified live in browser: src: inline; value:[3 items] renders 3 <li> via @each. Integration test added (11 reactive tests + 11 analysis tests green).

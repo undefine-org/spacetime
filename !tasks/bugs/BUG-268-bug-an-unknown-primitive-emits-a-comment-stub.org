@@ -1,0 +1,60 @@
+#+TITLE: an unknown primitive emits a comment stub and the build succeeds
+#+STATE: DONE
+#+PRIORITY: #A
+
+* The bug (eleventh silent-drop instance)
+src/pipeline/expand.rs:187: a ResolvedPrimitive whose name resolves to nothing
+gets `// Primitive not found: <name>` emitted INTO THE SHIPPED BUNDLE and the
+build reports success. Two unit tests (expand.rs:2185, 2244-ish) PIN the stub
+— the BUG-252 class: gates asserting the degrade, not the contract.
+
+* Inventory (probed across demos/* + examples/*, 2026-08-03)
+Four producers reach the stub, only ONE of them legitimate:
+1. `none` (9x score-launch) + `noop` (3x) — INTENTIONAL `primitive: none`
+   driver rows (drivers.st:316): the row positively states "nothing to start".
+   These should resolve to a REAL empty primitive, not fall through "not found".
+2. `version` (2x) — `@version 2026-06-09;` is a compiler directive that still
+   produces a ResolvedPrimitive("version"); routing gap, it should never reach
+   primitive expansion.
+3. `type` (6x) — `@type Card { … }` declarations (type-data.st) produce a
+   ResolvedPrimitive("type") with no primitive; a type declaration is
+   registry data, not an emit target.
+4. `preset` (1x, demos/spacetime-docs, right after the pretext vendor bundle)
+   — the text module references a `preset` name that resolves nowhere.
+   Suspicious after the ~preset retirement (caceec89): may be a stale
+   reference that should error LOUDLY, not stub.
+
+* Fix shape
+- Intentional no-output (none/noop): an explicit resolvable empty primitive
+  (or the expander recognizes the registry's `primitive: none` marker
+  directly — one mechanism, not two).
+- @version / @type: route them out of primitive expansion at the point the
+  ResolvedPrimitive is created (they are compiler directives / registry data).
+- `preset` in the text module: find the reference; if stale post-retirement,
+  it errors loudly.
+- THEN the not-found path becomes E0956 (unknown primitive) and the two
+  pinned tests are rewritten to assert the error — a test asserting the
+  degrade is debt (the arc's rule).
+
+* FIXED 2026-08-04 (agent 65 + orchestrator)
+
+- E0956 (unknown primitive) added; the expand not-found path returns Err
+  instead of emitting the stub comment. Discriminated: a %binds naming a
+  nonexistent primitive fails the build.
+- The four producers routed honestly: registry-FACT macros (@version, @type,
+  @deploy, driver rows) route out at ResolvedPrimitive creation in resolve.rs;
+  `none`/`noop` are real empty primitives (stdlib/primitives/noop.st).
+- The two pinned-stub tests rewritten; twelve pipeline plumbing tests that
+  relied on the stub now use probe_context (real probe primitives) —
+  312/312 pipeline green.
+- CAUGHT A REAL CORPSE: stdlib/__host__/index.st's @dev-bridge never resolved
+  (the macro lives in __admin__/app/macros.st, unimported) — dead since
+  authoring, now imported.
+- THE RESURRECTION BUG (orchestrator, hardest knot): a consumed bind left
+  bind_decls empty, and resolve_evaluated's else-branch re-ran resolve_single,
+  RESURRECTING the consumed score bind from the macro definition — E0956 then
+  masked the E0951/E0954 diagnostics that actually explained the page
+  (score_domain + sign-crossing-rate tests). Fix: a body-evaluated match with
+  empty bind_decls means "consumed — nothing to resolve", never "unevaluated".
+- NOTE: 10f52370 (render fix) swept the compiler.rs E0956 mapping hunk into
+  its commit (staged-index sweep, second incident); content correct, recorded.

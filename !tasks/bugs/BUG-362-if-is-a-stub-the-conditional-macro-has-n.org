@@ -1,0 +1,137 @@
+#+TITLE: @if is a stub: the conditional macro has no implementation
+#+STATE: ITEM
+#+SESSION_ID: 153497be379ff5cc
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-18T12-18-12-318Z_153497be379ff5cc.jsonl]]
+#+CUSTOM_ID: BUG-362-if-is-a-stub-the-conditional-macro-has-n
+
+* Initial Message
+
+please explain and cluster the remaining failures from zero context so that we may have a last push to fix them all
+
+* Summary
+
+~@if~ has never been implemented. It is declared in ~stdlib/macros/each.st~
+(~%macro conditional~) with a ~%form~ and a ~%when~ clause, but NO ~%emit~
+block and no primitive behind it, so the compiler refuses it at the only point
+where it would have to produce output:
+
+#+begin_src sh
+$ spacetime check   # .h1 { @if($show) { > .yes { "Y" } } }
+error[E0956]: unknown primitive: conditional
+  = hint: The primitive was neither a registered `%primitive` nor a macro with
+          an `%emit` block. Check the `%binds`/driver that names it.
+#+end_src
+
+The identically-shaped ~@each~ in the SAME file compiles clean, which is the
+control: the surrounding grammar is fine, it is ~conditional~ specifically that
+has no implementation.
+
+* This supersedes the BUG-358 framing
+
+BUG-358 recorded "`@if` inside a template's markup renders as page text" and
+scoped the fix to the HTML region scanner. That was measured correctly but
+diagnosed too narrowly. Measured now, from zero assumptions:
+
+| position                        | result                          |
+|---------------------------------+---------------------------------|
+| inside a template's markup      | leaks as page TEXT              |
+| in a selector scope, page level | renders NOTHING (E0956)         |
+| paren form ~@if($x)~            | renders NOTHING (E0956)         |
+| space form ~@if $x~             | renders NOTHING                 |
+| literal ~@if(true)~             | renders NOTHING                 |
+
+A literal-true condition rendering nothing is the tell: this is not a
+scope-resolution or a lexing problem. There is no code path that emits a
+conditional at all.
+
+So the template-markup leak is a SYMPTOM of the missing feature, not the
+disease. The HTML-scanner change BUG-358 proposed would convert a visible leak
+into a clean E0956 — worth doing, but it would not make ~@if~ work.
+
+* Why it looked like it worked
+
+Zero usages. ~@if~ appears in NO stdlib module, NO demo, and NO example. Its
+only occurrences repo-wide are:
+- the ~@example~ blocks in its own definition and in ~stdlib/macros/template.st~
+  (the latter now corrected — they documented a shape that cannot run), and
+- two ~tests/fixtures/native-template/~ files, both of which have been failing.
+
+A ~@if $cond { … }~ that renders nothing also PASSES any ~should not_exist~
+assertion, so the false branch always looked correct. Every currently-failing
+assertion in those fixtures is a ~not_exist~ that wants the true branch to have
+rendered something.
+
+* Dead metasystem plumbing behind it
+
+- ~%when~ IS evaluated (~src/pipeline/evaluate.rs:373~) but at COMPILE time,
+  against captured macro bindings — it cannot see a runtime signal.
+- ~CaptureType::Template~ (the ~$_thenTemplate:template~ capture) reaches only
+  parsing and LSP hover. Its extractor (~TemplateExtractor~,
+  ~src/syntax/events/extractors/blocks.rs:100~) delegates to ~ExprExtractor~,
+  i.e. it captures the block as an expression STRING. Nothing reifies it as
+  renderable content.
+
+~%macro conditional-else~ is in the same state, and its comment ("@else must
+follow @if — compiler handles pairing") describes pairing logic that does not
+exist either.
+
+* What a fix has to be
+
+Not a parser patch. ~@each~ is the model to follow: a real primitive with an
+~%emit~ block that produces DOM and subscribes to its source. A conditional
+needs the same — emit both branches' content behind a runtime subscription to
+the condition signal, mount/unmount on change.
+
+Decide explicitly, and RECORD the decision:
+1. implement it properly against the ~@each~ rail, or
+2. remove ~%macro conditional~ / ~conditional-else~ and their ~@example~ blocks
+   so the language does not advertise a surface it does not have.
+
+Shipping neither is the current state, and it is the worst one: the docs teach
+it, the grammar accepts it, and it silently does nothing.
+
+* Verify
+
+#+begin_src spacetime
+body { $show bool: true; }
+.h1 { @if($show) { > .yes { "Y" } } }
+#+end_src
+
+Done when ~.h1 .yes~ exists with ~$show: true~, does not exist with
+~$show: false~, and TOGGLES when the signal changes (the last is the part a
+compile-time-only mechanism cannot deliver).
+
+NOTE [2026-08-11]: BLOCK FORM IS ALSO DEAD — the two spellings fail through DIFFERENT layers, so
+a fix must cover both.
+
+`stdlib/macros/data.st` (line ~34) asserted that control-flow `@if $cond { … }`
+(block form, mount/unmount) was "UNCHANGED" by the FEAT-072 reactive-attr
+deletion. Technically true — that deletion did not touch it — and thoroughly
+misleading, because the block form does not work and did not work before it
+either. The sentence reads as "this spelling still works". Measured:
+
+  .h { @if $on { <p class="yes">SHOWN</p> } }
+  -> Spacetime: a directive body failed to parse and was dropped (BUG-216)
+     Parse error: expected scope block, directive, or declaration
+
+So the failure surfaces are:
+  - paren form `@if($x) { … }`  -> E0956: unknown primitive: conditional
+                                   (macro resolves, has no %emit / no primitive)
+  - block form `@if $cond { … }` -> refused by the PARSER, never reaches the
+                                   macro layer at all (BUG-216 path)
+
+That second one matters for scoping: implementing `%emit` on `%macro
+conditional` fixes the paren form ONLY. The block form needs the grammar to
+accept `@if <expr> { … }` as a directive-with-body first — it is currently not
+parseable, which is why it reports as a dropped body rather than an unknown
+primitive.
+
+Corrected the data.st note in place to state both, with the measurement.
+
+Also re-counted `@if` occurrences in shipped code: 15, across stdlib docs, the
+grammar declaration in each.st, and template.st's notes. ZERO are live call
+sites — every one is documentation or the macro's own %form. Nothing in
+stdlib/demos/examples depends on `@if` working, so implementing it breaks
+nothing and removing the surface breaks nothing. The choice is free either way.
+(An earlier note of mine said "zero occurrences" — that was a miscount; zero
+USAGES, 15 mentions.)

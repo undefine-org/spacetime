@@ -1,0 +1,241 @@
+#+TITLE: BUG: optional directive captures silently discard malformed clauses
+#+STATE: DOING
+#+CUSTOM_ID: BUG-264-optional-directive-captures-silently-drop-near-misses
+
+* Result
+
+The audited syntax inventory contains 67 optional-capture occurrences in active
+=stdlib/= directive forms and reusable =%capture_type= definitions. Two
+independently-built negative fixtures proved a real silent-drop mechanism:
+
+| optional capture | source | near miss | result |
+|-
+| =$closeSignal:binding?= | =stdlib/macros/portal.st:22= | =close: close= | *SILENT-DROP* |
+| =$closeSignal:binding?= | =stdlib/macros/portal.st:22= | =close: &close= | *SILENT-DROP* |
+| =$refresh:duration?= | =stdlib/macros/data-kind.st:191= | =refresh: 5= | *SILENT-DROP* |
+
+Thus: 67 occurrences, 2 explicit error-sibling guards (D28 space-form and
+=on_as_elem=), and at least 2 unguarded capture sites / 3 observed bad
+spellings. The count is by capture occurrence, not by spelling.
+
+* Evidence
+
+All probes used a page (not CSS-only), had =@version 2026-06-09;= on line one,
+and were built with =cargo run -q -- build <temporary-dir>/=.
+
+** Portal: bare name
+
+Fixture:
+#+begin_src st
+@version 2026-06-09;
+$open bool: false;
+<div class="stage">A</div>
+.stage { @portal(when: $open, close: close); }
+#+end_src
+
+Observed: build reported =Pages: 1= and no compile diagnostic. Its emitted
+=dist/spacetime.js= was 297793 bytes. The correct control fixture
+=close: $close= emitted 297798 bytes and contained:
+#+begin_src js
+const closeSig = "close" || sig
+#+end_src
+The malformed fixture did not contain that portal-init fragment. The directive
+was dropped, rather than the bad value being refused.
+
+** Portal: wrong sigil
+
+The same fixture with =close: &close= had the same silent outcome: 297793-byte
+bundle, no diagnostic, and no portal-init fragment. This is the same optional
+capture and same defect, with a second plausible spelling.
+
+** Fetch refresh: number without duration unit
+
+Fixture:
+#+begin_src st
+@version 2026-06-09;
+<div class="stage">A</div>
+@data fetch $x : "/x" { refresh: 5; }
+#+end_src
+
+Observed: a successful one-page build produced JS without =5000=. The control
+=refresh: 5s;= emitted =5000= in its bundle. The fetch itself remained emitted;
+the optional =refresh= clause alone vanished and silently fell back to its
+zero-refresh behaviour.
+
+* Inventory
+
+The complete text inventory (active forms plus reusable capture definitions) is
+below. Repeated references count separately because each directive head can
+make an optional capture independently silent.
+
+| area | source | optional captures |
+|-
+| data kinds | =macros/data-kind.st= | 12 =$type:typeref?= heads; query =filter/sortBy/sortDir/limit/transform/reduce/initial=; fetch options =refresh/initial=; collection =initial=; signal/stream =policy/optimistic= groups; subscribe seed =seed= |
+| data cycle | =macros/data.st= | =field:string?= |
+| gestures | =macros/drag.st= | swipe =onLeft/onRight/onUp/onDown= |
+| each | =macros/each.st= | two =key:expr?= heads; nine entering/exiting/move groups |
+| editable | =macros/editable.st= | mark/block =shortcut= groups; editable/richtext =marks/blocks= |
+| motion | =macros/fade-in.st= | =customKeyframes:keyframes?= |
+| handlers | =macros/handle.st= | =optimistic/receive/final= groups |
+| host/event/portal | =macros/host.st=, =on-event.st=, =portal.st= | =headers=, mutation =target=, portal =closeSignal= |
+| current on grammar | =macros/on.st= | driver subject/params, form args, call name, =on_as= twice, arm guard, signal facet, motion semicolon |
+| score | =macros/score.st= | during =to=, rate =to=, score =as= |
+| exports/doc | =macros/presets.st=, =md/macros/doc.st= | exports body, doc =src/content= |
+| websocket | =macros/websocket.st= | realtime =query/order=, presence =type= |
+| migration grammar | =migrations/entries/2026-07-26-on-cutover.st= | scroll =trigger=, value-change entering/exiting |
+
+The following have no independent near-miss spelling: self-driver subject
+=&.member=, optional argument-list commas, optional semicolon, and absent
+body slots whose omission is the documented syntax. They are *N-A-no-near-miss*,
+not defects merely because they are optional.
+
+Existing correct reference guards: D28's =on-driver-form-legacy-space= consumes
+the otherwise-ambiguous space form and refuses it; BUG-261's =on_as_elem=
+sibling consumes the wrong =as &name= spelling. The current build also emits a
+diagnostic for bare =as reveal=, so =on_as= is REFUSED, not a remaining hole.
+
+* Decision
+
+Do *not* add blanket registration validation for every optional capture. The
+registry records only syntactic optionality, not whether absence is documented
+intent or whether a nearby spelling is plausibly a mistake. The audit itself
+contains counterexamples (optional commas, semicolons, self-driver subject, and
+absent body slots). A required =near_miss= declaration would therefore need a
+human classification for all 67 sites, cannot be inferred mechanically, and
+would add a second metadata mechanism while retaining the existing sibling-form
+pipeline. It would make the registry noisier without making new holes
+impossible.
+
+The narrower rule that holds is: when evidence proves a literal optional clause
+has a hazardous spelling, add an error sibling for that spelling. To avoid a
+Rust arm per directive, BUG-264 adds one pipeline-only =optional-clause-error=
+primitive: sibling forms provide message, hint, and (where required) a
+value-rule as data; the shared sink emits =E0955= before resolution. This
+preserves the established =on_as_invalid= arrangement and fixes only measured
+near misses, not all optional syntax.
+
+* Fix
+
+- =portal_close_invalid= matches =close: close= and =close: &close=, while the
+  normal portal form retains =close: $close=.
+- =data_refresh_invalid= receives the refresh text; its data-specified
+  =bare-number= rule reports =refresh: 5= while leaving =refresh: 5s= valid.
+- =tests/optional_capture_audit_test.rs= is enabled and asserts both negative
+  and positive values.
+
+* Gate
+
+RED was observed before the fix with:
+
+#+begin_src sh
+cargo test --test optional_capture_audit_test -- --ignored
+#+end_src
+
+It failed exactly because the malformed portal input compiled green:
+#+begin_example
+✓ /tmp/.tmpSow8p3/index.st
+✓ All 1 file(s) passed
+#+end_example
+
+GREEN after the fix:
+
+#+begin_src sh
+rm -f stdlib/.cache/registry.bin
+cargo test --test optional_capture_audit_test
+#+end_src
+
+Observed: 2 passed, 0 failed. The negative assertions require =E0955= plus the
+specific repair (=close: $close= / =refresh: 5s=); the positive assertions
+require a clean check. Thus breaking either sibling makes the negative
+assertion fail rather than merely proving that output was produced.
+
+Remaining inventory: the other optional captures require an independently
+observed hazardous spelling before they receive an error sibling. This is a
+judgment-backed audit obligation, not a property the current registry can
+truthfully infer.
+
+* UPDATE 2026-08-03 — two-phase matching alone CANNOT fire the guards (empirical)
+
+Agent 49 implemented the two-phase matcher and proved the premise wrong with
+evidence: the PRODUCTIVE forms accept the near-misses LENIENTLY, so phase 2
+(zero productive matches) never arrives.
+
+- `data-fetch-opts` matches `refresh: 5` with refresh=Expr("5") — the
+  body-capture Expr fallback accepts a number where a duration/binding belongs.
+- `portal` matches `close: close` by DROPPING the clause — ARG_LIST trailing
+  leniency discards what it cannot bind.
+- Both error siblings have EXACTLY equal specificity to their productive
+  counterparts (18=18, 29=29), so specificity ordering cannot save us either.
+
+THE REAL ENEMY IS LENIENT ACCEPTANCE, NOT MATCH ORDER. The correct shape:
+a match that succeeded by dropping/forcing a clause is NOT a clean match and
+must not count as productive acceptance. Two candidate mechanisms:
+(a) CLEAN-MATCH: FormMatch carries whether any leniency fired (49's
+    `trailing_leftover` was the start of this); lenient wins rank BELOW a
+    matching error sibling.
+(b) STRICT CAPTURES: the productive capture itself rejects the wrong kind
+    (49's `is_bad_duration_literal` for `:duration` values) so the near-miss
+    never matches productively in the first place.
+Likely both: (b) for kind mismatches, (a) for dropped clauses.
+
+** Incident (recorded for the playbook): 49's Python brace-matching script
+CORRUPTED 15 files (every FormMatch literal in the tree), left the checkout
+non-compiling, and its feature changes were entangled with the corruption.
+All 15 restored from HEAD (evidence diffs in /tmp/matcher-backout/), the one
+LEGITIMATE hunk caught in the sweep (P10's `pub(crate) registry_pairs` in
+drivers.rs) was re-applied by hand. Lesson: no brace-matching scripts on Rust;
+use the edit tool's symbol targets, and never leave the tree broken.
+
+* UPDATE 2026-08-03 (2) — clean-match ranking + strict captures LANDED (agent 56 + orchestrator)
+
+The mechanism the 2026-08-03 finding called for, implemented:
+
+- STRICT CAPTURES: `is_bare_number_duration_reject` — a bare number where a
+  Duration/Time capture is expected FAILS the productive form
+  (form_compiler.rs extract_body_captures property branch). `refresh: 5` no
+  longer matches productively at all.
+- CLEAN-MATCH RANKING: try_match returns (FormMatch, LENIENT flag) — leniency
+  detected via param-group/body leftover tokens (has_dropped_tokens, ignoring
+  structural closers), NOT a new FormMatch field (avoids touching ~70
+  literals). match_sink ranks: productive-CLEAN accepted immediately; lenient
+  deferred; error sibling fires before any lenient acceptance.
+- Declaration order is the tie-break at equal specificity (portal.st reordered
+  so the productive form precedes its sibling; data-fetch sibling declared
+  after data-fetch-opts).
+
+Verified: portal `close: close` -> E0955, `close: $close` compiles; fetch
+`refresh: 5` -> E0955, `refresh: 5s` compiles. DISCRIMINATION: lenient defer
+disabled -> `close: close` silently accepted (the bug reproduces) -> restored.
+Regressions: metasystem 246, fetch 4, optional_capture_audit 4, plus two unit
+tests on the strict-capture helper (both polarities).
+
+STILL OPEN: the guard fan-out — 62 remaining unguarded optional captures now
+have a mechanism that works. Each is a data-kind.st/portal.st-shape sibling
+entry with DATA-supplied message/hint, plus a neg/pos test pair.
+
+* UPDATE 2026-08-03 (3) — fan-out done; the guardable set is much smaller than 67
+
+Two agents probed EVERY optional capture with near-miss fixtures. Result:
+13 guards landed (12 data-family in cd705e0e + on-mutation target in
+783fc242), each pre-proven to compile SILENTLY before its sibling. The rest
+of the "67" dissolve into three documented classes:
+
+1. UNGUARDABLE-BY-CONSTRUCTION: `:expr?` / `balanced(...)` captures bind ANY
+   token run cleanly (drag x4, each x2, editable x2, websocket x2, bindings,
+   host). They never DROP — the clause binds, wrong kind and all. The residual
+   risk is wrong-kind ACCEPTANCE, not silent dropping.
+2. ACCEPTS-GARBAGE (a different bug class): query dir:/limit: wrap any value
+   as Ident/Number without validation — `limit: "banana"` compiles. Needs a
+   compiler strict-reject for Ident/Number kind mismatches, NOT a sibling
+   (the productive match is clean, so no sibling can ever fire). FILED as
+   follow-up work: kind-strictness for scalar captures.
+3. MATCHER GAP: post-inline leftover (websocket `presence` — `as viewers: 5`
+   after the arg list) is not flagged lenient the way ARG_LIST/body leftovers
+   are, so the productive form wins cleanly and a sibling stays dead. One
+   matcher fix (flag post-inline trailing tokens as lenient) unblocks it.
+
+Verdict: the silent-DROP class inside optional captures is now closed where
+closable by data. What remains is strict-KIND enforcement — a compiler
+concern, tracked above as classes 2+3.
+
+NOTE [2026-08-04]: Class 3 CLOSED (post-inline leniency landed). form_compiler step 3.6 gained an else-if: a body-less form WITH an ARG_LIST that leaves post-inline trailing tokens (beyond the captured inline/arg-list segment, and not a lone `;` terminator) is now flagged LENIENT — the same has_dropped_tokens rule as ARG_LIST/body leftovers, one rule four sites. websocket.st re-adds the `presence-type-invalid` error sibling (agent 61's dead sibling from 783fc242's class-3 note): `@presence(...) as $name:ident : $badType:expr` → E0955 naming the TYPE repair. Discrimination proven: with the leniency disabled, `as viewers: 5` compiles green (sibling dead); enabled, E0955. Gates: `as viewers: 5`→E0955, `as $viewers: Viewer[]` and `as $viewers` compile. Neg+pos in tests/optional_capture_guards_misc_test.rs (presence_post_inline_type_near_miss_is_refused_not_dropped, presence_with_a_valid_type_still_compiles, presence_with_type_omitted_still_compiles). Regressions: metasystem 246 ✓, fetch ✓, websocket ✓, both optional_capture suites ✓, form_compiler/match_sink/form_scoring/events/extractors/bootstrap ✓. Remaining: class 2 (kind-strictness for scalar captures) still open.

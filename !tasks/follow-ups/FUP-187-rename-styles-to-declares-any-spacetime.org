@@ -1,0 +1,86 @@
+#+TITLE: Rename %styles to %declares — any Spacetime, not just properties
+#+STATE: ITEM
+#+SESSION_ID: 153f5ed0617636c7
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-26T21-12-46-213Z_153f5ed0617636c7.jsonl]]
+#+CUSTOM_ID: FUP-187-rename-styles-to-declares-any-spacetime
+
+* Initial Message
+
+ok so is there any point in keeping the worktree now? verify
+
+* The rename
+
+`%styles` is a `properties`-typed PARAMETER, interpolated as `%styles` inside a
+primitive's `%emit css`. The name says "CSS properties go here", which
+under-describes what the slot should hold: any Spacetime that produces
+declarations — a form splice (`--card-surface;`), a nested directive, a
+conditional.
+
+Rename to **`%declares`**. It names the ACT (this slot declares things) rather
+than the CONTENT TYPE (these are styles), which is what lets the slot widen
+without the name becoming a lie. `%sets` was the alternative; `%declares` reads
+better against neighbouring clause names (`%binds`, `%registers`, `%exports`),
+all of which are verbs in the same third-person form.
+
+* Blast radius (measured, small)
+
+- 5 interpolation sites: `stdlib/primitives/{font-face,property-registration,media}.st`
+  (media twice), `stdlib/enum/state.st`.
+- 3 parameter declarations: `styles: properties` (media.st:13), `styles: any`
+  (font-face.st:21, property-registration.st:21).
+- 18 Rust references to the string `"styles"`, centred on
+  `src/emit/metasystem_codegen.rs:875-892` — a guard that skips the emit block
+  when the slot is absent or empty.
+
+The parameter NAME and the interpolation TOKEN are the same string, so both move
+together.
+
+* Loop safety — ALREADY DONE, and it is good
+
+The requirement "fail hard if there are form loops within" is already met, for
+style forms, by `E0966`. Verified:
+
+| case                          | result                                             |
+|-------------------------------+----------------------------------------------------|
+| `--a` splices `--b` splices `--a` | `E0966: form splice cycle: --b -> --a -> --b`  |
+| `--a` splices itself           | `E0966: form splice cycle: --a -> --a`            |
+| three-deep `--a -> --b -> --c -> --a` | `E0966: form splice cycle: --b -> --c -> --a -> --b` |
+| DIAMOND: `--a` and `--b` both splice `--base` | PASSES, emits `color: red` twice   |
+
+The diamond case is the one that matters for correctness of the CHECK itself: a
+shared base is legal and common, and an over-eager cycle detector would refuse
+it. This one does not — it distinguishes a cycle from a re-visit.
+
+The diagnostic prints the full path, which is the difference between a usable
+cycle error and a frustrating one.
+
+* Work
+
+1. Rename the parameter + interpolation token in the 5 stdlib sites and 3
+   declarations.
+2. Rename the 18 Rust references; the guard at metasystem_codegen.rs:875 keeps
+   its behaviour (skip the emit block when the slot is empty).
+3. A gate pinning that `%declares` accepts a FORM SPLICE, not only literal
+   properties — this is the point of the rename and must be proven, not assumed.
+   NB: whether a splice inside `%emit css` expands today is UNVERIFIED; an
+   earlier probe suggested it does not, but that probe was unsound (its control,
+   a shipped primitive using `%emit css`, also emitted nothing). Measure from a
+   real project directory before assuming either way.
+4. A gate pinning that a cycle reached THROUGH `%declares` still produces E0966
+   with its path — the existing detection must not be bypassed by the new slot.
+
+* Acceptance
+
+- Zero `%styles` remaining in stdlib or src.
+- `E0966` still fires for all three cycle shapes above, and the diamond still
+  passes.
+- A form splice inside a `%declares` slot expands (or, if it cannot, the reason
+  is filed rather than worked around).
+- Corpus flat: examples 35, demos 36, fixtures 6.
+
+* Context
+
+Raised in PLAN-147's `%states` redesign: the sketch used a `%styles` clause name
+that I had invented, and checking whether it collided revealed the real
+`%styles` parameter. The rename is a precondition for any new clause wanting
+that name.

@@ -1,0 +1,63 @@
+#+TITLE: @mount-block @template defs not collected by validate_template_refs (false E0402)
+#+STATE: DONE
+#+SESSION_ID: 1503ca05d05c0c62
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-10T14-32-18-497Z_1503ca05d05c0c62.jsonl]]
+#+CUSTOM_ID: BUG-105-mount-block-template-defs-not-collected
+#+COMPLETION_HASH: 9f0b495e16621978
+
+* Initial Message
+
+ok do the full W3-clean. Don't stop until you're fully done. Thanks.
+
+* Symptom
+A `.test.st` that defines a `@template` INSIDE a `@mount { … }` block and then
+invokes it (`&name(…)`) fails to compile with E0402 "template does not exist",
+even though the template is defined. This blocks the Spacetime-native `.test.st`
+harness from exercising template factories — the exact feature PLAN-039 ships —
+so Rust v8_runtime tests are currently the only reliable gate for per-instance
+template behavior.
+
+* Root cause (agent://22-ReviewTestCoverage)
+`validate_template_refs` (src/pipeline/mod.rs:627) collects `register-template`
+names from the OUTER flat `primitives` list and checks `invoke-template`/`&name`
+refs against it. But `@mount` (stdlib/testing/test.st:1066) captures its body as a
+`$content:block` and emits the sub-compiled `%$content.js` inline — the inner
+`@template`'s `register-template` primitive is produced inside the BLOCK
+sub-program, so it never appears in the outer primitive list the validator scans,
+while a file-scope (or other-mount) invocation does ⇒ false E0402. It is a
+per-sub-program collection asymmetry, NOT a harness-only artifact.
+
+* Fix options
+1. Hoist `register-template` names produced inside `@mount`/`%$x.js` block
+   sub-programs into the outer validation set before E0402 checking.
+2. OR scope E0402 validation per sub-program (a block validates its own template
+   universe).
+Option 1 is the smaller change; option 2 is more correct if blocks should be able
+to reference outer templates.
+
+* Related (P3, same harness gap)
+Nested `@each` in a @template body emits a raw `$r` row reference into a JS
+position under the headless `@mount` sub-compile path (a SyntaxError), whereas the
+browser page builder leaves `$r.field` inside the HTML row string handled by
+each-inline/ssg_unroll at render time. Triage whether the @mount block sub-compile
+routes nested @each through a different emit than the page builder
+(stdlib/primitives/data/each-inline.st:155). If confirmed harness-only after
+triage, downgrade; until then prefer Rust v8_runtime tests for these constructs.
+
+* Acceptance
+- A `.test.st` with `@mount { @template &c(){…} <main>…</main> .x{&c();} } @then{…}`
+  compiles with 0 diagnostics and the assertions run headless.
+- Add such a test to the editable/template surface suite once green.
+
+* Impact
+Unblocks native `.test.st` testing of the entire template/instance surface
+(per-instance @on, class-toggle, nested @each, @editable bind) — today only
+deterministic-but-lower-level Rust v8 tests cover it.
+
+NOTE [2026-06-14]: DONE (d4aaf993 + d3d0dec7). Two parts:
+1. E0402 false-positive: validate_template_refs now scans raw String/Expr captures for `@template &name` DEFINITIONS (collect_template_defs byte-walk) and admits them to `defined`, so a @template defined inside @mount (which compiles in a separate sub-program via test.st %$content.js) no longer false-errors on a same-block &name() invoke. Precise: genuinely-undefined &ghost() still raises E0402. +2 unit tests.
+2. P3 hole-codegen: a @template fixture body with a `$label` hole broke the @mount fixture's backtick template literal (SyntaxError 'Unexpected identifier $label'). Added a `.fixture_html` field accessor (src/emit/js.rs::apply_param_field_accessor) = .html escaped for backtick embedding (escape backtick + ${, NOT backslashes — raw value is already JS-escaped). @mount/@fixture use %$content.fixture_html; .html stays raw for HTML contexts (docs.st markdown code spans). 
+
+UNBLOCKED: native .test.st template-factory testing. PROOF: tests/fixtures/native-template/template-factory.test.st (@template &card($label) defined+invoked in @mount, with hole) compiles+runs+asserts headless = 1 passed. Previously fully blocked (Rust v8 only). 
+
+Gates: lib 2254, integration 172, v8 425(+9 BUG-087), headless 355/251 baseline (no regression; the 251 are the SEPARATE nested-each `el already declared` codegen issue — distinct from this bug). closesRef ready.

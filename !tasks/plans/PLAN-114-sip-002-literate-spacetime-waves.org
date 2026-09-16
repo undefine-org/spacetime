@@ -1,0 +1,213 @@
+#+TITLE: PLAN-114 — SIP-002 Literate Spacetime (.st.md): wave tracking
+#+DATE: 2026-07-24
+
+* PLAN-114 SIP-002 Literate Spacetime — waves
+:PROPERTIES:
+:CUSTOM_ID: PLAN-114
+:STATE: DONE
+:END:
+
+Spec: =docs/specs/SIP-002-literate-spacetime-markdown-host.org= (LANDED v1).
+
+** W1 — tangler + ingress wiring [DONE 2026-07-24, commit 919f1d38]
+
+- =src/literate.rs= (new): =tangle()=, =LineMap=, =is_literate()=,
+  =is_spacetime_source()=, =read_source()= — 17 unit tests.
+- Ingress: =Compiler::from_file= (THE central read \u2192 serve/check/build/export
+  all gained =.st.md= at once), server diagnostics re-read, clean-path
+  candidates (=<p>.st.md=, =<p>/index.st.md=), =derive_st_path= root fallback,
+  =check= discovery (dir walk + single file), dev watcher.
+- 7 e2e tests (=tests/integration/literate_tangle.rs=), fixture
+  =tests/fixtures/literate/counter.st.md= (browser-verified).
+- Design change vs spec: the =stdlib/md= import is SYNTHESIZED when a document
+  has prose (spec had authors write a hidden import fence — boilerplate AND a
+  silent-failure footgun). Literate documents are zero-boilerplate.
+- Two pre-existing defects found + fixed: BUG-221 (=@doc(content:)= escapes
+  never decoded), BUG-222 (E0909 false-positive on prose quoting =<-=).
+
+** W2 — migrate demos/starter-pack to index.st.md [DONE 2026-07-24]
+
+The elegance-bar gate-3 debt named in the spec: the feature must delete its own
+motivating boilerplate.
+
+- Collapse =demos/starter-pack/{index.st, docs/01..04.md}= into ONE
+  =index.st.md=: prose becomes prose, each chapter's playground becomes an
+  =st= fence at its document position, the hand-wired
+  =[data-doc="chN"] { @doc(src: …) }= sections disappear.
+- Keep: the dark studio styling (a =st hidden= fence), the counter / @each+fold
+  badge / @view experience switcher (they demonstrate composition and must
+  keep working).
+- Acceptance: =cargo run -- check demos/starter-pack/= passes; served page
+  keeps chapter order, counter clicks 0\u21921, cards\u2194list swap works, README
+  screenshot refreshed.
+- NB the =st src= flag is what preserves the "doc beside the code that runs"
+  teaching shape.
+
+*** Outcome
+
+- =demos/starter-pack/{index.st, docs/01..04.md}= (565 lines across 5 files)
+  → ONE =index.st.md= (445 lines). The hand-wired =[data-doc="chN"]= divs +
+  =@doc(src: …)= scopes are GONE — the gate-3 debt in SIP-002 is paid.
+- The migration removed real DUPLICATION, not just wiring: chapters 2 and 3
+  previously QUOTED code in prose while a separate fence implemented the same
+  thing (two copies that could drift). Now one =st src= fence is shown AND run.
+- Verified live (port 3556): 11 prose sections, 12 source blocks, all four
+  chapters render; counter 0→2→1; =@view= swaps cards↔list and back; =@each=
+  maps 3 task rows from =$tasks= DECLARED IN CHAPTER 2 (cross-fence file
+  scope); =@on visible= reveal fires 0→1 on scroll; =```spacetime= fences are
+  shown but produce ZERO elements; no escape leakage.
+
+*** BUG-223 found + fixed during this wave
+
+The shown-source block ate its own holes: =escape_html= in the tangler escaped
+=< > & "= but NOT the BACKTICK. A backtick opens a HOLE in Spacetime markup, so
+a =st src= block teaching =`$title`= was lexed as an interpolation and rendered
+EMPTY — silently deleting the exact syntax the block existed to teach.
+
+Caught by a SCREENSHOT (=data-id=""= and empty =<span></span>= where holes
+should be); the compile check and every DOM assertion passed. Fixed by escaping
+the backtick as =&#96;= (displays as a backtick, invisible to the hole lexer).
+Regression test: =literate::tests::shown_source_escapes_backticks_so_holes_are_not_eaten=,
+which asserts BOTH halves — the shown copy is escaped, the spliced copy keeps
+its real holes.
+
+Second time this session a defect was visible only in a rendered screenshot
+(cf. BUG-221). The lesson is now load-bearing: for anything user-visible, a
+visual check belongs in the verification loop.
+
+** W3 — optional migrations [DONE 2026-07-24]
+
+Judged case by case rather than migrated wholesale. The deciding question:
+*does the page OWN its prose?* Literate mode hosts page-owned prose;
+=@doc(src:)= references documents that belong elsewhere. Both surfaces are
+correct — for different jobs.
+
+*** MIGRATED — =projects/backdesk-new/brand.st= → =brand.st.md=
+
+The textbook case: prose explaining a design system, interleaved with live
+specimens OF that system. Now every specimen is an =st src= fence — shown and
+run — so the palette chips are filled from the live =theme.st= tokens, and the
+stamp/buttons/receipt are rendered by the CSS the site ships. Verified live:
+5 chips (vermilion chip computes =rgb(255,59,36)= from =--bn-verm=), 2 stamps,
+3 receipt rows, 5 source blocks, 7 prose sections.
+
+*** MIGRATED — =projects/backdesk-new/process.st= → =process.st.md=
+
+Page-owned framing prose became markdown; the FOUR CHAPTERS deliberately stay
+as =@doc(src: "process/0N-*.md")= calls INSIDE fences, because those files are
+cited artifacts in their own right (the PROJ-007 record links them) and are
+read standalone. The page now demonstrates both surfaces cooperating, and says
+so in its own text. Verified live: 4 chapters render (3476/2678/3191/4705
+chars), 8 source links intact.
+
+*** NOT MIGRATED — =demos/spacetime-docs/= (deliberate)
+
+It renders =docs/testing/*.md= — canonical files owned by the TESTING docs,
+referenced from AGENTS.md and read standalone. Migrating would mean either
+(a) inlining copies into the reader — guaranteeing the exact drift =@doc(src:)=
+exists to prevent, or (b) keeping the =@doc(src:)= calls inside fences for zero
+gain. A migration that makes the codebase worse is not a migration; the wave is
+"optional" precisely so this call could be made honestly.
+
+*** Snarkdown limitation found
+
+A =---= horizontal rule that lands in its OWN prose segment (isolated between
+two fences) reaches snarkdown as a lone line and renders as literal =---=
+rather than a rule. Removed the orphan rules from all three literate documents;
+section borders come from CSS anyway. Not filed as a bug: it is a vendored
+renderer's block-context requirement, not a Spacetime defect. Authoring note
+for =.st.md=: put a rule INSIDE a prose block, never alone between fences.
+
+** W4 — diagnostic line-mapping [DONE 2026-07-24]
+
+W1 threaded a =LineMap= through =read_source= but never USED it: a syntax error
+inside a fence reported the TANGLED line number, and the rendered snippet showed
+synthesized =[data-lit-seg]= wiring the author never wrote — actively
+misleading, not merely imprecise.
+
+*** What shipped
+
+- =LineMap::translate_offset(out_offset, tangled, original)= — byte-offset
+  translation. Fence bodies splice VERBATIM, so for the case that matters (an
+  error in =st= code) BOTH line and column survive exactly. Synthesized lines
+  clamp to the start of their originating line: the right line with an
+  approximate column beats a confident wrong column.
+- =remap_parse_errors(errors, map, tangled, original)= — rewrites every
+  =ParseError= offset into =.st.md= coordinates; a no-op without a map, so
+  plain =.st= files are provably untouched.
+- Wired at BOTH parse-error sites: =Compiler::from_file= (=src/compiler.rs=)
+  and =check_file= (=src/main.rs=). Each renders miette against the ORIGINAL
+  document, so the reader gets their own file back, fence markers and all.
+
+*** Verified
+
+Before: =index.st.md:7:21= (tangled line), snippet showed tangled text.
+After:  =index.st.md:9:21= (authored line), snippet shows the author's fence.
+
+Tests: 4 unit (=translate_offset= round-trips to the same TOKEN; identity
+without a map; =remap_parse_errors= no-op for plain =.st=; span length
+survives) + 2 e2e (=parse_error_in_a_fence_reports_the_authored_st_md_line=
+asserts both the line AND that no =data-lit-seg= wiring leaks to the reader;
+=parse_error_in_a_plain_st_file_is_unaffected_by_the_remap=).
+
+*** Test-authoring note (my own bug, caught by the RED phase)
+
+My first two W4 tests failed — not because the code was wrong, but because
+their fixtures used a BARE =```= fence, which is INERT prose by design. The
+implementation was right; the test was testing prose. Tagging the fences =st=
+turned them green. Worth recording: in a literate document the info string is
+load-bearing, and a test fixture that omits it silently tests the wrong path.
+
+*** Not in scope (still open)
+
+Editor-side LSP support (hover/completion INSIDE fences) is a separate concern
+from diagnostic line-mapping and remains unimplemented. Filed as FUP-140.
+
+** Investigation note — a FALSE lead, recorded so it is not re-chased
+
+While spiking W2 (templates/@view inside fences) I believed I had found a
+compiler bug: "a =<pre><code>= containing ESCAPED =@template= text makes the
+compiler emit those template bodies as page markup." It reproduced in plain
+=.st= too, so it looked pre-existing and real.
+
+It was NOT a bug. The evidence was a =curl | grep 'class="card"'= over served
+HTML — which matches the escaped source TEXT inside the =<pre>=, because
+=&quot;= renders as a quote character in text content. A DOM check
+(=document.querySelectorAll('.card')=) settled it: 2 nodes, both inside
+=.grid=, zero stray.
+
+Lesson: grepping served HTML for =class="x"= cannot distinguish MARKUP from
+displayed SOURCE TEXT. For any claim about what a page contains, query the DOM.
+
+* Closed 2026-07-24 — all four waves landed
+
+| wave | outcome |
+|------+---------|
+| W1 | tangler + ingress (=Compiler::from_file= as THE read point) |
+| W2 | starter-pack: 5 files/565 lines → 1 file/445 lines; gate-3 debt paid |
+| W3 | backdesk /brand + /process migrated; spacetime-docs deliberately not |
+| W4 | diagnostics report the authored =.st.md= line, not the tangled one |
+
+Final coverage: 22 literate unit tests, 9 literate e2e, 2 compiler regressions.
+Suites at close: lib literate 22 ok, integration 200 ok, v8 438 ok.
+
+** Defects found and fixed along the way
+
+| id | what | how it was caught |
+|----+------+-------------------|
+| BUG-221 | =@doc(content:)= never decoded escapes (its own docstring example was broken) | screenshot — literal =\n= in rendered prose |
+| BUG-222 | E0909 false-positive on prose QUOTING =<-= | first literate fixture refused to compile |
+| BUG-223 | shown-source fences ate their own holes (backtick unescaped) | screenshot — =data-id=""= where a hole belonged |
+
+All three were reachable WITHOUT literate mode (any hand-written =@doc=). The
+feature's real value was flushing them out: the machinery it consolidates was
+quietly broken in three places.
+
+** Standing lesson
+
+TWO of the three defects were invisible to =cargo check= AND to DOM assertions,
+and visible only in a rendered screenshot. A third false lead (see the
+investigation note above) came from grepping served HTML instead of querying
+the DOM. For anything user-visible: compile → assert the DOM → LOOK AT IT.
+Skipping the last step shipped nothing broken this time only because the
+screenshots were taken.

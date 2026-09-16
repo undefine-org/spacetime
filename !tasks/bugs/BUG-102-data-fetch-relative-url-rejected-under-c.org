@@ -1,0 +1,57 @@
+#+TITLE: @data fetch relative URL rejected under `check` (File-source resolution)
+#+STATE: ITEM
+#+SESSION_ID: 1507711255a45786
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-13T10-37-35-958Z_1507711255a45786.jsonl]]
+#+CUSTOM_ID: BUG-102-data-fetch-relative-url-rejected-under-c
+
+* Initial Message
+
+look at the Spell MCP features. I would like the interfaces to be defined as functions that are loaded into the live environment, so that it is a fully live environment from scratch, instead of just a 'prompt thing'.
+
+1. look at anything that's pending in that thread of work
+2. find your own insights w.r.t what I just said
+3. come back to me with your realisations
+
+* Parent
+[[id:PLAN-038-signal-reactive-output-the-sibling-of-da]] — minor blocker for
+shipping picker.st / library .st functions cleanly under `check`.
+
+* Symptom (observed, W2.5 of PLAN-037)
+`@data fetch $proposal : "data.json";` in stdlib/__mcp__/picker.st compiles fine
+under `build` but FAILS under `cargo run -- check`: a relative fetch URL does not
+resolve to a static File source, so the dispatch layer errors:
+
+    server.rs:4478  "@data fetch URL must resolve to a File source; got {:?}"
+
+The picker only works today because it is served via `build`, not `check`. Any
+.st FUNCTION the MCP loads that fetches a runtime contract (data.json) hits this.
+
+* Root cause (verified)
+src/server.rs:4478 — the `@data fetch` validation insists the URL resolve to an
+on-disk File at check-time. A RELATIVE URL ("data.json", "/api/x") is a legitimate
+RUNTIME endpoint, not a build-time file. check-mode conflates "static asset" with
+"runtime data source". `build` skips this resolution, which is why it passes there.
+
+* Expected
+A relative/absolute URL string is a valid runtime data source under BOTH `check`
+and `build`. check should validate the SHAPE (it is a url-typed value), not require
+the endpoint to exist on disk. Only an explicit file: or workspace-relative ASSET
+import should require on-disk resolution.
+
+* Fix sketch (confirm before editing)
+In the `@data fetch` resolution (server.rs ~4478 + dispatch in main.rs:96 region):
+distinguish "asset reference" (must resolve to File) from "runtime endpoint"
+(url string → pass shape-check, no disk hit). A leading scheme/`/`/`./` + .json|
+api-ish path → runtime endpoint. Mirror how `build` already tolerates it.
+
+* Verification
+- Repro: `cargo run -- check` on a 3-line page with `@data fetch $x : "data.json";`
+  → currently errors at 4478.
+- After fix: same page passes `check`; `build` unchanged; picker.st passes both.
+- Regression: a genuine bad asset import (`@data fetch $x : "./missing.st"`) still
+  errors (don't loosen asset resolution).
+- Add an integration_tests case: relative fetch URL passes check.
+
+* Notes
+Small + surgical. File it now so W2's library-function .st files are `check`-clean.
+Not a blocker for W1 (the language core). Sequence before W2.

@@ -1,0 +1,87 @@
+#+TITLE: @cms macro body-scope + rich placement errors
+#+STATE: ITEM
+#+SESSION_ID: 14f8685429e4ccf1
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-01T18-22-11-112Z_14f8685429e4ccf1.jsonl]]
+#+CUSTOM_ID: FUP-026-cms-macro-body-scope-rich-placement-erro
+
+* Initial Message
+
+ok let's think deeply deeply. What would a headless CMS for Spacetime look like? like a headless CMS that has all the nice features of a headless CMS and the power of Spacetime combined. Look at the stdlib and the __dev__ to understand some of the pre-existing experiments, and do a research on the state of headless CMSes, before coming back with your THOUGHTS AND REFLECTIONS (no decisions yet)
+
+* Origin
+docs/specs/spacetime-cms.md §4.4 (Spacetime CMS V1, the @cms display-hint macro).
+Part of the CMS arc: see PLAN "SPACETIME_CMS_V1_LOCAL_ADMIN".
+
+* Why this exists
+CMS V1 introduces a =@cms= hint macro that marks DISPLAY ROLES (title / subtitle /
+thumbnail / chips) for a =@type=, so the auto-generated admin knows which field is
+a list row's title, which is its thumbnail, etc. Per the user's requirement, =@cms=
+MUST be valid ONLY inside the body of a =@type= macro — never at file scope or
+selector scope. Used anywhere else it MUST emit a rich, specific diagnostic.
+
+Target diagnostic quality (miette-style, like the rest of Spacetime):
+#+BEGIN_EXAMPLE
+error: `@cms` is only valid inside a `@type` body
+  ┌─ index.st:12:1
+12│ @cms { title: name; }
+  │ ^^^^ `@cms` placed at file scope
+  = help: move this `@cms { … }` block inside a `@type { … }` definition
+#+END_EXAMPLE
+
+* The gap (verify before building)
+The current macro scope system expresses WHERE a macro may appear only in coarse
+scopes — see =stdlib/macros/type-data.st= (=%scope file | selector=). It has NO
+notion of "valid only inside another macro's body." Enforcing =@cms='s containment
+needs the metasystem to express and check a CONTAINMENT constraint: macro B is legal
+only when lexically nested inside the body of macro A.
+
+Relevant code:
+- =src/metasystem/registry.rs= — macro/primitive definitions + scope.
+- =src/metasystem/validate.rs= — where scope violations are (or should be) caught.
+- =src/metasystem/diagnostics.rs= + =src/diagnostics/= — rich error surface.
+
+* Constraints (from AGENTS.md — non-negotiable)
+- DO NOT write a Rust-based parser/fallback that special-cases =@cms= placement.
+  The metasystem is self-describing; fix this at the macro-scope LAYER so ANY
+  body-scoped macro benefits, not just =@cms=.
+- The rich error MUST flow through the existing diagnostics architecture, matching
+  the quality of other Spacetime errors (spans + help).
+
+* Scope
+1. Design a scope token expressing body-containment. Candidate syntaxes (coordinate
+   with the macro-namespaces FUP): =%scope body(type)=, =%scope within @type=, or a
+   containment field on the macro def. Exact syntax TBD.
+2. Enforce it in the metasystem validator: detect =@cms= outside any =@type= body and
+   emit the rich diagnostic with the correct source span.
+3. Tests:
+   - positive: =@cms= inside =@type= resolves and registers display hints.
+   - negative: =@cms= at file scope / selector scope → the specific error above.
+   - nested-edge: =@cms= inside a NON-=@type= macro body → error naming the wrong container.
+
+* Insights
+- This is a GENERAL capability (body-scoped macros), not a one-off. Once it exists,
+  future nested hint macros (per-field hints, =@type.index=, =@type.view=) reuse it.
+- Body-scope (legality of placement) is ORTHOGONAL to namespacing (identity/naming).
+  This FUP owns legality; the namespaces FUP owns the symbol. Likely: namespace =
+  identity, body-scope = where-legal; one need not imply the other.
+
+* Open questions
+- Should the containment constraint be single-parent (=@cms= only in =@type=) or a
+  set (=@cms= in =@type= OR =@theme=)? V1 needs only =@type=; design for the set.
+- Does the FormMatch layer already know its enclosing macro at validation time, or
+  does the validator need parent-context threading? (Check resolve/evaluate passes.)
+
+* Acceptance
+- A body-scoped macro can be declared in stdlib with NO Rust special-casing.
+- =@cms= outside =@type= produces the specific diagnostic above (not a generic
+  "unknown directive" or a silent pass).
+- V1 MAY ship =@cms= with a best-effort guard; this FUP delivers the rigorous,
+  general mechanism.
+
+* Related
+- docs/specs/spacetime-cms.md §4.4
+- the macro-namespaces FUP (namespace symbol may rename/relocate =@cms=)
+- stdlib/macros/type-data.st (=@type= host macro)
+- src/metasystem/{registry.rs,validate.rs,diagnostics.rs}
+
+NOTE [2026-06-03]: REFRAMED 2026-06-03 (user decision): the implemented file-scope @cms(TypeName) form is now CANONICAL and PREFERRED over a nested @type { @cms {} }. This FUP is DOWNGRADED from "required to ship @cms" to OPTIONAL FUTURE ERGONOMICS. @cms already ships (commit 5ed4e097) as a real metasystem macro at %scope file with no placement special-casing; the rich-placement-error mechanism is no longer on any V1 critical path. Keep open only as a general language capability (body-scoped macros) that could later add a nested @cms alias.

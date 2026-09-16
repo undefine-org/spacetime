@@ -1,0 +1,27 @@
+#+TITLE: @measure $lines live binding renders em-dash, never populates (text module)
+#+STATE: DONE
+#+SESSION_ID: 14f94e45c6c3f247
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-02T11-06-49-499Z_14f94e45c6c3f247.jsonl]]
+#+CUSTOM_ID: BUG-069-measure-lines-live-binding-renders-em-da
+#+COMPLETION_HASH: 58811c28c57fa0e5
+#+LAYER: runtime
+
+* Initial Message
+
+can you write docs for them and feature the link to that prominently in AGENTS.md?
+
+first do a markdown version (in .md files) for the content. keep it short and concise, but complete, and focused on the testing infra for now.
+
+then tell me how you'd make a Spacetime-based documentation generator that also acts as a showcase for the features of Spacetime. I want something that really slaps. You can use the latest %capture_type, %primitive, %form, and %macro and whatnot to really really slap (give me your ideas). you can test drive that
+
+`@measure(lineHeight: N)` is documented to export a reactive `$lines` signal (stdlib/text/macros/measure.st `%binds measure-text(&self,...) -> { $lines, $height, $widest }`), readable by a sibling binding `text: $lines`.
+
+REPRO (canonical demo, not my code): `demos/text-engine/index.st` binds `.line-count { text: $lines; }` against `.lede { @measure(lineHeight: 1.6) }`. Serve it, load in a real browser → `.line-count` shows the placeholder `—` and never updates to the measured line count.
+
+Confirmed on a second independent page (demos/spacetime-docs measure panel) — identical empty result. Inspect --layer emit shows NO `measure-text(...)` call nor `$lines` wiring emitted for the `@measure(...)` shorthand form, so the `%binds` form is not lowering into a runtime binding on the page (it does drive `@balance`/`@reveal`, which DO work — so the text module loads; only the metric-export binding is dead).
+
+Likely cause: the `%binds` block of `@measure` is not emitted when the directive is used in its bare `@measure(...)` form at file scope (vs. the explicit `-> { $lines }` capture form). Either the shorthand drops the binds, or the exported signal is scoped so a sibling selector can't read it.
+
+IMPACT: any "live text metrics" readout is dead. Cosmetic on showcase pages; but it's a documented capability that silently no-ops. NOT introduced by FEAT-081 (reproduced on the pre-existing text-engine demo).
+
+NOTE [2026-06-09]: Fixed (commit b85d35d3). Root cause: element-scope %yield (ST.set el) vs body-scope binding read (SpacetimeLocal + local:name:updated) — disjoint planes. Fix: ST._bridgeExport/_bridgedExports + ST._ensureLocalProxy canonical factory; binding emits ST._bridgeExport(dep). Proven live in CDP (7 → 16 on re-measure) + unit regression. The 12 v8 failures are pre-existing (proven via HEAD st.js swap).

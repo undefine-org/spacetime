@@ -1,0 +1,444 @@
+#+TITLE: Typed forms across the seam: Ecto changeset ⇄ .st validation vertical (initial syntax + spikes)
+#+STATE: ITEM
+#+SESSION_ID: 153c9c68ea93c166
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-24T17-46-26-602Z_153c9c68ea93c166.jsonl]]
+#+CUSTOM_ID: FUP-142-typed-forms-across-the-seam-ecto-changes
+
+* Initial Message
+
+look at the spacetime_lv and do a review and show me the features that would be most exciting for you to do there
+
+* Initial Message
+Review of elixir/spacetime_lv (2026-07-24). User: "#5 is very interesting. show
+me how the syntax could look like (we will probably have an initial syntax
+settled and put in an FUP that is meant to have even more spikes)."
+
+* Why (the gap)
+Forms are where LiveView is strongest and the bridge is currently SILENT. The
+bridge does realtime toys (counter, kanban) but has no story for the most common
+LiveView surface: a changeset-backed form with server validation, inline errors,
+and optimistic client-side feedback. Winning here makes the bridge viable for
+real CRUD apps, not just multiplayer demos.
+
+* Design thesis (fits the existing bridge, adds ONE assign type + ONE macro)
+A form is not a new subsystem — it is:
+  1. a new server ASSIGN TYPE: assign(:form, :changeset) — the reconciler already
+     diffs assigns; a changeset serialises to a typed envelope
+     {values, errors, valid?} that flows as DATA (never a rendered <form>).
+  2. a new client SUBSCRIBE shape that decodes that envelope into a form signal:
+     @data form $signup from $auth : form ; (sibling of @data subscribe).
+  3. field binding + submit reuse EXISTING grammar: field inputs bind with the
+     established value<- / @on input pattern; submit is just a @data signal with
+     a tagged reply; validation feedback is @handle — NO second mutation or
+     decode vocabulary (bridge principle 4 "one decode vocabulary").
+
+The changeset envelope is the shared schema; E0928 checks the page's declared
+fields subset of the changeset's cast fields (a typo'd field name = compile
+error, same family as send emit "typo").
+
+* Initial syntax (settled enough to spike against — NOT final)
+
+** Server half (Elixir) — declare a changeset-typed assign
+: assigns do
+:   assign(:form, :changeset)          # NEW assign type; reconciler serialises
+: end                                  # to {values, errors, valid?} envelope
+: events do
+:   event(:validate, form: :map)       # per-keystroke recast (optional)
+:   event(:submit,   form: :map)
+: end
+: def mount(_p, _s, socket),
+:   do: {:ok, assign(socket, form: to_form(Accounts.change_user(%User{})))}
+: # validation round-trip: recast, reply with the fresh envelope tag
+: def handle_event("validate", %{"form" => params}, socket) do
+:   cs = Accounts.change_user(%User{}, params) |> Map.put(:action, :validate)
+:   {:reply, %{tag: "invalid", reply: form_envelope(cs)}, assign(socket, form: to_form(cs))}
+: end
+: def handle_event("submit", %{"form" => params}, socket) do
+:   case Accounts.create_user(params) do
+:     {:ok, user}  -> {:reply, %{tag: "ok",      reply: %{id: user.id}}, socket}
+:     {:error, cs} -> {:reply, %{tag: "invalid", reply: form_envelope(cs)},
+:                       assign(socket, form: to_form(cs))}
+:   end
+: end
+
+The form_envelope/1 helper (lives in Spacetime.LiveView, not per-page) turns a
+changeset into %{values: %{...}, errors: %{field => [msgs]}, valid?: bool} — the
+ONLY thing that crosses the wire. No HEEx <.form>, no <.input>.
+
+** Client half (.st) — @data form + field bindings + @handle
+: @import "stdlib/macros/data-kind"
+: @import "stdlib/macros/handle"
+: @import "stdlib/macros/form"        // NEW: @data form + field helpers
+: @import "./$hosts.st"
+: @type SignupForm { email: string; password: string; }
+: // NEW: subscribe a changeset-typed assign as a FORM signal. Binds:
+: //   $signup.values.<field>, $signup.errors.<field>, $signup.valid
+: // E0928 checks the fields read here subset of the changeset's cast fields.
+: @data form $signup SignupForm from $auth : form ;
+: // submit + live validate are ordinary signals (existing grammar)
+: @data signal $validate($form map) to $auth {
+:   send emit "validate" { form: $form }
+:   receive to Validated { "invalid" => Invalid($.reply); _ => Ok($.reply); }
+:   policy latest
+: }
+: @data signal $submit($form map) to $auth {
+:   send emit "submit" { form: $form }
+:   receive to Submitted { "ok" => Saved($.reply); "invalid" => Rejected($.reply); }
+:   policy latest
+: }
+: .signup {
+:   @handle $validate { receive {
+:     Invalid(env) => { $signup <- env; }      // server-authoritative errors
+:     Ok(env)      => { $signup <- env; }
+:   }}
+:   @handle $submit { receive {
+:     Saved(_)     => { $signup.submitted <- true; }
+:     Rejected(env)=> { $signup <- env; }       // inline errors from the changeset
+:   }}
+: }
+: // Field binding reuses the ESTABLISHED value<- / @on input pattern.
+: .signup .field-email input {
+:   value <- $signup.values.email;
+:   @on input { $validate({ email: $.value, password: $signup.values.password }); }
+: }
+: .signup .field-email .error { text: $signup.errors.email; }
+: .signup button.submit { @on click { $submit($signup.values); } }
+
+* What's actually NEW vs reused (elegance-bar audit)
+- NEW server: assign(:form, :changeset) handling in the reconciler +
+  form_envelope/1 helper. One assign type, DATA-driven serialisation.
+- NEW client: @data form macro (a specialised @data subscribe that names an
+  envelope shape and exposes .values/.errors/.valid), optional field() binding-
+  sugar macro. Both are stdlib entries, not Rust.
+- REUSED: reconciler diff path, signal round-trip, @handle continuity, receive
+  matcher, E0928 contract check. No new subsystem.
+- DELETES potential: obviates ever reaching for HEEx <.form>/<.input> inside a
+  bridged page.
+
+Passes the AGENTS elegance bar ONLY IF the changeset-envelope + @data form can
+be expressed as registry/stdlib data + the reconciler's existing diff path. If
+assign(:form, :changeset) needs a Rust match-arm per changeset shape → it FAILS
+the bar and stays an FUP for more spikes (which is the intent here).
+
+* Open questions / spikes to run (this FUP is a SPIKE MAGNET by design)
+1. Envelope shape. {values, errors, valid?} minimal? Do we need `touched`
+   per-field (blur tracking) for "don't show errors until blurred" UX? Nested
+   changesets (inputs_for, has_many) — how does the envelope + @each compose?
+2. Field-name checking. Can E0928 see the changeset's cast fields at compile
+   time? The changeset schema is Elixir; the contract sidecar would need to
+   carry the form's field list + types (extend assign(:form, :changeset) to emit
+   fields: {email: string, …} into the contract JSON).
+3. field() sugar. Should there be a one-liner field(&self, $signup, :email) that
+   expands to value-bind + input-emit + error-text + aria-invalid, so a whole
+   labelled field is one macro call? Spike the expansion; keep it stdlib, watch
+   the "one sigil one meaning" rule.
+4. Optimistic vs authoritative errors. Client-side format checks (email regex)
+   for instant feedback vs server changeset as truth. Does @handle optimistic{}
+   cover local-first validation cleanly, with the server reply reconciling? Or
+   does that double-render errors?
+5. Debounce / policy. Per-keystroke validate needs debounce (existing signal
+   policy/timeout?) so we don't round-trip every character.
+6. Multi-field submit payload. $submit($signup.values) sends the whole map;
+   confirm the params shape matches Phoenix's %{"form" => params} nesting and
+   the event(:submit, form: :map) declaration.
+7. Reset / server-driven form replacement. mount seed + a server
+   assign(form: to_form(fresh_cs)) must reseed the form signal (reconciler path
+   already does this for @data subscribe — confirm it holds for the envelope).
+
+* Acceptance for the FIRST spike (before promoting to a FEAT)
+- A throwaway SignupLive + signup.st in elixir/spacetime_lv/frontend/ that:
+  round-trips validate + submit, renders one inline server error, and clears it
+  on a valid recast — proving the envelope + @data form + @handle path works
+  end-to-end with ZERO page JS and ZERO HEEx form.
+- A written verdict on OQ2 (compile-time field checking): feasible via contract
+  extension, or deferred to runtime with a follow-up.
+- Decide: does @data form earn its place (elegance bar), or does @data subscribe
+  + a plain @type envelope already suffice (no new macro)?
+
+* Parent / relation
+Sibling of FEAT-159 (subscribe channel), FEAT-160 (contract-is-the-app),
+FEAT-161 (client continuity). This is the "CRUD vertical" that the realtime
+pillars set up. Not blocked by FUP-121/132/FEAT-138.
+
+* SPIKE 1 RESULTS (2026-07-24) — syntax proven against the real compiler + a live browser
+Prototype landed in elixir/spacetime_lv/ (frontend/signup.st, frontend/$hosts.st
+$auth host, frontend/SignupLive.contract.json, lib/.../live/signup_live.ex,
+/signup route). Server compiles clean; page compiles + builds; two-field form
+driven end-to-end in a real browser (puppeteer).
+
+** VERDICT: the "no new macro" variant WORKS — but reveals exactly why a form
+** primitive earns its place. Both halves of the answer are load-bearing.
+
+*** What the plain path proves (no `@data form` needed to FUNCTION)
+- The whole form compiles from PLAIN `@data subscribe $form from $auth : form ;`
+  + existing grammar (`value <- …`, `@on input`, `@data signal`, `@handle`).
+  Zero page JS, zero HEEx `<.form>`.
+- Nested reactive reads work: `$form.values.email` / `$form.errors.email` emit
+  `ST.resolve(__node,'form').values.email` inside a `render = () =>` closure →
+  re-render on every `form` signal write. Verified in the emitted spacetime.js
+  (4 reactive reads) AND live (errors render + clear).
+- E0928 auto-covers the new page: a `send emit "validaaate"` typo → hard compile
+  error `E0928: live host $auth (SignupLive) does not handle event validaaate …
+  contract declares: [submit, validate]`. The seam is checked the moment a
+  contract sidecar exists — no per-page wiring.
+- `assign(:form, :changeset)` flows through the server DSL and `mix
+  spacetime.contract` emits `{"name":"form","type":"changeset"}` into the
+  sidecar. The changeset assign TYPE is already first-class in the contract.
+- Live loop confirmed (server log): 7×`HANDLE EVENT "validate"` + 1×`"submit"`;
+  submit → `$submitted <- true` → `.success` renders "true".
+
+*** Three concrete seams that JUSTIFY a `@data form` primitive (the real payload)
+1. **`@data subscribe` carries no type + seeds `null`.** Grammar (data-kind.st)
+   is `@data subscribe $name:binding from $host:binding : $assign:ident ;` — NO
+   `$type:typeref?` slot, and `%binds local-state-impl(initial: null)`. So the
+   `@type FormEnvelope` I wrote is DECORATIVE (W0203 "defined but never used")
+   and EVERY nested read compiles to a defensive `try { … } catch { return; }`
+   against the null seed. A `@data form $signup FormEnvelope from $auth : form ;`
+   would bind the type AND seed `{values:{},errors:{},valid:false}` so reads are
+   total, not guarded. → primitive closes this.
+2. **Cross-field stale read — the sharp one.** Each field's `@on input` rebuilds
+   the whole params map by reading the SIBLING field from `$form.values.*`:
+   `$validate({ email: $.value, password: $form.values.password })`. But
+   `$form.values.password` is the LAGGING SERVER ECHO. Typing fast in both
+   fields → a validate fires with a stale sibling value → the browser SHOWED a
+   stuck "can't be blank" email error after both fields were valid (reproduced;
+   settled/sequential input clears correctly). This is the canonical forms bug a
+   primitive fixes by keeping a LOCAL client-authoritative `values` signal (the
+   inputs write it directly) and treating server `errors/valid` as the only
+   authoritative-echo fields. `@handle optimistic{}` is the existing tool, but
+   wiring it by hand per field is exactly the boilerplate `@data form` should
+   absorb.
+3. **Field boilerplate.** value-bind + `@on input` reconstruction + error-text +
+   (aria-invalid) is 4 lines PER FIELD, and the input reconstruction is where
+   seam #2 hides. A `field(&self, $signup, :email)` sugar collapses it to one
+   call AND removes the chance to hand-write the stale-sibling bug.
+
+*** Elegance-bar ruling (per AGENTS)
+`@data form` EARNS its place: (1) small extension of existing `@data subscribe`
+grammar (adds a type slot + non-null structured seed + `.values/.errors/.valid`
+accessors); (2) variants are stdlib/registry data, not Rust arms; (3) it DELETES
+the decorative `@type`, the per-read `try/catch`, and the hand-wired cross-field
+reconstruction; (4) testable by the same @clock/browser machinery. The `field()`
+sugar is a SEPARATE, weaker call — spike its expansion before committing.
+
+*** FUP-121 evidence surfaced incidentally
+Adding `/signup` forced a THIRD hand-mirrored branch in
+`Spacetime.LiveView.render_host/1` (converted the `if @__root__ == ".board"` to
+a `cond` with a `.signup` arm). This is literal proof of FUP-121's rot: N pages
+→ N drift-prone Elixir arms. The real forms feature must ride FUP-121's
+compiler-emitted skeleton, not hand-add a fourth arm.
+
+** Spike artifacts (kept as the living fixture; NOT production)
+- elixir/spacetime_lv/frontend/signup.st                 (the plain-path page)
+- elixir/spacetime_lv/frontend/$hosts.st                 (+$auth host)
+- elixir/spacetime_lv/frontend/SignupLive.contract.json  (mix-generated)
+- elixir/spacetime_lv/lib/spacetime_lv_web/live/signup_live.ex (envelope server, no Ecto)
+- elixir/spacetime_lv/lib/spacetime_lv_web/router.ex     (+/signup)
+- elixir/spacetime_lv/lib/spacetime/live_view.ex         (.signup skeleton arm — FUP-121 debt)
+- staged bundle: priv/static/spacetime/signup/spacetime.{js,css}
+
+** NEXT SPIKES (updated from the original OQ list)
+- SPIKE 2: define `@data form` in stdlib (typed slot + structured seed +
+  accessors); re-express signup.st against it; prove reads are total (no
+  try/catch) and the type is referenced (no W0203).
+- SPIKE 3: fix the cross-field stale read via a local values signal (client-
+  authoritative values, server-authoritative errors); reproduce the fast-typing
+  bug RED then GREEN in a browser/@clock test.
+- SPIKE 4: `field()` sugar expansion — one call → value-bind + input-emit +
+  error-text + aria-invalid. Decide if it earns its place.
+- SPIKE 5 (OQ2 still open): compile-time field-name checking — extend the
+  contract to carry the changeset's cast fields + types so `$form.values.typo`
+  is an E0928-family error. Needs the server DSL to introspect the changeset.
+- Real Ecto: swap the hand-rolled validator for `form_envelope(%Ecto.Changeset{})`
+  once an Ecto-bearing host exists; the wire shape (and the whole .st side) is
+  unchanged by design.
+
+* SPIKE 2+3 RESULTS (2026-07-24) — are the "seams" actually @data subscribe bugs? MOSTLY YES.
+Re-examined each seam by experiment (not reasoning). Verdict flips the earlier
+framing: two of the three seams are PARITY GAPS / BOILERPLATE on the EXISTING
+surface, fixable WITHOUT any new primitive. This reframes the recommendation:
+**strengthen `@data subscribe` first; `@data form` becomes THIN sugar on top,
+not a new capability.**
+
+** Seam #1 (no type slot, null seed) → PARITY BUG on @data subscribe. Confirmed.
+Every sibling @data kind has `$type:typeref?` in its %form
+(inline L27, fetch L50, derive L86, stream L361/L458) — subscribe (L543) is the
+ONLY one missing it, and it hardcodes `local-state-impl(initial: null)`. There
+is no design reason; it's an omission. FIX = add the type slot + let the type's
+default seed (or an explicit `: <assign> = <seed>`) replace the null. This alone
+kills the decorative @type (W0203) and the per-read try/catch. This is a
+`@data subscribe` improvement, filable as its own small FUP — NOT a form feature.
+
+** Seam #2 (cross-field stale read) → BOILERPLATE, fixable in pure .st TODAY.
+Rewrote signup.st (SPIKE 3) to keep a LOCAL client-authoritative `$values`
+signal (inputs write it via `$values <- Object.assign({}, $values, {…})`), server
+`$form` consulted ONLY for errors. Built + drove the EXACT concurrent
+fast-typing repro that left email stuck at "can't be blank" in v1:
+  before: emailErr stuck non-empty after both fields valid.
+  after : both errors clear cleanly. FIXED. Zero new primitive.
+∴ seam #2 is not a missing capability — it's a pattern (local values +
+authoritative errors) that a `field()` sugar should ENCODE so nobody hand-writes
+the stale-sibling bug. It does NOT justify `@data form` as a new mechanism; it
+justifies SUGAR.
+
+** Seam #2b (NEW, found during SPIKE 3): bare-key object seed fails to parse.
+`@data inline $values : { email: "", password: "" } ;` → parse error
+(signup.st:49 "expected scope block, directive, or declaration"). QUOTED keys
+work: `{ "email": "", "password": "" }`. Papercut in @data inline's expr parser,
+orthogonal to forms. Should be filed as a small BUG (bare identifier keys in
+object literals inside @data seeds). A typed `@data form`/typed-subscribe
+sidesteps it by knowing its fields, but the parser bug should be fixed anyway.
+
+** Seam #3 (field boilerplate) → the ONLY genuine ergonomic win, and it's SUGAR.
+Still real: value-bind + input-write + validate-emit + error-text + aria is
+4-6 lines/field AND is where seam #2's bug hides. This is what `field()` earns.
+
+** REVISED elegance-bar ruling (supersedes SPIKE 1's ruling)
+`@data form` as a NEW PRIMITIVE does NOT clearly earn its place — its two
+load-bearing justifications dissolve into (a) a subscribe parity fix and (b) a
+sugar macro. RECOMMENDED PATH:
+  1. Strengthen `@data subscribe`: add `$type:typeref?` + typed/default seed
+     (own FUP; benefits EVERY subscribe, not just forms). "everything we wanted
+     from @data form and more" — the user's hypothesis is CORRECT.
+  2. Ship `field()` as a stdlib binding-sugar %macro (encodes the local-values +
+     authoritative-errors pattern so the stale-read bug is impossible by
+     construction).
+  3. `@data form` collapses to (optionally) a TINY convenience wrapper that
+     declares a typed-subscribe + a local values signal in one line — pure sugar
+     over 1+2, added ONLY if the two-line idiom proves annoying in practice.
+  4. Fix the bare-key object-seed parser bug (separate BUG).
+
+** field() sugar — proposed design (stdlib binding-sugar %macro)
+Modeled on the local-pointer %macro shape (%form carries the call, %binds wires
+signals). Two ergonomic tiers:
+
+*** Tier A — selector-scoped binder (no HTML ownership; binds onto host skeleton)
+Placed in a field's input selector; wires value + input + validate in one call
+against a typed form signal, reading/writing the LOCAL values signal (so the
+stale-read is structurally impossible):
+: .signup .field-email input { @field($form, email) }
+expands to (the pattern SPIKE 3 proved):
+: value <- $form.values.email;
+: @on input {
+:   $form.values <- Object.assign({}, $form.values, { email: $.value });
+:   $validate($form.values);
+: }
+and the sibling error element:
+: .signup .field-email .error { @field-error($form, email) }
+:   → text: $form.errors.email;
+NB requires the STRENGTHENED subscribe (typed, non-null seed) so `$form.values`
+is always an object — otherwise the Object.assign spreads undefined. This is why
+subscribe-first is the right order.
+
+*** Tier B — template projection (owns the whole labelled field markup)
+A @template that projects a complete field once FUP-121 emits skeletons from the
+page (so the page owns structure too):
+: @template &field($form, $name string, $label string) {
+:   <label class="field field-`$name`">
+:     <span class="field__label">`$label`</span>
+:     <input value="`$form.values[$name]`"
+:            aria-invalid="`$form.errors[$name] ? 'true' : 'false'`"
+:            @on input { $form.values <- Object.assign({}, $form.values, { [$name]: $.value }); $validate($form.values); } />
+:     <span class="field__error">`$form.errors[$name]`</span>
+:   </label>
+: }
+usage:
+: &field($signup, "email", "Email");
+: &field($signup, "password", "Password");
+OPEN Q for Tier B: dynamic key `[$name]` in Object.assign + `$form.values[$name]`
+read — does the compiler support computed member access in holes/JS bodies? (a
+SPIKE 4 item). If not, Tier A (static per-field name) is the shippable form.
+
+** Updated next spikes
+- SPIKE-A (subscribe parity): add `$type:typeref?` + typed/default seed to
+  `@data subscribe`; re-run signup.st reads WITHOUT try/catch and WITHOUT the
+  decorative @type going unused (W0203 gone). This is the keystone — file as its
+  own FUP ("strengthen @data subscribe to parity with sibling @data kinds").
+- SPIKE-4 (field sugar): implement Tier A `@field` / `@field-error` %macros;
+  prove the concurrent fast-typing repro is GREEN by construction; then attempt
+  Tier B computed-key template and record whether computed member access works.
+- BUG (parser): bare-identifier keys in object-literal @data seeds.
+- SPIKE-5 (OQ2, unchanged): compile-time field-name checking via contract
+  carrying the changeset's cast fields.
+- Real Ecto swap (unchanged).
+
+* SPIKE 4 RESULTS (2026-07-24) — `@field` Tier A sugar: implemented, browser-GREEN.
+Prerequisite check first: confirmed FUP-144 (subscribe parity), BUG-228 (object
+seed parser), FUP-142/143 all filed on disk before running.
+
+Built a page-local `@field` / `@field-error` macro pair (elixir/spacetime_lv/
+frontend/field.st) + a field-sugar signup variant (signup_field.st) hosted by a
+new SignupFieldLive (/signup-field), and drove the concurrent fast-typing repro
+in a real browser.
+
+** OUTCOME: GREEN. Ergonomic win real, stale-read impossible by construction.
+- Field-binding block: 10 hand-written lines (signup.st) → 4 sugar calls
+  (signup_field.st). Each field = one `@field($values, name, on: $validate)` +
+  one `@field-error($form, name)`.
+- The concurrent repro (type BOTH fields in the same tick, invalid→valid):
+  errors render on invalid, BOTH clear cleanly on valid (no stuck email),
+  submit → success "true". Server log shows validate round-trips + one submit.
+- All 6 frontend files pass E0928 (SignupFieldLive got its own $authField host +
+  mix-generated contract).
+
+** TWO REAL FINDINGS surfaced building the primitive (both generalize)
+*** Finding A — `const el = %&el` SHADOWING FOOTGUN in %primitive bodies.
+The selector-init wrapper binds the element as `el` (`init = function(el){…}`),
+so a primitive body that writes `const el = %&el;` compiles to `const el = el;`
+— a self-referential dead binding (the inner const shadows the param and reads
+undefined/TDZ). Symptom: the primitive's listeners never attach, silently. FIX:
+never name a primitive-body local `el`; use `node`/`self`. This is a latent trap
+for ANY primitive author — worth a lint (`W: primitive body binds `el`, shadows
+the selector-init param`) or a doc note in the %primitive authoring guide. Filed
+as its own note below.
+
+*** Finding B — file-scoped signals live in `window.SpacetimeLocal`, NOT `ST.set`.
+The killer. A `@data inline $values` is a FILE-scoped signal → its shared store
+is the `window.SpacetimeLocal` Proxy (writing there broadcasts
+`local:<name>:updated`). My first cut used ELEMENT-scoped `ST.set(node,'values',…)`
+— which gives EACH input its OWN private `values` copy. So email's field wrote
+{email} and password's field wrote {password}, each clobbering the other's key,
+and every validate sent a half-empty map → the stuck-email symptom REAPPEARED
+even WITH a local values signal. FIX: read/merge/write `window.SpacetimeLocal[
+valuesSig]` so all fields share ONE object identity; then a same-tick two-field
+update merges correctly. This is the actual mechanism SPIKE-3's SURFACE
+`$values <- Object.assign(…)` used (the compiler lowers `$x <-` to
+`SpacetimeLocal[x] = …`) — my primitive had to replicate it, not use ST.set.
+LESSON for the real feature: `@field`'s primitive must target the file-signal
+store; a typed `@data form`/strengthened-subscribe (FUP-144) that OWNS its values
+signal would encapsulate this so no primitive author picks the wrong store.
+
+** Ruling refinement (still: subscribe-first + sugar, NOT a new primitive)
+`@field` works as a thin selector-macro over a file-scoped values signal + the
+signal-call registry. It does NOT need `@data form` as a mechanism. BUT Finding B
+shows the sugar is only safe if the values signal is a well-known shared store;
+that's an argument for the values signal being DECLARED by the form construct
+(so the sugar can't target the wrong scope), which a strengthened `@data
+subscribe` seed (FUP-144) or a tiny `@data form` wrapper provides. Net: ship
+FUP-144 first; `@field` sugar rides on top; `@data form` optional convenience.
+
+** Tier B (computed-key template) — PROBED, viable.
+Computed member access compiles AND builds AND runs: `$form.values[$name]` and
+`{ [$name]: v }` both emit correct JS (verified: /tmp/ckprobe.st builds; emitted
+`.values[…]` + `{ [name]: … }`). So the Tier B `@template &field($form,$name,…)`
+projection with dynamic keys is FEASIBLE once FUP-121 emits page-owned skeletons.
+Not built this spike (Tier A proved the ergonomics); Tier B is the FUP-121-gated
+follow-on.
+
+** Spike-4 artifacts (fixture; not production)
+- elixir/spacetime_lv/frontend/field.st                (the @field/@field-error macros + primitives)
+- elixir/spacetime_lv/frontend/signup_field.st         (sugar variant)
+- elixir/spacetime_lv/frontend/$hosts.st               (+$authField host)
+- elixir/spacetime_lv/frontend/SignupFieldLive.contract.json (mix-generated)
+- elixir/spacetime_lv/lib/spacetime_lv_web/live/signup_field_live.ex (delegates to SignupLive)
+- elixir/spacetime_lv/lib/spacetime_lv_web/router.ex   (+/signup-field)
+- staged: priv/static/spacetime/signup_field/spacetime.{js,css}
+
+** Remaining spikes (unchanged priority)
+- SPIKE-A / FUP-144: strengthen @data subscribe (typed + seed) — the keystone.
+- SPIKE-5 / OQ2: compile-time field-name checking via contract carrying cast fields.
+- Tier B template (@field projection w/ computed keys) — gated on FUP-121.
+- Real Ecto swap.
+- Finding A lint + Finding B store-encapsulation feed into the real feature design.
+
+NOTE [2026-07-26]: FUP-144 LANDED (PLAN-118, 2026-07-24). Seam #1 (typed envelope / decorative @type) is now HALF-CLOSED: the type slot on @data subscribe is real — signup.st uses `@data subscribe $form FormEnvelope from $auth : form ;`, the envelope @types are referenced (W0203 gone), and the binding registers with its shape (substrate for OQ2/SPIKE-5 field-name checking). The OTHER half — removing the try/catch guards on nested reads via a seed — remains BLOCKED: the FormEnvelope is nested and nested-object seeds hit the balanced-capture limitation (BUG-228, scope-expanded). Scalar/one-level seeds DO work (`{ initial: 0 }`). So `@field`/forms are unblocked for the common path; deeply-nested seeds await the BUG-228 parser fix. Net: subscribe-first was the right call — the type win benefits every subscriber, not just forms.

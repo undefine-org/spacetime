@@ -1,0 +1,185 @@
+#+TITLE: spacetime_query_docs — intent→construct semantic search (ranker B)
+#+STATE: ITEM
+#+SESSION_ID: 15676265c4342b28
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-08-26T23-07-40-176Z_15676265c4342b28.jsonl]]
+#+CUSTOM_ID: PLAN-149-spacetime-query-docs-intentconstruct-sem
+#+LAYER: mcp
+#+PRIORITY: #B
+
+* Initial Message
+
+two things:
+
+1. create a new folder called roadmap/mcp/ and a file called self-documentation.st.md inside it. The goal is to explain, in simple language from zero context, how Spacetime is self-documenting through the spacetime_query_docs tool.
+2. This query_docs tool (very) efficiently applies a semantic fuzzy search so that declarations of intent are matched with potential Spacetime constructs
+3. What other tools would help you bridge the gap between a user's intention and the result?
+
+Build your own understanding and bring it back to me
+
+* Initial Message
+
+User: "ranker B. make the PLAN."
+
+Continues the roadmap doc `roadmap/mcp/self-documentation.st.md` (this session),
+which designs `spacetime_query_docs` and weighs three ranker options. The user
+picked **B — lexical BM25 + curated synonym expansion, zero heavy deps**. This
+PLAN implements B as the shipping floor, with the `DocRanker` trait boundary kept
+so ranker A (`fastembed`/BGE-M3, behind `--features semantic-docs`) can drop in
+later as a pure data swap.
+
+* Goal
+
+Ship an MCP tool `spacetime_query_docs { query, kind?, limit? }` that turns a
+plain-language declaration of intent into the Spacetime constructs most likely to
+express it — ranked, each with its form/doc/exports. The corpus is the LIVE
+compiler registry (the same rows the reference page renders), so results can
+never drift from the language.
+
+Ranker = **B** (BM25 + synonym map). No ONNX, no model download, deterministic,
+unit-testable. The neural ranker A is explicitly OUT of this PLAN (named as a
+follow-up), but the trait seam that makes it a drop-in IS in scope.
+
+* Why this shape (grounding — verified this session)
+
+- Corpus already exists: `compiler::cached_stdlib_registry()` +
+  `build_registry_json` (src/compiler.rs:2795 → {name,kind,doc,exports}) and
+  `build_dispatch_json` (src/compiler.rs:3287 → {directive,name,signature,
+  tokens,doc,kind,origin,scopes,binds,overloads}). DO NOT fork a catalog — the
+  elegance/harmony rule: one source, many consumers.
+- MCP tool seam is a known pattern: add one `tool(name,desc,schema)` to the list
+  in `src/mcp/tools.rs` and one arm in `call()` (mirrors every `st_*` tool).
+- `.fastembed_cache/models--BAAI--bge-m3` in the tree = a prior embedding spike;
+  it is the de-risk for ranker A LATER, not used by B.
+
+* Non-goals (OUT)
+
+- Ranker A (neural embeddings / fastembed / ONNX). Follow-up only.
+- Ranker C (remote embedding API). Follow-up only.
+- The in-language `@data docs $x match "…"` surface (§4b of the doc) and its
+  `inject_docs_data` injector. Separate FEAT once the tool proves ranking.
+- Runtime `match $q` (live search box needing a dev endpoint).
+- Any change to registry row shape or the reference page.
+
+* Design
+
+** The DocRanker trait (the one seam)
+
+#+begin_src rust
+struct DocRow { name: String, kind: String, doc: String, signature: String, exports: Vec<String> }
+struct Scored { row: DocRow, score: f32 }
+
+trait DocRanker {
+    fn rank(&self, query: &str, rows: &[DocRow], limit: usize) -> Vec<Scored>;
+}
+#+end_src
+
+Default impl this PLAN ships: `Bm25Ranker`. Future `EmbeddingRanker`
+(feature-gated) and `RemoteRanker` (opt-in) implement the same trait; the tool
+never knows which is live.
+
+** Ranker B algorithm
+
+1. Tokenize query + each row-document (`format!("{name}. {doc}")`, optionally
+   append signature). Lowercase, split on non-alphanumerics, drop a tiny
+   stopword set.
+2. Expand query tokens through a curated synonym map BEFORE scoring:
+   reload/refetch→refresh, popup/modal→dialog, fade/appear/reveal→transition/scroll,
+   list/array→collection, click/tap→on, loop/repeat→each, etc. Keep the map
+   SMALL and data-shaped (a `&[(&str,&[&str])]` const, not code branches) so it
+   is auditable and grows by data.
+3. BM25 over the row-documents (classic k1=1.2, b=0.75). Add a small bonus when a
+   query token matches the construct NAME/directive exactly (name hits matter
+   more than doc hits).
+4. Sort desc, truncate to `limit`. Normalize score to 0..1 for the result.
+
+** Corpus assembly
+
+Prefer refactoring `build_dispatch_json` to expose a `Vec<Row>` builder that both
+the JSON path and `corpus()` call (one source). If that refactor is too wide for
+this PLAN, fall back to parsing the two existing JSON arrays and merging by name
+— but leave a NOTE that the Vec builder is the harmonious end state.
+
+** MCP tool surface
+
+tool `spacetime_query_docs`:
+- `query` (required, string) — plain-language intent
+- `kind` (optional) — pre-filter: data|events|animation|motion|scene|text|test
+  (applied as a cheap structured retain BEFORE ranking)
+- `limit` (optional int, default 8)
+returns `structuredContent { query, matches: [{name,kind,score,signature,doc,exports}] }`,
+`matches` sorted score-descending.
+
+* Scope / files
+
+IN:
+- src/mcp/docs_search.rs (NEW) — DocRow, Scored, DocRanker trait, Bm25Ranker,
+  synonym const, corpus() over cached_stdlib_registry().
+- src/mcp/tools.rs — one `tool(…)` entry + one `call()` arm `query_docs(…)`.
+- src/mcp/mod.rs — `mod docs_search;`.
+- (maybe) src/compiler.rs — expose a `Vec<Row>` builder if the harmonious
+  refactor is in reach; else consume existing JSON.
+- Tests colocated (unit ranking table + corpus-parity + MCP smoke).
+
+OUT: everything in Non-goals.
+
+* Waves
+
+** W1 — corpus + trait + Bm25 core (no MCP yet)
+- Create src/mcp/docs_search.rs with DocRow/Scored/DocRanker/Bm25Ranker + synonyms.
+- corpus() pulls from cached_stdlib_registry() via the existing builders.
+- Unit tests: intent→expected-top-k table (RED first, then GREEN):
+  - "reload the list every few minutes" ⇒ @data fetch in top-2
+  - "fade a section in as I scroll" ⇒ @on &.scroll (or scroll macro) in top-3
+  - "a number that goes up on click" ⇒ @data inline / @on click in top-3
+  - "server-sent events stream" ⇒ @data stream in top-2
+- corpus-parity test: corpus().len() == count of documentable registry rows for
+  the same registry (proves one source, not a fork).
+Gate: `cargo test --lib docs_search`.
+
+** W2 — MCP tool wiring
+- Add the `tool(…)` schema entry + `call()` arm in src/mcp/tools.rs.
+- kind pre-filter (retain before rank); limit default 8.
+- Protocol test in src/mcp/protocol.rs: tools/call spacetime_query_docs returns
+  matches[] score-descending, every name present in the registry, kind filter
+  narrows correctly.
+Gate: `cargo build && cargo test --lib mcp`.
+
+** W3 — hardening + docs
+- Empty/whitespace query → clear error result (mirror non_empty_arg pattern).
+- Flip roadmap/mcp/self-documentation.st.md §5 markers for the shipped pieces
+  (tool + ranker B) from proposed→built; leave §4b / ranker A / C as roadmap.
+- NOTE on the Vec-builder harmonization state.
+Gate: `cargo build && cargo test --lib mcp && cargo run -- check roadmap/mcp/self-documentation.st.md`.
+
+* Acceptance criteria
+
+- `spacetime_query_docs { query: "reload a list every few minutes" }` returns
+  `@data fetch` in the top 2, with its signature + exports, score-descending.
+- The corpus is the live registry: a construct added to stdlib appears in results
+  next build with zero tool edits (verified by corpus-parity test).
+- `kind` narrows before ranking; `limit` caps results.
+- Ranker B pulls NO new heavy dependency (no ort/onnx/model). `cargo build` with
+  default features has the tool available.
+- DocRanker trait is the sole seam; adding a second ranker touches no tool code.
+- All gates green: `cargo test --lib docs_search`, `cargo test --lib mcp`,
+  `cargo run -- check roadmap/mcp/self-documentation.st.md`.
+
+* Verification (write tests FIRST — a gate never seen to fail is not a gate)
+
+- Unit ranking table (W1) — deterministic, no browser, RED before GREEN.
+- Corpus-parity (W1) — one source proof.
+- MCP protocol smoke (W2) — shape + ordering + name-membership + kind filter.
+- No behavior/browser gate needed: this tool returns data, it does not move a
+  DOM. (Per AGENTS BUG-252: a browser gate is required only when a feature's job
+  is to MOVE something. This one's job is to RANK — assert the ranking.)
+
+* Follow-ups (named, not built here)
+
+- FEAT: ranker A — EmbeddingRanker (fastembed/BGE-M3) behind `--features
+  semantic-docs`, vectors cached + invalidated on registry change (reuse the
+  IncrementalStdlibCache trigger). Drop-in via DocRanker.
+- FEAT: in-language `@data docs $x match "…"` arm — `data-docs-match`
+  %pipeline-consumed macro + `inject_docs_data` in src/compiler.rs beside
+  inject_registry_data/inject_dispatch_data (build-time literal-query ranking).
+- FEAT: harmonize corpus — a shared `Vec<Row>` builder feeding BOTH
+  build_dispatch_json and corpus() if not done in W1.

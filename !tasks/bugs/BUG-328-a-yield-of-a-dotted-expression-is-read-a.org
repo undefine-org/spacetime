@@ -1,0 +1,132 @@
+#+TITLE: A %yield of a dotted expression is read as a CSS selector and emits a duplicate const el (every stdlib page dead)
+#+STATE: ITEM
+#+SESSION_ID: 154d0baaa942d918
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-08-06T12-08-13-733Z_154d0baaa942d918.jsonl]]
+#+CUSTOM_ID: BUG-328-a-yield-of-a-dotted-expression-is-read-a
+
+* Initial Message
+
+exlpain #30, and for #14 and #11, does the new @on's text-change facet solve this?
+
+#+STATE: ITEM
+#+PRIORITY: A
+
+* Symptom
+
+ANY page that imports stdlib fails to build:
+
+#+begin_example
+✗ Export failed: Route '' has compile diagnostic:
+  the compiler emitted JavaScript that does not parse: JS error at 6968:27: TS1109
+#+end_example
+
+Minimal reproduction — no directives at all, just the import:
+
+#+begin_src spacetime
+@import "stdlib"
+<div class="x">hi</div>
+#+end_src
+
+* The emitted JavaScript
+
+`inspect --layer emit` shows a scope declaring `const el` TWICE:
+
+#+begin_example
+(function() {
+const el = document.body;
+const el = ".rect.width".startsWith('.')
+      ? document.querySelector(".rect.width")
+      : document.querySelectorAll(".rect.width");
+ST.set(el, "ref", el);
+#+end_example
+
+TS1109 is that redeclaration. A bundle that does not parse never evaluates, so the whole
+page is dead — E0952 exists precisely to catch this, and it is doing its job.
+
+* Root cause
+
+`stdlib/primitives/resize.st:25` yields a dotted JS expression:
+
+#+begin_src spacetime
+const rect = entry.contentRect;
+%yield rect.width -> $width;
+#+end_src
+
+`rect.width` is a MEMBER EXPRESSION in the primitive's JS body. Something downstream reads
+that bare dotted token as a CSS class selector — `.rect.width` — and emits the standard
+selector-resolution preamble for it, which declares its own `const el` into a scope that
+already has one.
+
+The tell is in the emitted string itself: `".rect.width".startsWith('.')` shows a leading
+dot was PREPENDED to `rect.width`, i.e. it was classified as a class selector rather than
+an expression.
+
+* Scope
+
+Not limited to `resize.st` — the same shape appears at lines 48 and 52 of that file
+(`rect.width / rect.height`), and any `%yield <expr>.<member>` anywhere is a candidate.
+
+* Why it was not caught
+
+- `cargo test --lib` (3141), `integration_tests` (199) and the LSP suite all pass: none of
+  them BUILDS a page through the export path that runs the JS parse check.
+- `tests/repro/*/check-contract.sh` gates that call `build` DO catch it — gh-11's gate
+  reports "no index.html produced". That is how it surfaced.
+- It is pre-existing at HEAD: verified with an unmodified `public/runtime/st.js`, an
+  unmodified stdlib, and a freshly built binary. NOT introduced by the PLAN-138 work,
+  though it blocks that work's end-to-end verification.
+
+* Fix direction
+
+Find the pass that decides "is this token a selector?" and make it refuse a dotted token
+that came from inside a `%emit js` body / `%yield` expression — a member expression is not
+a selector. Prefer fixing the classification over special-casing `rect`.
+
+Gate: `@import "stdlib"` + a bare `<div>` must build, and `%yield rect.width -> $width`
+must emit a member access rather than a `querySelector` preamble.
+
+* Note
+
+The `%yield` shape here is idiomatic and appears throughout stdlib, so the correct fix is
+in the classifier, not in `resize.st`. Changing the stdlib to avoid dotted yields would be
+working around a compiler defect in the one place the metasystem is supposed to be
+authoritative.
+
+NOTE [2026-08-07]: DIAGNOSIS CORRECTED after bisecting — the original write-up blamed the wrong file.
+
+Not `resize.st`'s `%yield rect.width`. Bisecting stdlib/index.st import-by-import isolated
+`stdlib/dnd/index.st`, then submodule-by-submodule isolated `stdlib/dnd/macros/drag.st`.
+
+The real shape is an element-ref MEMBER ACCESS in a `%derives` expression
+(stdlib/dnd/macros/drag.st:81):
+
+  $x: $bounds != none
+    ? clamp($rawX, 0, &$bounds.rect.width - &self.rect.width)
+    : $rawX
+
+`&$bounds.rect.width` means "the rect.width of the element captured in $bounds". The
+compiler instead reads the trailing `.rect.width` as a CSS CLASS SELECTOR and expands the
+`element-ref` primitive (stdlib/primitives/dom.st:42) against the literal string
+".rect.width" — note `dom.st` is not even imported by stdlib/index.st, so the expansion is
+entirely synthesized from the misread.
+
+That emits, into a scope that already has `const el = document.body`:
+
+  const el = ".rect.width".startsWith('.')
+    ? document.querySelector(".rect.width") : document.querySelectorAll(".rect.width");
+
+TS1109 is the duplicate `const el`. A second defect is visible in the same block —
+`const updateRect = () =>;` (an empty arrow body, from the `%yield` inside the arrow being
+dropped), so the misexpansion produces at least two independent syntax errors.
+
+Blast radius is every page that does `@import "stdlib"`, because stdlib/index.st imports
+dnd. `@drag` itself does not need to be used.
+
+Reproduction narrowed to:
+  @import "stdlib/dnd/macros/drag.st"
+  <div class="x">hi</div>
+
+Fix direction unchanged in spirit but retargeted: the classifier must treat `&$capture.a.b`
+as a member access on an element reference, not as a selector. `&self.rect.width` on the
+same line appears to survive, so the `&$name.` form specifically is what falls through —
+that asymmetry is the lead worth pulling first.

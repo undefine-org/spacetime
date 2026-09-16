@@ -1,0 +1,73 @@
+#+TITLE: Three radial-gradient "eyes" never render in projects/unkn — circle takes a length, not a percentage
+#+STATE: ITEM
+#+SESSION_ID: 153f5ed0617636c7
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-26T21-12-46-213Z_153f5ed0617636c7.jsonl]]
+#+CUSTOM_ID: BUG-295-three-radial-gradient-eyes-never-render
+
+* Initial Message
+
+please explain FUP-176 and FEAT-166 and anything else to fully integrate this work to the rest of the codebase
+
+* What
+
+`projects/unkn/modules/_globals.st:366-374` paints three red "eyes" on
+`.unkn-strip--eyes::after` with three stacked radial gradients:
+
+#+begin_src css
+background:
+    radial-gradient(circle 2.4% at 18% 50%, #d43e2b 0%, transparent 70%),
+    radial-gradient(circle 2.4% at 50% 50%, #d43e2b 0%, transparent 70%),
+    radial-gradient(circle 2.4% at 82% 50%, #d43e2b 0%, transparent 70%);
+#+end_src
+
+**None of them render.** `circle` takes a `<length>` radius; a single
+`<percentage>` is invalid, so the browser drops the whole `background`
+declaration. The element has been blank since it was written.
+
+Confirmed against two primary sources, not inferred:
+- MDN: "One `<length>` value provides a circle, while two values in
+  `<length-percentage>` units provide an ellipse. A single `<percentage>` value
+  is not valid."
+- W3C CSS Images Module Level 3, `<radial-size>`: "Note: Percentages are not
+  allowed here; they can only be used to specify [an ellipse's radii]."
+
+The same block appears in the built output of at least `404/index.st` and
+`about/index.st` (19 occurrences of the declaration across the project).
+
+* How it was found
+
+By FUP-176's new declaration validator (5f27f9ac), on its first run over the
+private `projects/` tree. It was the ONLY genuine defect in 18,934 declarations
+across every project — which is also the argument for that check existing.
+
+* Fix
+
+Either give the circle a length radius, or say ellipse and keep percentages:
+
+#+begin_src css
+radial-gradient(circle 24px at 18% 50%, ...)     /* fixed size */
+radial-gradient(ellipse 2.4% 2.4% at 18% 50%, ...) /* percentage of the box */
+#+end_src
+
+`ellipse` with two equal percentages is the closer match to the intent (a dot
+that scales with the strip), but it is a VISUAL decision — the two differ once
+the container is not square, so this wants an eyeball rather than a guess.
+Not fixed here because it is a design call in a private project.
+
+* Why the validator no longer flags it
+
+A deliberate, and uncomfortable, tradeoff. lightningcss 1.0.0-alpha.67 cannot
+parse several FUNCTION values that are valid CSS (`cross-fade()`, `paint()`,
+`-webkit-` gradients), so refusing a function value would fail builds over a
+dependency's release schedule. Function values are therefore checked only for
+parenthesis balance.
+
+That is the right default — a false positive that blocks a build is worse than a
+missed diagnostic — but it means this class stays invisible. Closing the gap
+honestly needs the gradient grammar itself, which is FUP-177.
+
+* Related
+
+- FUP-176 — the declaration validator that found it.
+- FUP-177 — function-value validation (the gap that lets it hide again).
+- BUG-257 — the colour-promotion blind spot this class descends from.

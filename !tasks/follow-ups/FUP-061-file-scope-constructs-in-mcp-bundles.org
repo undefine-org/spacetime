@@ -1,0 +1,65 @@
+#+TITLE: file-scope constructs in MCP bundles (templates-only v1)
+#+STATE: ITEM
+#+CUSTOM_ID: FUP-061-file-scope-constructs-in-mcp-bundles
+#+DEPENDS: PLAN-041-plan-039-unified-live-mcp-environment-or
+#+LAYER: mcp
+#+PRIORITY: C
+
+* Parent
+[[id:PLAN-041-plan-039-unified-live-mcp-environment-or][PLAN-041]] (via the unified-env design).
+
+* Context
+The unified MCP environment ships bundles that carry, per source: a Vec of @template bundles + css + contract + origin. v1 carries TEMPLATES ONLY — file-scope HTML/behaviors outside any @template are NOT included in the bundle. Deliberate: the only consumer that needs file-scope constructs is the workbench CHROME, which is the persistent host page (not a bundle). Bundles mount as template instances into regions; regions are leaf-mount points.
+
+* What this FUP tracks
+Lifting the restriction so a bundle may also carry file-scope HTML (mounted into the region root) + file-scope selector-scoped behaviours. Needed when a region should host a whole mini-page rather than a single template instance — e.g. mounting a full standalone Spacetime app into a region (the legitimate successor to the removed standalone-page mode, Fork 6).
+
+* Design constraint (locked)
+When implemented, file-scope-in-bundle MUST reuse the same region pipeline (region-mount + Spacetime.templates registry + @scope CSS wrapping + element-scoped ST.set). It must NOT revive the per-instance standalone page route (/__mcp/instance/{id}/) — removed (Fork 6) to avoid two parallel rendering pipelines. A standalone preview, if ever wanted again, mounts the bundle into a single full-viewport region on a minimal host page.
+
+* Out of scope for the unified-env v1 wave
+Everything in this FUP. Filed for after PLAN-041 ships.
+
+* Design locked (2026-06-20) — approach A: implicit &main synthesis
+Decision owner: "A I think. In the future we'll view files as functions,
+implicitly. But for now do whatever is easiest to get to the UX we're looking
+for." Full design: @research/mcp-builder-view-and-convergence-2026-06-20.org
+(PART II). Needed by PLAN-051 (a real page in a builder frame) + PLAN-052 Rungs
+4-5 (admin preview on the region pipeline; admin-as-frame).
+
+** The move
+A file-scope guest (markup shell + body{$sig} + selector behaviors, like
+__admin__/app/app.st or demos/app-shell) yields an EMPTY templates bundle today
+-> mount_into_host REJECTS it ("wrap in @template", live.rs ~949). Instead, at
+compile_to_bundle, if the source has file-scope body markup and no &main,
+SYNTHESIZE a template &main() whose body IS the file-scope markup (HTML +
+file-scope @data/body{$sig} state + selector behaviors). The EXISTING
+templates-only bundle then carries it; mount_into_host mounts it unchanged. This
+DELETES the rejection special-case (elegance bar: one fewer error state, one
+mount path).
+
+** The real work (region-scoping; per region-model doc)
+- file-scope @data inline / body{$x} -> element-scoped ST.set(regionRoot,'x',..)
+  not document.body / global ST.setData (host.st setSource shows the split).
+- file-scope selector behaviors already compile to registerSelectorInit (the
+  MutationObserver applies them in the mounted subtree) — verify $sig resolves
+  against the region root, not a page global.
+- CSS already @scope-wrapped by registerBundle.
+
+** Constraint (still locked)
+MUST reuse the region pipeline; MUST NOT revive the per-instance standalone page
+route (Fork 6). A standalone preview = mount the bundle into a single
+full-viewport region on a minimal host page.
+
+** Acceptance / de-risking order
+Mount demos/app-shell/index.st (simple file-scope page) into a workbench frame
+first -> render + selectable, NO @template rejection. Surface region-scoping gaps
+(file-scope @effect / @data fetch assuming document.body or page globals), fix
+the region-root binding, THEN admin. The implicit-main wrapper is cheap; the
+region-scoping is where the work + test cases live.
+
+** Relations
+Blocks: PLAN-052 Rung 4 (admin iframe->region), Rung 5 (admin-as-frame).
+Enables: PLAN-051 mounting a real file-scope page in a builder frame.
+
+NOTE [2026-07-04]: Subsumed by PLAN-064 (Structure IR). The "templates-only v1" limitation of stage_structure_from_bundle (walks bundle.refs / TEMPLATE_REF only → a single-template component projects as 1 node) is exactly what PLAN-064 B2 fixes, via a shared structure_ir() CST walk that emits element/hole/@each/@match/arm/ternary node kinds. Track the resolution there.

@@ -1,0 +1,31 @@
+#+TITLE: BUG-206 @on nested selector hoisting
+#+STATE: DONE
+#+SESSION_ID: 1539c43b5b2c4f49
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-22T12-44-59-116Z_1539c43b5b2c4f49.jsonl]]
+#+CUSTOM_ID: BUG-208-bug-206-on-nested-selector-hoisting
+#+PRIORITY: A
+
+* Initial Message
+
+BUG-206 — @on hoisting in nested selector blocks. Severity: correctness-breaking, silent.
+ The natural way to write a page is nested blocks (.counter { > .controls { > button.inc { @on click … } } }). With nesting, the event binding registered on the outer element — so one click on + bubbled to
+ .counter and fired every handler bound under it. In the counter: one click → inc and dec → net zero → the button appears to do nothing. Against a real server it's worse: double-dispatched events — one user
+ gesture, two handle_event calls, two state mutations. In a checkout or a booking flow that's a duplicate-submission bug, the class that costs money. The diagnostic surface is brutal too: nothing is visibly
+ broken, the count just "doesn't move," and the only evidence is pairs of lines in the server log. The workaround (top-level compound selectors) is fine but unguessable. Any real page with layout nesting +
+ events hits this on day one — it should be P1 for the next compiler pass. NB: text/style bindings resolve nested paths correctly (.counter > .value emitted fine) — the hoist is specific to the event-binding
+ lowering, which is also the tell for where the fix lives.
+
+ BUG-207 — W0201 false positive. Severity: trust-erosion, not runtime.
+ $error is used in a text: binding and in @handle arms, yet check warns it's "never used" — while $count, used in the same positions, doesn't warn. Nothing breaks; the page is correct. The damage is to the
+ diagnostic channel itself: a linter that cries wolf teaches authors to ignore warnings — and W0201 shares a check pass with E0928, the contract check that's supposed to be the bridge's safety spine. A noisy
+ check output is a check output people stop reading, which quietly devalues the real contract errors when they appear. Fix is a usage-scan hole (one position in the scan misses a source with no subscriber-like
+ usage); small fix, outsized hygiene value.
+
+
+please find the root causes and propose .test.st RED, then show me your impl plan. make sure you start writing the .test.st in subfolders too
+
+Root cause: NestedScope stored only authored leaf selectors while CSS alone composed ancestors. Plain-scope directive assignment stamped FormMatch.selector with the outer ScopeBlock selector, so nested @on handlers registered on .counter and bubbled clicks double-dispatched.
+
+Fix: lifted compose_selector into src/syntax/mod.rs; added NestedScope.composed_selector; compose_nested_selectors precomputes the full path once during CST→AST construction. CSS emit and directive assignment/rematch paths now read the same composed field. Added parser regression and tests/bugs/BUG-206-on-hoisting-in-nested-selector-blocks.test.st (two behavioral cases).
+
+Verification: parser regression passed; BUG-206 behavioral test 2/2 passed repeatedly; headless macros/animations/integration/bugs sweep 163 passed; lib 2725 passed; integration_tests 189 passed.

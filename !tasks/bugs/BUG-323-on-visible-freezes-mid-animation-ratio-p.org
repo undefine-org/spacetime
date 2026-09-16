@@ -1,0 +1,93 @@
+#+TITLE: `@on &.visible` freezes mid-animation — ratio published as progress, but sampled at ONE threshold
+#+STATE: ITEM
+#+SESSION_ID: 1534a2eae1903af0
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-18T13-07-01-638Z_1534a2eae1903af0.jsonl]]
+#+CUSTOM_ID: BUG-323-on-visible-freezes-mid-animation-ratio-p
+
+* Initial Message
+
+so how do I use it? i launched it and little seems to actually work or be interactive. use the browser tool and see if there are errors in the code and stuff. please be thorough and make sure all expectred storiees work. work autonomously and complete as you go
+
+* Summary
+
+`@on &.visible { … }` publishes `entry.intersectionRatio` as the timeline's
+progress (`progress_export: ratio`, PLAN-126 `ea592371`), but the observer
+behind it is created with a SINGLE threshold (default 0.5). An
+IntersectionObserver only calls back when a threshold is CROSSED, so after the
+one crossing the ratio is never re-sampled: progress freezes at whatever value
+that callback happened to carry, forever.
+
+The element is left permanently mid-animation — half-faded, half-risen.
+
+* Reproduction (browser-verified)
+
+`scratch/visprobe3/index.st`:
+
+#+begin_src spacetime
+.spacer { height: 1200px; }
+.a { height: 200px; background: #333; @on &.visible { opacity: 0 -> 1; } }
+#+end_src
+
+Scrolling the page and sampling the element's true visible fraction against
+the published progress:
+
+| scroll | true ratio | published progress | opacity |
+|--------+------------+--------------------+---------|
+|  0.125 |          0 |                  0 |       0 |
+|  0.250 |      0.605 |              0.605 |   0.605 |
+|  0.375 |      *1*   |            *0.605* | *0.605* |
+|  0.500 |      *1*   |            *0.605* | *0.605* |
+|  0.625 |      *1*   |            *0.605* | *0.605* |
+|  0.750 |      0.605 |              0.605 |   0.605 |
+
+The element is FULLY on screen for three consecutive samples and never gets
+past 60.5% opacity.
+
+Live instance of the same defect in a shipped demo: `demos/brand-catalog`
+`/guidelines`, the `.enter` chip — stuck at `opacity: 0.8526`,
+`translateY(3.54px)` indefinitely, with `--st-time` frozen at `3037.7`.
+
+* Root cause
+
+`stdlib/primitives/intersection.st` builds `options.threshold = %threshold` —
+one scalar. `intersection` is a SENSOR primitive: its natural exports are
+`$visible`, `$ratio`, `$rect`. PLAN-126 needed a progress export name for the
+nameless-driver fix and wired the one that existed (`ratio`), which silently
+turned a sensor into a timeline source without giving it the sampling a
+timeline needs.
+
+* Two readings, and why it matters which
+
+1. `.visible` is an ENTRANCE — "on becoming visible, rise" (the launch
+   article's words; `tests/repro/gh-6-*` calls it "one-shot"; motion forms
+   carry a `$duration` that only means something for a played timeline). Then
+   ratio is the wrong source entirely: the driver should gate a rAF timeline
+   at the threshold, which is exactly what `load-driver` already implements.
+2. `.visible` is a SCRUB on visible-fraction. Then ratio is right but must be
+   sampled continuously — and note an element TALLER than the viewport can
+   never reach ratio 1, so an entrance written this way can never complete.
+
+The evidence (docs, repro suite, form durations) points at (1). Today's
+registry says (2), implemented as neither.
+
+* Fix landed for the sampling half
+
+The observer now takes a threshold LADDER so ratio is continuous, while every
+author-facing meaning of `threshold:` is preserved: `$visible` is published as
+`ratio >= threshold` (not raw `isIntersecting`, which would flip true at the
+first pixel and change `once:`/boolean semantics). Strictly more fidelity than
+one sample; no page can regress.
+
+The entrance-vs-scrub question above is NOT settled by that change and is the
+remaining work: if (1) wins, `.visible` should register a timeline primitive
+(`load-driver` shape: threshold-gated rAF 0->1) and `intersection` goes back to
+being a pure sensor. That is a registry-data change plus a decision, tracked
+here.
+
+* Related
+
+- BUG-322 — positional driver args bind by index, so `@on &.visible(300ms)`
+  sets `threshold: 300` instead of a duration. Both bugs must be fixed for
+  `@on &.visible(300ms)` to mean anything.
+- Every gate for this surface asserts emitted strings (`__drive_visible_`),
+  which is why a permanently-frozen animation shipped. BUG-252 class.

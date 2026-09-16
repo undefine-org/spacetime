@@ -1,0 +1,94 @@
+#+TITLE: Collection CRUD sync protocol for JSON array mutations
+#+STATE: DONE
+#+SESSION_ID: 14a73642d9cc17d9
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-03-30T14-30-47-693Z_14a71735234c17b2/18-CreateFeat2.jsonl]]
+#+CUSTOM_ID: FEAT-005-collection-crud-sync-protocol-for-json-a
+#+EFFORT: M
+#+PRIORITY: #A
+#+LAYER: server
+
+NOTE [2026-03-30]: Implemented EditJsonArray protocol with ArrayOp (Insert/Delete/Reorder), handler, dispatcher, and 8 unit tests. Client-side helpers added to dev-save.st.
+
+* Scope
+
+** In scope
+- Extend sync protocol with array mutation operations (insert, delete, reorder)
+- Server-side handler for JSON array ops
+- Client-side protocol support in dev-ws.st and dev-save.st
+- DataUpdate broadcast after array mutations
+
+** Out of scope
+- UI affordances for collection CRUD (separate item)
+- @each template re-rendering logic (already works via DataUpdate + ST.setData)
+
+** Boundary rationale
+Separating protocol from UI allows the admin panel form editor and inline @each CRUD to share the same server infrastructure.
+* Tests
+
+** Rust unit tests (~src/sync/handlers.rs~ inline tests)
+- Insert at end of array, insert at index, insert into empty array
+- Delete by index, delete out-of-bounds (error), delete from single-item array
+- Reorder: move item forward, move item backward, reorder single-item array (no-op)
+- Nested arrays: operate on array within object within array
+- Type validation: insert item that doesn't match @type schema (if TypeRegistry available)
+- Path traversal prevention on file field
+- Malformed JSON path handling
+- Concurrent write safety (file locking or read-modify-write atomicity)
+
+** Integration tests (~tests/integration_tests/sync_protocol.rs~ or new file)
+- Round-trip: send EditJsonArray via WebSocket -> verify file contents -> verify DataUpdate broadcast received
+- Multi-client: two clients connected, one sends insert, both receive DataUpdate
+
+** Headless .test.st
+- ~tests/dev-tools/collection-crud-protocol.test.st~: trigger array insert via dev-ws, verify @each re-renders with new item
+* Implementation
+
+** Step 1: Protocol extension (~src/sync/protocol.rs~)
+#+begin_src rust
+// Add to ClientMessage enum:
+EditJsonArray {
+    file: String,
+    path: String,       // JSON path to the array (e.g., "" for root array, "products" for nested)
+    op: ArrayOp,
+    op_id: Option<String>,
+}
+
+enum ArrayOp {
+    Insert { item: Value, index: Option<usize> },  // None = append
+    Delete { index: usize },
+    Reorder { from_index: usize, to_index: usize },
+}
+#+end_src
+
+** Step 2: Handler (~src/sync/handlers.rs~)
+- New ~handle_edit_json_array()~ function
+- Validate file path (reuse existing validate_file_path)
+- Read JSON file, parse, navigate to array via path
+- Validate target is a JSON array (return error if not)
+- Apply operation (insert/delete/reorder)
+- Write file back (pretty-printed JSON)
+- Broadcast DataUpdate to all clients
+- Return Ack with op_id
+
+** Step 3: Message dispatcher
+- Add ~EditJsonArray~ branch to ~handle_message()~ dispatcher (line ~1204 in handlers.rs)
+
+** Step 4: Client-side support
+- Update ~stdlib/__dev__/primitives/dev-ws.st~ to handle new message type
+- Add helper functions to ~stdlib/__dev__/primitives/dev-save.st~: ~saveArrayInsert()~, ~saveArrayDelete()~, ~saveArrayReorder()~
+- These will be called by the admin panel and collection CRUD UI items
+* Edge Cases
+- Empty array: insert works, delete returns error, reorder is no-op
+- Out-of-bounds index: return descriptive Reject message
+- Array within array: path like ~[0].tags~ targets nested array
+- Root-level array: empty path targets the file root
+- File doesn't exist: return Reject (don't auto-create)
+- Non-array target: path points to object/scalar, return Reject
+- Large arrays (1000+ items): ensure no performance cliff
+- Concurrent edits: two clients insert at same index simultaneously
+* Acceptance Criteria
+- ~cargo test --lib~ passes with 8+ new handler tests
+- ~cargo test --test integration_tests~ passes with round-trip test
+- Headless test passes: insert/delete operations round-trip through WebSocket
+- JSON files correctly modified after each operation
+- DataUpdate broadcast triggers @each re-render on all connected clients

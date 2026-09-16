@@ -1,0 +1,52 @@
+#+TITLE: BUG-222 — E0909 false-positive on documentation prose that QUOTES a binding
+#+DATE: 2026-07-24
+
+* BUG-222 E0909 false-positive on prose quoting `<-`
+:PROPERTIES:
+:CUSTOM_ID: BUG-222
+:STATE: DONE
+:END:
+
+** Symptom
+
+A page whose documentation prose merely QUOTES a binding — e.g. a markdown code
+span containing =text <- $count= — failed to compile with:
+
+: error[E0909]: `<-` content injection used outside component body context
+
+The prose is inert text destined for a markdown renderer; nothing is being
+injected. Worse, the SAME prose passed when supplied via =@doc(src: "x.md")=
+and failed via =@doc(content: "…")=, so the two spellings of one feature
+disagreed about what is legal.
+
+Concretely this made it impossible to DOCUMENT the binding syntax on a page
+that uses the md module — e.g. the Spacetime starter pack's own chapter 2,
+whose subject is =text <- $sig=.
+
+** Root cause
+
+=check_injection_outside_template= (=src/pipeline/mod.rs=) scans every non-
+template FormMatch capture for =" <- "=. It already skips macros whose captures
+are opaque text rather than reactive source: =handle= (effect clauses),
+=data= (signal/stream clauses), =test= (harness body, PLAN-077 W4).
+
+=doc= belongs in that same category — its =content= capture is PROSE — but was
+never added.
+
+** Fix
+
+=@doc= joins the skip list, with the reasoning recorded inline next to the
+existing =handle=/=data=/=test= entries.
+
+** Discovery
+
+SIP-002 wave 1. The first literate fixture quoted a binding inside an inert
+=```spacetime= fence (the documented way to show code WITHOUT running it) and
+the page refused to compile. Reproduced independently on a plain =.st= file
+with a hand-written =@doc(content:)=, confirming it is pre-existing and not
+literate-specific.
+
+** Related
+
+- BUG-221 (same pass, same discovery) — =content:= escapes were never decoded.
+- SIP-002 =docs/specs/SIP-002-literate-spacetime-markdown-host.org=.

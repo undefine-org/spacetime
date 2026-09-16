@@ -1,0 +1,225 @@
+#+TITLE: PLAN: W4 implementation — @score, the clip driver, and the launch video
+#+STATE: ITEM
+#+SESSION_ID: 1534a2eae1903af0
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-18T13-07-01-638Z_1534a2eae1903af0.jsonl]]
+#+CUSTOM_ID: PLAN-128-plan-w4-implementation-score-the-clip-dr
+
+* Initial Message
+
+let's have the score conversation. Please start by reminding yourself of what we were trying to do and what our design goals were. this is like a "Previously on Spacetime" feature where we get to understand what our design intentions were and where we stopped our investigations
+
+#+STATE: ITEM
+
+* Why this plan exists
+
+W4 of PLAN-121 (SIP-001). The design is LOCKED — SIP-001 §Proposal/4 "W4
+rulings" (R1–R4) carries the rulings with their rejected alternatives, and
+PLAN-125 (the brief) is DONE. This plan is implementation only. If a question
+feels open while executing, it is answered in the spec; do not re-decide it
+here.
+
+The deliverable that proves the wave: **`demos/score-launch/index.st.md`** —
+a literate page whose prose and score are the same file, where the SAME
+`@form score` body is driven by `&.time` on the page and `&.clip` under
+render. That is SIP-001b §5's falsifiable thesis made executable. The 134-block
+HyperFrames catalog is NOT this wave (W8, its own plan).
+
+* The one idea the implementation must not lose
+
+`@score` adds NO runtime concept. Every driver already `%yield`s exactly one
+0..1 progress signal (`stdlib/primitives/animation/drivers.st`), and a score
+is a pure derivation over that signal:
+
+: &lower-third at 2s for 3s          // inside @score &.time(60s)
+: $lower_third_progress <- clamp01(($film_progress * 60000 - 2000) / 3000)
+
+If an implementation step starts introducing a scheduler object, a clip list
+walked by a tick loop, or a second progress pipeline — stop. That is the
+design being lost, and it is how live and rendered films diverge (001b §8.6).
+
+* Sequence
+
+** t1 — RED gates first, per BUG-253's lesson
+
+Every gate below must be SEEN to fail before anything is implemented, and
+each carries a NEGATIVE (positive-only gates are exactly why five wrong
+drivers passed for months).
+
+- `tests/score_domain_test.rs` — `@score &.scroll(cover) { &x at 2s; }` is
+  E-MEASURE-DOMAIN, and the negative: the same line under `&.time(60s)` is
+  ACCEPTED. A domain check that rejects everything passes a positive-only test.
+- `tests/score_window_map_test.rs` — assert the EMITTED JS: `at 2s for 3s`
+  under a 60s score produces the affine window, not merely "compiles". Assert
+  against observable compile effects, never `inspect`, never check-green.
+- `tests/score-launch.test.st` (`--cdp`, `needs timing`) — the thesis test:
+  one score body, two projections, same ordering.
+
+** t2 — `domain:` column + E-MEASURE-DOMAIN (R1)
+
+Registry data in `stdlib/macros/drivers.st` (header already documents the
+column). The diagnostic reads the column; it does NOT match on driver names.
+Did-you-mean population comes from the domain (`at 2s` under normalized ⇒
+suggest a percentage).
+
+** t3 — `score_block` capture type (P10/P11)
+
+The `%capture_type` sketches already exist in SIP-001 §Proposal/4
+(`placement`, `score_step`, `score_line`, `score_mark`, `score_rest`,
+`score_block`). Gate: placement words parse OUTSIDE the call, and the
+negative — a placement word smuggled INSIDE the parens is an error. That
+negative is what protects P4, and P4 is what makes the studio (W6) possible.
+
+** t3b — `score_rest`: `gap(...)` and `hold(until:)` (DEFERRED, not forgotten)
+
+SIP-001 §Proposal/4 sketches `score_rest` as part of the score body:
+
+: %capture_type score_rest { ( "gap(" $d:measure ")" ) | ( "hold(until:" $cond:expr ")" ) }
+
+t2 implemented `score_line` and `score_mark` but NOT `score_rest` — caught by
+the t2 review swarm. Deliberately deferred rather than dropped, because the two
+halves have different weights:
+
+- `gap(2s)` is sugar. A gap is an absence, and an absence is already
+  expressible by where the next clip starts (`at`). It earns its place only if
+  a relative-sequence score (one with no absolute `at` anywhere) is common
+  enough that computing the offsets by hand is the pain. Decide with a worked
+  example, not in the abstract.
+- `hold(until: $cond)` is NOT sugar and must not be conflated with `rate: 0`.
+  `rate: 0` freezes ONE CLIP while the timeline runs; `hold` stops the
+  PLAYHEAD. The spec calls conflating them the likely bug, and W4.4's gate
+  already demands the distinction be asserted. `hold` is also the interactive
+  gate that makes a slide deck or a scrollytelling checkpoint work, so it is
+  load-bearing for the `.steps` pole.
+
+RESOLVED 2026-08-02. `gap` LANDED; `hold(until:)` is deliberately NOT in W4,
+and the reason is a design finding rather than a scheduling choice.
+
+`hold` does not belong to the window map at all. R3's IR maps a parent's
+progress to a child's — it answers "given the playhead is HERE, where is this
+clip?". `hold` changes where the playhead GOES, which is a property of the
+TRANSPORT, i.e. of the driver. The spec already says exactly this (§5: "freeze
+= one clip stops while the timeline runs; hold = the playhead stops"), and the
+distinction survives contact with the implementation: `rate 0` is a window map
+whose integral is flat, while `hold` is a driver that stops advancing.
+
+So implementing `hold` as score-body vocabulary would have been the wrong
+shape — it would have put a transport concern in the arrangement layer, and
+that IS the pressure I flagged. The right home is a driver-level concern
+(`&.time(interrupt: hold)` already has the vocabulary from B8, and `.steps`
+needs the same mechanism to wait for an advance signal). It lands with the
+`.steps` driver, where there is a real consumer to design against — one worked
+example beats a speculative surface.
+
+R3 is UNPRESSURED by this: the window map stays a pure function of its input,
+and a held playhead simply stops producing new inputs. Nothing about the
+purity claim bends.
+
+** t4 — lowering: the window map (R3)
+
+A score line lowers to a derived signal per clip. `during A to B` resolves
+windows from named spans; `mark &name` is a named point other placements
+reference. Nested scores compose because a window map of a window map is a
+window map.
+
+** t5 — promote the clip driver
+
+`&.clip` is `primitive: planned:clip-driver` ⇒ E0948 today. The thesis test
+cannot run without it. `domain: inherited` — the clip reads the window its
+parent assigned, which is exactly the R3 IR seen from the inside. NB this is
+the honest-dead pattern working as intended: the word was reserved and loud,
+never silently wrong.
+
+** t6 — `rate:` as the map's derivative (P13, W4.4)
+
+`rate: 1 -> 2` ramp · `rate: 0` freeze · `rate: -1` reverse. Gate: `rate: 0`
+(one clip holds, timeline runs) vs `hold(until:)` (playhead stops) asserted as
+DIFFERENT — conflating them is the likely bug.
+
+** t7 — the launch video
+
+`demos/score-launch/index.st.md`. Literate, because the prose and the score
+belong together. No custom JS (AGENTS.md); if something is genuinely missing
+from Spacetime, stop and design it properly rather than reaching for a script.
+
+** t8 — close-out
+
+Full battery + `--cdp`. Record what the thesis test actually proved, and
+honestly, what it did not.
+
+* Acceptance
+
+- The four article score examples (`.story` `.deck` `.film` `.mv`) compile.
+  Three of four need drivers that exist; `.deck`/`.mv` need `steps`/`playback`
+  — if they stay `planned:`, say so explicitly rather than quietly dropping
+  them from the gate.
+- The article's `@score` fences currently carry a BLANK fence flag, so they
+  have never compiled. Promote them to ` ```st ` when the grammar lands —
+  otherwise the launch article documents a feature nothing verifies.
+- No new Rust match arm per driver or per placement word. New behavior is a
+  registry row or a capture type.
+- Net: `@score` must DELETE the clip-degrade special case (SIP-001 §What it
+  deletes) rather than adding beside it.
+
+* Watch out
+
+- `rm -f stdlib/.cache/registry.bin` after ANY stdlib edit — a stale cache
+  silently serves the old body.
+- BUG-229 is FIXED (verified 2026-07-31 by reproduction attempt; the gate
+  `tests/bug_229_capture_type_failure_gate_test.rs` is 5/5 green). A malformed
+  score body WILL be rejected. But note the trap it documents: a `%form` body
+  written as a GROUP — `"{" ( $lines:score_line )+ "}"` — compiles against
+  STDLIB capture types only, so a same-file `%capture_type` is invisible and
+  the directive never matches AT ALL. Write `{ $lines:score_line+ }` (a direct
+  repeated body capture) so it resolves through the augmented registry. The
+  score grammar is exactly the shape that hits this.
+- `check` on a directory with no PAGE compiles nothing and still prints
+  "✓ All 1 file(s) passed". Any A/B fixture needs a control that MOVES the
+  bundle before its result means anything.
+- P5 debt: `stdlib/primitives/effect.st` still exists though W3.3 promised its
+  deletion (it was collapsed onto `ST.watchChanges`, not removed).
+
+* Status 2026-08-02 — the arrangement layer lands; motion does not
+
+t1, t2, t3b, t4, t5, t6, t7 all executed. `@score` parses, checks its domains,
+lowers to window maps, splices fragments, promotes `.clip`, and carries `rate`
+as the map's derivative. 26 gates green across four suites, lib 3021,
+integration 202.
+
+AND THE WAVE IS NOT DONE, because a score currently assigns windows that
+nothing can consume (BUG-258, #A). Every clip signal appears exactly three
+times in the emitted site code — publish, prime, watch — with no reader. The
+arrangement layer is real; the motion is not.
+
+** What the wave actually delivered
+
+- R1 the driver owns the domain (registry column, one check, E0951)
+- R2 grouping is a fragment — and fragments now genuinely EXPAND (they did not
+  until t7 exposed it)
+- R3 the window map, pure, with `rate` as its derivative; nesting is a map over
+  a map, so the clip join needs no scheduler
+- R4 untouched, as decided — projections stay
+
+** What remains before W4 can be called done
+
+1. BUG-258: a consumer surface for a clip's progress, plus the `--cdp`
+   behavioral gate the wave never had. The fidelity ladder (`needs timing`)
+   exists for exactly this.
+2. The percentage-in-fragment inconsistency (also BUG-258): decide whether a
+   fragment's measures are domain-independent, then make both paths agree.
+3. The remaining review findings — rate values at extreme inputs (`rate -2`,
+   ramps crossing zero), E0951 span/dedup with several bad placements,
+   `.playback` producing a driverless score because its primitive is still
+   `planned:`.
+4. SIP-001 §"What it deletes" names a clip-degrade special case that this wave
+   did NOT delete. AGENTS.md requires a new mechanism to delete one — the debt
+   is real and should be paid or the claim withdrawn.
+
+** The lesson worth carrying to W5
+
+Every defect this wave was a SILENT ACCEPTANCE, and the gates that caught them
+were the ones asserting a NEGATIVE or evaluating a VALUE. The gates that missed
+them all asserted that something was produced. `rate 2` behaving identically to
+`rate 1` was invisible to a test comparing compiled output and obvious the
+moment the map was evaluated over sample points. A wave whose deliverable is
+behavior needs at least one gate that observes behavior — this one shipped
+without it, and BUG-258 is the bill.

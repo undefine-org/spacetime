@@ -1,0 +1,90 @@
+#+TITLE: Sigil-free match — pursue only a pure metasystem route
+#+STATE: TODO
+#+CUSTOM_ID: FUP-130-non-sigil-forms
+#+PRIORITY: C
+#+LAYER: metasystem
+#+EFFORT: research
+#+DEPENDS_ON: PLAN-111
+
+* Scope
+
+This follow-up is **ONLY** about whether `@match`/`@view` can someday lose the
+`@` without adding Rust statement-routing or keyword special-cases. `let`,
+`if`, general non-sigil forms, and operator-headed forms are explicitly OUT OF
+SCOPE. They require separate future decisions.
+
+Current author syntax remains authoritative:
+#+begin_src spacetime
+@match $kind {
+  "list" => &list();
+  _      => &empty();
+}
+#+end_src
+
+PLAN-111 deliberately keeps this surface. It makes `=>` first-class, defines
+the canonical render `arm` capture type, and removes the `@match`-specific
+value-position parser hack — without growing the CST statement grammar.
+
+* Observed ceiling (empirical, 2026-07-22)
+
+The tempting data-only declaration is valid *as a capture type*:
+#+begin_src spacetime
+%capture_type match_block {
+  "match" $subject:binding "{" ( $arms:arm )* "}"
+}
+#+end_src
+
+But a migration which mechanically rewrites `@match` to bare `match` produces a
+statement the current CST rejects. Prototype:
+#+begin_src
+$ cat /tmp/xxxxx/bare.st
+match $kind {
+  "list" => &listView();
+}
+$ cargo run -q -- inspect /tmp/xxxxx/bare.st --layer parse
+✗ Failed to parse /tmp/xxxxx/bare.st: 3 parse errors:
+  expected scope block, directive, or declaration
+#+end_src
+
+Why: statement routing is sigil-led. `@` creates a DIRECTIVE node, which is
+matchable; bare `match` is an IDENT at statement position and is rejected before
+`%capture_type` matching runs. `%macro`/`%capture_type` data cannot repair a
+CST grouping decision made earlier in the pipeline.
+
+`localStorage(...)` is NOT a counterexample: it is a registered bare-ident macro
+used inside a `$binding : value` expression, not a top-level statement. It never
+passes through the statement-position gate that rejects bare `match`.
+
+* Explicit decision — do NOT take the Rust shortcut
+
+Rejected approaches:
+- adding `match`/`view` as hardcoded CST keywords;
+- special-casing bare `match` in `body_item` / root parsing;
+- widening `%form` parsing just for these names;
+- a migration that emits syntax the CST cannot parse.
+
+Those are Rust routing exceptions, reduce the metasystem's coherence, and buy
+only cosmetic sigil removal. `@` is currently load-bearing routing syntax.
+
+* Reconsideration condition
+
+Reopen ONLY if a **pure**, registry/stdlib-defined mechanism can make a bare
+form reach matching without a named Rust branch and without a new parser
+subsystem. The proof obligation is an end-to-end prototype:
+
+1. Define the surface solely with `%macro` / `%capture_type` / existing migration data.
+2. Migrate `@match` → `match` without hand-authored source edits.
+3. `cargo run -- inspect <fixture> --layer parse` produces a matchable construct
+   with zero parse errors.
+4. Existing selector/property parsing remains unchanged.
+
+Until then, retain `@match`/`@view`. This is a defer-by-evidence, not an
+implementation plan.
+
+* Relationship to PLAN-111 / FUP-131
+
+- PLAN-111 is complete first: its `FAT_ARROW` token and canonical `arm` remain
+  useful regardless of whether heads ever lose their sigil.
+- FUP-131 is separate: top-level `$lhs => rhs;` needs CST grouping even though
+  `$`-led forms exist. It remains deferred because that is ergonomics, not a new
+  capability.

@@ -1,0 +1,148 @@
+#+TITLE: `@on &.visible(once: true)` is accepted and ignored — an unknown driver param must be refused
+#+STATE: DONE
+#+SESSION_ID: 1534a2eae1903af0
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-18T13-07-01-638Z_1534a2eae1903af0.jsonl]]
+#+CUSTOM_ID: BUG-331-on-visibleonce-true-is-accepted-and-igno
+#+COMPLETION_HASH: ff85013041dd8f7c
+
+* Initial Message
+
+so how do I use it? i launched it and little seems to actually work or be interactive. use the browser tool and see if there are errors in the code and stuff. please be thorough and make sure all expectred storiees work. work autonomously and complete as you go
+
+* Summary
+
+`@on &.visible(threshold: 0, once: true) { … }` compiles clean. `.visible` now
+binds `load-driver`, which has no `once` parameter, so the argument reaches
+nothing. `check` reports ✓ and the build succeeds.
+
+Today the consequence is benign — `load-driver` disconnects its observer after
+the first intersection, so it is one-shot ANYWAY and `once: true` is a
+redundant truth rather than a lost intent. But the RULE is wrong: an argument
+naming a parameter the target primitive does not have should be refused, the
+way `E0960` refuses an unknown argument to a FORM.
+
+Live example: `tests/unit/macros/on-load.test.st` line 46.
+
+* Why it is worth fixing
+
+This is the silent-acceptance class the project bans (BUG-229/BUG-243). A
+driver's parameter list is registry DATA and the primitive's signature is
+introspectable (`registry.get_primitive(name).params` — `typed_primitive_arg`
+already reads it), so the check is a lookup, not a new subsystem.
+
+The same lookup would have caught BUG-322 from the other side: an unnamed arg
+landing in a param the author never meant.
+
+* Expected
+
+`E09xx: `.visible` has no parameter `once` — declared parameters: duration,
+delay, threshold, immediate`, with the driver's real parameter list in the
+hint.
+
+* Care needed
+
+Row constants (`primitive_args: "trigger:mouseenter,…"`) and renames
+(`param_map`) mean the author-facing name and the primitive-facing name differ.
+The check must run AFTER `param_map` resolution, against the primitive's
+signature, or it will reject legal spellings (`.text-change(stagger: …)` →
+`charStagger`).
+
+* Acceptance
+
+1. RED-first: `@on &.visible(once: true)` is refused, naming the real params.
+2. Every legal spelling in `tests/` and `stdlib/` still compiles — in
+   particular the `param_map` drivers (`.text-change`) and the event drivers
+   that carry row constants.
+
+NOTE [2026-08-08]: RE-VERIFIED at HEAD (2026-08-07) by emit diff.
+
+`.a { @on &.visible(once: true) { opacity: 0 -> 1; } }` vs the same source
+without `(once: true)` produce BYTE-IDENTICAL dist/spacetime.js. The parameter is
+accepted and silently ignored.
+
+NB a raw `grep -c once dist/spacetime.js` returns 16 and `unobserve|disconnect`
+returns 4 — all runtime-library text, NOT evidence the param is honored. The
+token-count read is what makes this bug look implemented when it is not; only
+the A/B diff settles it (AUD-011).
+
+Same shape as BUG-334: an unknown driver param must be REFUSED, not absorbed.
+These two share one root — driver params are not validated against the driver's
+declared surface — and should be fixed together.
+
+NOTE [2026-08-08]: CORRECTION (2026-08-07) — this is NOT a design question. `once` is already
+implemented and working; the driver simply does not route to it.
+
+Evidence:
+- stdlib/primitives/intersection.st:19 declares `once: bool = false`, documented
+  "Disconnect after first intersection", with a real `observer.disconnect()` at
+  :73 guarded by `if (%once && __stVisible)`.
+- @reveal already exposes it — stdlib/macros/reveal.st:39, `once: $once:bool = true`.
+- Emit diff PROVES it drives real code: `@reveal(once: true)` vs `once: false`
+  differ at `if (revealed && true) return;` and `if (true && observer) { ... }`.
+  (Careful: the raw diff also shows a per-instance hash change; normalize
+  `_st_init_[0-9a-f]*` before reading it or the hash noise masks the real delta.)
+
+∴ identical in kind to BUG-334: a working implementation the driver never reaches.
+Fix = add `once` to the visible driver's declared params. No new runtime code.
+
+Consistency is the argument: an author who learns `once:` on @reveal and tries it
+on `@on &.visible` currently gets silence for a CORRECT guess — the exact failure
+the learnable-by-pattern rule exists to prevent.
+
+Sub-question: the two existing defaults disagree — intersection.st has
+`once = false`, @reveal overrides to `true`. For a driver the composable default
+(false) is the safer inherit; @reveal is opinionated because it is a finished
+behavior rather than a building block.
+
+I previously recorded that there was NO implementation. That was wrong, from a
+grep over src/ and the driver registry that never looked in stdlib/primitives/ —
+the AUD-011 mistake repeated. Gate remains --cdp: in, out, in again, fires
+exactly once (headless has no scroll model, BUG-305).
+
+NOTE [2026-08-08]: RESOLVED as REFUSE — and my "route it" correction was ALSO wrong. Third reading
+of this bug, and the only one grounded in what `visible` actually binds.
+
+** What the driver actually is
+
+stdlib/macros/drivers.st:94 — `visible` binds `load-driver`, NOT `intersection`.
+Changed deliberately (BUG-323/BUG-315): intersection published the ratio as
+progress, so a partly-visible element sat permanently mid-animation and
+re-entering the viewport reverted a completed entrance.
+
+`load-driver` (stdlib/primitives/animation/drivers.st:1857) declares exactly:
+name, duration, delay, threshold, immediate. No `once` — and it does not need
+one, because it is one-shot BY CONSTRUCTION, twice over:
+
+: if (started) return;        // :1878 — play() can never run a second time
+: started = true;
+
+: if (entry.isIntersecting) { // :1923
+:   play();
+:   observer.disconnect();    // the observer is gone after the first fire
+: }
+
+So `@on &.visible` already never repeats. `once: true` was asking for behavior
+the driver already guarantees unconditionally.
+
+** Resolution
+
+The refusal from BUG-352 is the whole fix, and its enumeration is now accurate:
+
+: error[E0960]: unknown argument `once` for driver `visible`
+:   — declared parameters: delay, duration, immediate, name, threshold
+
+An author who wanted one-shot gets told `once` is not a parameter, and the
+listed params are the real surface. Nothing to implement.
+
+** My two errors, recorded because the pattern repeated
+
+1. First reading: "no implementation anywhere" — from a grep over src/ and the
+   driver registry that never looked in stdlib/primitives/. Wrong; `once` exists
+   on `intersection` and `@reveal`.
+2. Second reading: "route it to the visible driver, one data line" — from
+   finding `once` on `intersection` and ASSUMING `visible` still binds it. It
+   does not, and has not since BUG-323.
+
+Both errors share one shape: concluding what a driver does from a name match
+instead of reading which primitive the registry entry actually names. The
+registry entry is the only source of truth for that, and it is four lines long.

@@ -1,0 +1,76 @@
+#+TITLE: wait_until inside a 3D-scene fixture emits await in a non-async function (E0952, dead bundle)
+#+STATE: ITEM
+#+SESSION_ID: 154d0baaa942d918
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-08-06T12-08-13-733Z_154d0baaa942d918.jsonl]]
+#+CUSTOM_ID: BUG-324-wait-until-inside-a-3d-scene-fixture-emi
+
+* Initial Message
+
+exlpain #30, and for #14 and #11, does the new @on's text-change facet solve this?
+
+#+STATE: ITEM
+#+PRIORITY: A
+
+* Symptom
+
+#+begin_src spacetime
+@import "stdlib/testing/test"
+@import "stdlib/3d"
+@test "3d fixture + wait_until" needs paint {
+  @fixture { <canvas class="cq" data-q></canvas>
+    [data-q] { @stage(camZ: 5) { @object(shape: "torusknot", size: 1.2) } } }
+  @wait_until (document.querySelector('canvas.cq')._stObject) timeout: 4000ms
+  @assert (!!document.querySelector('canvas.cq')._stObject)
+}
+#+end_src
+
+#+begin_example
+error[E0952]: the compiler emitted JavaScript that does not parse:
+             JS error at 20405:7: AwaitInFunction
+#+end_example
+
+E0952 is the compiler's own self-check: it means the EMITTED bundle does not parse, so the
+whole page is dead. This is a compiler bug, not a source error — the diagnostic says so.
+
+* Bisected (each variant verified individually on the built binary)
+
+| variant                                              | result |
+|------------------------------------------------------+--------|
+| `@wait_until` in a plain `@test`                      | passes |
+| `@wait_until` in a `needs paint` test                 | passes |
+| `@fixture` (plain markup) + `@wait_until`             | passes |
+| `@import "stdlib/3d"` + `@wait_until`, no fixture     | passes |
+| `@import "stdlib/3d"` + 3D-scene `@fixture`, no wait  | passes |
+| 3D-scene `@fixture` + `@wait_until`                   | **E0952** |
+
+So neither the import, the fixture, the paint rung, nor `@wait_until` is independently at
+fault. The break needs a fixture whose body mounts a 3D scene AND an awaiting directive in
+the same test.
+
+Hypothesis (NOT yet verified — stated as a guess): a 3D fixture's mount path emits a
+non-async wrapper function (scene setup / rAF callback), and `@wait_until`'s `await` is
+spliced into that wrapper's scope rather than the test's own async body.
+
+* Why it matters beyond the one shape
+
+`@wait_until` is the ONLY way to wait for an async scene handle to exist. `_stObject` is
+assigned after three.js finishes loading, so a paint-rung 3D assertion without a wait is
+inherently racy. This bug therefore blocks the entire class of "assert the rendered scene
+graph" gates — exactly the gates GH-14/GH-12 need to prove that a shape argument becomes
+the requested geometry.
+
+Discovered while making the GH-14 `.cdp` gate real (PLAN-137 follow-up). Worked around
+there by asserting without a wait, which is weaker than it should be.
+
+* Fix direction
+
+Find where the 3D fixture mount wrapper is emitted and make it async (or hoist the awaited
+directive into the test's async body). Gate: the repro above must `check` clean AND the
+assertion must pass under `--cdp`.
+
+* Note on discovery
+
+This was invisible until `--cdp` actually ran. The gate had been recorded as "unrunnable —
+no Chromium", which was WRONG: Chrome is installed at /usr/bin/google-chrome-stable and the
+runner already looks for it; the binary simply had not been built with `--features cdp`.
+Every "cannot verify in this environment" claim deserves the same check.

@@ -1,0 +1,29 @@
+#+TITLE: SVG elements render in HTML namespace (never paint) in reactive builder + @each rows
+#+STATE: DONE
+#+SESSION_ID: 14fc108ed3772fa8
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-04T14-32-37-965Z_14fc108ed3772fa8.jsonl]]
+#+CUSTOM_ID: BUG-082-svg-elements-render-in-html-namespace-ne
+#+COMPLETION_HASH: ecfaacfffcf09e6b
+
+* Initial Message
+
+ok dude I want you to focus on FEAT-092. Give me your boldest vision for it, and explain what's separating us from it. Do a deep review of what's available and how to do it
+
+* Symptom
+Declarative SVG markup (<svg viewBox><circle cx></circle></svg>) parses and builds cleanly (verified by probe), but the elements NEVER PAINT in the browser: they are created in the HTML namespace, so <circle>/<path>/<text> become HTMLUnknownElement.
+
+* Root causes (two render paths, both wrong)
+1. Reactive builder: emit_element (src/emit/html_reactive.rs:385) emits `document.createElement(tag)` unconditionally. SVG-tagged subtrees need `document.createElementNS('http://www.w3.org/2000/svg', tag)`; a <foreignObject> child reverts to HTML namespace.
+2. @each rows: makeRow (stdlib/primitives/data/each-inline.st:209-211) does `tpl.innerHTML = rowHtml; tpl.content.firstElementChild`. Parsing `<circle>` OUTSIDE an <svg> ancestor yields HTML-namespace unknown elements. When the each container is itself in the SVG namespace, rows must be parsed in SVG context (wrap in <svg>…</svg> and unwrap) so the parser assigns the right namespace.
+
+* Why it matters
+FEAT-092's relation graph is designed as DECLARATIVE SVG (@each over layout-derived nodes/edges inside <svg>) — the first data-driven vector rendering in the platform; unlocks charts/diagrams for every project. Per AGENTS.md: legitimately missing platform feature → implement properly in the platform (emitter + stdlib primitive), NOT a JS helper bypass in the admin.
+
+* Acceptance
+- [ ] RED V8 test: builder-emitted <svg><circle> has namespaceURI 'http://www.w3.org/2000/svg' (currently HTML ns)
+- [ ] RED V8 test: each-materialized row <circle> in an SVG container has SVG namespaceURI
+- [ ] foreignObject children revert to HTML namespace (xhtml ns)
+- [ ] Static HTML path unaffected (server-side string emit — browser parser namespaces correctly there)
+- [ ] Gates: lib/integration/v8 green, stdlib clean, browser-verified painted SVG
+
+NOTE [2026-06-10]: FIXED, all three render paths namespace-aware. (1) Reactive builder: Builder.svg_depth context threaded through emit_element/emit_element_root_scoped — inside <svg> (or for <svg> itself) emits createElementNS(SVG ns); <foreignObject> children revert to HTML; raw-HTML holes in SVG context wrap-parse in <svg> and lift children into a fragment. (2) Runtime rows: new shared ST.parseHtml(html, containerEl) in st.js — SVG-namespaced container → wrap-parse in <svg>…</svg> + unwrap (template.innerHTML outside <svg> yields HTMLUnknownElement); HTML containers unchanged; each-inline makeRow and template.st legacy fallback both route through it. RED→GREEN: svg_subtree_uses_createelementns (lib, emit assertions incl. foreignObject revert + sibling div) + bug082_parse_html_namespaces_svg_rows (V8, namespaceURI assertions both containers). Browser-verified: served fixture with .chart { @each($nodes) { <circle cx=$n.x> } } → 3 circles, namespaceURI svg, all painted (getBoundingClientRect nonzero), CSS fill applied. Gates: lib 2180/0, integration 169/0, v8 341/12 (12 = pre-existing BUG-039 baseline, zero new). NB: snapshot regen audited — only the ST.parseHtml addition. Unlocks FEAT-092 declarative SVG relation graph + data-viz for all projects.

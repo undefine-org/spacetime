@@ -1,0 +1,48 @@
+#+TITLE: inline object-literal data [{k:v}] breaks directive value parser
+#+STATE: DONE
+#+SESSION_ID: 14f48ced503111a7
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-05-29T18-28-09-664Z_14f48ced503111a7.jsonl]]
+#+CUSTOM_ID: BUG-042-inline-object-literal-data-kv-breaks-dir
+#+COMPLETION_HASH: 5316179eb81c1dee
+
+* Initial Message
+
+ok start with FEAT-046 Blocker 1 and then continue onto the W3->W6 cluster. Use the native testing tool whenever you can. I'm going for a date, so trust yourself and consider any decision approved. Be rigourous and choose the more structurally sound and long-term option, even if it means adding waves/leaves and surfacing/filing/fixing or implementing FEAT/BUG files. Write a summary in between each sub-wave and whatnot.
+
+* Symptom
+An `@data inline` (or `@data fold`) whose value is an array of OBJECT LITERALS fails to
+parse:
+  @data inline $todos : [{"title": "Alpha"}, {"title": "Beta"}];
+  -> × expected scope block, directive, or declaration (multiple, at each `{`)
+
+Scalar arrays parse fine: `@data inline $items : ["Alpha", "Beta"];` ✓
+
+* Root cause
+The directive grammar (CST parser parse_directive / inline value handling) treats `{` as
+the start of a directive BODY block, not as part of an inline expression value. An object
+literal `{ "title": ... }` inside the `: value` position is misread as the directive's
+body, breaking the parse. Same family as the leading-paren ambiguity hit in W3 fold
+(`($src, acc, item)` split into ARG_LIST) and the greedy-value boundary (W3 required `;`).
+
+* Impact
+Medium. Realistic @each-over-objects demos (todo lists, product cards) want inline object
+arrays. Workarounds today: (a) @data fetch from a JSON file/URL, (b) scalar arrays +
+derive, (c) runtime-populated signals. The HTML-bodied @each (W4) renders object fields
+correctly via `$.field` once the data arrives through any of those channels — only the
+INLINE object-literal authoring path is blocked.
+
+* Fix direction
+The inline value after `:` in a value-bearing directive should parse as a full expression
+(balanced over `{}`/`[]`/`()` + strings) up to the `;` terminator, NOT stop at the first
+`{`. The W3 `balanced(';')` terminal already does depth-aware brace/bracket/paren tracking
+via source byte-scan (src/syntax/events/extractors/custom.rs) — the @data value capture
+could adopt it (the kind macros currently use `$value:expr`). Care: must not regress the
+body-block forms (legacy `@data $n:type { … }`). Likely: only treat `{` as a body when the
+value position is NOT already inside a balanced expression.
+
+* Acceptance
+- `@data inline $todos : [{"title":"A"},{"title":"B"}];` parses + compiles.
+- @each over it renders object fields (`<li>\`$t.title\`</li>`), live-verified.
+- Scalar arrays + body-block @data forms unaffected. Full gate green.
+
+NOTE [2026-06-02]: DONE (commit 0ad56a53). Both parsers feeding the value capture had the twin defect: CST parse_inline_arg bumped `[` alone then exited at the inner `{` (object misread as body); events inline_args inner loop stopped at L_BRACE leaving value=Expr("["). Fix: consume_balanced_brackets (depth-aware over []{}()​; STRING is one token so quotes inert) in BOTH parsers, guarded by an opener lookahead so attribute selectors ([data-x], peek=IDENT) keep per-token shape. Extended (79de13d3) to bare object literals via starts_object_literal (`{ STRING COLON`) + peek_non_trivia. Enshrined data_kind_dispatch.rs::data_inline_object_literal_array_captures_whole_value + attribute_selector_not_consumed_as_array + data_inline_bare_object_literal_value + fn_body_starting_with_string_is_not_object_value. Unblocked FEAT-047 (cart-demo product catalog).

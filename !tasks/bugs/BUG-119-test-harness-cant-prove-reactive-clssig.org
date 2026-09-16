@@ -1,0 +1,107 @@
+#+TITLE: Test harness can't prove reactive .cls:$sig — @given drops nested scopes + binding JS emitted after @when
+#+STATE: ITEM
+#+SESSION_ID: 150f475256d7192f
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-19T12-43-02-363Z_150f475256d7192f.jsonl]]
+#+CUSTOM_ID: BUG-119-test-harness-cant-prove-reactive-clssig
+
+* Initial Message
+
+Verification: lib 2363 passed/0 failed · integration 172 · FUP-069 acceptance green · headless 456→513
+ passed.
+
+ Filed BUG-112 for the residual @try $error lowering bug ($error signal-lowers to ST.get(el,"error") =
+ __e) — out of FUP-072 scope, accounts for the remaining state/binding @try failures.
+
+ Notes (honesty):
+ - 9 v8_runtime failures (@media→JS, getSelection/DOMParser/IntersectionObserver, async initElement) are
+ pre-existing — st.js is byte-identical to HEAD, and @media("print") (no colon, real selector) fails
+ identically, ruling out all my changes.
+ - 4 non-test snapshots + part of test_and_fixture drift from the other session's concurrent
+ public/runtime/templates.js edit (FEAT-124/126 bundle code), embedded in compiled-JS snapshots — not my
+ logic. Left the test_and_fixture snapshot unstaged since it's entangled with their unstaged bundle.
+
+
+
+please review this owrk and what it was trying to achieve, and tell me what it did right and what the next steps are
+
+* Symptom
+A `.test.st` that drives a reactive class toggle fails even though the feature
+WORKS in production:
+```
+@given .btn { @on click { $bt <- !$bt; } }
+@given .target { .is-active: $bt; }
+@when .btn click
+@then ... .target has class is-active   // FAILS (class never applied)
+```
+This is the canonical $-signal idiom (the migration target of PLAN-047), so the
+harness gap blocks proving every state-machine→$-signal migration.
+
+* Root cause — THREE distinct test-fidelity artifacts (NOT a production bug)
+Verified by subagent diagnosis (read agent transcript; probes cited inline).
+
+** (1) @given drops nested reactive CSS scopes
+stdlib/testing/test.st:312-340 — the `given-directives` macro emits `%$body.js`.
+A nested `.is-active: $bt;` is a CSS SCOPE, not a directive macro; its
+reactive-binding JS is produced by `emit_scope_css_inner` over `ast.scopes`
+ONLY. Inside a macro body block that JS is never generated → no
+`registerSelectorInit` / `local:<name>:updated` listener exists at all.
+Probe: inspect of a `@given .target { .is-active: $bt }` page shows
+`ST.runMutations` for .btn but ZERO `is-active` / `__stBind` / `local:bt:updated`.
+
+** (2) File-scope reactive-binding JS is appended AFTER test-directive JS
+src/compiler.rs:721-725 — `compile()` does
+`format!("{}
+{}", js, scope_binding_js)`, appending scope bindings after the
+pipeline JS. In a test body the `@when` click therefore runs BEFORE the
+`.target { ... }` `local:<name>:updated` listener is attached → the mutation's
+event fires into the void → `render()` never invoked → class never toggled.
+Probe (/tmp/rcbug_seeded_render.test.st, properly seeded proxy): @when click at
+emit line ~5931, the binding `addEventListener("local:bt:updated", ...)` at
+~6068; render-count probe = `{renderCount:0, afterResolve:true, class:false}`
+— i.e. ST.resolve returns true, event fired, but listener attached too late.
+
+** (3) Undeclared auto-init signal mutation silently throws
+public/runtime/st.js:589-597 + 670-680 — `transformExpr('!$bt')` →
+`!SpacetimeLocal.bt`. If `SpacetimeLocal` is undefined (undeclared signal),
+`eval(jsExpr)` throws ReferenceError; inner catch returns undefined; outer
+`if (value !== undefined)` skips ALL write branches → no write, no event.
+Probe: `{typeofBare:"undefined", evalError:"SpacetimeLocal is not defined"}`.
+NB this DOES affect production for genuinely-undeclared signals — see below.
+
+* Production impact (important nuance)
+- Declared signals (@data / localStorage / local-state — how jallete & jeton
+  declare $cart etc.): NOT affected. All init/handler/binding JS runs
+  synchronously on page load before any user interaction, so ordering (2) is a
+  non-issue and the proxy exists so (3) is a non-issue. Reactive .cls:$sig
+  works in production for declared signals.
+- Genuinely-undeclared auto-init signals (`$x <- !$x` with no @data/local decl):
+  AFFECTED in production too via (3) — the RHS eval throws and the mutation is
+  a silent no-op. Either the runtime should ensure a local proxy before eval,
+  or the compiler should require/auto-declare the signal.
+
+* Recommended fix (from diagnosis)
+1. (2) Test emission ordering: in src/compiler.rs:721-725, when compiling a
+   TEST body, place `scope_binding_js` BEFORE the pipeline `js` (or hoist scope
+   init to the top of each @test body), so `local:<name>:updated` listeners
+   exist before @when clicks. (Production already loads synchronously; this is
+   a test-path ordering fix.)
+2. (1) @given nested scopes: extend the @given/block compiler
+   (stdlib/testing/test.st:312-340 + block path) to emit reactive scope-binding
+   JS for scopes nested inside @given, not only top-level ast.scopes.
+3. (3) Robust mutation eval: public/runtime/st.js:589-597 — make transformExpr
+   safe when SpacetimeLocal is undefined (fall back to window._localState[name]
+   or run ST._ensureLocalProxy() before eval) so undeclared writes still fire
+   the update event. This is the one with real production reach.
+
+* Relationship to PLAN-047
+This is the W0 BLOCKER. Items (1)+(2) are pure test-fidelity — without them the
+per-project migration probes (@when click → @then has class) cannot turn green
+even though the migrated pages work. Item (3) is a real (if narrow) production
+correctness fix worth doing regardless. Fix (1)+(2) before W2 migrations;
+fix (3) opportunistically (or require declared signals in the migrated pages,
+which jallete/jeton already do).
+
+* Provenance
+Root-caused 2026-06-19 by delegated diagnosis during the headless 91-failure
+triage. Originally suspected a production reactive-class bug; diagnosis proved
+it is (mostly) a harness-fidelity gap. Companion: PLAN-047, BUG-117.

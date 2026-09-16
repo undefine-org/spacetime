@@ -1,0 +1,34 @@
+#+TITLE: PLAN-122 scalar flattening silently killed score measure lowering — all % windows collapsed
+#+STATE: DONE
+#+SESSION_ID: 1534a2eae1903af0
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-18T13-07-01-638Z_1534a2eae1903af0.jsonl]]
+#+CUSTOM_ID: BUG-312-plan-122-scalar-flattening-silently-kill
+
+* Initial Message
+
+continue
+
+* Diagnosis (found PLAN-135 W6, 2026-08-05)
+
+PLAN-122 W1.2 flattened every CSS scalar capture to its SOURCE TEXT (`ScalarSourceTextExtractor`, `src/syntax/events/extractors/custom.rs:256`) — "the serialized repr of a scalar is its CSS string, always". `src/pipeline/score.rs` consumers still expected the OLD typed shapes:
+
+- `measure_value_kind` had arms for `CapturedValue::Time` and `CapturedValue::Length{unit:"%"}` only — a `for 50%` arriving as `String("50%")` matched nothing, so `step.span` stayed `None`.
+- `resolve_windows` then read span=0 ("to the end of the score"): the FIRST entry emitted `_swOffset=0, _swSpan=0` (full-range identity) and every later entry `_swOffset=1, _swSpan=0` (extent ≤ 0 → `return 0`, dead).
+- `placement_measures`'s `collect` walker had the same blind spot — the E0951 domain check saw no measures at all under String captures.
+
+Effect: EVERY multi-entry score with percentage placements collapsed to "first clip owns the whole window, the rest never animate" — inline AND form-spliced, under `.scroll` (and percentage spans under `.time`/`.loop` scaled wrong). Eight existing gates in `tests/score_window_map_test.rs` were RED at HEAD (95f8d3ee) and nobody had noticed — including BUG-267's own regression gate. Browser-verified live: a 4-subject scroll hero showed subject 1 at raw parent progress (identity) and subjects 2–4 frozen at 0.
+
+* Fix
+
+Consumer-side, matching the PLAN-122 contract (scalar = source text): `parse_scalar_measure("50%") → (50.0, "%")` + `duration_ms` (ms/s/m/h/us), wired as a `CapturedValue::String` arm in both `measure_value_kind` (value + relative flag) and `collect` (Measure::Ratio/Time/Spatial). One parse helper, both consumers, inline and fragment paths covered (they share `resolve_windows`/`expand_fragments`).
+
+* Proof
+
+- `tests/score_window_map_test.rs`: 10/18 → **18/18** (the 8 pre-existing reds flip green — the gate was seen to fail first).
+- Emitted constants: `_swOffset/_swSpan` now `0/0.5, 0.5/0.5` for a 50/50 score (was `0/0, 1/0`).
+- Browser (dev server + puppeteer): 2-subject score bb = (0.945−0.5)/0.5 = 0.8905 exactly; the 4-subject motion hero sequences exactly per its 25/35/25/15 windows at five scroll positions.
+
+* Files
+
+- `src/pipeline/score.rs` (the fix)
+- no new test file — the existing 18-test suite was the gate; it was RED before, which is the point (BUG-308-class suite rot: red gates don't protect)

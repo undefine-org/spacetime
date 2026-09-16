@@ -1,0 +1,51 @@
+#+TITLE: @data query where/map never worked — computed-source emits broken predicate
+#+STATE: DONE
+#+SESSION_ID: 14fc108ed3772fa8
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-04T14-32-37-965Z_14fc108ed3772fa8.jsonl]]
+#+CUSTOM_ID: BUG-090-data-query-where-map-never-worked-comput
+
+* Initial Message
+
+what will this look like in the end? why are you saying that EditJson stays out of AST? Think about this: what if the tokens were never in json in the first place? AP1 and AP2 need structural fixes, not this, I think you are not going very far in envisioning this as a full meta-language. What is the ideal syntax and DX and UX?
+
+* Problem
+`@data query` with a `where:`/`map:` expr emits a NON-FUNCTIONING predicate.
+Ground-truth emitted JS (served /tmp/qtest, runtime.js:4602) for
+`where: $.name.indexOf($mediaQuery) !== -1`:
+
+  const filterExpr = $.name.indexOf(ST.get(el, "mediaQuery")) !== -1;  // evaluated ONCE at init
+  const filterFn = (item) => filterExpr;                               // ignores `item`
+  result = result.filter(filterFn);
+
+Three breakages, all in stdlib/primitives/data/computed-source.st:
+1. `$.` NOT rewritten to `item.` → `$.name` leaks literally → ReferenceError at init.
+2. `$mediaQuery` → `ST.get(el, "mediaQuery")` — wrong scope (no `el`); should be
+   `SpacetimeLocal['mediaQuery']` (Global eval, like derived-signal).
+3. filter evaluated ONCE as a scalar; `(item) => filterExpr` ignores per-item
+   `item` — all rows get the same boolean.
+Same for `map:` (transform: expr?).
+
+* Root cause
+computed-source declares filter/transform as `expr?`. An `expr` param interpolates
+as INLINE CODE via the element-scoped binding rewriter (`ST.get(el, …)`), wrong for
+a file-scope array predicate. derived-signal (backs @data derive) takes `expr:
+string` (raw text) + rewrites `$sig`→SpacetimeLocal + discovers deps + builds real
+Functions in %emit js. computed-source must do the same, plus `$.field`→`item.field`.
+
+* Evidence it never worked
+tests/integration/computed_codegen.rs asserts only FormMatch CAPTURES (parse), never
+emitted behavior. Docs use `$.inStock`; the lone emitting test uses bare `item.inStock`
+(== the arrow param), so the `$.`-form was never exercised. compiling≠correctness.
+
+* Fix (structural — mirror derived-signal)
+Receive filter/transform/sortBy/reduce as raw STRINGS; in %emit js rewrite
+`$.field`→`item.field` and `$sig`→`SpacetimeLocal['sig']` (quote-aware char scan,
+BUG-041-safe, reuse derived-signal's globalExpr scanner); build real `(item) =>
+(rewritten)`; discover `$sig` deps and watch each (`local:<sig>:updated` +
+ST.afterData) so external signals ($mediaQuery) re-run. SUBSUMES planned A.1 dep-fix.
+
+* Acceptance (RED→GREEN, emitted-JS asserted)
+- v8: `where: $.field` filters per-item (not all-same).
+- v8: `where` w/ external `$sig` re-filters on signal change.
+- v8: `map { path: $.name }` projects per item.
+- browser: media.st search filters live.

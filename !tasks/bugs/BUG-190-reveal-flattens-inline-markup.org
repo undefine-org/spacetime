@@ -1,0 +1,39 @@
+#+TITLE: @reveal splitText() flattens inline markup (br/em/a) into plain text
+#+STATE: DONE
+#+SESSION_ID: 153497c78a510229
+#+CUSTOM_ID: BUG-190-reveal-flattens-inline-markup
+#+COMPLETION_HASH: 0ea829ebcd992580
+
+* Source
+GitHub issue #3 (undefine-org/spacetime).
+
+* Symptom
+`@reveal` on an element containing inline markup (`<br>`, `<em>`, `<a>`)
+destroys that markup: the reveal animation rebuilds the element's content
+from plain text, so line breaks and inline elements vanish.
+
+* Root cause (verified 2026-07-18)
+stdlib/primitives/reveal.st splitText() L50+: `const text = el.textContent;`
+then `el.innerHTML = ''` (L55) and rebuilds word/char spans from the TEXT
+only. `originalHTML` (captured L42) is only used for cleanup restore (L319),
+never for the animated rebuild.
+
+* Impact
+Authors can't use the headline reveal on any real markup (multi-line titles,
+inline emphasis, links) -- a very common cinematic pattern -- without losing
+their markup.
+
+* Test pin (RED)
+tests/bugs/BUG-190-reveal-flattens-inline-markup.test.st
+- 1 sanity control + 5 RED (br/em/a preservation claims).
+Run: `cargo run --features headless -- test <file> --headless --format json`
+Requires `@mount` + selector-scoped `@reveal` + an @eval shim of
+window.matchMedia (headless src/headless_shims.js does not define it and the
+reveal engine throws on its first line otherwise -- tracked in BUG-196).
+
+* Fix direction
+splitText() should walk the element's child NODES (preserving element
+boundaries) and wrap text nodes in word/char spans in place, rather than
+round-tripping through textContent. Keep cleanup-restore semantics.
+
+NOTE [2026-07-19]: FIXED (PLAN-078): reveal.st splitText() rewritten to walk child NODES recursively — text nodes wrap into the existing st-reveal-char/word span masks inside the preserved element tree; <br> cloned as-is; <em>/<a>/inline elements shallow-cloned with recursive descent; lines mode measures an off-screen copy of the original structure. originalHTML cleanup restore unchanged. Pin 6/6 green.

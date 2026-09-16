@@ -1,0 +1,184 @@
+#+TITLE: Spacetime CMS V1 — local zero-config content admin
+#+STATE: DONE
+#+SESSION_ID: 14f8685429e4ccf1
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-01T18-22-11-112Z_14f8685429e4ccf1.jsonl]]
+#+CUSTOM_ID: PLAN-028-spacetime-cms-v1-local-zero-config-conte
+#+COMPLETION_HASH: c3f7286ebc0703f0
+
+* Initial Message
+
+ok let's think deeply deeply. What would a headless CMS for Spacetime look like? like a headless CMS that has all the nice features of a headless CMS and the power of Spacetime combined. Look at the stdlib and the __dev__ to understand some of the pre-existing experiments, and do a research on the state of headless CMSes, before coming back with your THOUGHTS AND REFLECTIONS (no decisions yet)
+
+* Goal
+Build V1 of the Spacetime CMS: a LOCAL, ZERO-CONFIG content admin that AUTO-DERIVES its
+entire UI from the project's =@type=/=@data= definitions, served on a SEPARATE
+full-window route =/__spacetime/admin/=, distinct from the =__dev__= debug overlay,
+sharing the existing WebSocket edit protocol. First real target: managing the =unkn=
+talent-agency JSONs (Talents, Services, Work, Reasons, Stats, Strip Rows).
+
+THE THESIS (why this beats any general CMS): no CMS config, no schema registration.
+Adding a field to a =@type= IS adding it to the admin. The admin is itself a Spacetime
+site (primitives + metasystem, NO custom JS). It caters to exactly ONE system —
+Spacetime — which is its entire advantage. A general headless CMS must keep its content
+layer and presentation layer as different substances that drift; in Spacetime, =@type=
+(schema) + =@template=/=@each= (presentation) + =@on=/=@scroll= (behavior) are ONE source
+span, so the admin's schema cannot drift from the site.
+
+* REQUIRED READING (do not skip — these carry the full design + insight)
+- docs/specs/spacetime-cms.md — MASTER SPEC: thesis, headless-CMS landscape distilled,
+  the polarities, V1 in full (§4), build seams (§4.8), out-of-scope (§8), and the
+  verify-don't-trust reading list (§10).
+- docs/specs/spacetime-cms-stage2-3.md — the killer trajectory; V1 is its foundation.
+- docs/specs/cms-mockups/v1-talent-admin.png — the VALIDATED V1 mockup
+  (object-types-as-navigation; three-pane; schema-generated drawer).
+- docs/CONTENT_EDITING.md — provenance addressing contract (data-st-id / data-st-origin).
+- @tasks/projects/PROJ-094-dev-tools-architecture.org — the stdlib/__dev__ architecture
+  + edit data-flow this REUSES.
+- @tasks/projects/PROJ-107-content-editing.org — unified EditAst content editing.
+- !tasks/plans/PLAN-006-spacetime-cms-file-based-content-managem.org — PRIOR ART (DONE):
+  already built array CRUD, upload, type/site introspection, and schema-driven forms
+  INSIDE the dev sidebar. THIS PLAN'S NEW ARC: a SEPARATE admin surface (=__admin__=),
+  NOT the debug sidebar; the killer trajectory; the =@cms= display-hint macro. Reuse
+  PLAN-006's server plumbing; DO NOT duplicate it. (Audit findings AUD-002 list real
+  bugs in the dev-sidebar data editor — missing op_id, wrong data route, schema keyed by
+  source not type name — fix-or-avoid these in the new admin.)
+
+* Context — what already exists (VERIFY at these paths before building)
+| Capability | Where | State |
+|---|---|---|
+| =@type=/=@data= content model | stdlib/macros/type-data.st | exists |
+| =@type= → JSON-schema endpoint | src/server.rs::dev_types_handler → /__spacetime/dev/types.json | exists |
+| Site graph endpoint | src/server.rs::dev_site_handler → /__spacetime/dev/site.json | exists |
+| Type registry + schema gen | src/type_system/ (TypeRegistry::from_form_matches, generate_json_schema) | exists |
+| Content store | projects/<name>/data/*.json (git-tracked) | exists |
+| Edit value | src/sync/handlers.rs::handle_edit_json ← EditJson | exists |
+| Array CRUD | handle_edit_json_array ← EditJsonArray (Insert/Delete/Reorder) | exists |
+| Content edit (text) | handle_edit_ast ← EditAst + __content sentinel | exists |
+| Media upload | src/server.rs::upload_handler → /__spacetime/dev/upload | exists |
+| Save orchestration | stdlib/__dev__/primitives/dev-save.st (window.__stDevSave: save, saveArrayInsert/Delete/Reorder; op_id; Ack/Reject; optimistic + revert) | exists |
+| Reactive re-render | ST.setData(source,data) on DataUpdate → @each re-renders | exists |
+| Media picker (image swap) | stdlib/__dev__/primitives/dev-media-picker.st | exists |
+| Collection CRUD overlays | stdlib/__dev__/primitives/dev-collection-crud.st | exists |
+
+THE GAP V1 FILLS: these organs are DEBUG-FLAVOURED (an inspector overlay). V1 assembles
+them into a CALM, CONTENT-FIRST, FULL-WINDOW admin with a GENERATED UI.
+
+KNOWN NON-GAP: =@data= is CLIENT-side only today (data-source emits runtime fetch; @each
+renders in the browser; export strips dev attrs but never prerenders). "Compile-time
+hydration" is a SEPARATE missing stage (FUP-030). V1 EXPLICITLY DEFERS it and uses the
+existing client-side @each re-render (DataUpdate → ST.setData) for preview feedback.
+
+* The polarities this CMS manages (refresher — why admin/user decoupling matters)
+Content splits into two correlated columns, two products over one substrate:
+- STATIC / DESIGNER / IN-FILE / PAGE  ← "design surface" (the user-front = the website)
+- DYNAMIC / WRITER / JSON / ENTRY     ← "content surface" (the admin-front = V1)
+V1 builds the content-surface column. Admin-front (compile-time-only, itself a Spacetime
+site, schema→forms, writes data/*.json) is decoupled from user-front (the site). One
+substrate (compiler + .st + data/), two emitters. This is NOT "headless" (API-out); it
+is COUPLED in-context editing, which is Storyblok/Tina/Framer's strongest feature and
+the thing Spacetime is uniquely built for.
+
+* LOCKED DECISIONS (from the user — do not relitigate)
+1. SURFACE: a separate full-window route =/__spacetime/admin/=, NOT the debug overlay;
+   shares the WS edit protocol (EditJson / EditJsonArray / upload).
+2. DISPLAY INFERENCE: an OPTIONAL =@cms= hint macro marks display fields, with
+   CONVENTION FALLBACK (works on unkn untouched).
+3. HYDRATION: keep client-side @each re-render (DataUpdate → ST.setData) for V1. Defer
+   compile-time hydration (FUP-030).
+4. STDLIB PLACEMENT: the admin lives in its OWN folder =stdlib/__admin__/= (sibling to
+   stdlib/__dev__/), NOT under macros/ or primitives/. Keep work cleanly separated from
+   user stdlib AND from the dev tools.
+
+* Auto-derivation rules (the heart of V1)
+Collections:
+  @data X: T[]  → a collection "X", count = json.length (the left-rail nav item)
+  @data Y: T    → a "single" (one entry, e.g. site settings)
+Field → form widget:
+  string                  → text input
+  string (desc/body/bio)  → textarea            (heuristic on field name)
+  number                  → number input
+  boolean                 → toggle
+  "A"|"B"|"C" union       → select
+  url + image-ish name    → media field          (reuse dev-media-picker + /upload)
+  string[]                → repeatable chip/tag editor
+  T (nested object)       → nested fieldset
+  T[] (nested array)      → nested repeatable list (RECURSE)
+  field named slug        → read-only, derived from the title field
+Display inference — CONVENTION, override with =@cms= INSIDE the @type body:
+  fallback: title=name|title|label ; subtitle=headline|subtitle|description ;
+            thumbnail=image|photo|avatar (url) ; chips=categories|tags
+  override:
+    @type Talent { @cms { title: name; subtitle: headline; thumbnail: image;
+                          chips: categories } id:string; slug:string; … }
+unkn (6 types in projects/unkn/index.st:35-85) gets a FULL admin with ZERO .st edits.
+
+CRITICAL: =@cms= MUST be scoped to the @type body; used elsewhere → rich error
+(FUP-026). The nesting symbol for @cms is a research question (FUP-027). DO NOT hardcode
+a Rust parser for @cms placement (AGENTS.md: the metasystem is self-describing).
+
+* Build seams → WAVES
+
+** WAVE 1 — Foundations (parallelizable)
+- W1.1  =@cms= macro in stdlib/__admin__/ — registers display hints into the type
+  registry. Best-effort body-scope guard now; the rich-error path is FUP-026.
+- W1.2  Extend dev_types_handler (src/server.rs) to emit =@cms= hints + computed
+  display-role inference alongside the JSON-schema in types.json. (Audit AUD-002 #12:
+  current handler doesn't see @type from @import-ed files — fix so modules/*.st types
+  are included; unkn defines types in index.st but real sites import.)
+- W1.3  =/__spacetime/admin/= route in src/server.rs, --debug gated, serving the
+  compiled admin runtime + styles (MIRROR dev_runtime_js_handler / dev_styles_css_handler).
+
+** WAVE 2 — Admin site (blocked by W1)
+- W2.1  stdlib/__admin__/ scaffolding: index.st (gate + mount), primitives (admin-ws
+  REUSING the dev WS; admin-schema fetching types.json + site.json), internal macros.
+- W2.2  schema→form generator: recursive widget generation per the rules above. (Avoid
+  AUD-002 #8: map data-source filename → @type name correctly; the schema is keyed by
+  TYPE name, the source by FILE name.)
+- W2.3  collection list: left rail from @data (object-types-as-navigation, per the
+  Anytype reference); center editable rows (thumbnail/title/subtitle/chips/drag handle).
+- W2.4  entry drawer: schema-generated form + sticky footer (Done / Delete).
+
+** WAVE 3 — Writer actions (blocked by W2; protocol mostly exists)
+- W3.1  edit value → EditJson ; add entry → schema default object → EditJsonArray Insert.
+- W3.2  delete/reorder → EditJsonArray Delete/Reorder (drag handle). (window.__stDevSave
+  already exposes saveArrayInsert/Delete/Reorder.)
+- W3.3  media field → /upload → EditJson (reuse dev-media-picker). MUST include op_id
+  on every EditJson (AUD-002 #2/#4: missing op_id silently dropped server-side).
+- W3.4  save → DataUpdate → ST.setData → @each re-render (verify end-to-end).
+
+* Definition of Done
+Open =/__spacetime/admin/= while serving unkn with --debug → all 6 collections
+auto-listed in the rail with counts → click a talent → edit name/headline/image/
+categories in a GENERATED form → add, delete, reorder talents → the live page reflects
+every change via client-side re-render. NO .st edits required to get the admin; =@cms=
+available to refine display roles.
+
+* Verification
+** Automated
+- cargo test --lib ; cargo test --test integration_tests (protocol round-trips)
+- cargo run --features headless -- test tests/ --headless (new __admin__ tests)
+- Playwright E2E: open admin, edit a talent field, add/reorder, upload an image.
+** Manual
+- cargo run -- serve projects/unkn/ --debug → visit /__spacetime/admin/.
+- Edit "Carolina Mendes" headline in the drawer → data/talent.json updated → roster
+  re-renders. Add a talent → talent.json gains an entry → grid shows it. Reorder →
+  order persists. Replace a portrait → upload → JSON src updated → image renders.
+
+* Out of scope (LATER layers — do NOT smuggle in)
+auth/roles, multi-editor/CRDT, draft/publish, hosting/CI-CD, remote upload.
+FORWARD-COMPAT HYGIENE (cheap, do from V1): make the admin write through the SAME verbs
+a future server would expose (GET types · GET/PUT data/* · POST build); the existing
+EditJson/op_id/Ack/Reject protocol already has this transport-agnostic shape, so
+local→remote later is a TRANSPORT SWAP, not a rewrite. (spec §8)
+
+* Mockup
+docs/specs/cms-mockups/v1-talent-admin.png (validated direction).
+
+* Follow-ups referenced
+- FUP-026 (@cms body-scope + rich errors — REQUIRED for @cms diagnostics)
+- FUP-027 (macro namespaces — the nesting symbol for @cms)
+- FUP-030 (compile-time hydration — deferred from V1)
+
+NOTE [2026-06-03]: EXPLORATION 2026-06-03: V1 IS ALREADY LARGELY IMPLEMENTED. Commits 5ed4e097 (W0+W1 @cms + display roles) → e97b667e (W1 widget engine) → dd4c40ed (W2+W3 working admin at /__spacetime/admin/) → 7b894083 ("CMS V1 complete: W3 media replace + W4 verify") → 53a22f87 (data-source src fix). Present: stdlib/__admin__/{index.st, admin-app.st (560 lines: rail/list/drawer, schema widgets, EditJson/Array persistence), macros/admin.st, cms-hint.st}; server routes admin_page/runtime/styles_handler + dev_types_handler emitting display{roles}+widget annotations + dev_site_handler emitting dataSourceMap. `cargo run -- check projects/unkn/` = 57/57 pass. KEY DEVIATION (now CANONICAL per user): @cms uses file-scope @cms(TypeName) not nested @type{@cms{}} — preferred; FUP-026/027 downgraded to optional. REMAINING/UNVERIFIED: live runtime behavior on unkn (serve+browser), singles (@data Y:T) editing deferred, reorder drag UX, audit-grade review vs AUD-002 bug classes (op_id presence, import-aware types). NEXT: a runtime verification pass + gap audit, not a greenfield build.
+
+NOTE [2026-06-03]: PLAN-028 COMPLETE (Waves A-D). Wave A: verified V1 live on unkn (6 collections auto-derived, schema forms, edit/add/delete→disk, zero errors) + filed defect ledger. Wave B: BUG-055 drag-reorder FIXED+reviewed+disk-verified. Wave C: FEAT-067 search, BUG-056 two-step delete, FEAT-069 titleless labels, FEAT-068 pages-soon — all live-verified + reviewer-passed (caret P3 fixed). Wave D: +test_w1_titleless_type_has_null_title_role; 31/31 server tests + reorder test green; 2094 lib pass; 5 pre-existing failures = BUG-038(×4)+BUG-053(×1), unrelated (my commits touched zero compiler code). Commits c07b1e9c, b3d4bc85. Deferred (low value, no fixture): singles (@data Y:T) inline editing — unkn has no singles. V1 is production-usable locally.

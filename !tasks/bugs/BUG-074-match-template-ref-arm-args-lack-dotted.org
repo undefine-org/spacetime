@@ -1,0 +1,58 @@
+#+TITLE: @match/template-ref arm args lack dotted-path resolution
+#+STATE: ITEM
+#+SESSION_ID: 14fc108ed3772fa8
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-04T14-32-37-965Z_14fc108ed3772fa8.jsonl]]
+#+CUSTOM_ID: BUG-074-match-template-ref-arm-args-lack-dotted
+
+* Initial Message
+
+what do you need from me to implement FEAT-076 fully and in a Spacetime-y way? I am going to sleep so you'll auto-accept the most ambitious and Spacetime-y choice every time (unlimited budget). Ask me questions one last time, if needed, before going off
+
+* BUG — @match arm args + template-ref args don't resolve dotted paths
+
+** Parent
+[[id:FEAT-076-rebuild-the-cms-admin-multi-file-the-pro]] W2. Surfaced by the recursive schema-drawer design (the CMS admin rebuild). FEAT-073 left this gap.
+
+** Symptom
+In stdlib/primitives/template.st, both the @match arm dispatch (~lines 559-575) and the
+template-ref dispatch (~lines 457-490) resolve invocation ARGS with a SIMPLE lookup:
+  arg.startsWith('$') -> data[arg.slice(1)]
+So `&field($name, $node.properties, $value)` resolves the 2nd arg as
+`data["node.properties"]` (undefined) instead of walking `data.node.properties`.
+
+Meanwhile the SUBJECT (`@match $node.widget`) and the TEMPLATE NAME (`&$node.widget()`)
+BOTH already support dotted-path walking (lines ~539-544 and ~463-469). Args are the lone
+inconsistency — args should walk dotted paths exactly like names/subjects do.
+
+** Impact
+Blocks the natural recursive-form pattern that the CMS admin entry-editor needs:
+  @template &field($name, $node, $value) {
+    @match $node.widget {
+      "fieldset" => &fieldset-field($node.properties, $value);
+      "list"     => &list-field($node.items, $value);
+      ...
+    }
+  }
+The fieldset/list arms must pass nested sub-nodes (`$node.properties`, `$node.items`) down
+to the recursive child template. Without dotted-arg resolution, every nested widget gets
+undefined and the recursive drawer cannot render.
+
+** Root cause
+Three near-identical arg-resolver closures (template-ref args, @match arm args, possibly
+%each) each do a flat `data[varName]` lookup. The dotted-path walk used for names/subjects
+was never applied to args. DRY fix: ONE shared `resolveArg(arg, data)` helper that walks
+dotted paths (mirroring the name/subject resolver), used by all arg sites.
+
+** Fix plan (RED -> GREEN, stdlib only — NO Rust)
+1. RED: V8 test — a @template with `@match $n.widget { "fieldset" => &sub($n.props, $v); }`
+   passes a dotted arg; assert the child template receives the nested object (currently
+   undefined).
+2. GREEN: extract `ST.resolveTemplateArg(arg, data)` (or inline shared closure) in
+   template.st that: $ + dotted -> deep walk data; quoted -> strip quotes; else literal.
+   Replace BOTH arg-resolver sites with it.
+3. Verify recursion still depth-guarded; no regression in feat073_match V8 tests.
+
+** Acceptance
+- [ ] Dotted args resolve identically to dotted subjects/names.
+- [ ] RED test goes GREEN; feat073 tests still pass.
+- [ ] Single shared arg resolver (no parallel flat-lookup copies).

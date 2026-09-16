@@ -1,0 +1,78 @@
+#+TITLE: A colon in reference position is silently dropped, not refused
+#+STATE: DONE
+#+SESSION_ID: 153497be379ff5cc
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-18T12-18-12-318Z_153497be379ff5cc.jsonl]]
+#+CUSTOM_ID: BUG-232-a-colon-in-reference-position-is-silentl
+#+LAYER: parser
+#+COMPLETION_HASH: 9049eb6358f0c8dc
+
+Found while verifying PLAN-117 (registry addressing). See
+=docs/specs/registry-addressing.md= §4.1.
+
+* Reproduction
+
+#+begin_src bash
+# with a module defining `@badge` imported as `@use "./badge.st" as b`
+.badge { @b/badge("NEW") { color: red; } }   # emits .badge::before into spacetime.css
+.badge { @b:badge("NEW") { color: red; } }   # reports "✓ passed", emits ZERO css
+#+end_src
+
+Proven by differential build (=cargo run -- build=, grep the emitted
+=spacetime.css=): the slash form emits =badge::before=; the colon form produces
+an empty stylesheet AND a successful exit code.
+
+* Why it matters
+
+An addressing typo produces a SILENTLY BROKEN PAGE. No error, no warning, no
+output — the directive simply vanishes. This is the worst possible failure mode
+for a reference: the compiler knew it could not resolve the name and said
+nothing.
+
+It also contradicts the fidelity-ladder doctrine (=docs/testing/FIDELITY_LADDER.md=):
+refuse rather than fake. A dropped directive is a fake green.
+
+* Root cause (hypothesis, needs confirmation)
+
+The CST lexer emits =COLON= as a token that terminates the directive name run
+(=src/syntax/cst/ast.rs:283= — only =SLASH IDENT= continues the run). The
+resulting name =b= matches no =%form=, and an unmatched directive appears to be
+dropped rather than diagnosed. NOT yet confirmed by reading the drop path.
+
+* Fix
+
+An unresolvable directive/reference name must produce a diagnostic naming the
+qualifier and the fix (=E-qualifier-colon= in PLAN-117 §8; =:= belongs inside an
+import string, =/= addresses within a registry).
+
+Broader question worth answering while here: is there a general
+"directive matched no form" diagnostic, and if not, should there be? A silent
+drop of ANY unmatched directive is the same defect class.
+
+* Test
+
+=tests/lang/registry_addressing_diagnostics.rs::red_w3_colon_in_reference_position_is_an_error_not_a_silent_drop=
+(RED today; currently reports =Got: []=).
+
+NOTE [2026-07-26]: FIXED in PLAN-117 W3.
+
+Refused at =src/syntax/cst/parser.rs:653= \u2014 the same site as the FEAT-118
+qualifier-slash loop, and the only point where both halves of the name are still
+visible. Same tight-adjacency discipline, which keeps a legitimate
+=@directive prop: value= (spaced =:= in VALUE position) out of the way.
+
+#+begin_example
+error: `@b:badge` uses `:` where a module qualifier needs `/` — write `@b/badge`.
+       `:` belongs inside a module address in an import string (`@use "local:b"`);
+       in a reference, `/` addresses within a registry
+#+end_example
+
+Diagnostic code E0944's neighbour E0943 carries the pipeline-level form.
+
+Test: =tests/lang/registry_addressing_diagnostics.rs::red_w3_colon_in_reference_position_is_an_error_not_a_silent_drop=
+\u2014 asserts BOTH the refusal and that the message teaches the fix, so a bare
+"errors somehow" cannot satisfy it.
+
+The broader question the bug raised ("is there a general unmatched-directive
+diagnostic?") remains open and is worth its own investigation \u2014 this fix closes
+the colon case specifically, which was the silent-drop path in the addressing
+grammar.

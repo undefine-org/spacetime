@@ -1,0 +1,45 @@
+#+TITLE: MCP workbench actions require agent await
+#+STATE: DONE
+#+SESSION_ID: 150b19ecadd449ba
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-16T06-50-46-327Z_150b19ecadd449ba.jsonl]]
+#+AGENT: main
+#+CUSTOM_ID: BUG-106-mcp-workbench-actions-require-agent-awai
+#+LAYER: mcp
+#+REF: FEAT-123
+#+COMPLETION_HASH: 03806df6ef828830
+
+* Initial Message
+
+look at the latest plans and the work done and critically review both what was done and what wasn't done, and what next slice we should be doing. Take your time
+
+* Problem
+Browser workbench actions appeared to do nothing in the user's page.
+
+Observed during live showcase 2026-06-16:
+- `st_workbench` mounted and rendered discovered environments.
+- Clicking `Open environment` queued `mcp-action` events, but visible state did not change until the agent called `st_await`.
+- With `@mcp-input(refresh: 1000)`, repeated source publication could re-bind selector directives and risk duplicate click events.
+
+* Expected
+A workbench button click should mutate MCP state and refresh the page without requiring the agent to manually call `st_await`.
+
+* Scope
+Fix the systemic path:
+- Share env/tab registry between MCP stdio tools and the live HTTP signal server.
+- Dispatch supported `mcp-action` operations in `/__mcp/signal/{instance}` immediately.
+- Refresh the workbench instance `input.json` as part of signal handling.
+- Keep `st_await` observational; it must not double-dispatch actions already handled by HTTP.
+- Deduplicate MCP click/action handlers across reactive refreshes.
+
+* Acceptance
+- Fresh `st_workbench` page: click env button -> open env card appears without calling `st_await`.
+- Repeated polling/refresh does not multiply events per click.
+- HTTP-level regression test proves signal endpoint updates instance input before `st_await`.
+- `cargo build && cargo test --lib mcp && cargo run -- check stdlib/__mcp__/env.st` passes.
+
+* Notes
+This bug is distinct from async MCP resource notifications. This fix makes the workbench page responsive using the existing HTTP signal path + input polling; future resource notifications can reduce polling later.
+
+NOTE [2026-06-17]: Fix implemented 2026-06-17: Changed MCP live workbench actions from agent-dispatched to HTTP-signal-dispatched. Root cause: `/__mcp/signal/{instance}` only recorded `mcp-action` events; actual state mutation happened later inside `st_await`, so user page appeared inert unless the agent manually awaited. Fix: introduced shared `WorkbenchSession` for env/tab registry used by both stdio tools and live HTTP server; `LiveServer::start` receives the shared session; `/__mcp/signal/{instance}` now dispatches supported actions (`st_env_open`, `st_tab_open`, `mcp_refresh`) immediately, updates the mounted workbench instance `input`, and returns `action` in the HTTP JSON response. `st_await` now reads `_mcp_action` from the recorded event and does not double-dispatch. Also hardened `@mcp-click`/`@mcp-action` primitive listeners with per-element handler keys so polling/re-render refresh does not accumulate duplicate click listeners. Regression: `signal_endpoint_dispatches_workbench_actions_immediately` posts directly to the HTTP signal endpoint and asserts `input.json` changes before `st_await`. Live proof: fresh `st_workbench` page initial state open=0/tabs=0/events=0/discovered=42; clicked env button and, without calling `st_await`, DOM repainted to open=1/events=1; waited through refresh and clicked again, events became exactly 2 (no listener multiplication); posted browser `st_tab_open`, no `st_await`, DOM repainted to tabs=1/events=3. Gate: `cargo build && cargo test --lib mcp && cargo run -- check stdlib/__mcp__/env.st` PASS.
+
+NOTE [2026-06-17]: Closed after commit b7573141. Acceptance met: HTTP signal dispatch updates workbench state immediately; page click works without agent st_await; duplicate listener risk tested; focused MCP tests and env check pass.

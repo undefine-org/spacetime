@@ -1,0 +1,169 @@
+#+TITLE: CDP test backend: setTimeout/setInterval/rAF registered independently of the awaited promise chain never fire (wait_until polling never retries)
+#+STATE: ITEM
+#+SESSION_ID: 15219c677c4613e6
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-03T18-27-25-809Z_15219c677c4613e6.jsonl]]
+#+CUSTOM_ID: BUG-150-cdp-test-backend-settimeout-setinterval
+
+* Initial Message
+
+ok now let's think about this failure and look at it in the context of IMPROVING SYNTAX just like we did with the Spacetime ECS. Take this example and add more to pressure test the options we come up with. Let's come up with a syntax that feels natural and lets us easily explain everything we just talked about
+
+* Initial Message
+
+Discovered while debugging PLAN-062 Wave 3 (`@pose-track` CDP test,
+`stdlib/3d/tests/pose-track.test.st`) — needed a `@wait_until` to poll for a
+requestAnimationFrame-driven state change (three-stage.st's render loop
+advancing a mesh's position). It never worked; root-caused all the way down
+to a fundamental CDP test-runner limitation, not the pose-track code.
+
+* Symptom (verified via a battery of from-scratch minimal repros)
+
+Under `cargo run --features cdp -- test <file> --cdp`:
+
+1. `requestAnimationFrame` registered inside a test body NEVER fires — a
+   recursive rAF-tick counter never advances past 0 within a 3s `@wait_until`.
+2. Overriding `window.requestAnimationFrame` to use `setTimeout` instead
+   (`evaluate_on_new_document`, BEFORE any page script runs) does NOT fix it —
+   the override IS applied (confirmed: `requestAnimationFrame.toString()`
+   contains `setTimeout`), but the polyfilled timer STILL never fires.
+3. A PLAIN `setInterval(fn, 16)` registered via `@eval` inside a test body
+   never increments its counter, even across a 500ms `@wait`.
+4. A PLAIN single `setTimeout(fn, 50)` registered via `@eval` inside a test
+   body never fires within a subsequent 300ms `@wait`.
+5. CRITICALLY: `@wait_until`'s OWN internal poll loop — which uses the EXACT
+   SAME `await new Promise(r => setTimeout(r, pollInterval))` pattern as
+   `@wait` (which DOES work) — only executes ONE iteration before its 2000ms
+   timeout expires. A counter incremented inside the poll condition itself
+   (`window.__pollCount++`) reaches only 1, never advancing further despite
+   the loop's `while (Date.now() - start < timeout)` structure.
+
+Meanwhile, `@wait`'s single `await new Promise(r => setTimeout(r, ms))` DOES
+reliably resolve (every test above completes in ~2-9s, never hanging to the
+full backend timeout) — so SOME timers fire, just not ones a test body tries
+to register/observe independently.
+
+* Root cause (documented Chromium behaviour + CDP evaluate semantics, not
+  fully pinned down to an exact mechanism, but the pattern is externally
+  documented)
+
+- Chromium deliberately throttles/never-fires `requestAnimationFrame` for a
+  background/inactive tab (documented since 2011:
+  https://developer.chrome.com/blog/background_tabs — "rAF is paused when
+  tabs are hidden"). Every CDP test tab this driver creates
+  (`src/cdp.rs::run_one_page`, `browser.new_page("about:blank")`) is a NEW
+  tab that is never given real foreground/visible status under headless
+  Chromium.
+- Tried AND RULED OUT as fixes (each built, tested against a from-scratch
+  `requestAnimationFrame`-fires sanity test, reverted after failing):
+  - `page.bring_to_front()` (chromiumoxide's tab-activation API) — no effect.
+  - Chrome launch flags `--disable-background-timer-throttling` /
+    `--disable-backgrounding-occluded-windows` / `--disable-renderer-
+    backgrounding` (Chromium's own documented workaround for automated test
+    suites) — no effect.
+  - `BrowserConfig::builder().new_headless_mode()` (the NEW headless mode,
+    which per https://developer.chrome.com/docs/chromium/new-headless has
+    different/better rAF-vs-beginFrame semantics than the OLD default
+    headless mode chromiumoxide uses) — no effect.
+  - Overriding `window.requestAnimationFrame` to a `setTimeout`-based
+    polyfill via `evaluate_on_new_document` (confirmed applied; the
+    documented reliable Puppeteer/CDP workaround per multiple sources) — no
+    effect, because the deeper issue (#5 above) is that ANY independently-
+    registered timer, not just rAF specifically, fails to service repeatedly.
+- The deeper mechanism (point #5, `@wait_until`'s own poll loop only firing
+  once) suggests this is NOT (only) a background-tab rAF throttle, but a more
+  general CDP `Runtime.evaluate`/`evaluate_function` `awaitPromise` semantics
+  issue: a timer chained DIRECTLY into the one promise the top-level
+  `evaluate_function` call is awaiting resolves fine (this is why `@wait`'s
+  single `setTimeout` "works" and why `@wait_until`'s poll loop's FIRST
+  iteration also completes) — but something prevents that same await-chain
+  from being serviced a SECOND time in a `while` loop, or prevents any
+  timer NOT in that exact chain from firing at all. Matches the documented
+  general pattern that "evaluate has no idea you triggered a setTimeout — the
+  async callback is not linked up with the main promise chain" (a Puppeteer
+  StackOverflow finding, consistent with `Runtime.evaluate`'s underlying CDP
+  execution model), but the fact that `@wait_until`'s SAME construct only
+  gets ONE iteration despite an unambiguous await chain suggests a wrinkle
+  specific to this driver's `evaluate_function` usage, not just the generic
+  Puppeteer footgun — worth a focused investigation, not assumed identical.
+
+* Impact
+
+- ANY CDP test that needs to poll for state driven by a real timer (rAF loop,
+  setInterval-based animation, `setTimeout`-scheduled async work NOT directly
+  chained into the awaited test function's own promise) will hang until
+  `@wait_until`'s timeout and then FAIL as if the condition never became
+  true — even though the underlying mechanism (e.g. three-stage.st's render
+  loop) works perfectly under a real, manually-driven browser (verified via
+  puppeteer tool interaction: scrolling a page with a live `@stage` +
+  `@pose-track` reliably drove `mesh.position`/`mesh.quaternion` to the
+  correct values within ~1 real frame, repeatably, across many manual runs).
+- This blocks CDP-level verification of ANY stdlib/3d primitive built on
+  `registerFrame` (three-stage.st's render loop) — `@scroll-3d`,
+  `@particles`, `@orbit`, `@parallax`, and the new `@pose-track`
+  (PLAN-062 Wave 3) all compose against this same rAF-driven tick, so none
+  of them can be CDP-verified for a state change that requires the loop to
+  actually run more than once during the polling window.
+- No existing `.test.st` file in this repo currently exercises this path
+  (confirmed via grep before filing) — this is a NEWLY surfaced gap, not a
+  regression of previously-working coverage.
+
+* Workaround in use (PLAN-062 Wave 3)
+
+Verified `@pose-track`'s actual behaviour via DIRECT manual browser automation
+(the `puppeteer` tool, not the CDP test harness) instead: loaded a live
+`cargo run -- serve` page, scrolled it, and read `canvas._stObject.position`/
+`.quaternion` directly — repeatable, correct, matches the design exactly
+(flat orientation + origin position at scroll 0; the declared second stop's
+position/tumbled orientation at scroll 1). This is a real, hands-on
+functional proof, just not an AUTOMATED regression-test proof — the CDP
+`.test.st` file for `@pose-track` had its rAF-dependent assertions removed/
+restructured to avoid depending on the broken mechanism, with a note
+pointing back to this bug.
+
+* Suggested fix directions (not attempted further — needs its own
+  investigation, likely with CDP protocol tracing)
+
+1. Investigate whether `Page.setWebLifecycleState` (a CDP Page-domain method
+   not currently exposed by chromiumoxide 0.7.0's high-level API, may need a
+   raw CDP command) can force a tab out of the "frozen"/backgrounded
+   lifecycle state.
+2. Investigate whether periodically issuing `HeadlessExperimental.beginFrame`
+   CDP commands (mentioned in the research as the correct way to drive
+   rAF/animation ticks in headless mode) alongside the test's own polling
+   would unblock rAF specifically — orthogonal to the deeper `setInterval`/
+   `@wait_until`-repeat-iteration issue (point #5), which likely needs a
+   completely different mechanism (possibly restructuring `evaluate_function`
+   to poll from the RUST side via repeated `page.evaluate()` calls rather
+   than a single long-lived in-page `await` loop, so each poll iteration gets
+   its own CDP round-trip and a fresh chance for the renderer to service its
+   timer queue).
+3. Alternatively (simpler, no CDP investigation needed): restructure
+   `src/cdp.rs::run_one_page` to drive `@wait_until`-style polling FROM THE
+   RUST SIDE (repeated short `page.evaluate()` calls checking the condition,
+   with the Rust loop doing the sleeping) instead of a single long-lived
+   `evaluate_function` awaiting an in-page JS `while` loop — this sidesteps
+   whatever CDP-level limitation prevents the SAME await chain from ticking
+   more than once, since each Rust-side poll is a fresh CDP round-trip.
+
+* Acceptance (whenever this is picked up)
+
+- A minimal regression test (`requestAnimationFrame`/`setInterval` tick count
+  reliably exceeds 1 within a bounded CDP `@wait`/`@wait_until`) passes.
+- `stdlib/3d/tests/pose-track.test.st`'s rAF-dependent scroll-driven
+  assertions (currently removed/simplified, see that file's comments) can be
+  restored to their full intended form once this is fixed.
+
+* Provenance
+
+Filed 2026-07-04 from PLAN-062 Wave 3 (FEAT-149 typed 3D pose tracks),
+`stdlib/3d/tests/pose-track.test.st`. Investigation involved: a from-scratch
+bisection methodology (7+ minimal single-purpose repro files, each isolating
+ONE variable — mount/stage/object/pose-track/wait/wait_until/eval — building
+up from a trivially-passing baseline to the exact failing shape); 2 attempted
+Rust-level fixes in `src/cdp.rs` (`bring_to_front` + launch flags,
+`new_headless_mode`, an rAF-to-setTimeout `evaluate_on_new_document`
+override), BOTH reverted after being empirically proven ineffective (kept the
+repo's `src/cdp.rs` byte-identical to its pre-investigation state — no
+speculative/unproven changes left behind). Companion: BUG-149 (a SEPARATE
+compiler bug that masked this investigation's early findings as false passes
+until isolated).

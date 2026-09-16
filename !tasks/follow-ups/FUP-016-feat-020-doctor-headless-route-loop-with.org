@@ -1,0 +1,56 @@
+#+TITLE: FEAT-020 doctor: headless route loop with Spacetime.review()
+#+STATE: DONE
+#+SESSION_ID: 14cb68a08c63888e
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-04-27T19-31-50-449Z_14cb68a08c63888e.jsonl]]
+#+CUSTOM_ID: FUP-016-feat-020-doctor-headless-route-loop-with
+#+EFFORT: 4h
+#+LAYER: coding-agent
+#+PRIORITY: #A
+
+Deferred from PLAN-018 wave-4 (FEAT-020::headless-loop). The doctor CLI ships with the `check` phase + pretty/JSON output; routes are marked `skipped_reason: "headless route loop not yet implemented (see FUP-016)"`.
+
+* Scope
+
+In-scope:
+- Reuse =src/browser_test.rs::runner::BrowserTestRunner= initialization (single =Arc<Playwright>=).
+- Boot the dev server via =serve()= with =debug=true= so =/__spacetime/dev/runtime.js= is mounted.
+- For each route in =DoctorArgs.routes= (default `/`):
+  1. Navigate via Chromium with `wait_until=domcontentloaded`.
+  2. Poll for `window.Spacetime.review` for up to 30s (per-route timeout).
+  3. Evaluate `Spacetime.review()` and map into `RouteReport.dims` + `findings` + `score`.
+  4. Capture console errors / unhandled promise rejections.
+  5. If `--screenshot-dir` set, save `<dir>/<route-slug>.png`.
+- Pass/fail thresholds remain those in =DoctorReport::compute_pass=.
+
+Out-of-scope:
+- Snapshot/regression diffing.
+- Cross-browser parity (Chromium only).
+- CI integration template.
+
+* Existing patterns
+- =src/browser_test.rs= already initializes Playwright. Doctor's headless loop reuses the same `Arc<Playwright>` initialization; do NOT spin up a second instance.
+- Server boot: =src/server.rs::serve()=. Doctor MUST boot via the same code path.
+- Skill anchor map: assign each finding a `skill_ref` field (e.g., `spacetime-design#anti-slop-inline-handlers`) via a small static map in =src/cli/doctor.rs=.
+
+* Tests
+
+Integration (in =tests/integration_tests.rs=, gated behind the `browser` feature flag):
+- T3 (re-enabled): `cargo run -- doctor projects/spacetime-showcase/ --format json` exits 0 with JSON containing `routes[*].review.score`.
+- T4: A fixture project containing one inline-handler outputs a doctor report with a `dim: 'idiomatic'` finding whose `skill_ref` is set.
+- T5: `--screenshot-dir tests/tmp/doctor/` produces ≥1 PNG per route.
+
+* Acceptance criteria
+
+- `cargo run -- doctor projects/spacetime-showcase/ --format json` exits 0; JSON contains all 5 review dims per route with numeric scores 0..10.
+- `cargo run -- doctor projects/<name>/ --format pretty` prints summary table including per-route dim scores.
+- T3..T5 pass.
+- `--help` documents `--screenshot-dir`, `--routes`, `--format` (already shipped in PLAN-018).
+- Until landed, this FUP is referenced from `.claude/skills/spacetime-design/SKILL.md::Status` and from FEAT-020 body.
+
+* Carry-over from PLAN-018
+
+- FEAT-020 stub + report-schema + check-phase + output-modes shipped under PLAN-018 (commit forthcoming).
+- DoctorReport schema, route slug helper, pass/fail logic and 8 unit tests all in =src/cli/doctor.rs=.
+- The Playwright integration is the only remaining piece.
+
+NOTE [2026-04-28]: FEAT-033 (PLAN-020) absorbs this FUP. The headless route loop is implemented in src/cli/doctor.rs::run_headless_phase, gated behind --features browser. Without the feature, every route returns a benign "browser feature not enabled" skip that compute_pass tolerates; with the feature, doctor spawns the dev server, drives Chromium via Playwright per route, evaluates Spacetime.review(), captures console errors, optionally saves a per-route screenshot, and tears down. compute_pass tightened: any non-benign skipped_reason now causes failure (BENIGN_SKIP_REASONS allowlist). CLI flag --route-timeout-ms (default 30000) tunes the per-route Spacetime.review readiness poll. Closes DONE when FEAT-033 ships its commit.

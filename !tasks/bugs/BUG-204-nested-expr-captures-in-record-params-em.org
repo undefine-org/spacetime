@@ -1,0 +1,25 @@
+#+TITLE: Nested Expr captures in record params emit as ST.get(el,…) instead of quoted text (PLAN-077 derive-match broken)
+#+STATE: DONE
+#+SESSION_ID: 1534a246b3aa1d15
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-18T13-04-13-518Z_1534a246b3aa1d15.jsonl]]
+#+CUSTOM_ID: BUG-204-nested-expr-captures-in-record-params-em
+
+* Initial Message
+
+continue
+
+* BUG: record-typed primitive params (e.g. derive-match's `arms: expr` receiving the cond_block record) serialized nested `CapturedValue::Expr` values VERBATIM. The emit pass then re-tokenized the substituted record and Signal-lowered bare `$sig` → `ST.get(el, "isOrange")` — with `el` unbound in the IIFE scope. Guards became runtime values/throws; dep discovery found nothing; `@data derive $x T : @match {…}` never recomputed (always the catch-all).
+
+* Repro (pre-fix): `spacetime test stdlib/enum/tests/ --headless` → 3 failed; emitted JS showed `guard: { expr: ST.get(el, "isOrange") }`.
+
+* Root cause: two record serializers — `captured_to_js` and `captured_to_js_with_registry` (src/pipeline/expand.rs) — recursed into Named/Array children with the SAME top-level treatment (Expr = verbatim code splice). Inside a record, an Expr is DATA (source text the runtime re-evaluates), not code.
+
+* Fix (DONE, 2026-07-20): added `captured_to_js_data` / `captured_to_js_data_with_registry` — nested Expr → quoted escaped JS string with `$` intact (runtime dep-scan/eval needs it); Named/Array/Block recurse via the data variant; top-level param splices unchanged (Expr verbatim + macro/keyframe expansion).
+
+* Also fixed the concurrent session's lib test `plan077_w2_derive_match_form_parses_all_type_shapes` (src/syntax/events/form_compiler.rs): asserted `macro_name == "data-derive-match"` but for @-forms macro_name is the DIRECTIVE name; def identity lives in `matched_macro`. Feature itself was correct.
+
+* Verification: `cargo test --lib` 2652 ✓; `spacetime test stdlib/enum/tests/ --headless` 5/5 ✓; integration 189 ✓.
+
+* Found while implementing PLAN-079 (migration capsules); the PLAN-077 W2 work arrived uncommitted from a concurrent session (owner inactive ~22h at fix time).
+
+NOTE [2026-07-20]: 2026-07-20: companion fix landed in stdlib/testing/test.st (then-claims): nested-Expr-as-text is now the UNIFORM record rule, so @then{…} claim values arrive as source text and are evaluated at claim time (__claimValue: bare $sig → signal read, else new Function eval). Verified: headless tests/ 631 ✓, v8 437 ✓, lib 2652 ✓, integration 203 ✓. NOTE: stdlib/enum/ is being ACTIVELY edited by the PLAN-077 owner session (derive.st + tests changing mid-run, mtime 2026-07-20 13:36) — enum test results are their moving target; do not stabilize from this session. The is_template_invocation_map fast paths had to be mirrored into the data serializers (match-render's `inv` contract is an ARRAY of {name,args} with verbatim code args).

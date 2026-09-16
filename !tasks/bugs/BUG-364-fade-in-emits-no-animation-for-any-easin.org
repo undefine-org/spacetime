@@ -1,0 +1,186 @@
+#+TITLE: @fade-in emits no animation for any easing spelling
+#+STATE: DONE
+#+SESSION_ID: 153f5ed0617636c7
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-26T21-12-46-213Z_153f5ed0617636c7.jsonl]]
+#+CUSTOM_ID: BUG-364-fade-in-emits-no-animation-for-any-easin
+#+COMPLETION_HASH: ae069d0c21781f45
+
+* Symptom
+
+A page using `@fade-in` builds cleanly and emits NO animation: no `@keyframes`,
+no `animation:` declaration, no motion of any kind. The element renders, static,
+with no diagnostic.
+
+#+begin_src spacetime
+%scope page
+<div class="box">Hello</div>
+.box {
+  @fade-in(duration: 300ms, easing: ease-out);
+}
+#+end_src
+
+#+begin_src bash
+cargo run -- build scratch/probe/     # ✓ Export complete: Pages: 1
+grep -c "@keyframes\|animation:" scratch/probe/dist/spacetime.css   # -> 0
+#+end_src
+
+* ROOT CAUSE — it is stated in the stdlib source
+
+`stdlib/macros/fade-in.st:41-46`. The macro matches its form, binds an
+intersection observer, and then does nothing:
+
+#+begin_src spacetime
+  %binds {
+    intersection(&self, threshold: $threshold, once: true) -> { $visible }
+  }
+
+  %when $visible {
+    // TODO: Implement using @tween or CSS keyframes primitive
+    // %timeline was never functional - it created empty state machines
+    // For now, the intersection observer triggers but no animation plays
+  }
+#+end_src
+
+"the intersection observer triggers but no animation plays" — the defect is
+known, written down at the site, and shipped. This is not a regression to
+bisect; it is unfinished work with a comment where the body belongs.
+
+`@fade-in` is additionally mid-retirement: `examples/rename-directive.st` is a
+migration script whose entire job is rewriting `@fade-in` to `@reveal`.
+
+* What is NOT broken (measured, so the scope stays honest)
+
+The easing TYPE and DECLARATION halves both work end to end. A local curve
+reaches the runtime correctly:
+
+#+begin_src js
+// dist/spacetime.js:7084, from `@form easing --friendly { spring(300, 22, 1) }`
+ST.registerEasing("friendly", ST.springCurve(300, 22, 1));
+#+end_src
+
+So the SIP-001c sigil migration (commit b01994dc) is sound: curves register,
+under their names, with their parameters. What is missing is the CONSUMER — no
+directive picks a registered curve up and animates with it.
+
+Four easing spellings were tried against `@fade-in`; all four build, none
+animate, which is what rules the easing system out as the cause:
+
+| easing value                        | builds | animation emitted |
+|-------------------------------------+--------+-------------------|
+| `ease-out` (bare keyword)           | yes    | NO                |
+| `--ease-out-expo` (stdlib curve)    | yes    | NO                |
+| `--friendly` (local `@form easing`) | yes    | NO                |
+| `spring(...)` via a local curve     | yes    | NO                |
+
+`@reveal` was also probed and is equally silent, so the gap is not confined to
+one macro. Establishing its true extent is part of this item.
+
+* Why it went unnoticed
+
+`grep -rl "@fade-in" demos/` returns NOTHING — no demo uses the directive, so
+nothing renders it in a browser where a human would see it not move. It is
+exercised only by stdlib tests, which assert on emitted source.
+
+This is precisely the failure mode AGENTS.md documents under BUG-252: a feature
+whose job is to MOVE something needs a `--cdp` gate asserting that it moved. A
+string gate proves a string was written. And a `needs timing` claim is SKIPPED
+under `--headless` while the run still exits 0, so a dead directive reads
+exactly like a passing one.
+
+* Scope to establish
+
+- Which motion macros share the empty-`%when` shape? `@reveal` is confirmed
+  silent; check `@loop`, `@on &.visible`, and the rest of `stdlib/macros/`.
+- What is the intended primitive — `@tween`, a CSS keyframes primitive, or
+  something else? The TODO names two candidates without choosing.
+- `%timeline` "was never functional — it created empty state machines". Is it
+  still referenced anywhere it might mislead the next author?
+- Does `@reveal` (the rename TARGET of the migration script) actually work? If
+  `@fade-in` is being retired INTO `@reveal`, and both are silent, the migration
+  moves callers from one dead directive to another.
+
+* Acceptance
+
+- A `--cdp` gate asserting the element ACTUALLY animates — and per BUG-252, seen
+  to FAIL against the current code before any fix lands.
+- The gate covers each easing spelling in the table above, so a curve reference
+  is proven to reach the animation, not merely to register.
+- Every motion macro sharing the defect gets its own behavior gate; one shared
+  assertion would let a sibling stay dead.
+- If `@fade-in` is genuinely retired, it should say so LOUDLY (a deprecation
+  diagnostic pointing at `@reveal`) rather than compiling to silence.
+
+* Found by
+
+Behavior-verifying the SIP-001c easing migration (commit b01994dc) — building a
+page and reading its output, rather than asserting on emitted source. The
+migration is sound; this defect is independent and pre-existing.
+
+NOTE [2026-08-12]: NARROWED to a compiler emission gap (commit 2e06bca2).
+
+The stdlib half is now correct and complete: `stdlib/primitives/fade-in.st`
+(`fade-in-engine`, modelled on the working `reveal-engine` — owns its observer,
+drives a real WAAPI `el.animate()`, honours prefers-reduced-motion, resolves
+declared `@form easing --name` curves through `ST.ease`), and all three macros
+rewired from the dead `%when` to `%binds fade-in-engine(...)`.
+
+ROOT CAUSE OF THE ORIGINAL DEADNESS: `%when` is evaluated at COMPILE time
+against captured macro bindings and cannot see a runtime signal — stated
+explicitly in `stdlib/macros/each.st` (BUG-362). The three `@fade-in` macros
+were waiting on a mechanism that could not arrive, which is why the TODO was
+never actionable as written.
+
+WHAT REMAINS, localised precisely:
+- the macro MATCHES (compiles clean),
+- the primitive RESOLVES (misspelling it yields `E0956: unknown primitive`; the
+  correct name does not),
+- the file passes `check`,
+- but the primitive's `%emit js` NEVER REACHES THE PAGE. A temporary probe
+  inside the primitive body (`window.__fadeInEngineRan`) never fired in
+  Chromium.
+
+So the defect is in emission, not in the stdlib definition. Next step is to
+trace why a `%binds` on a `%macro` with an optional body form does not emit its
+primitive's JS, comparing against `@reveal` / `@magnetic-glow`, which do.
+
+GATE: `tests/bugs/BUG-364-fade-in-must-animate.cdp.test.st`, committed RED
+deliberately. Seen failing 0/2 both before and after the engine change, so it is
+a proven instrument rather than an untested assertion.
+
+CORRECTION TO THIS ITEM'S EARLIER SCOPE: the claim that `@reveal` is "equally
+silent" was WRONG. The method was the error — I grepped `dist/` for animation
+evidence, but `@magnetic-glow` (known-working) emits nothing detectable that way
+either, so the probe could not distinguish a live directive from a dead one.
+`@reveal` passes its own `--cdp` gate before and after this work. The worry that
+the `@fade-in` -> `@reveal` migration script moves callers "from one dead
+directive to another" is therefore UNFOUNDED and withdrawn.
+
+NOTE [2026-08-12]: DONE — `@fade-in` animates, and its documented API is now its real API.
+
+Commits: 2e06bca2 (engine + RED gate), fa3ed1e5 (`const el = el;`), f855efd2
+(API surface). Gate `tests/bugs/BUG-364-fade-in-must-animate.cdp.test.st` is
+4/4 GREEN in Chromium, every claim seen RED first.
+
+THREE DEFECTS, ONE SHAPE — each compiled clean while doing nothing:
+1. `%when $visible` is a COMPILE-time construct and can never see a runtime
+   signal (stated in stdlib/macros/each.st, BUG-362). Replaced with a
+   `fade-in-engine` primitive bound through `%binds`, modelled on `reveal-engine`.
+2. `const el = %&el;` emitted `const el = el;` inside the generated
+   `const init = function(el)` wrapper — a temporal-dead-zone self-reference
+   that threw ReferenceError and killed the IIFE silently.
+3. The doc comment advertised a custom-keyframes body that was captured as
+   `$_customKeyframes` and dropped, and omitted `from:`/`once:` which the engine
+   had supported all along.
+
+Remaining scope moved to FUP-185 (`@fade-in-stagger` does not stagger children;
+prefers teaching `reveal-engine` a non-text split over duplicating stagger).
+
+METHOD NOTE for the next investigation of "this compiles but does nothing":
+`inspect --layer expansion` then `--layer emit` answered in two commands what
+three hand-written probes could not. Grepping `dist/` proves nothing — the
+known-working `@magnetic-glow` is equally invisible to it.
+
+And a near-miss worth keeping: the custom-keyframes gate PASSED before the fix
+when it asserted "a transform keyframe exists", because `distance` already emits
+a translate. Only asserting the SCALE specifically could fail. A gate that cannot
+fail is not a gate.

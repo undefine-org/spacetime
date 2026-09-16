@@ -1,0 +1,62 @@
+#+TITLE: BUG-354: @reveal dead on every page — stagger_value object × number = NaN delay
+#+CATEGORY: bugs
+#+STATE: DONE
+#+PROPERTIES:
+#+CUSTOM_ID: BUG-354-reveal-stagger-object-times-number-nan
+#+PRIORITY: #A
+#+END:
+
+* Symptom
+
+Every ~@reveal~ on a page is permanently dead: units are split and hidden
+(=opacity: 0=, translateY), =--st-revealProgress= stays =0=, no WAAPI
+animation is ever created. Load-trigger and visible-trigger alike.
+
+* Cause
+
+~stdlib/macros/reveal.st~ declares ~stagger: $stagger:stagger_value = 30~.
+The ~stagger_value~ capture type (stdlib/capture-types/spacetime-values.st:55)
+emits an OBJECT — ~{ delay: 40, from: "", grid: "" }~ — a contract written for
+~apply-animations.st~, whose comment says so explicitly.
+
+~stdlib/primitives/reveal.st~ never got that memo: ~delay = i * staggerMs~
+multiplies the object by a number -> NaN -> ~unit.animate()~ throws
+TypeError (non-finite delay). The init wrapper catches it
+(=[ST] Init error for <selector>=, console only), and since ~revealed = true~
+is set BEFORE the loop, no retry ever fires. One bad multiply kills every
+reveal instance on the page, invisibly, with the build reporting success.
+
+* The bug class, again
+
+Exactly the AGENTS "source assertion is not a behavior assertion" lineage
+(BUG-252): string gates asserted ~@reveal(~ was emitted, and every reveal in
+the tree shipped dead. Found LIVE in demos/brand-launch (PLAN-146 W1): hero
+title invisible over a rendering 30k-particle WebGL sphere.
+
+* Fix
+
+In ~stdlib/primitives/reveal.st~, read the delay out of the object contract
+(~typeof staggerData === 'object' ? staggerData.delay : staggerData~), keeping
+the bare-number path for older emissions. Stdlib DATA fix, no Rust.
+
+* Gate
+
+Needs a --cdp behavior gate: a char's computed opacity goes 0 -> 1 and
+~--st-revealProgress~ reaches 1. A headless run proves nothing (needs
+timing claims skip).
+
+* Resolution (2026-08-08)
+
+Fixed in stdlib/primitives/reveal.st: read ~delay~ out of the ~stagger_value~
+object (bare-number path kept). Verified LIVE in demos/brand-launch: hero
+title reaches ~--st-revealProgress: 1~, 4/4 chars at opacity 1, zero console
+errors; visible-trigger beats reveal on scroll.
+
+Behavior gate: tests/unit/primitives/reveal-stagger-progress.test.st —
+RED-seen (0/2 with the old line, under --cdp in real Chromium), GREEN 2/2
+with the fix. Skips headless by design (needs timing).
+
+Pre-existing neighbor failures recorded while verifying: all three in
+stdlib/text/tests/reveal-lines.test.st (lines split mode asserted headlessly,
+where there is no layout to measure lines with — identical 19/3 with and
+without this fix). A fidelity-ladder authoring gap, not this bug.

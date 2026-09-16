@@ -1,0 +1,36 @@
+#+TITLE: Live Preview — split-pane iframe, token push, zero-reload recolor
+#+STATE: DONE
+#+SESSION_ID: 14fc108ed3772fa8
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-04T14-32-37-965Z_14fc108ed3772fa8.jsonl]]
+#+CUSTOM_ID: FEAT-105-live-preview-split-pane-iframe-token-pus
+#+COMPLETION_HASH: 1abbbe934aa1b463
+
+* Initial Message
+
+can you check how that looks like in the admin? Can you compare that with stuff that is present in Framer/online/in mockups? I want it to look good please
+
+PLAN-036 ① — the loop-closer. Edit a brand token → the live website preview recolors WITHIN ONE FRAME, no page reload. Design: docs/specs/next-level/DESIGN.md §①, mockup docs/specs/next-level/01-live-preview.png.
+
+ARCHITECTURE (recombination — primitives already exist):
+- $brand.scarlet is a reactive signal; CSS-property position repaints via style.setProperty (BUG-091, SHIPPED).
+- EditAst patches the .st literal + sets suppress_reload_path (src/sync/handlers.rs) → disk write does NOT reload.
+- Project page already ships /ws live-reload client (LIVE_RELOAD_SCRIPT, src/server.rs:36; dev_server.rs ws hub).
+
+NEW RUST (minimal):
+1. DevServerMessage::TokenPreview { binding, field, value } variant in src/dev_server.rs (alongside Reload). Broadcast to all /ws clients.
+2. Extend LIVE_RELOAD_SCRIPT: on TokenPreview, call ST.setLocal(binding, {...prev,[field]:value}) → same publish path a normal signal write uses → every $brand.<field> binding repaints. NO new render path.
+
+ADMIN (.st only):
+3. Brand pane @on input [data-path] → ST.adTokenPreview (sends TokenPreview via window.__stDevWs; optimistic, NO disk). @on change [data-path] → ST.adBrandInput (EditAst persist). Split mirrors the existing input-vs-change distinction.
+4. Admin shell layout: grid rail | editor | preview-iframe (src=/, same origin). Add when $pane === brand (or a preview toggle).
+
+VALIDATION (GREEN = browser DOM, per methodology):
+- RED first: drag scarlet → assert hero background unchanged in iframe (no bridge yet).
+- GREEN: TokenPreview push → iframe hero background-color === new scarlet within ~1 frame; index.st UNCHANGED on disk (read file).
+- release (change) → index.st literal updated, siblings byte-exact; iframe NOT reloaded (assert preserved scroll/marker).
+- v8: TokenPreview JSON round-trips; ST.setLocal republish fires bindings. lib: serde round-trip of the new variant.
+- Reviewer swarm after (P1: same-origin postMessage/WS security; no token injection via value).
+
+GATE: lib + v8 + integration green (12 v8 baseline BUG-039 only); browser proof captured (screenshot/DOM assertion).
+
+NOTE [2026-06-12]: COMPLETE. Split-pane iframe preview recolors live on token edit, zero reload. Transport: postMessage (not WS) — same-origin iframe, synchronous, ZERO new DevServerMessage. Commits: ce5f7fd1 (bridge in LIVE_RELOAD_SCRIPT), <admin commit> (iframe pane + adTokenPreview + input/change split + bridge contract test), cdeb0312 (hardening). Browser-verified: input→iframe recolor 200ms no-reload; iframe identity survived 2nd edit + disk persist (suppress_reload); persist byte-exact siblings. Reviewer (Opus 0.93): correct, no P0/P1/P2. Gates: lib 2246/0, integration 172/0, v8 baseline-only (BUG-039). Mockup docs/specs/next-level/01-live-preview.png; shipped feat105-shipped.png.

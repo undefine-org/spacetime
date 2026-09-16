@@ -1,0 +1,66 @@
+#+TITLE: Assign-diff subscribe channel: @data subscribe … from $lv — server-initiated assign changes stream to signals (multiplayer for free)
+#+STATE: DONE
+#+SESSION_ID: 1539989eb44441ea
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-22T09-34-26-513Z_1539989eb44441ea.jsonl]]
+#+CUSTOM_ID: FEAT-159-assign-diff-subscribe-channel-data-subsc
+#+COMPLETION_HASH: bc36278b27b236b6
+
+* Initial Message
+
+explain the FUPs and show me your vision for the Spacetime <> LV connection and what would make it *wow*. Exlpain the impact of each bug that you saw
+
+* Wow pillar 1 of 3 — "Multiplayer for free."
+Closes FUP-122. Principles: elixir/spacetime_lv/AGENTS.md §Spacetime⇄LiveView
+bridge principles (2, 3, 4). Design: @research/spacetime-phoenix-liveview-bridge.org §1/§8/§9.2.
+
+* Problem
+Server→client state flows only as (a) the one-time mount seed (st-set) and
+(b) {:reply} payloads to the page's own fires. Server-INITIATED assign changes
+— PubSub broadcasts, handle_info, another user's action — never reach the
+page. LiveView's core superpower (server-pushed reactivity) is unused.
+
+* Deliverable
+`@data subscribe $items from $board : items ;` in a .st page, wired end-to-end:
+
+1. *Client surface (stdlib/primitives/signal.st + compiler).* New @data kind
+   `subscribe … from $host : assign_name` (plus dotted sugar `$board.items` if
+   the grammar makes it cheap). Registers the (host-module, assign-name, target
+   signal) triple; bridge applies incoming diffs via ST.set. Unreferenced
+   assigns are never wired — bandwidth win by construction (design §9.2).
+2. *Server reconciler (Spacetime.LiveView).* Track pushed assign values per
+   socket; on every render-worthy socket change, push ONLY the diff as st-set
+   messages (data, never templates — principle 3). Subsumes FUP-129's
+   auto-diff push_view: the seed becomes the first diff.
+3. *Bridge (assets/js/app.js).* st-set handler already exists; extend to route
+   by (module, assign) so multiple hosts/pages coexist (groundwork for
+   FUP-124, full per-host scoping can land here if cheap).
+4. *Contract rule (src/analysis/liveview_contract.rs).* E0928-family check:
+   subscribe names ⊆ contract `assigns`. RED→GREEN: subscribe a name the
+   server doesn't declare → compile error.
+
+* Tests
+- mix: CounterLive (or a BoardLive test-double) — handle_info-driven assign
+  change → st-set push asserted via assert_push.
+- Headless .st: subscribe-kind signal receives an ST.set → @view/@match
+  re-derives.
+- cargo: E0928 subscribe rule RED→GREEN.
+
+* Depends on
+Nothing (builds on FEAT-136/137 which are DONE). Consumed by FEAT kanban demo.
+
+* NOTE 2026-07-22 FEAT-159 implementation
+Shipped the registry-driven `@data subscribe $signal from $host : assign ;` surface,
+module+assign-scoped hook routing, and LiveView after-render assign reconciliation.
+The first connected render is the seed; subsequent renders push changed-only assigns.
+CounterLive now schedules server-only ticks, and `counter.st` subscribes to `count`.
+
+Evidence:
+- `cargo run -- check elixir/spacetime_lv/frontend/` passed.
+- `cargo test liveview_contract --lib` passed (10 tests, including unknown-assign E0928).
+- `cargo run --features headless -- test tests/bugs/FEAT-159-liveview-subscribe.test.st --headless` passed.
+- `cd elixir/spacetime_lv && mix precommit` passed (8 tests).
+- Browser proof on PORT=4001: no-click timer stream visibly changed `.value` from 21 to 39; screenshots saved as `artifacts/FEAT-159-assign-diff-e2e.png` and `artifacts/FEAT-159-assign-diff-e2e-after.png`.
+
+Deviation: full `cargo test --lib` is currently red on unrelated in-flight BUG-206/BUG-207 regression tests (`test_parse_on_click_in_nested_scope_keeps_compound_selector`, `test_text_binding_marks_data_source_as_used`, `test_handle_arm_marks_data_source_as_used`). FEAT-159 remains DOING until their owning work lands and the global gate is rerun.
+
+NOTE [2026-07-22]: VERIFIED + DONE 2026-07-22 (orchestrator gate). Shipped as 1ac98e80: @data subscribe $count from $counter : count client surface (stdlib/macros/data-kind.st + signal.st); LiveView changed-assign reconciler (diff-only st-set pushes, connected mount seed = first diff); bridge routing scoped by (module, assign) with reconnect-safe buffering; E0928-family rule subscribe ⊆ contract assigns (RED→GREEN). Gates: cargo check frontend/ green · cargo test liveview_contract --lib 10/10 · headless subscribe test green · mix precommit 8/8 · puppeteer e2e :4001 — counter advanced 21→39 with ZERO clicks (server timer tick → assign diff → .value re-render; artifacts/FEAT-159-assign-diff-e2e*.png). cargo test --lib shows exactly 3 failures, all in src/analysis/tests.rs + src/pipeline/integration_tests.rs — files dirty in the working tree from the CONCURRENT BUG-206/BUG-207 agent (test_handle_arm_marks_data_source_as_used, test_text_binding_marks_data_source_as_used = BUG-207 W0201 territory; test_parse_on_click_in_nested_scope_keeps_compound_selector = BUG-206 territory). Confirmed NOT from this work: none of those files appear in 1ac98e80. Bundle note: priv/static/spacetime/counter/ is root-.gitignored (line 10: spacetime.js) — build artefact by design, regenerated via the documented build command.

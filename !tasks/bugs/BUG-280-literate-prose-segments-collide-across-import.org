@@ -1,0 +1,35 @@
+#+TITLE: BUG-280 literate prose segments collide across imported files
+#+TODO: TODO DOING | DONE CANCELLED
+#+STARTUP: overview
+
+* DONE [#A] literate prose segments collide across imported .st.md files
+:PROPERTIES:
+:CUSTOM_ID: BUG-280
+:PRIORITY: #A
+:LAYER: pipeline
+:DISCOVERED: 2026-08-04
+:FIXED: 2026-08-04
+:END
+
+** Symptom
+A page importing multiple .st.md files (the FEAT-172 gallery pattern) rendered
+the LAST import's prose in EVERY prose section — and the host's own prose
+vanished too. Fences and live elements were unaffected (correct order).
+
+** Root cause
+tangle() numbers each file's prose segments from 0 and emits
+`[data-lit-seg="0"] { @doc(content: …) }` rules. Merged into one page, N files
+produce N rules with the same selector and different content → CSS
+last-writer-wins → one prose everywhere.
+
+** Fix
+`tangle_seeded(input, seed)`; read_source derives a deterministic per-file
+seed (FNV-1a over the path, 16 hex) so segment ids become `<seed>-<n>`.
+Unseeded tangle() keeps the historic bare ids (standalone pages unchanged).
+
+** Gates
+- tests/integration/literate_tangle.rs::imported_literate_files_keep_their_own_prose
+  (RED→GREEN: three literate files merged, distinct ids + each prose intact)
+- src/literate.rs::seeded_tangle_namespaces_segment_ids (unit)
+- served_html_preserves_document_order made seed-agnostic
+- Visual: demos/effect-gallery renders host intro + 15 distinct snippet proses

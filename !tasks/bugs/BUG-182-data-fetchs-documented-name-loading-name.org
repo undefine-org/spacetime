@@ -1,0 +1,127 @@
+#+TITLE: @data fetch's documented $name_loading/$name_error/$name_refetch yields are never actually published to reactive state -- only $name (the data) works
+#+STATE: ITEM
+#+SESSION_ID: 153115a0b151f3c0
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse-commercial-host/2026-07-15T18-54-16-774Z_153115a0b151f3c0.jsonl]]
+#+CUSTOM_ID: BUG-182-data-fetchs-documented-name-loading-name
+#+layer: compiler,primitives
+
+* Found by
+Building =commercial/host/frontend/host-admin/index.st= (Spacetime
+Host's Wave 7 operator dashboard). A login-gate derived from
+=$probe_error != null= (=$probe= being a =@data fetch=) never
+flipped, even though the underlying fetch genuinely 401'd -- verified
+via a live browser test against a real running server.
+
+* Reproduction
+#+begin_src text
+@data fetch $probe : "/some/url/that/returns/401";
+@data derive $probeFailed bool : ($probe_error != null);
+#+end_src
+
+Live browser inspection after the fetch resolves:
+#+begin_src js
+window.__spacetimeData.probe
+// => { data: null, loading: false, error: "Unauthorized" }  -- CORRECT internally
+
+window._localState.probe_error
+// => undefined  -- NEVER SET, despite a real fetch failure
+
+Object.keys(window._localState)
+// => does not even contain "probe_error", "probe_loading", or "probe_refetch"
+#+end_src
+
+* Root cause (confirmed by reading =stdlib/primitives/data/source.st=
+  in full)
+The primitive's INTERNAL =store= object (=store.data=/=store.loading=/
+=store.error=, at =window.__spacetimeData[sourceName]=) IS correctly
+updated in every code path (success, error, empty). But the bridge to
+REACTIVE state (=window._localState=/=window.SpacetimeLocal=, the
+ONLY thing a =@data derive=/=.class:=/=text <-= binding can actually
+read) only happens for the MAIN =$data= value:
+#+begin_src js
+// success path (~line 111-143):
+store.data = result;
+window._localState[sourceName] = result;   // <- $name PUBLISHED
+
+// error path (~line 155-158):
+store.loading = false;
+store.error = err.message;                 // <- store updated
+// NOTHING publishes this to _localState at all
+#+end_src
+There is NO =%yield= statement anywhere in this primitive's =%emit
+js= for =loading=/=error=/=reload= -- the macro's own
+=stdlib/macros/data-kind.st= =%binds= block DECLARES the mapping
+(=$loading as \${$name}_loading=, =$error as \${$name}_error=,
+=$reload as \${$name}_refetch=), and the primitive's OWN doc comment
++ =%exports= block both document these as real yields -- but the
+=%emit js= body simply never writes to =window._localState[
+"\${sourceName}_error"]= (or =_loading=/=_refetch=) ANYWHERE. This is
+a documented, declared, but completely unimplemented contract.
+
+* Impact
+Every =.st= page that follows the documented =@data fetch=
+loading/error pattern (shown in this primitive's OWN doc comment, and
+presumably copied by real authors) silently gets NOTHING: no loading
+spinner condition, no error message, no manual refetch button ever
+works, because =$name_loading=/=$name_error=/=$name_refetch= are ALL
+permanently =undefined= in reactive scope, regardless of the fetch's
+REAL outcome. A derived signal like =($name_error != null)= is
+ALWAYS =false= (since =undefined != null= is =false= in JS's loose
+comparison... actually =undefined != null= is =false= too, both
+nullish -- meaning this specific comparison silently always evaluates
+to the SAME branch, compounding the silence). This is NOT a rare edge
+case -- it is the DOCUMENTED, headline error-handling story for the
+single most commonly used data-fetching primitive in the whole
+language, and it does nothing.
+
+* Fix required
+1. Add the missing state-publish calls in =source.st='s =%emit js=
+   for ALL THREE outcomes this primitive tracks:
+   - on fetch START: publish =true= to
+     =window._localState["\${sourceName}_loading"]= (+ dispatch the
+     matching =local:...:updated= event, mirroring exactly how the
+     SUCCESS path already publishes =$data=).
+   - on ERROR: publish =err.message= to
+     =window._localState["\${sourceName}_error"]=.
+   - on SUCCESS: publish =null=/clear to
+     =window._localState["\${sourceName}_error"]= (so a RETRY after a
+     prior failure correctly clears the stale error) AND =false= to
+     =_loading=.
+   - =\${sourceName}_refetch=: this needs to be a REAL callable
+     function (matching =@data signal='s own =$name_refetch=/
+     =registerSignalCall= pattern) -- currently =store.reload = load=
+     exists internally but is never exposed to the by-name signal-call
+     rail (=ST.registerSignalCall=) or any other externally-reachable
+     path, so =$probe_refetch()= (the documented call-a-function-by-
+     name idiom) would ALSO silently no-op today.
+2. Add a REAL test: a =@data fetch= against an endpoint that returns
+   a non-2xx status, asserting =\${name}_error= is a real, non-
+   undefined string in =window._localState= (or the equivalent
+   signal-inspection API this codebase's OWN test suite uses for
+   reactive state) -- NOT just that the internal =store.error= is
+   set, which is exactly the gap that let this ship undetected. Same
+   for =_loading= (assert =true= DURING the in-flight window, before
+   the fetch resolves) and =_refetch= (assert calling it actually
+   re-fires the fetch).
+3. This is almost certainly the SAME underlying pattern as BUG-181
+   (=@data signal='s =%body=/=%params= -- declared in a primitive's
+   own param list/exports, never actually referenced in =%emit js=)
+   -- worth a broader audit of every =%primitive= in
+   =stdlib/primitives/data/= for the SAME "%exports says X exists,
+   %emit js never writes it" gap, rather than fixing this one
+   instance in isolation and leaving siblings broken.
+
+* Workaround applied (this session)
+NONE within the affected file's own scope -- there is no safe
+workaround for "the language's documented error-state primitive
+doesn't publish error state" short of hand-rolling a raw =fetch()=
+call via an =@on visible= mutation body (a real escape hatch that
+exists in this language, confirmed working in a DIFFERENT context
+this session -- =window.open(...)= via a =$var <- expr= mutation --
+but re-implementing an entire fetch-with-error-handling primitive
+inline in a mutation body defeats the whole point of =@data fetch=
+existing, and was judged NOT worth doing for a single dashboard
+page's login-gate condition). =commercial/host/frontend/host-
+admin/index.st='s login-gate currently does not correctly detect an
+expired/missing session via =$probe_error= -- documented as a known,
+unresolved blocker in that file, tracked back to this bug.

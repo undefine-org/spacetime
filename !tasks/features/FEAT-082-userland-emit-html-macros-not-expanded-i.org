@@ -1,0 +1,58 @@
+#+TITLE: Block-capture %emit html macros (@example dual-render) not expanded at file scope
+#+STATE: DONE
+#+SESSION_ID: 14f94e45c6c3f247
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-02T11-06-49-499Z_14f94e45c6c3f247.jsonl]]
+#+CUSTOM_ID: FEAT-082-userland-emit-html-macros-not-expanded-i
+#+LAYER: emit
+#+DEPENDS: BUG-070-import-without-terminator-swallows-follo
+#+COMPLETION_HASH: e1ff15abe2e9eb0f
+
+SCOPE CORRECTION: ordinary markup generation does NOT need this — `@template &x($p){...}` + `@each` + `@data` is the idiomatic, sufficient, PROVEN path for API cards / galleries / `@reference`-style content (the docs-site gallery uses exactly this). A `&template` covers "data in → markup out".
+
+The ONLY thing it cannot do, and the only reason this FEAT exists: a `&template` takes params and emits ONE rendered markup; it cannot take an arbitrary free `{ <markup> }` BLOCK and emit that block BOTH as live DOM AND as its own escaped source text. That dual-render is the `@example` doc primitive:
+
+  @example "A button" { <button class="b">Hi</button> }
+  → <figure>
+      <div class="live"> <button class="b">Hi</button> </div>   // rendered
+      <pre><code>&lt;button class="b"&gt;Hi&lt;/button&gt;</code></pre>  // its own source
+    </figure>
+
+That needs block-capture (`$body:block`) + the `%$body.html` field in a `%emit html` macro. `.html`/`.js` block-field access already works in `%emit js` (src/emit/js.rs:980-981); the gap is that a userland `%emit html` macro invoked at FILE SCOPE is not expanded into the compiled body_html — its call renders verbatim.
+
+Repro: `%macro card { %form { @card $l:string { $b:block } } %emit html { <figure>%$b.html</figure> } }`, invoke at file scope → served HTML shows the literal `@card ...` text, not the `<figure>`.
+
+NOT NEEDED FOR: the docs-site gallery / cards / registry rendering (those are `&template`+`@each`). ONLY needed for: the source-code-pane "show this example's own text" feature. Lower priority accordingly.
+
+* REFINEMENT ((2) of the docs brainstorm): two orthogonal primitives, then @example falls out
+The @example dual-render is the NATURAL CONSEQUENCE of two small, general pieces — neither a doc-site special-case:
+
+** Piece A — file-scope userland %emit html expansion (the core gap)
+Today the file-scope → body_html pipeline (PLAN-023 W1 CompiledSpacetime.html, src/compiler.rs:700+ emit_html_blocks) lowers `<tag>` literals + builtin block macros (@each/@template) but does NOT invoke userland `%emit html` macros — so `@example "x" { ... }` at file scope renders VERBATIM (proven: the served HTML shows the literal `@card ...` text).
+FIX DIRECTION: in emit_html_blocks / the file-scope collector, route a file-scope `@directive` whose macro has a `%emit html` form through the SAME macro resolver @each/@template already use, and splice its emitted html into the body markup stream. General — fixes ALL userland html macros at once. No Rust special-case (AGENTS.md).
+NB: relates to BUG-070 (terminator-less @import swallowing markup) — both live in the file-scope item/markup boundary; fix BUG-070 first as it is #A and may share the collector path.
+
+** Piece B — a `.source` block field (escaped verbatim capture)
+`%$body.html` already resolves (raw markup, renders) and `%$body.js` (compiles) — src/emit/js.rs:980-981. Add a sibling `.source` (or `.escaped`) field in resolve_var_ref that emits the VERBATIM captured block text, HTML-escaped, as a compile-time string literal. Symmetric, tiny (one match arm), compile-time (the source pane needs no JS).
+
+** Then @example is pure userland .st
+  %macro example {
+    %form { @example $title:string { $demo:block } }
+    %emit html {
+      <figure class="ex">
+        <figcaption>%$title</figcaption>
+        <div class="ex__live">%$demo.html</div>            // live DOM
+        <pre class="ex__src"><code>%$demo.source</code></pre> // its own escaped source
+      </figure>
+    }
+  }
+Once A+B exist, @example / @playground / @figure / any show-and-tell macro is userland — the metasystem EARNS it. The live demo and the shown code can never disagree (one source, rendered twice).
+
+** ACCEPTANCE
+- a file-scope `@example "t" { <button/> }` renders a <figure> with BOTH a live <button> AND its escaped `<button/>` source text in the <pre>.
+- `%$body.source` escapes `<`,`>`,`&`,`"` (no markup leak into the <pre>).
+- works on a `.st`-only page (no index.html); SSG-correct (source pane is static).
+- a second userland %emit html macro (not @example) also expands at file scope (proves Piece A is general).
+
+** DEPENDENCY: BUG-070 (file-scope boundary, #A) first. Independent of FEAT-083/084 (those are data-plane; this is markup-plane). Together they complete the docs brainstorm (1)+(2).
+
+NOTE [2026-06-09]: Done (commits 3f90b63f Piece A+B, 3a5cbca2 Piece C). EmitLang::Html variant + parse + IR codegen + substitute_html_template (%$name/%$block.html/%$block.source escaped) + pipeline plumbing (ir.html->ExpandedPrimitive->PipelineOutput->compiler body splice). stdlib @example dual-renders live+escaped-source. 3 regression tests. Needs rematch_with_user_macros (compile + serve do this). v1: end-of-body placement.

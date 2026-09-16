@@ -1,0 +1,50 @@
+#+TITLE: MCP kit form: collect per-field values into the submit envelope
+#+STATE: DONE
+#+SESSION_ID: 150ccb99745d347e
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-17T14-25-31-601Z_150ccb99745d347e.jsonl]]
+#+CUSTOM_ID: FUP-068-mcp-kit-form-collect-per-field-values-in
+#+COMPLETION_HASH: 650c867d9f59e551
+
+* Initial Message
+
+Dig into the FUPs and explain to me
+1. what got done
+2. what you can do with it
+3. what we should do next
+
+treat this as an overall report to explain things to me from scratch
+
+#+DEPENDS: PLAN-043-plan-043-mcp-interaction-kit-picker-form
+
+* Parent
+PLAN-043 W3 (form kit, S0). The form kit ships on the proven rails (prompt + @each fields + a kit-submit action) but its submit is INTENT-only.
+
+* Problem
+stdlib/__mcp__/kit/form.st renders inputs and emits `mcp-action` `action:"kit-submit"` on click, but the envelope does NOT carry the current field VALUES. The existing host primitives (mcp-click-event / mcp-action-event) emit a FIXED payload computed from the clicked element + static/attr args — none reads sibling form inputs. So today the agent gets "submit happened" but must read the page or re-prompt to learn the values.
+
+* Why deferred (honest S0 scope)
+Collecting `{name: value}` across the region's inputs at click time needs a new read step. Per AGENTS elegance bar, a speculative new %primitive should not be folded into the kit's first ship — file it, ship the proven rails, add the primitive against a RED test.
+
+* Design options
+1. New selector-scoped %primitive `mcp-submit(&self, fields: ...)` that, on click, queries the nearest [data-st-instance] region for `input[name]` (and select/textarea), builds `{name: value}`, and emits `mcp-action` `action:"kit-submit"` with `payload.values = {...}` through the SAME `host.signal` path. One generic sink preserved; one new primitive, data-driven.
+2. Extend `mcp-action-event` with an optional `collect: "form"` mode that gathers `[name]` values from the region root into the payload. Smaller surface (no new primitive) but overloads the action primitive — weigh against harmony.
+   Lean toward option 1 (a distinct submit verb reads cleaner than a mode flag on action).
+
+* Acceptance
+- Mounting form.st with N fields, filling them, clicking submit → st_await returns
+  `payload.values == { <name>: <current input value>, ... }` for every declared field.
+- Headless test seeds fields, sets input values, dispatches click, asserts the collected values in the emitted envelope (RED→GREEN).
+- inspect --layer emit proves the submit primitive reads `[name]` from the region root and emits through the one `/__mcp/signal/{instance}` sink (no new route).
+- Harmony: still one sink; no per-form route; JS only inside the new %primitive.
+
+* Out of scope
+- Field validation / typed coercion beyond string values (a later kit refinement).
+- Multi-step / wizard forms.
+
+NOTE [2026-06-18]: DONE in PLAN-044 commit 0584b7fd. Chose design option 1 (a distinct submit verb) over overloading @mcp-action: new selector-scoped @mcp-submit primitive+macro gathers every input[name]/select[name]/textarea[name] in the nearest [data-st-instance] region into payload.values={name:value} (checkbox/radio -> boolean) and emits mcp-action through the SAME host.signal path / one generic sink — no new Rust route. form.st's submit swapped from @mcp-action to @mcp-submit.
+
+Implementation note: the gather LOOP lives in the runtime as ST._mcpCollectValues (public/runtime/st.js); the primitive calls it as a single call expression, because the %emit js statement splitter mangles a loop-bearing helper inside a %primitive (for/forEach collapses, continue hoisted -> 'Illegal continue statement', whole runtime fails to init). Filed FUP-070 for that splitter bug; the runtime-helper placement is the clean architecture regardless (mirrors the admin's querySelectorAll gather helpers).
+
+ACCEPTANCE met (live-verified, not just headless): mounted form.st via st_mount, edited service=billing-api + replicas=5 in the browser, clicked submit -> st_await returned payload.values={service:'billing-api', replicas:'5'}. inspect --layer emit confirms the submit reads [name] from the region and emits through /__mcp/signal (no new route). Harmony: one sink, no per-form route, JS only in the primitive + the runtime helper. The same @mcp-submit also powers review.st (approve/reject with a comment).
+
+Out-of-scope (unchanged): field validation / typed coercion beyond string|boolean; multi-step forms.

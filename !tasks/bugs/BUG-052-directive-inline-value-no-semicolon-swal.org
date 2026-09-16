@@ -1,0 +1,64 @@
+#+TITLE: Directive inline value (no semicolon) swallows trailing comments/code
+#+STATE: ITEM
+#+SESSION_ID: 14f94e45c6c3f247
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-02T11-06-49-499Z_14f94e45c6c3f247.jsonl]]
+#+CUSTOM_ID: BUG-052-directive-inline-value-no-semicolon-swal
+
+* Initial Message
+
+let's think about how we'll extend the stdlib for Spacetime using this as a philosophical underpinning: https://www.gingerbill.org/article/2025/09/08/package-managers-are-evil/
+
+
+In the context of integrating pretext to make text layout much simpler in Spacetime, especially in ora-ventures.com's hero section (projects/ora-ventures.com/ has some older syntax which the implementation agent will have to fix).
+
+Gather your thoughts and come up with your own understanding of the nuances of going that way for this project. Remember that the stdlib/ folder is going to go from having `macros/` and `primitives/` to a modular architecture for folders, which is how we are going to make the pretext macros btw.
+
+This is pretext: https://github.com/chenglou/pretext
+
+Also think about stuff we could put in the demos/ folder to showcase the integration with pretext and the latest Spacetime features. Let's not do ora-ventures.com just yet, let's first think about a nice framework for making the stdlib library both lean and "fusion-engine-included", and showcase that with pretext. Consider all angles
+
+* Symptom
+A directive with an inline VALUE and no trailing =;=, followed by a =//= comment
+or further statements, captures the trailing content INTO the value. Concretely:
+
+#+BEGIN_SRC
+@data fetch $terms T[] : "/data/x.{locale}.json"
+// a trailing comment
+.foo { color: red; }
+#+END_SRC
+
+emits a fetch URL of ="/data/x.{locale}.json"// a trailing comment// ..."= — the
+quoted string plus everything after it. Same family as BUG-047 (greedy directive
+inline capture without a =;= terminator), here in the directive VALUE path
+(=@data fetch ... : <value>=).
+
+* Impact (real)
+Broke the ora-ventures hero: =@data fetch $heroTerms : "/data/hero-terms.{locale}.json"=
+(no =;=) fetched =/%22/data/hero-terms.en.json%22//...comments...= -> 404 -> heroTerms
+empty -> =@cycle= had no data -> split-flap never cycled -> =@value-change= never
+fired. Looked like a value-change bug; was actually a fetch-URL capture bug.
+
+* Workaround (applied in FEAT-053)
+Terminate the directive with =;=. =@data fetch ... : "...";= captures the URL
+precisely. This is the documented convention (stdlib/AGENTS.md recommends =;= on
+bodyless directives), but the parser should not silently swallow comments.
+
+* Root cause (suspected)
+The directive inline-value / inline-arg consumption loop (src/syntax/cst/parser.rs
+and src/syntax/events/grammar/directives.rs) does not treat a line comment =//=
+(or a following statement after a complete string value) as a value boundary. The
+W3 fix (BUG-047) added a newline guard for =.=/=#= selector starts; it did NOT
+cover =//= comments or a string-value directive followed by arbitrary tokens.
+
+* Proper fix
+Stop inline value/arg capture at a line comment, and (for a `: <value>` inline
+value that is a complete string/expr) at the newline that ends it. Mirror in BOTH
+parsers (CST + events). Add tests: directive-with-inline-value + trailing comment,
++ trailing directive, with and without =;=.
+
+* Verification
+- =@data fetch ... : "url"= followed by =// comment= and =.scope {}= -> URL is exactly =url=.
+- ora-ventures hero: heroTerms fetch 200, flap cycles, value-change animates
+  (verified manually post-workaround).
+
+Discovered during PLAN-024 FEAT-053 (ora-ventures hero migration).

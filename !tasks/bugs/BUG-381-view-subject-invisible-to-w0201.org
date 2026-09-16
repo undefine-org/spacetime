@@ -1,0 +1,78 @@
+#+TITLE: W0201 false positive: `@view`/`@match` subject is invisible to read-usages
+#+STATE: DONE
+#+CUSTOM_ID: BUG-381-view-subject-invisible-to-w0201
+
+* Symptom
+
+A `@data` source consumed ONLY as the subject of a `@view` (reactive dispatch)
+or `@match` (mount once) is flagged =W0201 "defined but never used"= by
+=check --deny-warnings=. Reproduced against the release binary (2026-08-28):
+
+#+begin_src spacetime
+@data inline $status : "idle";
+@template &bubble($m) { <div class='bubble'>`$m`</div> }
+.status { @view $status { _ => &bubble(); } }
+#+end_src
+
+→ =warning[W0201]: 'status' is defined but never used= — while the browser
+re-mounts the indicator on every status change.
+
+* Root cause
+
+=stdlib/enum/dispatch.st:44= defines =@view= as
+=%form { @view $subject:binding { $arms:arm+ } }=, lowered to
+=dispatch-mount(subject: $subject, reactive: true)= — the subject IS a reactive
+read (the mount re-runs when it changes). But
+=CompileAnalysis::analyze_read_usages= (src/analysis/mod.rs:828) never looks at
+a =view= or =match= FormMatch's =subject= capture; the only code in the tree
+that pattern-matches those macro names is the enum-union diagnostic
+(src/pipeline/mod.rs:2382), which is about arm coverage, not usage.
+
+Same shape as BUG-207 and BUG-380: one more read-position the scan doesn't
+know.
+
+* Found by
+
+Same audit as BUG-380: spell's =@exempt_sources= carries =status=, =partial=,
+=error=, =vars_count= — every one a `@view` subject, each verified live in the
+emitted bundle before being listed.
+
+* Fix
+
+In =analyze_read_usages=: for =fm.macro_name in {"view", "match"}=, read the
+=subject= binding and insert its signal name into =read_usages= — stripping the
+=$= and reducing a dotted path (=$m.text=) to its base via the existing
+=leading_source_ident= (src/analysis/mod.rs:42), the same normalisation every
+other read-position gets.
+
+* Gate
+
+RED: Rust unit tests in =src/analysis/tests.rs= — a =@view $status= page and a
+=@match= page parsed from real source must not warn; a dotted subject marks
+its BASE used; the genuinely-unused negative stays red. Behavioural guard in
+=tests/bugs/BUG-381-….test.st=: mount a view, change the subject signal, assert
+the matching arm's template re-mounted (proves the subject is consumed at
+runtime; the diagnostic gate itself is the Rust test, per BUG-207's note).
+* AS BUILT
+
+** The change
+
+- =src/analysis/mod.rs= — =analyze_read_usages=: a =view= or =match=
+  FormMatch's =subject= binding joins =read_usages= (via =read_base=, which
+  keeps dashed names intact and reduces dotted subjects to their base).
+  Scanned in =walk_matches=, so scoped AND flat (file-scope) forms are both
+  seen. Two lines of reader; the bug was the missing channel, not the shape.
+
+** Gates
+
+- RED→GREEN, =src/analysis/tests.rs=: =view_subject_marks_source_used_bug381=,
+  =match_subject_marks_source_used_bug381= (mount-once is still a read),
+  =dotted_view_subject_marks_base_source_used_bug381=, and the EDN-ingress
+  half of the shared BUG-380/381 document test.
+- Behavioural guard: =tests/bugs/BUG-381-view-subject-invisible-to-w0201
+  .test.st= — a `@view` mounts the arm matching the initial subject AND
+  re-mounts on change (headless V8). Green before and after, by design: the
+  runtime was never wrong.
+
+Suites as recorded in BUG-380's AS BUILT (same commit).
+

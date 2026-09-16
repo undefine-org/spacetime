@@ -1,0 +1,50 @@
+#+TITLE: Reactive bindings: harmonize to one expression model
+#+STATE: DONE
+#+SESSION_ID: 14f48ced503111a7
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-05-29T18-28-09-664Z_14f48ced503111a7.jsonl]]
+#+COMMIT: b778b8be
+#+CUSTOM_ID: BUG-026-reactive-bindings-harmonize-to-one-expre
+#+EFFORT: 1d
+#+LAYER: coding-agent
+
+* Initial Message
+
+my friend, I want you to do two things that are quite related to each other:
+1. look at projects/unkn for the way it structures its files and tell me how you would have structured it
+2. look up reactive bindings and how they are done in Spacetime (the $ sigil), as well as full-spacetime work (as in, not using index.html, only index.st and generating the html from it by putting the html inline).
+
+The goal is to build a project that showcases reactive bindings, so that websites can start dealing with userland values instead of just animation-specific values (although one of the strengths of Spacetime is its ability to bring reactive bindings to the animation sphere).
+
+The goal of this is both to make a showcase demo (in demos/) and to use that to find all the BUGs and FEATs and REFACTORs that we need to implement. Do NOT use the 'emacs' way of managing tasks; only the Spell-native way. Think a bit about the type of demo that would make sense to showcase reactive bindings; get inspiration by choosing from awwwards.com too
+
+* Source
+Discovered while building a reactive-bindings showcase demo. Verified by compiling + serving probes in a real browser (puppeteer), not docs.
+
+* Root causes (compile-time extraction was the narrow link; runtime ST.signals/watch was already capable)
+Three locally-coherent designs fought the general case:
+
+1. **State actions were pattern-matched, not evaluated.** `parse_state_action` (src/syntax/events/form_compiler.rs ~L1893) only recognized Toggle(!$v) / Increment($v+N) / Decrement($v-N) / Set(literal); anything else became StateAction::Raw + an E0906 diagnostic, and the runtime Raw evaluator (stdlib/primitives/template.st) only handled !$x, $x, JSON.parse — no arithmetic/array ops. So `$count <- $count + 1` (non-literal), `$items <- $items.concat([...])`, `.map`, `.filter` all silently failed.
+
+2. **Content/attr bindings were not extracted from selector blocks.** `parse_component_body` only scanned inner lines for `.class: $v` (toggle) and `&self.prop <- $expr`; `.sel { text: $expr }` fell through to dead css_rules → value DISPLAY silently no-op'd.
+
+3. **@on event space-selector form unsupported.** `@on click .inc { }` parsed ".inc" INTO the event string; only the paren form `click(.inc)` split event/selector.
+
+4. **@computed greedy capture.** `from: $sig` swallowed trailing clauses (`items; reduce:...; initial:0`) as the dependency name → false E0405. And validate_computed_dependencies (src/analysis/mod.rs) never included $-scoped signals in the lookup set.
+
+* Fix (harmonization: "any binding or action is an expression over signals")
+- R1: accept `@on click .inc` (space form) ≡ `click(.inc)` — parse_on_event_block.
+- R2: state mutation RHS is a first-class expression; `$sig` transpiled at compile time to `ST.get(__el,'sig')` and emitted as a real `(__el) => (expr)` arrow (no runtime eval). Fast paths (Toggle/Increment/Decrement/Set) retained as codegen shortcuts. New helpers transpile_signal_expr + collect_signal_deps in src/syntax/form_match.rs.
+- R3: `.sel { text|content|attr: $expr }` extracted to ContentBinding carrying a transpiled apply arrow + full dependency set; runtime re-evaluates on any dep change. Legacy `&self.x <- $a.b` dotted simple-ref preserved via allow_dotted_ref flag.
+- R4: computed dependency reduced to its leading identifier (leading_source_ident); reactive source resolution unified (reactive_source_names) so @data + @computed + scoped $state + signals are one lookup set.
+
+* Tests
+- Unit (src/syntax/events/form_compiler.rs): transpile_signal_expr, @on space-selector, content-binding-expression-from-block; updated 2 tests that encoded the old E0906-for-expressions contract.
+- Integration (tests/integration/reactive_properties.rs): space-selector compiles + wires selector, content-binding expression transpiles, @computed from $state with reduce/initial raises no false E0405.
+- All form_compiler unit tests (112) + reactive integration tests (9) green.
+- Live browser: counter increments; `text: $count * 2` derived output updates reactively; --st-count CSS var mirrors state.
+
+* Files
+src/syntax/events/form_compiler.rs, src/syntax/form_match.rs, src/syntax/mod.rs, src/analysis/mod.rs, stdlib/primitives/template.st, tests/integration/reactive_properties.rs
+
+* Commit
+b778b8be — feat(reactive): harmonize bindings to one expression model

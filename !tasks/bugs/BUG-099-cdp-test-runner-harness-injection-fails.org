@@ -1,0 +1,44 @@
+#+TITLE: CDP test runner: harness-injection fails (__spacetime_run_tests never available)
+#+STATE: ITEM
+#+SESSION_ID: 1503ca05d05c0c62
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-10T14-32-18-497Z_1503ca05d05c0c62.jsonl]]
+#+CUSTOM_ID: BUG-099-cdp-test-runner-harness-injection-fails
+
+* Initial Message
+
+okkk! how does that translate to the actual admin? is the actual editing interface working, and how? let's DESIGN and BRAINSTORM how we'd do it properly
+
+* Problem
+The CDP test runner (`cargo run --features cdp -- test <file> --cdp`) launches Chromium
+fine but the in-page JS test harness never becomes available:
+  ✗ cdp:<file>  "test harness (__spacetime_run_tests) never became available"
+accompanied by chromiumoxide WS errors:
+  ERROR chromiumoxide::conn  Failed to deserialize WS response: data did not match any
+    variant of untagged enum Message
+  ERROR chromiumoxide::handler  WS Connection error: Serde(...)
+
+Reproduced with BOTH:
+- tests/cdp_runner_test.rs (the built-in CDP smoke test) — fails the same way (14s);
+- stdlib/editable/tests/region-surface.cdp.test.st (@drive against a served page).
+
+So the harness injection / page-eval handshake under chromiumoxide is broken in this
+environment, independent of the test content. The chromiumoxide WS deserialize error
+suggests a CDP protocol-version / Message-enum mismatch between the pinned chromiumoxide
+0.7 and the installed Chrome (google-chrome-stable).
+
+* Impact
+Blocks ALL `--cdp` test execution (the layout/timing/paint + @drive rungs). The region-
+edit @drive test (region-surface.cdp.test.st) PARSES (after the BUG-095 fix) and launches
+Chrome, but can't complete because the harness never loads. Live behaviour is instead
+proven via the browser/puppeteer tool directly (which speaks raw CDP and works).
+
+* Likely fix locus
+- src/cdp.rs: the harness-injection path (addScriptTag/evaluate of the test runtime) and
+  how it polls for __spacetime_run_tests; and/or
+- the chromiumoxide version vs Chrome protocol (the untagged-enum deserialize failure is
+  a version-skew signature) — may need a chromiumoxide bump or a CDP message-filter.
+
+* Provenance
+Surfaced during FUP-045 S4 (region-edit CDP gate). Pre-existing (cdp_runner_test fails
+identically) — NOT caused by FUP-045 or BUG-095. The puppeteer/browser tool path is the
+working live-verification rung in the meantime.

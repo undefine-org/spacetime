@@ -1,0 +1,109 @@
+#+TITLE: @scroll-spy $isActive is element-scoped only; @when-guard can flip true but never back to false
+#+STATE: ITEM
+#+SESSION_ID: 1522a68ca8a351a6
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-04T13-50-14-178Z_1522a68ca8a351a6.jsonl]]
+#+CUSTOM_ID: BUG-148-scroll-spy-isactive-is-element-scoped-on
+
+* Initial Message
+
+look up the blender mcp and other stuff that we need to start making our own gltf shapes
+
+* Initial Message
+
+Found while building demos/3d/genesis/ (PLAN-063, Genesis showcase) trying to
+fade each of 4 pinned narrative sections in/out independently as scroll passes
+through them. Two compounding gaps, confirmed via minimal isolated repro
+(scratch/scrollspy-iso, since deleted — reproducible from the steps below).
+
+* Gap 1: $isActive from @scroll-spy is not readable by a sibling `.cls: $x;`
+  binding in the SAME selector scope (silent, no diagnostic)
+
+** Repro
+#+begin_src spacetime
+@import "stdlib"
+
+.sec {
+  min-height: 100vh;
+  @scroll-spy
+  .sec--live: $isActive;
+}
+.sec.sec--live { background: red; }
+#+end_src
+
+Compiles clean (=cargo run -- check= passes, no warning). Inspect the emitted
+=__spacetime/runtime.js=: =ST.registerSelectorInit('.sec', init)= is
+registered exactly ONCE (the @scroll-spy primitive's own init, which does
+=ST.set(el, "isActive", active)=), and there is NO
+=classList.toggle('sec--live', ...)= call anywhere in the compiled output.
+The =.sec--live: $isActive;= binding is silently dropped — not an error, not
+a warning, just absent from the emitted JS.
+
+** Why (confirmed against stdlib/primitives/scroll-spy.st +
+   stdlib/primitives/when-guard.st source)
+=@scroll-spy='s =$isActive= is stored via =ST.set(el, "isActive", ...)= —
+ELEMENT-scoped, not a page-scope reactive value. The only DOCUMENTED read
+path (stdlib/macros/when-guard.st's own example) is:
+#+begin_src spacetime
+.work-section {
+  @scroll-spy
+  @when &self.scrollSpy.isActive { $navTheme <- "dark"; }
+}
+#+end_src
+i.e. via a =@when &self.<ns>.<sig> { ... }= guard that runs a MUTATION BODY,
+not a direct binding read. A bare =.cls: $isActive;= sibling never resolves
+this — either the compiler should support it (element-scoped signals visible
+to sibling reactive-prop bindings in the same selector scope, matching how
+=@gltf='s =$loaded=/=$progress= behave — TODO: verify whether THOSE actually
+work this way or are a false analogy, worth double-checking), or it should
+emit a diagnostic when a =.cls: $sig;= references an undefined/out-of-scope
+signal instead of silently compiling to nothing.
+
+* Gap 2: even via the documented @when-guard path, the signal can only be
+  set to true, never back to false
+
+** Source (stdlib/primitives/when-guard.st)
+#+begin_src js
+const unwatch = ST.watch(host, sig, (v) => {
+  if (!v) return;   // <-- only runs the mutation body on the TRUTHY transition
+  try { ST.runMutations(host, body); }
+  ...
+});
+#+end_src
+
+So =@when &self.scrollSpy.isActive { $mySignal <- true; }= can flip
+=$mySignal= to =true= once §isActive becomes true, but there is no symmetric
+path to flip it back to =false= when the section leaves view (=isActive=
+going false again never triggers the guard body, by design — =if (!v)
+return;=). This makes a symmetric fade-IN-then-fade-OUT-as-you-scroll-away
+pattern impossible to express with the CURRENT stdlib surface, only a
+fade-in-and-stay pattern.
+
+* Impact
+Any page wanting per-section "active while centered in viewport, inactive
+otherwise" styling (the classic scroll-driven nav/section-highlight pattern)
+cannot express it declaratively today without a project-local =lib/=
+primitive. Confirmed this is a real, currently-unmet need (not a contrived
+edge case) — it's exactly stdlib/macros/scroll-spy.st's own doc-comment
+example use case ("nav theming").
+
+* Workaround in use
+demos/3d/genesis/index.st abandoned the fade-in/fade-out-per-section
+approach entirely and used =@load= (threshold-based, fires once on first
+visibility, no fade-out) for a simpler "reveal once, stay revealed" effect
+instead. Not a fix — a different, less capable effect that happened to be
+acceptable for that page's specific design.
+
+* Proposed follow-up (not investigated, needs its own design pass)
+- Either widen =.cls: $sig;='s resolution to look up element-scoped signals
+  set by a sibling primitive in the SAME selector scope (closing Gap 1
+  cleanly, and is probably the more "harmonious" single fix per repo
+  elegance-bar rules — one mechanism, not two);
+- and/or extend =@when-guard= (or add a sibling macro) to support a
+  two-branch form for symmetric true/false mutation
+  (=@when &self.scrollSpy.isActive { ... } @else { ... }=, or a dedicated
+  =$isActive <- &self.scrollSpy.isActive;= direct-binding surface that
+  mirrors any boolean signal, truthy or not).
+
+* Status
+OPEN — filed from PLAN-063 session. Not investigated further (out of scope
+for that PLAN); needs its own design + RED test pass.

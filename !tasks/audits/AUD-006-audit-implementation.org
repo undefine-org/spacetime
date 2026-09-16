@@ -1,0 +1,65 @@
+#+TITLE: Audit: implementation
+#+STATE: DONE
+#+CUSTOM_ID: AUD-006-audit-implementation
+#+LAYER: coding-agent
+
+* Source
+Manual audit
+
+* Findings
+## Audit findings
+
+Sorted by effort-to-impact ratio.
+
+---
+
+- **What**: Stale `cargo run -- serve site/` / `check site/` / `build site/` and "Site Directory (`site/` and subdirectories)" ownership in agent context prompts.
+- **Where**:
+  - `.claude/agents/site-designer.md` — multiple, including `## Tools & Technologies` "`cargo run -- serve site/` for live development server", `## Owns / Site Directory (`site/` and subdirectories)`, `## Notes / Development Workflow` step 1 "Start dev server: `cargo run -- serve site/`", debugging tips `RUST_LOG=trace cargo run -- serve site/`, plus `site/examples/todo-app` example.
+  - `.claude/agents/pipeline-engineer.md` — the shell block under `## Notes / Key Debugging Commands` contains `RUST_LOG=spacetime::pipeline=trace cargo run -- serve site/`, `cargo run -- check site/`, `cargo run -- build site/`.
+  - `.claude/agents/code-quality-guardian.md` — 1 example mention `site/examples/todo-app`.
+- **Why**: `site/` no longer exists in the repo. Subagents loaded under these identities will paste broken commands and propose changes to a non-existent directory. This is precisely the work item FEAT-014::update-skills was meant to cover (the plan explicitly listed "Update only verbatim copy-paste-ready commands"); execution missed `.claude/agents/`.
+- **Effort**: trivial (3 files, literal find/replace `site/` → `projects/<name>/`, plus rename "Site Directory" ownership stanza to point at `projects/`).
+
+---
+
+- **What**: `# Or from the Spacetime repo root: cargo run -- serve <cd_target>` hint in `run_init` success output assumes the caller's cwd is the Spacetime repo root.
+- **Where**: `src/main.rs::run_init` ~line 1782–1783.
+- **Why**: When `cd_target = projects/<name>` the hint is correct only if cwd was already the repo root (so `projects/` was the in-repo gitignored dir). When `cd_target = <name>` (no `projects/` parent), the hint prints `cargo run -- serve <name>`, which only resolves to the right place if the user's cwd happened to be the Spacetime repo root. Misleading for users who installed `spacetime` and ran `init` from a personal scratch dir without `projects/`.
+- **Effort**: trivial (gate the "Or from the Spacetime repo root" hint behind the `cd_target.starts_with("projects/")` branch, or drop the hint entirely).
+
+---
+
+- **What**: `resolve_init_target_returns_pathbuf` test is a tautological type assertion duplicating `resolve_init_target_no_projects_dir`.
+- **Where**: `src/main.rs` ~lines 3736–3741.
+- **Why**: Adds noise without coverage. The function signature already declares `-> PathBuf`; the cargo build proves the type. Dead test.
+- **Effort**: trivial (delete).
+
+---
+
+- **What**: No test for `projects/` being a broken symlink (target missing).
+- **Where**: `src/main.rs::init_target_tests`.
+- **Why**: `std::fs::metadata` follows symlinks; on a broken symlink it returns `Err`, so `unwrap_or(false)` falls back to cwd/name. Behavior is correct but unverified. Adjacent to the existing `with_projects_symlink_to_dir` test, easy to add.
+- **Effort**: trivial.
+
+---
+
+- **What**: Tracked compiler bug documentation (`bugs/BUG-000-each-template-rendering-overview.md` … `BUG-003-template-invocation-js-serialization.md`) moved to gitignored `scratch/bugs/`.
+- **Where**: `scratch/bugs/` (was root `bugs/`, listed in plan as "non-Spacetime debris").
+- **Why**: Reading file contents, these are Spacetime-compiler-specific BUG notes (template-invocation extractor stub, body capture quantifier loop, etc.). They look like the older equivalent of the `!tasks/bugs/` org-mode bug tracker. Demoting them to gitignored `scratch/` removes them from the main repo's history going forward and from anyone cloning the repo. The plan scoping called this a "decision" but the deletion is irreversible after the next prune; consider whether they should instead be archived under `!tasks/` or `docs/legacy-bugs/` before falling out of git visibility.
+- **Effort**: small (move tracked-but-still-needed entries into `!tasks/bugs/` legacy area; or `git mv scratch/bugs docs/legacy-bugs` and adjust .gitignore exception).
+
+---
+
+- **What**: `tests/PHASE8_SUMMARY.md` and other historical task summaries still contain absolute `/home/user/code/ora/spacetime/...` paths.
+- **Where**: `tests/PHASE8_SUMMARY.md` lines 19, 62, 163, 378; `.serena/memories/STDLIB_JS_EMISSION_TRACE.md:273` references `cargo run -- serve site/`.
+- **Why**: Plan deliberately scoped historical notes out ("only forward-facing instructional docs change"), but `tests/PHASE8_SUMMARY.md` is in `tests/`, not under `!tasks/` or `@tasks/`, and might get crawled by future readers as if it were current docs. Borderline — flagged for awareness, not necessarily action.
+- **Effort**: trivial (one sed-style substitution) if you choose to action.
+
+** Completion [2026-04-27]
+*** Verification
+All six audit findings remediated through PLAN-016 child items BUG-018..BUG-021. See child completion blocks for evidence.
+*** Artifacts
+[[file:!tasks/plans/PLAN-016-aud-006-implementation-remediation.org]]
+*** Deviations
+None.

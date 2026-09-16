@@ -1,0 +1,28 @@
+#+TITLE: BUG: event-parser drops form_application args when driver_expr has params
+#+STATE: DONE
+#+SESSION_ID: 1534a2eae1903af0
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-18T13-07-01-638Z_1534a2eae1903af0.jsonl]]
+#+CUSTOM_ID: BUG-246-bug-event-parser-drops-form-application
+#+COMPLETION_HASH: 64dfd30ff38f6fc7
+
+* Initial Message
+
+continue. use parallel agents when you can
+
+Reproduced: `@on &.visible(threshold: 0.2) --rise(distance: 8px);` loses the form's call args at MATCH time — the `form` capture becomes `Named{form: --rise}` with NO `args` key, so the expansion silently substitutes the form's DEFAULTS (measured: emitted keyframes carry `24px`, not `8px`). Without driver params (`@on &.visible --rise(distance: 8px);`) the args survive.
+
+Measured facts:
+- Extractors work in isolation: driver_expr consumes 9 tokens, form_application consumes 8 WITH args (unit probe in src/syntax/events/extractors/custom.rs::driver_form_probe).
+- The bug only appears through the production event-parser path (parse_matches → MatchSink): `parse_matches(".x { @on &.visible(threshold: 0.2) --rise(distance: 8px); }")` returns the args-less capture.
+- Body splices are unaffected: `@on &.scroll(start: 0.2) { --rise(distance: 8px); }` emits 8px correctly.
+- Present since the driver-params commit (025981d5, W3.2) — the combination driver-params + form-args was never tested together. Found by the W3.5 article gate (tests/sip_001_w3_article_gate_test.rs) when the article's footer fence combined them.
+
+Impact: silent wrong behavior (defaults substituted for explicit args) — the worst class per the project's uninferrable-is-error rule.
+
+Suspected area: the event-parser/MatchSink path for custom-type captures (NOT form_compiler — the isolated extractor path is clean, and the body-splice path works). Next step: trace how MatchSink computes the token slice for the second custom capture and where the `args` key is dropped in capture merging.
+
+Gate: tests/sip_001_w3_article_gate_test.rs::the_splice_call_args_override (currently RED against the article's footer fence).
+
+NOTE [2026-07-28]:
+
+FIXED + GATED (2026-07-26). Grammar consumes tight consecutive paren groups; try_match splices all ARG_LIST children. Durable regression test: src/syntax/events/extractors/custom.rs::driver_form_probe::driver_params_do_not_eat_form_args (asserts args survive at the match level). Review round 22-GrammarReview: correct.

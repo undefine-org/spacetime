@@ -1,0 +1,131 @@
+#+TITLE: Inline @directive attribute shorthand on HTML elements (sugar for selector-scoped directives)
+#+STATE: ITEM
+#+SESSION_ID: 150f9b60559952f5
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-19T18-50-16-790Z_150f9b60559952f5.jsonl]]
+#+CUSTOM_ID: FUP-073-inline-directive-attribute-shorthand-on
+
+* Initial Message
+
+what did PLAN-048 do? can you let me try it out and show me?
+
+* Initial Message
+
+From a workbench design session (2026-06-19): while test-driving agent-control
+mounts I intuitively authored `<button @mcp-action="approve">Approve</button>` —
+an INLINE `@directive` attribute directly on an element. It felt natural (it's the
+Vue/Alpine/Svelte muscle memory) and read cleanly. But Spacetime has no such form:
+`@mcp-action` / `@on` / `@view` / `@mcp-region` are all SELECTOR-SCOPED directives
+that live in a rule block, never as an element attribute. The inline form silently
+lowered to a dead `setAttribute("@mcp-action","approve")` (see BUG for the refusal
+fix). This FUP is the DESIGN of making that inline shorthand a REAL, lowered form —
+it's worth implementing down the line, but needs back-and-forth before it's right.
+
+* Problem / Opportunity
+
+Today, attaching behaviour to one element means writing a selector rule that
+re-selects it — even when the element is right there in the template:
+
+#+begin_src spacetime
+@template &main() {
+  <button class="approve">Approve</button>
+}
+.approve { @mcp-action(action: "approve") }   // re-select to wire one button
+#+end_src
+
+The selector rule is the right tool for CROSS-CUTTING behaviour (style a class
+everywhere, wire every `.mcp-open-env`). But for a ONE-OFF on a specific element it
+adds a class whose only job is to be a wiring anchor, and splits the element from
+its behaviour across two locations. An inline shorthand would co-locate them:
+
+#+begin_src spacetime
+@template &main() {
+  <button @mcp-action(action: "approve")>Approve</button>
+}
+#+end_src
+
+NB harmony (AGENTS): `@` is THE directive sigil — one meaning. An inline
+`@directive(...)` attribute is the SAME directive, just positioned on the element
+instead of in a rule. That's a positional extension of an existing sigil, not a new
+meaning, so it's harmony-compatible IN PRINCIPLE. The design work is making the
+lowering identical to the selector-rule path (one implementation, not a parallel
+one) and resolving the open questions below.
+
+* Sketch of the desired surface (illustrative — NOT final)
+
+** A. Fixed-payload directives (the @mcp-action / @on family)
+#+begin_src spacetime
+@template &card($id) {
+  // inline @on — co-located event behaviour, no anchor class
+  <button @on(click) { $open <- "yes"; }>Toggle</button>
+
+  // inline @mcp-action — the exact case that started this
+  <button @mcp-action(action: "approve")>Approve</button>
+
+  // multiple directives on one element (compose, like multiple rule blocks)
+  <input @mcp-action(action: "mcp_param", targetAttr: "data-param", on: "change")
+         @on(focus) { $active <- $id; }
+         data-param="`$id`">
+}
+#+end_src
+Each inline `@directive(...)` lowers to EXACTLY what the equivalent selector rule
+lowers to (the element becomes its own implicit selector scope). No new runtime —
+it reuses mcp-action-event / the @on handler primitive.
+
+** B. The @view / @mcp-region case (region-scoped, already element-ish)
+`@view` and `@mcp-region` already attach to ONE region root selected by
+`[data-st-region="stage"]`. Inline form would drop the re-selection:
+#+begin_src spacetime
+<main data-st-region="stage" @mcp-region @view($stageView) {
+  "env"   => &mcp-env-detail($mcpActiveEnv);
+  "guest" => &$stageTpl();
+  _       => &mcp-begin();
+}>
+  <div class="mcp-stage-empty">…</div>
+</main>
+#+end_src
+This reads better than today's trailing rule block, but the brace-body-as-attribute
+parse is the hardest grammar question (see OQ3).
+
+* Open questions (the back-and-forth this FUP needs)
+
+OQ1. Param syntax inside the attribute. `@mcp-action(action: "approve")` reuses the
+     `%form` combinator `( )` — consistent with the macro grammar. But inside an
+     HTML tag the existing hole sigil is backtick. Does `@on(click) { … }` body use
+     the same statement grammar as a rule block? Confirm no collision with attribute
+     tokenization (`=`, quotes, `>`).
+
+OQ2. Precedence vs a real attribute named with a leading `@`. Decision needed: is
+     `@`-leading ALWAYS a directive (no escape), or is there a literal escape? Repo
+     stance leans: `@` is the directive sigil, period — a literal `@x` attribute is
+     not a use case (verified: zero `.st` files use one). Lock this.
+
+OQ3. Brace-bodied inline directives (`@on(click){…}`, `@view($s){…}`) inside a tag.
+     The tag parser currently stops attributes at `>`; a `{ … }` body containing
+     `>`/`<` (nested HTML in a @view arm) breaks naive tokenization. Likely needs a
+     dedicated inline-directive scan in the element parser (the real cost of this
+     FUP). Fixed-payload directives (family A, no brace body) are MUCH cheaper and
+     could ship FIRST as a v1, with brace-bodied (family B) deferred.
+
+OQ4. Multiple directives + ordering. If an element has both `@on(click)` and
+     `@mcp-action`, both must attach; define a deterministic order (source order).
+
+OQ5. Lowering unification. The inline form MUST route through the SAME codegen as
+     the selector rule (the element becomes a synthetic single-element scope). A
+     parallel lowering path is a harmony violation and a drift risk (this is exactly
+     how the two-mount-path class of bug happened). Acceptance: an inline directive
+     and its selector-rule equivalent produce byte-identical wiring JS.
+
+* Suggested phasing
+- v1: family A only (fixed-payload `@directive(args)`, no brace body) — co-locates
+  the common case (@mcp-action, @mcp-click), cheapest grammar delta, reuses macro
+  param parsing. Gate: inline == selector-rule lowering (OQ5).
+- v2: family B (brace-bodied `@on`/`@view`/`@mcp-region` inline) — needs the
+  inline-directive element-parser scan (OQ3). Bigger; do after v1 proves the loop.
+
+* Provenance
+- Sibling BUG (the refusal): inline `@`-attr today silently dies as a dead
+  setAttribute — that BUG makes it a COMPILE ERROR (totality of lowering), which is
+  the safety floor THIS FUP eventually turns into a real feature.
+- Directive today: stdlib/__mcp__/primitives/host.st::559 (%macro mcp-action,
+  selector-scoped). Emit site: src/emit/html_reactive.rs::emit_attr.
+- Design session: workbench round-3 test-drive (PLAN-048 follow-on).

@@ -1,0 +1,59 @@
+#+TITLE: Block comment with tag-literal and backtick before markup desyncs events parser, drops FormMatches
+#+STATE: ITEM
+#+SESSION_ID: 14f94e45c6c3f247
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-02T11-06-49-499Z_14f94e45c6c3f247.jsonl]]
+#+CUSTOM_ID: BUG-073-block-comment-with-tag-literal-and-backt
+
+* Initial Message
+
+what's next to make this super usable? especially for e.g. multiple dispatch and making it useful as an actual browser. also, could you create a basic Markdown parser in pure Spacetime (only scoped to spacetime-docs for now, if needed), that you would use to integrate Markdown files already written about testing? How hard would that be?
+
+* Symptom
+A file-scope block comment that contains BOTH an angle-bracket token (e.g. ~<tag>~)
+AND a backtick run (e.g. =`$signal`=), placed immediately before the first real
+~<markup>~ element, causes every following directive FormMatch to be dropped — the
+page compiles "successfully" but emits none of its behavior JS (e.g. ~@doc~ /
+~@on~ never fire; ~snarkdown~ never injected).
+
+* Minimal repro
+#+begin_src spacetime
+@import "stdlib/md";
+/* <tag> via `x` */
+<div class="doc__body" data-doc="g"></div>
+[data-doc="g"] { @doc(content: "# Hi") }
+#+end_src
+=> built JS contains NO ~snarkdown~ call (expected: 1). Removing either the ~<~ or
+the backtick from the comment, OR inserting a real statement between the comment
+and the first ~<markup>~, makes it compile correctly.
+
+* Bisection
+- ~/* <tag> literals */~ alone (followed by a non-markup statement) :: OK
+- backtick alone in comment :: OK
+- ~<~ + backtick in comment, directly before first ~<element>~ :: FAILS
+- A real statement (e.g. ~@data inline $x : 0;~) between comment and markup :: OK
+
+* Suspected root
+The events parser (~parse_matches~, ~grammar::root~) and/or the CST
+~scan_html_region~ treats the ~<~ inside the block-comment trivia as the start of
+an HTML region (it byte-scans from the ~<~), then the backtick is read as a hole
+delimiter, desyncing the region end against the token stream so the immediately
+following real ~<element>~ + trailing directives are swallowed. Comments must be
+OPAQUE to HTML-region detection: a ~<~ inside a COMMENT token is not markup. Mirror
+of BUG-070/072 (HTML-region vs token-stream desync), but the trigger is comment
+trivia rather than a stray quote/terminator.
+
+* Fix sketch
+When choosing to enter ~parse_html_element~ / the events-parser HTML skip, require
+the ~<~ to be a real LT token at statement position, not bytes inside a COMMENT (or
+STRING) token. The byte-scanners (~scan_html_region~, ~scan_html_end~) already skip
+~<!-- -->~ HTML comments; the gap is /Spacetime/ block comments ~/* … */~ that
+contain ~<~. Twin the guard in cst/parser.rs and events/grammar/mod.rs.
+
+* Workaround (in use)
+demos/spacetime-docs/index.st avoids ~<~ and backticks together in block comments
+that precede markup. Not a fix — the parser should handle it.
+
+* Severity
+#C — cosmetic-comment-triggered, easily avoided, but a silent-drop class bug
+(compiles green, emits nothing) so worth fixing for robustness. Discovered while
+building the ~md~ module docs reader (stdlib/md, @doc).

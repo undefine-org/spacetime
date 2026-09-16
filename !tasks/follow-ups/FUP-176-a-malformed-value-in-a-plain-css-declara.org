@@ -1,0 +1,109 @@
+#+TITLE: A malformed value in a plain CSS declaration still reaches the stylesheet
+#+STATE: ITEM
+#+SESSION_ID: 153f5ed0617636c7
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-26T21-12-46-213Z_153f5ed0617636c7.jsonl]]
+#+CUSTOM_ID: FUP-176-a-malformed-value-in-a-plain-css-declara
+
+* Initial Message
+
+please show all the waves and all the work there is to do, write it in the todo, and act atuonomously to implement it until the end
+
+* What still slips through
+
+PLAN-122 W1.2/W3 made the scalar grammars authoritative for DIRECTIVE ARGUMENTS.
+A malformed value there is now refused with a spanned E0946:
+
+#+begin_example
+.x { @object(color: #e8ee1) }     -> refused (E0946)
+.x { @fade-in(distance: 40 px) }  -> refused (E0946)
+#+end_example
+
+A PLAIN CSS DECLARATION does not go through a capture type, so it is still
+unvalidated:
+
+#+begin_example
+.probe { color: #e8ee1; background: #zzz; }
+$ cargo run -- check    -> All 1 file(s) passed
+emitted spacetime.css   -> .probe { color: #e8ee1; background: #zzz; }
+#+end_example
+
+The browser silently drops both declarations and the author sees an element
+render wrong with no diagnostic anywhere in the toolchain. This is the original
+BUG-257 complaint, now reduced to exactly one surface.
+
+* Why lightningcss does not catch it (verified in the crate source)
+
+Version pinned: =lightningcss = "=1.0.0-alpha.67"= (Cargo.toml:77).
+
+`ParserOptions` does have both `pub error_recovery: bool` and
+`pub warnings: Option<Arc<RwLock<Vec<Error<ParserError>>>>>` — but they do not
+help here. In `Property::parse`, when a known property's TYPED parser fails, the
+implementation resets the input and deliberately returns
+`Ok(Property::Unparsed(UnparsedProperty::parse(...)))`, storing the raw token
+list. So `color: #e8ee1` is accepted as `Unparsed`, `StyleSheet::parse` returns
+`Ok`, and the warning sink stays EMPTY. This is by design (CSS forward
+compatibility), not a bug.
+
+The typed API does reject it:
+
+#+begin_src rust
+use lightningcss::{traits::Parse, values::color::CssColor};
+assert!(CssColor::parse_string("#e8ee1").is_err());
+assert!(CssColor::parse_string("#fffa").is_ok());
+#+end_src
+
+An exact-crate probe returned `false, true, true, true` for
+`#e8ee1`, `#fffa`, `#e8eef7`, `#11223344` respectively.
+
+* Why this was NOT folded into PLAN-122 W1.2/W3
+
+Against the AGENTS elegance bar, doing it now fails two criteria:
+
+1. NOT a small extension of existing grammar/registry. A declaration value is a
+   bare `String` today — `StatePropertyAst { property: String, value: String }`
+   (src/parser/mod.rs:80-83) carries NO span. A spanned diagnostic therefore
+   requires threading source spans through the property AST and every producer
+   of it, which is a subsystem change, not a leaf addition.
+3. It would not DELETE a special case; it would add a validation pass.
+
+`validate_css` (src/validation/css.rs:78) is also the wrong seam: it is
+`headless`-only and runs post-hoc on the EMITTED stylesheet, so it has no route
+back to author source even if it could detect the value.
+
+* The two honest implementations, when this is picked up
+
+** A. Span the property AST, then validate through the SAME grammar (preferred)
+
+Give `StatePropertyAst.value` a `SourceSpan`, then validate declaration values
+with the stdlib `%capture_type` productions already written in
+`stdlib/capture-types/css-values.st`. One grammar answers "what is a colour?"
+for both directive args and declarations — which is the whole thesis of
+PLAN-122, and it would let FUP-164 delete `src/lsp/colors.rs`'s independent
+byte-scanner at the same time.
+
+Needs a property-name -> value-type map (`color`/`background-color`/`border-color`
+-> `color`; `width`/`margin`/`padding` -> `length`; ...). That map is exactly
+what FEAT-168's `%scalar_type` table is for, so this may want to FOLLOW W4
+rather than precede it.
+
+** B. Call `CssColor::parse_string` per declaration (tactical)
+
+Cheaper, but it re-introduces a second answer to "what is a colour" — the thing
+this arc exists to remove — and it only covers colours. Prefer A unless a fix is
+needed before W4 lands.
+
+* Gate when implemented
+
+`.probe { color: #e8ee1; background: #zzz; }` must produce a SPANNED diagnostic
+at the value, while `#fffa` and `#11223344` still pass. A naive "3 or 6 digits"
+rule regresses the alpha forms, which is why the permitted lengths are DATA.
+
+Corpus check: 0 illegal hex across 420 `.st` files, so no existing page
+regresses when this lands.
+
+* Related
+
+- BUG-257 (colour promotion blind spot) — this is its last unfixed surface.
+- FUP-164 (value-position LSP; deletes src/lsp/colors.rs).
+- FEAT-168 (`%scalar_type` single source) — supplies the property -> type map.
+- tests/css_scalar_acceptance_test.rs — the directive-argument half, already green.

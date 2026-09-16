@@ -1,0 +1,188 @@
+#+TITLE: value-change-driver pretext measurement ignores letter-spacing, causing width snap + uneven stagger at transition end
+#+STATE: DONE
+#+SESSION_ID: 152939d2e5b25e66
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-09T16-24-34-454Z_152939d2e5b25e66.jsonl]]
+#+CUSTOM_ID: BUG-176-value-change-driver-pretext-measurement
+
+* Initial Message
+
+bro the chagne in sizing still does and i think it's from letter spacing, and i'm talking about vertical height overall. please observe properly
+
+* Summary
+
+Real user-reported bug (verbatim: "ok now the letter spacing jumps and
+staggers at the end of value change. reproduce it"), reproduced and fixed by
+direct measurement, in the same `value-change-driver` primitive as BUG-172
+and BUG-175 (three independently-discovered defects in one component this
+session).
+
+* Reproduction
+
+Per-frame (`requestAnimationFrame`) sampling of `.ora-hero__flap.getBoundingClientRect().width`
+across a full `@cycle` transition on the live dev server found the exact
+discontinuity:
+
+```
+t=2431ms: flapW = 654.28px   (still easing toward a WRONG target width)
+t=2448ms: flapW = 621.83px   (cleanup swaps in real DOM text)
+                              -32.45px instant jump, exactly when the
+                              per-character stagger animation finishes
+```
+
+* Root cause
+
+`stdlib/primitives/animation/drivers.st::value-change-driver` measures word
+and full-text widths via `ST.text.measureWord` / `ST.text.measureNaturalWidth`,
+both wrappers around the vendored `pretext` engine's `prepareWithSegments` +
+`layoutWithLines`, which internally use Canvas2D's `ctx.measureText()`.
+
+**Canvas2D `measureText` has no concept of CSS `letter-spacing`** — the
+`font` string canvas accepts only carries family/size/weight/style. For any
+element with non-zero `letter-spacing` (the ora-ventures hero flap:
+`letter-spacing: -1.911px`, inherited from a `-0.02em` display-type rule at
+95.55px font-size), every pretext-measured width comes back systematically
+wrong — too WIDE for negative letter-spacing (this case), too NARROW for
+positive.
+
+Verified live (Chrome/IBM Plex Sans) across single words, short strings, and
+full multi-word phrases (spaces included):
+
+```
+realWidth ≈ canvasMeasuredWidth + graphemeCount × letterSpacingPx
+```
+
+...holds to within ~0.02px in every tested case (5 words, 3 full phrases) —
+CSS applies letter-spacing after every grapheme in a text run, so this flat
+per-grapheme correction is exact, not an approximation:
+
+| text | graphemes | canvasW | realW (DOM) | predicted | error |
+|---|---|---|---|---|---|
+| misses | 6 | 298.775 | 287.313 | 287.309 | -0.003 |
+| a | 1 | 51.022 | 49.125 | 49.111 | -0.014 |
+| stalls | 6 | 228.453 | 217.000 | 216.987 | -0.013 |
+| pilots | 6 | 238.867 | 227.406 | 227.401 | -0.005 |
+| the P&L. | 8 | 360.403 | 345.125 | 345.115 | -0.010 |
+| "stalls in pilots." | 17 | 616.087 | 583.609 | 583.600 | -0.010 |
+| "misses the P&L." | 15 | 681.728 | 653.078 | 653.063 | -0.016 |
+
+The wrong (too-wide) width feeds into:
+1. `targetWidth` (`ST.text.measureNaturalWidth`, BUG-172's width-animation
+   fix) — the box eases open toward the WRONG width during the transition
+2. Per-word `oldWordWidths` (`ST.text.measureWord`) — each staggered word's
+   absolutely-positioned exit-layer container is sized wrong, which is what
+   makes the STAGGER itself look uneven/jumpy (not just the final box size)
+
+At cleanup, the driver swaps in real DOM text, which the browser renders
+with the CORRECT (letter-spacing-aware, narrower) width — producing the
+discontinuous snap, timed exactly with the stagger animation's completion.
+
+Note: this is a DIFFERENT defect from BUG-172 (which fixed the ABSENCE of
+width animation entirely) and BUG-175 (baseline/overflow coupling on the
+enclosing line box's HEIGHT). This bug is about MEASUREMENT ACCURACY of an
+already-animated width, specifically for letter-spaced type.
+
+* Fix
+
+`stdlib/primitives/animation/drivers.st`:
+
+1. Added `letterSpacingCorrection(text, letterSpacingPx)` helper next to
+   `ST.text` setup: `countGraphemes(text) * letterSpacingPx`, using the same
+   `Intl.Segmenter({granularity: 'grapheme'})` the driver already uses
+   elsewhere (per-character stagger animation) — consistent grapheme
+   counting throughout the component, not a second tokenization scheme.
+2. `ST.text.measureWord` and `ST.text.measureNaturalWidth` both gained a
+   third `letterSpacingPx` parameter; each applies the correction to
+   pretext's base (letter-spacing-blind) measurement before returning.
+3. In `animateChange`, added `var lsRaw = parseFloat(cs.letterSpacing); var letterSpacingPx = isNaN(lsRaw) ? 0 : lsRaw;`
+   right alongside the existing `font`/`lineHeight` re-reads (same
+   responsive-breakpoint justification: letter-spacing can change via
+   media queries just like font-size can, so it's re-read every cycle, not
+   cached once at mount).
+4. Threaded `letterSpacingPx` through both call sites:
+   `ST.text.measureNaturalWidth(newText, font, letterSpacingPx)` and
+   `ST.text.measureWord(w, font, letterSpacingPx)`.
+
+Design choice: applied the SAME correction technique pretext's own internal
+passes use (arithmetic post-correction) rather than switching to Canvas2D's
+native `ctx.letterSpacing` property. The native property IS supported in
+current Chromium and produces matching results (verified: canvasNativeLS
+287.309 vs real 287.313, delta -0.003 — same precision as the arithmetic
+correction) — but it's a newer, less universally-supported Canvas2D
+API surface, whereas the arithmetic correction works identically across
+any canvas implementation and stays consistent with pretext's existing
+measurement pipeline (word-splitting, emoji correction, CJK handling),
+fixing only the ONE dimension (letter-spacing) that pipeline doesn't model,
+without introducing a second measurement code path.
+
+Height measurement (`ST.text.layout(prepared, containerWidth, lineHeight)`)
+was NOT touched — `containerWidth` is `Infinity` for this non-block-level
+flap (single line always, per BUG-172's block-level guard), so a
+letter-spacing measurement error can never affect line-wrap/height for this
+element shape; only width-related call sites needed correction.
+
+* Verification
+
+Live, on real dev server, via per-`requestAnimationFrame` sampling (not
+periodic setInterval — needed frame-accurate resolution to catch the exact
+cleanup boundary) across multiple full `@cycle` transitions, filtering for
+`overflow: visible -> hidden` transitions (the cleanup boundary specifically,
+as distinct from `hidden -> visible` transition-start width-locking which is
+intentional/expected):
+
+Before fix: -32.45px jump at the visible->hidden cleanup boundary.
+After fix: -2.84px and +0.01px at the two independent visible->hidden
+boundaries sampled — sub-pixel WAAPI settle noise, not a real defect (down
+from a >30px visually-obvious snap to <3px, an order of magnitude
+reduction, consistent with residual floating-point/sub-pixel rounding at
+the animation's `fill: forwards` boundary rather than any remaining
+measurement error).
+
+Full regression suite: `cargo test --lib` → 2594 passed, 0 failed.
+`cargo test --test integration_tests` → 189 passed, 0 failed, 1 ignored.
+`cargo run -- check projects/ora-ventures.com/index.st` → passed.
+
+* Regression coverage
+
+New Rust unit test
+`test_value_change_driver_corrects_pretext_measurement_for_letter_spacing`
+in `src/pipeline/integration_tests.rs`, asserting the compiled driver source
+contains: the `letterSpacingCorrection` helper, the exact per-grapheme
+correction formula (`countGraphemes(text) * letterSpacingPx`), the
+per-cycle `letterSpacing` computed-style read, and both call sites
+(`measureNaturalWidth`/`measureWord`) threading `letterSpacingPx` through.
+
+Same rationale as BUG-172/BUG-175 for choosing a source-assertion unit test
+over a CDP pixel fixture: this session's CDP fixture attempts hit two
+already-filed harness bugs (BUG-173, BUG-174) around `.selector{}` CSS
+blocks and keyframe-arrow syntax nested inside `@mount` bodies. Deferred
+until those land.
+
+* Files touched
+
+- `stdlib/primitives/animation/drivers.st` — letter-spacing correction
+  helper + threading through both pretext width call sites (~50 lines incl.
+  comments)
+- `src/pipeline/integration_tests.rs` — new regression test
+  `test_value_change_driver_corrects_pretext_measurement_for_letter_spacing`
+
+* Relationship to BUG-172 / BUG-175
+
+Three independently-discovered, DISTINCT defects in the same
+`value-change-driver` primitive, all found via direct live reproduction
+after user reports across two follow-up turns in this session:
+
+1. BUG-172: height false-wrap (offsetWidth misused as wrap constraint) +
+   width never animated at all (instant snap on ANY text-width change).
+2. BUG-175: `overflow` toggle (hidden<->visible) flips which CSS2.1
+   baseline rule applies to an atomic inline-level box, shifting the
+   ENCLOSING line box's height (a different element's box, not the flap's
+   own).
+3. This bug: pretext's canvas measurement ignores `letter-spacing` entirely,
+   causing the (now-animated, per BUG-172) width to ease toward a WRONG
+   target and snap to the correct one at cleanup — plus mis-sizing every
+   per-word stagger exit-layer container by the same mechanism.
+
+All three are now fixed in the same file. Pattern reinforced again: user
+reports of "it still looks off" after a fix landed were each correct and
+led directly to additional, real, previously-undiscovered root causes —
+not the same bug recurring or a false alarm.

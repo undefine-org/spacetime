@@ -1,0 +1,104 @@
+#+TITLE: FUP-139 — `//` line comments inside @media/@supports/@keyframes are emitted raw into CSS
+#+DATE: 2026-07-24
+
+* FUP-139 `//` comments inside at-rule blocks leak into emitted CSS
+:PROPERTIES:
+:CUSTOM_ID: FUP-139
+:STATE: TODO
+:PRIORITY: #B
+:END:
+
+** Symptom
+
+A =//= line comment written INSIDE an =@media= (or =@supports= / =@keyframes=)
+block is copied verbatim into the emitted stylesheet. CSS has no =//= comment
+syntax, so the browser's parser treats the comment line and the FOLLOWING
+selector as one malformed construct and **silently drops the next rule**.
+
+At top level (outside an at-rule) the same comment is stripped correctly. The
+inconsistency is the trap: the habit is safe everywhere except here.
+
+** Reproduction
+
+#+begin_src spacetime
+@media (max-width: 900px) {
+    // no scrub distance on mobile → rows fully inked
+    .journal-row {
+        opacity: 1;
+    }
+}
+#+end_src
+
+Emitted CSS contains the =//= line; =.journal-row= never applies. No error, no
+warning, no diagnostic. Compile is green.
+
+** Root cause (verified in source, not inferred)
+
+Two-part path, both parts intentional in isolation:
+
+1. *Capture* — =src/parser/mod.rs= =~L708= / =~L1040=: an at-rule directive is
+   harvested with =at_rule_dir.syntax().text().to_string()= — the RAW CST text,
+   comments included — and stored as =RawCssBlock.source=
+   (=src/parser/ast.rs= =~L190=, documented as "captured verbatim").
+
+2. *Normalization* — =normalize_raw_css_at_rule= (=src/parser/mod.rs:1108=)
+   splits the block at the first ={= and rewrites only the HEAD (it exists to
+   turn the Spacetime =@media("query")= string form into standard
+   =@media (query)=). The BODY is passed through byte-for-byte:
+
+   #+begin_src rust
+   let (head, body) = trimmed.split_at(brace);
+   // … head normalization only …
+   format!("{} {}", normalized_head, body)
+   #+end_src
+
+3. *Emission* — =src/compiler.rs:986= joins every =RawCssBlock.source= and
+   appends it to the stylesheet AFTER pipeline CSS (BUG-087: so conditional
+   rules win the cascade). Nothing between capture and emission inspects the
+   body.
+
+∴ the comment survives because the body is never parsed as CSS — only the head
+is understood. This is why top-level CSS (which DOES go through the CSS
+pipeline) strips comments correctly.
+
+** Impact
+
+Silent and load-bearing: the rule that vanishes is usually a responsive
+override or a reduced-motion fallback — exactly the rules that are hardest to
+notice missing, because they only apply in a state the author isn't looking at.
+Cost in the wild (PROJ-007): a mobile fallback that appeared written but did
+nothing; found only by inspecting computed styles in a real browser.
+
+Priority #B (raised from #C): this silently breaks accessibility fallbacks
+(=prefers-reduced-motion=) as easily as cosmetic ones.
+
+** Fix options
+
+*A — strip in the body (preferred).* Extend =normalize_raw_css_at_rule= to run
+a line-comment strip over the body before re-assembly. Must be
+string/url-aware: a =//= inside =url(https://…)= or a quoted content string is
+NOT a comment. Roughly: scan the body tracking quote and =url(= state, drop
+from an unquoted =//= to end-of-line.
+
+*B — diagnose instead (acceptable v1).* Emit a warning (=W07xx=: "`//` comment
+inside an at-rule block is not valid CSS and will break the following rule;
+use `/* … */`") and leave the text alone. Loud beats silent, and it is a
+smaller change than getting the string-awareness right.
+
+*C — both.* Strip, and warn once per file that the comment style is non-CSS.
+
+** Test plan
+
+- Unit on =normalize_raw_css_at_rule=: a body with a =//= comment loses it;
+  =url(https://x)= survives; =content: "a // b"= survives; =/* … */= survives
+  untouched.
+- Integration: compile a fixture with a commented =@media= block and assert the
+  FOLLOWING selector appears in =compiled.css= (the actual user-visible
+  failure, not just the comment's absence).
+- Regression guard: a =@keyframes= block with a comment between two keyframe
+  stops.
+
+** Discovery
+
+PROJ-007 (backdesk.org), 2026-07-24. Worked around by deleting the comment;
+filed as a compiler defect because it affects every project.

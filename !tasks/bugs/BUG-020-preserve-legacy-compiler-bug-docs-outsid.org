@@ -1,0 +1,155 @@
+#+TITLE: Preserve legacy compiler bug docs outside scratch
+#+STATE: DONE
+#+SESSION_ID: 14cb4663c8d20fb9
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-04-27T17-02-15-332Z_14cb4663c8d20fb9.jsonl]]
+#+CUSTOM_ID: BUG-020-preserve-legacy-compiler-bug-docs-outsid
+#+LAYER: docs
+
+* Initial Message
+
+Implement these audit recommendations from org://AUD-006-audit-implementation:
+
+## Audit findings
+
+Sorted by effort-to-impact ratio.
+
+---
+
+- **What**: Stale `cargo run -- serve site/` / `check site/` / `build site/` and "Site Directory (`site/` and subdirectories)" ownership in agent context prompts.
+- **Where**:
+  - `.claude/agents/site-designer.md` — multiple, including `## Tools & Technologies` "`cargo run -- serve site/` for live development server", `## Owns / Site Directory (`site/` and subdirectories)`, `## Notes / Development Workflow` step 1 "Start dev server: `cargo run -- serve site/`", debugging tips `RUST_LOG=trace cargo run -- serve site/`, plus `site/examples/todo-app` example.
+  - `.claude/agents/pipeline-engineer.md` — the shell block under `## Notes / Key Debugging Commands` contains `RUST_LOG=spacetime::pipeline=trace cargo run -- serve site/`, `cargo run -- check site/`, `cargo run -- build site/`.
+  - `.claude/agents/code-quality-guardian.md` — 1 example mention `site/examples/todo-app`.
+- **Why**: `site/` no longer exists in the repo. Subagents loaded under these identities will paste broken commands and propose changes to a non-existent directory. This is precisely the work item FEAT-014::update-skills was meant to cover (the plan explicitly listed "Update only verbatim copy-paste-ready commands"); execution missed `.claude/agents/`.
+- **Effort**: trivial (3 files, literal find/replace `site/` → `projects/<name>/`, plus rename "Site Directory" ownership stanza to point at `projects/`).
+
+---
+
+- **What**: `# Or from the Spacetime repo root: cargo run -- serve <cd_target>` hint in `run_init` success output assumes the caller's cwd is the Spacetime repo root.
+- **Where**: `src/main.rs::run_init` ~line 1782–1783.
+- **Why**: When `cd_target = projects/<name>` the hint is correct only if cwd was already the repo root (so `projects/` was the in-repo gitignored dir). When `cd_target = <name>` (no `projects/` parent), the hint prints `cargo run -- serve <name>`, which only resolves to the right place if the user's cwd happened to be the Spacetime repo root. Misleading for users who installed `spacetime` and ran `init` from a personal scratch dir without `projects/`.
+- **Effort**: trivial (gate the "Or from the Spacetime repo root" hint behind the `cd_target.starts_with("projects/")` branch, or drop the hint entirely).
+
+---
+
+- **What**: `resolve_init_target_returns_pathbuf` test is a tautological type assertion duplicating `resolve_init_target_no_projects_dir`.
+- **Where**: `src/main.rs` ~lines 3736–3741.
+- **Why**: Adds noise without coverage. The function signature already declares `-> PathBuf`; the cargo build proves the type. Dead test.
+- **Effort**: trivial (delete).
+
+---
+
+- **What**: No test for `projects/` being a broken symlink (target missing).
+- **Where**: `src/main.rs::init_target_tests`.
+- **Why**: `std::fs::metadata` follows symlinks; on a broken symlink it returns `Err`, so `unwrap_or(false)` falls back to cwd/name. Behavior is correct but unverified. Adjacent to the existing `with_projects_symlink_to_dir` test, easy to add.
+- **Effort**: trivial.
+
+---
+
+- **What**: Tracked compiler bug documentation (`bugs/BUG-000-each-template-rendering-overview.md` … `BUG-003-template-invocation-js-serialization.md`) moved to gitignored `scratch/bugs/`.
+- **Where**: `scratch/bugs/` (was root `bugs/`, listed in plan as "non-Spacetime debris").
+- **Why**: Reading file contents, these are Spacetime-compiler-specific BUG notes (template-invocation extractor stub, body capture quantifier loop, etc.). They look like the older equivalent of the `!tasks/bugs/` org-mode bug tracker. Demoting them to gitignored `scratch/` removes them from the main repo's history going forward and from anyone cloning the repo. The plan scoping called this a "decision" but the deletion is irreversible after the next prune; consider whether they should instead be archived under `!tasks/` or `docs/legacy-bugs/` before falling out of git visibility.
+- **Effort**: small (move tracked-but-still-needed entries into `!tasks/bugs/` legacy area; or `git mv scratch/bugs docs/legacy-bugs` and adjust .gitignore exception).
+
+---
+
+- **What**: `tests/PHASE8_SUMMARY.md` and other historical task summaries still contain absolute `/home/user/code/ora/spacetime/...` paths.
+- **Where**: `tests/PHASE8_SUMMARY.md` lines 19, 62, 163, 378; `.serena/memories/STDLIB_JS_EMISSION_TRACE.md:273` references `cargo run -- serve site/`.
+- **Why**: Plan deliberately scoped historical notes out ("only forward-facing instructional docs change"), but `tests/PHASE8_SUMMARY.md` is in `tests/`, not under `!tasks/` or `@tasks/`, and might get crawled by future readers as if it were current docs. Borderline — flagged for awareness, not necessarily action.
+- **Effort**: trivial (one sed-style substitution) if you choose to action.
+
+* Scope
+** In scope
+- Preserve the legacy compiler bug markdown that was moved to gitignored =scratch/bugs/= during PLAN-015 by moving it into tracked =docs/legacy-bugs/=.
+- Expected source files:
+  - =scratch/bugs/BUG-000-each-template-rendering-overview.md=
+  - =scratch/bugs/BUG-001-template-invocation-extractor-stub.md=
+  - =scratch/bugs/BUG-002-body-capture-quantifier-loop.md=
+  - =scratch/bugs/BUG-003-template-invocation-js-serialization.md=
+- Create =docs/legacy-bugs/README.md= explaining that these are historical compiler bug notes recovered from the pre-projects-dir reorganization =bugs/= directory and retained for reference.
+- If =scratch/bugs/= is missing in the implementation session, recover the four files from git history using =HEAD~1:bugs/<filename>=, because PLAN-015 removed tracked =bugs/= while the same content should still exist one commit back.
+
+** Out of scope
+- Do not convert these markdown files into org-mode bug items in this pass; user selected markdown preservation in =docs/legacy-bugs/=.
+- Do not edit the content of the legacy bug markdown except for line-ending normalization if unavoidable.
+- Do not preserve unrelated =scratch/= contents; only the four =BUG-000= through =BUG-003= compiler markdown files are in scope.
+- Do not reintroduce a root-level =bugs/= directory.
+
+* Existing Patterns
+- =docs/= is the tracked place for durable reference documentation.
+- =scratch/= is gitignored and therefore unsuitable for content that must survive clone/CI/history boundaries.
+- PLAN-015 added =/scratch/= to root =.gitignore=; content left there is intentionally private/untracked unless moved back to a tracked path.
+- The source audit =[[id:AUD-006-audit-implementation]]= identified these files as Spacetime-compiler-specific notes, not non-Spacetime debris.
+
+* Tests
+- Inventory scenario A: before moving, list the four source files from =scratch/bugs/= or confirm recoverability from =git show HEAD~1:bugs/<filename>=.
+- Integrity scenario B: compute checksums (for files available in =scratch/bugs/=) before the move and after the move; checksums must match for the four markdown files.
+- Tracking scenario C: =git status --short docs/legacy-bugs= shows the four bug markdown files plus =README.md= as tracked additions after staging.
+- Cleanup scenario D: =test ! -e scratch/bugs/BUG-000-each-template-rendering-overview.md= and equivalent checks for BUG-001..BUG-003 after the move when the source existed locally.
+- Documentation scenario E: =docs/legacy-bugs/README.md= names the original =bugs/= directory and explains why the archive lives under =docs/legacy-bugs/=.
+
+* Implementation
+** ITEM Inventory and checksum legacy bug docs (TDD: before implementation)
+:PROPERTIES:
+:CUSTOM_ID: BUG-020-preserve-legacy-compiler-bug-docs-outsid::inventory-legacy-bug-docs
+:END:
+- Check for the four exact expected files under =scratch/bugs/=.
+- If present, compute =sha256sum scratch/bugs/BUG-*.md= and save the output for the completion report.
+- If absent, verify recoverability with =git show HEAD~1:bugs/<filename> >/tmp/<filename>= for each file and checksum those temporary recoveries. This is a fallback only; prefer moving the local ignored source files.
+
+** ITEM Move docs to tracked legacy archive
+:PROPERTIES:
+:CUSTOM_ID: BUG-020-preserve-legacy-compiler-bug-docs-outsid::move-legacy-bug-docs
+:DEPENDS: BUG-020-preserve-legacy-compiler-bug-docs-outsid::inventory-legacy-bug-docs
+:END:
+- Create =docs/legacy-bugs/=.
+- Move the four source files from =scratch/bugs/= to =docs/legacy-bugs/= if they exist locally.
+- If source files do not exist locally, recreate them from =git show HEAD~1:bugs/<filename>= into =docs/legacy-bugs/<filename>=.
+- Create =docs/legacy-bugs/README.md= with a short explanation:
+  - These files are legacy compiler bug notes from the old root =bugs/= directory.
+  - They were separated from private/non-Spacetime scratch content after AUD-006 because they are repository-relevant compiler history.
+  - New actionable bugs should be filed as org items under =!tasks/bugs/=, not added here.
+
+** ITEM Verify legacy archive integrity
+:PROPERTIES:
+:CUSTOM_ID: BUG-020-preserve-legacy-compiler-bug-docs-outsid::verify-legacy-bug-docs
+:DEPENDS: BUG-020-preserve-legacy-compiler-bug-docs-outsid::move-legacy-bug-docs
+:END:
+- Recompute checksums for =docs/legacy-bugs/BUG-*.md= and compare to the inventory checksums or git-history fallback checksums.
+- Confirm =docs/legacy-bugs/README.md= exists.
+- Confirm no =scratch/bugs/BUG-000...BUG-003...= source files remain when local move was used.
+- Stage =docs/legacy-bugs/= and ensure no other =scratch/= content is staged.
+
+* Edge Cases
+- Because =scratch/= is gitignored, =git status= will not show missing source files there. The implementation must explicitly check filesystem existence.
+- If =scratch/bugs/= is already absent, do not fail immediately; recover from =HEAD~1:bugs/<filename>= as described.
+- If recovered files differ from local scratch copies, stop and report the mismatch rather than choosing silently.
+- Do not use =git mv scratch/bugs ...= because =scratch/= content is ignored/untracked after PLAN-015; a normal filesystem move followed by staging =docs/legacy-bugs/= is expected.
+
+* Acceptance Criteria
+- =docs/legacy-bugs/= exists and contains all four =BUG-000= through =BUG-003= markdown files plus =README.md=.
+- The four bug markdown files are tracked in the main repo after staging/commit.
+- No root =bugs/= directory is recreated.
+- No =scratch/= files are staged.
+- The archive README makes clear this is historical reference material and directs new work to =!tasks/bugs/=.
+
+** Completion [2026-04-27]
+*** Verification
+- Pre-move sha256 of =scratch/bugs/BUG-{000..003}.md= captured in [[file:!tasks/plans/plan-artifacts/PLAN-016-aud-006-implementation-remediation/legacy_bug_checksums.txt]].
+- Post-move sha256 of =docs/legacy-bugs/BUG-{000..003}.md= identical to pre-move (byte-exact preservation):
+  - 3bd0f94a... BUG-000-each-template-rendering-overview.md
+  - 7260aacd... BUG-001-template-invocation-extractor-stub.md
+  - 6c614ea1... BUG-002-body-capture-quantifier-loop.md
+  - 19ebd08b... BUG-003-template-invocation-js-serialization.md
+- =test -f docs/legacy-bugs/README.md= passes.
+- =ls scratch/bugs/= empty after move.
+- =git status --short -- scratch/= shows no scratch staged paths.
+*** Artifacts
+- [[file:docs/legacy-bugs/README.md]]
+- [[file:docs/legacy-bugs/BUG-000-each-template-rendering-overview.md]]
+- [[file:docs/legacy-bugs/BUG-001-template-invocation-extractor-stub.md]]
+- [[file:docs/legacy-bugs/BUG-002-body-capture-quantifier-loop.md]]
+- [[file:docs/legacy-bugs/BUG-003-template-invocation-js-serialization.md]]
+- [[file:!tasks/plans/plan-artifacts/PLAN-016-aud-006-implementation-remediation/legacy_bug_checksums.txt]]
+*** Deviations
+None.

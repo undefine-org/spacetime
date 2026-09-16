@@ -1,0 +1,157 @@
+#+TITLE: Close out the generalization arc: showcase demos, the reachability lint, and the remaining LSP/diagnostic debt
+#+STATE: ITEM
+#+SESSION_ID: 154d0baaa942d918
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-08-06T12-08-13-733Z_154d0baaa942d918.jsonl]]
+#+CUSTOM_ID: PLAN-141-close-out-the-generalization-arc-showcas
+
+* Initial Message
+
+exlpain #30, and for #14 and #11, does the new @on's text-change facet solve this?
+
+#+STATE: ITEM
+#+PRIORITY: A
+
+* Where this stands
+
+PLAN-140 named four missing generalizations. All four now have gates (commit 3c80dceb):
+
+| G  | gate                                                        | state |
+|----+-------------------------------------------------------------+-------|
+| G1 | tests/generalizations/g1_primitive_reachability_test.rs      | GREEN, baselined at 24 |
+| G2 | tests/generalizations/g2-subject-armed.cdp.test.st           | GREEN (2 passed, real Chromium) |
+| G3 | src/pipeline/drivers.rs::g3_duration_parity_tests            | GREEN, divergence PINNED |
+| G4 | g4-shim-honesty.test.st + .cdp.test.st                       | GREEN (4 + 1) |
+
+Two beliefs changed while writing them, both recorded in the bug files:
+- BUG-325 (fixture elements never armed) was MY MISDIAGNOSIS. The cause was BUG-328 killing
+  every stdlib bundle. Fixture init was never broken.
+- BUG-315 (one-shot reveal reverts on re-entry) is DISPROVED — gh-6's re-entry gate passes in
+  real Chromium. The caveat left on GH-6 is answered.
+
+* W1 — The showcase demos [#A]
+
+** Why this is not "write ten demos" (read before starting)
+
+The request was to showcase the G1 primitives. Investigation says most of them CANNOT be
+showcased as they stand, and building demos anyway would produce pages that teach a surface
+authors cannot use:
+
+  $ printf '@import "stdlib"
+<div class="x">hi</div>
+.x { @graphql() }
+' > index.st
+  $ spacetime check index.st
+  ✓ All 1 file(s) passed          # ...and it emits NOTHING
+
+`@graphql`, `@css-property`, `@sanitize-html`, `@signal-arms`, `@animate-color` have no
+author-facing `%macro`. They are primitives with no directive bound to them. A demo would
+require INVENTING the macro — a design decision about the language's surface, not a showcase
+of it.
+
+Worse, that `check` output is itself a defect (see W2): an unknown directive passes silently
+even with `--deny-warnings`, which is the same class as GH-13/GH-22.
+
+** Therefore, in order:
+
+*** W1.1 Triage the 24 into three buckets
+For each of the 24 unreachable primitives, decide:
+  - REACHABLE ALREADY via a mechanism the classifier cannot see → teach the classifier, drop
+    the baseline.
+  - WORTH A SURFACE → needs a `%macro` designed first. That is a language-design item with the
+    elegance bar applied (extends existing grammar · variants as data · deletes a special case
+    · testable by the same machinery), not a demo task.
+  - DEAD → delete. `element-ref` is the strongest candidate: reachable by nothing, in a file
+    stdlib does not import, and the thing BUG-328 mis-expanded. Deleting it removes surface a
+    matcher bug can land on.
+
+*** W1.2 Build demos ONLY for the bucket that has a surface
+Folder: `demos/showcase-<topic>/` with `index.st.md` — literate Spacetime, so the prose and the
+program are the same artifact and the explanation cannot drift from what runs (docs/language/
+literate.md). Each demo must:
+  - be runnable: `cargo run -- serve demos/showcase-<topic>/`
+  - showcase the primitive AND something about Spacetime as a whole (reactivity, one-definition
+    build/runtime parity, declarative animation) — a demo that only exercises one call is a test,
+    not a showcase
+  - carry a `.test.st` sibling proving the page does what the prose claims
+  - use NO custom JavaScript (project rule)
+
+Strong candidates once surfaced: `graphql` (data pipeline + reactive list, pairs with `@each`),
+`css-property` (a computed CSS custom property driving an animation), `score-window` (the score
+system's windowing, visually legible), `signal-arms` (lifecycle arms — teaches the `@on` model).
+
+*** W1.3 The index
+`demos/showcase-*/README.md` alone is not discovery. Add the set to the existing demo index so
+someone can find them without knowing they exist.
+
+* W2 — An unknown directive must not pass silently [#A]
+
+Found while triaging W1, and it is the reason the demos could not be verified by `check`:
+
+  .x { @totally-not-a-real-directive() }   →  ✓ All 1 file(s) passed   (even with --deny-warnings)
+
+GH-13 and GH-22 established that an unresolvable construct must diagnose rather than degrade
+into nothing. That rule was applied to unknown PRIMITIVES (E0956) but not to unknown
+DIRECTIVES in a selector scope. The consequence is exactly the GH-13 experience: forget an
+import, get a blank page and a green build.
+
+Gate: a directive matching no registered `%macro` produces a diagnostic naming it, with a
+did-you-mean over the registry. Must not fire on legitimately-unknown-at-check-time shapes —
+check `validate_document_is_silent_for_unknown_directive_like_check` in the LSP suite first,
+which asserts the CURRENT silence and will need to change with it.
+
+* W3 — Drop the G1 baseline toward zero [#B]
+
+The gate is baselined at 24 because the classifier is provisional. Work:
+  - teach it the remaining reachability mechanisms (a primitive named from another primitive's
+    `%emit`, registry-driven dispatch)
+  - re-measure; every primitive the classifier learns to see drops the baseline
+  - when the number is small and true, flip it from "must not grow" to "must be zero" with an
+    explicit `%unbound` marker for deliberate exceptions
+Only then is it a lint rather than a report.
+
+* W4 — Unify the duration parsers [#B]
+
+G3 pins the divergence: `2m` is 120000ms canonically and 300ms through
+`pipeline::drivers::parse_duration_ms`. Route the driver parser through
+`syntax::conversions::parse_duration_with_unit`, preserving the frame unit `f` (score-specific,
+legitimately not canonical). When done, `the_divergence_is_documented_not_silent` fails — delete
+it and the duplicate parser together.
+
+Also in this family (reviewer-confirmed, not yet gated): easing/interpolation duplicated between
+`stdlib/primitives/animation/apply-animations.st:58-116,173-207` and `public/runtime/easing.js:17-124`
+/ `interpolate.js:36-88`, with a real RGB-vs-OKLCH semantic divergence. Same fix shape as GH-11:
+evaluate the declared definition rather than mirroring it.
+
+* W5 — LSP debt [#B]
+
+From the reviewer swarm, all reproduced:
+- `did_change` runs the FULL compiler diagnostics chain synchronously per keystroke: 42-55ms per
+  publication, 249ms for five rapid edits, no debounce, no cancellation, no `spawn_blocking`.
+  Correct but not yet fast.
+- `src/wasm.rs:469` keeps a parallel unknown-directive rule (E171) that DISAGREES with the shared
+  pipeline — the same source is clean in `check` and erroneous in WASM.
+- `src/lsp/workspace/import_resolver.rs:244-306` keeps a hardcoded stdlib module list that already
+  omits the live `%macro handle`: `@import "scroll"` resolves, `@import "handle"` does not.
+Both of the latter are surviving fragments of the GH-28 "two sources of truth" defect that the
+static-registry deletion was supposed to end.
+
+* W6 — Tighten three weak repro gates [#C]
+
+The swarm judged GH-13, GH-20 and GH-27's `check-contract.sh` weak: each asserts a condition that
+can hold for reasons unrelated to the fix. All three have stronger siblings, so this is hygiene
+rather than exposure — but a gate that can pass for the wrong reason is a gate that will
+eventually lie.
+
+* W7 — BUG-333 [#C]
+
+`&$b` — an element reference to an UNDECLARED name — emits a bundle that does not parse instead
+of a diagnostic. Same family as W2: unresolvable must diagnose, never degrade. Narrow (no stdlib
+or authored page hits it), which is why it is last.
+
+* Sequencing
+
+W2 before W1.2 — the demos need `check` to actually catch a wrong directive, or every demo is
+verified by a command that cannot fail.
+W1.1 before W1.2 — cannot showcase what has no surface.
+W3 after W1.1 — the triage IS most of the classifier work.
+W4, W5, W6, W7 are independent and parallelizable.

@@ -1,0 +1,50 @@
+#+TITLE: Fix BalancedExtractor for nested-object + bare-key seeds (BUG-228 both faces)
+#+STATE: ITEM
+#+SESSION_ID: 153c9c68ea93c166
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-24T17-46-26-602Z_153c9c68ea93c166.jsonl]]
+#+CUSTOM_ID: PLAN-120-fix-balancedextractor-for-nested-object
+
+* Initial Message
+
+please exlain all you deferred and file with root causes and impacts and fix steps and opportunities
+
+#+STATE: ITEM
+Split out of PLAN-119 (2026-07-24) at user direction: FUP-149's STRUCTURAL
+zero-value synth lands the typed-forms "total reads" win WITHOUT the parser fix,
+so BUG-228 is off the typed-live-data critical path. It remains real for EXPLICIT
+literal seeds and for `@data fetch`, and is worth fixing on its own.
+
+* Scope
+The two faces of BUG-228 (see !tasks/bugs/BUG-228-...org):
+1. Bare-identifier object keys: `@data inline $x : { a: 1 } ;` fails; `{ "a": 1 }`
+   works. Seed-expr parser stricter than the @on statement-body JS parser.
+2. Nested object values in body captures: `{ initial: { "a": { "b": "" } } }`
+   fails in BOTH `@data fetch` and `@data subscribe … { initial }`.
+
+* Root cause (from FUP-144 W1 investigation)
+`balanced(';')` (BalancedExtractor, src/syntax/events/extractors/custom.rs): a
+nested `{...}` VALUE is pre-split by the parser into a child BODY node, so it's
+absent from the extractor's flat inline token slice — scan_end stops before the
+nested content and the brace balance never closes.
+
+* Fix steps
+1. scan_end: include pre-split child-BODY tokens so nested `{…}` balances close.
+2. Seed object-literal parsing: reuse the @on statement-body JS parser path so
+   bare identifier keys are accepted (parity, not a second grammar).
+3. Confirm across @data inline / fetch default / derive / subscribe seeds.
+
+* RED→GREEN
+- `@data inline $x : { a: 1, b: 2 } ;` compiles, seeds {a:1,b:2}.
+- `@data fetch … { initial: { "a": { "b": "" } } }` compiles (nested).
+- Byte-stability: existing quoted-key seeds unchanged.
+
+* Non-goal
+Not required for the FUP-142 forms win (FUP-149 covers it structurally). This is
+the explicit-literal-seed path + @data fetch ergonomics.
+
+* Relation
+Parent bug: BUG-228. Split from PLAN-119. Sibling to FUP-149 (which SIDESTEPS
+this for the synth path). Same extractor family as several @data body-capture
+papercuts.
+
+NOTE [2026-07-26]: Scope narrowed by PLAN-122 (2026-07-26): the typed-seed surface (@data inline WITH typeref) will not use the BalancedExtractor seed path at all — FEAT-166 (W2, typeref-directed record capture) parses record seeds against @type field grammars, deleting the bespoke path rather than repairing it. This PLAN remains the fallback fix for UNTYPED expr seeds only. If FEAT-166 lands first, re-triage: the remaining value here is @data fetch/derive/subscribe seed ergonomics, not @data inline. Also note W0 of PLAN-122 (FEAT-164) fixes the string-awareness class in BalancedExtractor (BUG-225/040/041), adjacent to this plan's scan_end work — coordinate if both proceed.

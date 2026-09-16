@@ -1,0 +1,57 @@
+#+TITLE: Headless test world has no AbortController -- all interactive drivers silently die in init
+#+STATE: DONE
+#+SESSION_ID: 153497c78a510229
+#+CUSTOM_ID: BUG-196-headless-missing-abortcontroller
+#+COMPLETION_HASH: f1d57511c0276219
+
+* Severity
+High test-fidelity gap: every interactive animation driver is silently
+inert under --headless.
+
+* Root cause (verified 2026-07-18)
+src/headless_shims.js / the LinkeDOM V8 sandbox does not define
+`AbortController`. stdlib/primitives/animation/drivers.st constructs one at
+the top of every interactive driver's init (mouse-driver L426
+`const controller = new AbortController();`; hover/focus/click triggers
+L571-581 attach listeners with `{ signal: controller.signal }`). The init
+throws at that line AFTER registerSelectorInit already set the element's
+`_st_init_<hash>` flag, and the scanner swallows the exception -- so: flag
+set, no listener, no initial yield, no error anywhere.
+Probe evidence: `el.addEventListener('mousemove', fn, {signal: new
+AbortController().signal})` throws "AbortController is not defined" in the
+test world; with a pre-fixture polyfill the full chain works (mousemove
+drives progress 0 -> 1, `transform:translateX(100px)` and `--st-<driver>:1`
+observed).
+
+* Why it stayed invisible
+Stacked silent failures: the existing @mouse suite
+(tests/unit/animations/mouse-tilt.test.st) is vacuous for an independent
+reason (BUG-194: in-@test keyframes compile the test body empty), so nobody
+saw interactive drivers never ran headless. Compounded by LinkeDOM reading
+unset inline styles as `undefined`, which makes naive `v !== ""` assertions
+pass vacuously.
+
+* Related shim-layer gaps (fix together in headless_shims.js)
+- window.matchMedia undefined: the reveal engine throws on its first line
+  without an author shim (BUG-190's pin carries one).
+- performance.now() is epoch-scale, not time-origin-relative (noted during
+  BUG-191 authoring).
+- getBoundingClientRect() returns all zeros (no layout) -- mouse driver's
+  rect.width === 0 guard early-returns; tests shim per-element rects.
+  Arguably by-design per docs/testing/FIDELITY_LADDER.md (layout belongs to
+  --cdp), but worth a documented decision.
+
+* Test pin (RED)
+tests/bugs/BUG-196-headless-test-world-missing-abortcontroller.test.st
+- 1 RED: typeof AbortController === "function" in the test world.
+- 1 GREEN control: with a manual polyfill, addEventListener {signal}
+  registers and fires (the exact call shape the drivers use).
+Run: `cargo run --features headless -- test <file> --headless --format json`
+
+* Fix direction
+Add AbortController/AbortSignal to headless_shims.js (minimal: signal with
+aborted flag + abort(); addEventListener can ignore the option). Then drop
+the inline polyfills from BUG-195's tests (they're guarded by typeof
+checks, so they degrade gracefully either way).
+
+NOTE [2026-07-19]: FIXED (PLAN-078): AbortController/AbortSignal polyfill + signal-aware addEventListener wrap + matchMedia stub added to src/headless_shims.js, in the file's existing logic-level style. Pin 2/2 green; BUG-195 tests dropped their inline polyfills. Interactive drivers (mouse/hover/focus/click) now initialize headless.

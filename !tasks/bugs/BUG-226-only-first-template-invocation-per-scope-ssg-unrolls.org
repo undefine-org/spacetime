@@ -1,0 +1,56 @@
+#+TITLE: Only the FIRST template invocation in a scope SSG-unrolls
+#+TODO: TODO DOING BLOCKED DONE
+* TODO Only the first template invocation per scope SSG-unrolls
+:PROPERTIES:
+:CUSTOM_ID: BUG-226-only-first-template-invocation-per-scope-ssg-unrolls
+:PRIORITY: #B
+:LAYER: html
+:END:
+
+** Symptom
+A scope containing N literal-arg template invocations unrolls only the FIRST
+into served HTML. The rest render at runtime only — invisible to a crawler or a
+no-JS client.
+
+#+begin_src st
+@template &row($t, $x) { <li class="k-row"><b>`$t`</b> `$x`</li> }
+<section class="rows"></section>
+.rows {
+    &row("03:47", "one");   // ← unrolls
+    &row("03:48", "two");   // ← does NOT
+}
+#+end_src
+
+Served: =<section class="rows"><li data-st-ssg="1"><b>03:47</b> one</li></section>=
+
+** Root cause (suspected, not yet confirmed in code)
+=unroll_static_invocations= (src/html/ssg_unroll.rs:907) loops invocations and
+calls =inject_rows(inv.scope_selector, …)= for each. The documented staticity
+rule requires the invoking selector to match "exactly ONE *empty* container"
+(docs/language/data-and-rendering.md §6a). After the first injection the
+container is no longer empty, so invocations 2..N fail that uniqueness proof and
+are silently skipped.
+
+If so the fix is to accumulate all renders for a scope and inject ONCE, rather
+than injecting per invocation.
+
+** Also worth checking
+Unroll appears not to fire at all when page markup lives in a separate
+=index.html= rather than inline in the =.st=. Same probe, markup moved to
+index.html → =<main class="page"></main>=, no unroll, no diagnostic. If that is
+by design it is undocumented; if not, it is the more severe half of this bug,
+because the multi-file layout is what real projects use.
+
+** Impact
+SEO/no-JS only — runtime hydrate is correct either way, so nothing is visibly
+broken in a browser. It silently defeats the =unroll == hydrate= promise for any
+component-based page, which is the layout a design-system-driven site naturally
+adopts.
+
+** Workaround in use
+=@each= over an =@data inline= / file-backed collection DOES unroll every row.
+So: =@each= for repeated items, single template invocation per scope for
+one-off structure. Adopted for projects/backdesk-new.
+
+** Repro
+=scratch/tplprobe/= (probe files present at time of filing).

@@ -1,0 +1,160 @@
+#+TITLE: keyframe-arrow CSS inside a .selector{} block within @mount silently truncates the entire test body to empty
+#+STATE: ITEM
+#+SESSION_ID: 152939d2e5b25e66
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-09T16-24-34-454Z_152939d2e5b25e66.jsonl]]
+#+CUSTOM_ID: BUG-173-keyframe-arrow-css-inside-a-selector-blo
+
+* Initial Message
+
+it still looks weird
+
+* Symptom — CRITICAL: silent false-positive test passes
+
+Any =@test { @mount { ... .selector { property: from -> to; } ... } ... }=
+where a nested =.selector { }= CSS scope block INSIDE =@mount='s markup
+contains a keyframe-arrow declaration (=property: from -> to;=, the same
+syntax =@reveal=/=@value-change='s explicit =:entering {}=/=:exiting {}=
+blocks and bare CSS transitions use) causes the ENTIRE test body — not just
+the CSS block, the whole =@mount { ... }= AND every directive after it
+(=@eval=, =@assert=, =@when=, =@then=, etc.) — to compile to an EMPTY string.
+
+The test then trivially "passes" (an empty =try {} finally {}= throws
+nothing), silently discarding every assertion in the test. This is NOT a
+compile error, NOT a diagnostic warning, NOT a runtime exception — the
+=cargo run -- check= command reports success, the test runner reports
+=1 passed, 0 failed=, and =console.log= breadcrumbs placed BEFORE =@mount=
+never fire either (proving the truncation happens at PARSE/MACRO-EXPANSION
+time, not runtime).
+
+** Minimal repro
+
+#+begin_src spacetime
+@import "stdlib/testing/test"
+
+@test "silently truncated" {
+  @eval (console.log('CHECKPOINT — never prints'))
+  @mount {
+    <span class="x">short</span>
+    .x {
+      opacity: 0 -> 1;
+    }
+  }
+  @eval (console.log('also never prints'))
+  @assert (false) "this should fail but the whole test body is empty, so it silently passes"
+}
+#+end_src
+
+Run under either backend:
+#+begin_src sh
+cargo run --features headless -- test repro.test.st --headless   # 1 passed, 0 failed
+cargo run --features cdp -- test repro.test.st --cdp              # 1 passed, 0 failed
+#+end_src
+
+Both report a pass. Neither =console.log= breadcrumb appears in
+=--format json='s =logs= array (only =["LinkeDOM initialized", "PASS: ..."]=)
+— confirming the ENTIRE captured =$body:block= for =@test= compiles to =""=,
+not merely a runtime error mid-body.
+
+** Confirmed NOT the trigger (isolation matrix)
+
+| variant | truncates? |
+|---|---|
+| =@mount= with plain markup, no CSS block | NO |
+| =@mount= + =.selector { display: inline-block; }= (static prop, no arrow) | NO |
+| =@mount= + =.selector { @reveal(duration: 400ms) }= (macro, no literal arrow in source) | NO |
+| =@mount= + =.selector { @on visible(50ms) { & { opacity: 0 -> 1; } } }= | YES (truncates) |
+| =@mount= + =.selector { @value-change(...) { :entering {...} :exiting {...} } }= (arrow inside) | YES (truncates) |
+| =@mount= + =.selector { opacity: 0 -> 1; }= (bare CSS keyframe arrow, no macro at all) | YES (truncates) |
+| =@mount= + =.selector { @value-change(duration: 400ms, stagger: 40ms) }= (macro, NO explicit keyframe block, uses default keyframes) | NO |
+
+So the trigger is specifically: a literal =property: value1 -> value2;=
+keyframe-arrow token sequence appearing anywhere inside a =.selector {}= block
+that is itself nested inside a top-level =@mount { }= test-body directive.
+Whether that arrow comes from a macro's inner =:entering {}= block or bare CSS
+makes no difference — the trigger is the ARROW SYNTAX ITSELF reaching the
+=.selector {}= block's raw source text.
+
+* Root cause (partially traced, needs deeper compiler investigation)
+
+=compile_block_body_to_js= (=src/emit/js.rs= ~L1144), which implements the
+=@test='s =%$body.js= accessor (see =%macro test= in
+=stdlib/testing/test.st=), takes the RAW block text captured for
+=$body:block=, re-parses it as a standalone fragment, re-matches it against
+the live macro registry (=rematch_with_registry=), and recompiles it with
+=Compiler::from_ast(&ast)....compile().js=.
+
+Confirmed via direct debug instrumentation (temporarily added, then removed)
+that in the failing case, =compile_block_body_to_js='s FINAL =.js= output is
+=""= (empty string) even though:
+- The bare fragment (just the =@mount {...} @assert(...)= text, parsed
+  STANDALONE via =crate::parser::parse=, bypassing the registry-rematch step)
+  parses fine and shows 2 top-level matches (=mount= and =assert=).
+- =crate::compiler::Compiler::from_ast(&ast)....compile()= on the FULL file
+  (via =test_runner::compile_test_html=) reports ZERO =pipeline_errors= —
+  meaning whatever swallows the output does so WITHOUT surfacing a
+  diagnostic.
+
+This strongly suggests the failure is in the interaction between:
+1. =rematch_with_registry= re-extracting =FormMatch=es for the fragment
+   against the live macro registry (unlike the bare stdlib-only parse), AND
+2. The nested =.selector { property: arrow; }= block being ambiguously
+   classified during FORM SCORING — likely related to
+   =src/syntax/form_scoring.rs='s =CaptureType::Properties= matching logic
+   (L473-474: =(CapturedValue::StyleProperties(_) | CapturedValue::Block(_),
+   CaptureType::Properties) => true=), where a keyframe-arrow CSS block could
+   plausibly be captured as BOTH a =Properties=-typed param AND the outer
+   =:block=-typed =$body= param of =@test=, and an ambiguous/mis-scored form
+   match causes the WHOLE fragment's compile to bail silently rather than
+   pick the correct form or surface a diagnostic.
+
+This root cause is NOT fully nailed down to a single line — it needs a
+dedicated debugging session with `rematch_with_registry` and
+`score_form_match` instrumented together on the minimal repro above. Filed as
+a standalone, precisely-reproducible bug so that session doesn't have to
+re-discover the repro matrix.
+
+* Impact — why #A priority
+
+This is a TEST-INFRASTRUCTURE INTEGRITY bug: any CDP/headless test asserting
+behavior of an element with a real keyframe-arrow animation (=@reveal=,
+=@on visible/hover=, =@value-change= with explicit keyframes, or even bare
+CSS transitions) INSIDE a =@mount='s nested CSS scope block will SILENTLY
+vacuously pass regardless of what the assertions actually check. This
+defeats the entire "test ≡ automation" fidelity-ladder discipline documented
+in =docs/testing/README.md= for exactly the class of tests (animation
+correctness) that discipline exists to protect. Any existing or future test
+matching this shape should be treated as UNVERIFIED until this is fixed.
+
+** Known affected/worked-around test authorship
+- =tests/fixtures/native-template/value-change-inline-width-wrap.test.st=
+  (BUG-172's regression fixture) was rewritten to avoid explicit
+  =:entering {}=/=:exiting {}= keyframe blocks specifically to dodge this bug;
+  see that file's header comment.
+- =tests/fixtures/native-template/on-visible-animation-only.test.st= (BUG-166's
+  fixture) uses =@on visible(50ms) { & { opacity: 0 -> 1; } }= directly at
+  TOP LEVEL of the mounted markup (not nested inside a =.selector {}= CSS
+  block) — this shape does NOT reproduce the truncation (confirmed: that
+  fixture's 3 CDP tests pass with real assertions, per PLAN-070 W2 notes), so
+  it is NOT retroactively suspect. The trigger specifically requires the
+  arrow syntax to be inside a =.selector { }= CSS-scope block nested in
+  =@mount=, not a bare =@on {}= directive at the mount's top level.
+
+* Acceptance
+- [ ] Root cause nailed to the specific mis-scored/mis-matched form (or
+  other exact mechanism) via instrumented `rematch_with_registry` +
+  `score_form_match` on the minimal repro in this bug.
+- [ ] Fix: either (a) correct form disambiguation so the =.selector {}=
+  block's keyframe-arrow content is never mistaken for the outer =$body=
+  capture, or (b) if truncation is unavoidable in some edge case, emit a
+  loud compile diagnostic (E09xx) instead of silently returning `""` — per
+  the project's "kill silent-drop, emit diagnostic" precedent (BUG-167).
+- [ ] Regression test: the minimal repro above, converted to a Rust unit
+  test in a location that asserts =compile_block_body_to_js='s (or
+  equivalent) output is NON-EMPTY and contains the expected directive
+  content for this exact nested-arrow-in-mount shape.
+- [ ] Re-run BUG-172's fixture with the explicit =:entering{}=/=:exiting{}=
+  block restored once fixed, confirming it becomes a real (non-vacuous)
+  pixel-level assertion again.
+- [ ] Audit existing =tests/fixtures/**/*.test.st= for the same shape
+  (=.selector {}= block nested in =@mount= containing a keyframe arrow) and
+  re-verify those tests are not silently vacuous.

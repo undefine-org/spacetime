@@ -1,0 +1,157 @@
+#+title: Todo
+
+* ~@after~ chaining
+Plan file: [[file:~/.claude/plans/atomic-swimming-kurzweil.md][Current plan file]]
+
+#+begin_src markdown
+
+### 8.12 Animation Chaining with `&` References
+
+**Problem:** `@sequence`, `@chain`, and `@after` need to trigger animations after previous ones complete, with individual delays per step.
+
+**Syntax:**
+```st
+// Option A: @sequence with @step
+@sequence intro {
+  @step step-1(300ms) {
+    .step-1 { opacity: 0 -> 1 }
+  }
+  @step step-2(300ms, delay: 200ms) {
+    .step-2 { opacity: 0 -> 1 }
+  }
+  @step step-3(300ms, delay: 200ms) {
+    .step-3 { opacity: 0 -> 1 }
+  }
+}
+
+// Option B: @after with & reference
+.hero {
+  @load intro(600ms) { opacity: 0 -> 1 }
+}
+.subtitle {
+  @after &intro fade(300ms, delay: 200ms) {
+    opacity: 0 -> 1
+  }
+}
+```
+
+**Implementation Approaches:**
+
+**Approach 1: Cumulative Delay Calculation**
+- Each `@step` calculates cumulative delay from previous steps
+- Step 1: delay = 0
+- Step 2: delay = step1.duration + step2.delay
+- Step 3: delay = step1.duration + step2.delay + step2.duration + step3.delay
+- Each step becomes a separate `load-driver` with computed delay
+
+```st
+%macro sequence {
+  %creates @sequence
+
+  %form {
+    @sequence $name:ident {
+      $steps:step+
+    }
+  }
+
+  // For each step, compute cumulative delay and emit
+  %for $i, $step in enumerate($steps) {
+    %binds {
+      load-driver(&self,
+        duration: $step.duration,
+        delay: cumulative_delay($steps, $i),  // computed
+        threshold: 0
+      ) -> { ${$step.name}_progress }
+      apply-animations(&self,
+        driver: ${$step.name}_progress,
+        animations: $step.body
+      )
+    }
+  }
+}
+```
+
+**Approach 2: Timeline Registration + Event System**
+- Each animation registers itself with a unique ID
+- `@after &name` listens for the 'complete' event of the referenced animation
+- Runtime tracks animation completion and triggers dependents
+
+```st
+%macro after {
+  %creates @after
+
+  %form {
+    @after &$predecessor:ident $name:ident(
+      duration: $duration:time,
+      delay: $delay:time = 0ms
+    ) {
+      $body:keyframes
+    }
+  }
+
+  %binds {
+    // Wait for predecessor to complete, then start with delay
+    after-driver(&self, predecessor: $predecessor, delay: $delay, duration: $duration) -> { $progress }
+    apply-animations(&self, driver: $progress, animations: $body)
+  }
+}
+```
+
+**New Primitive Required:** `after-driver`
+```st
+%primitive after-driver(
+  &el,
+  predecessor: string,
+  delay: number = 0,
+  duration: number = 1000
+) {
+  %emit js {
+    // Wait for ST.onComplete(predecessor), then start time-based playback
+    ST.onComplete('%predecessor', () => {
+      setTimeout(() => {
+        // Start animation...
+      }, %delay);
+    });
+  }
+}
+```
+
+**Approach 3: Range-Based Within Single Timeline**
+- Total duration = sum of all step durations + delays
+- Each step animates within a specific range
+- apply-animations already supports `range: { start, end }`
+
+```st
+// @sequence computes:
+// Total = 300 + 200 + 300 + 200 + 300 = 1300ms
+// step-1: range 0 to 0.23 (0-300ms)
+// gap: 0.23 to 0.38 (300-500ms)
+// step-2: range 0.38 to 0.62 (500-800ms)
+// gap: 0.62 to 0.77 (800-1000ms)
+// step-3: range 0.77 to 1.0 (1000-1300ms)
+
+%binds {
+  time-driver(duration: $total_duration) -> { $progress }
+  apply-animations(&self, driver: $progress, animations: {
+    scopes: [
+      { selector: ".step-1", properties: [...], range: { start: 0, end: 0.23 } },
+      { selector: ".step-2", properties: [...], range: { start: 0.38, end: 0.62 } },
+      { selector: ".step-3", properties: [...], range: { start: 0.77, end: 1.0 } }
+    ]
+  })
+}
+```
+
+**Recommended:** Start with **Approach 1** (cumulative delays) as it's simplest and doesn't require new primitives. Add **Approach 2** (event system) later for cross-element `@after` references.
+
+---
+#+end_src
+
+-> implement the approach 2, test it, and update the codebase
+
+* Purity Animation Optimization
+Future optimization for purity caching system:
+- Currently, animation event listeners (animationstart/end, transitionstart/end) are added to ALL element refs
+- Could detect which elements actually have CSS animations/transitions defined
+- Only add animation listeners to those elements to reduce listener overhead on static elements
+- Location: src/codegen/mod.rs ~line 1040-1180 (generate_element_ref_code)

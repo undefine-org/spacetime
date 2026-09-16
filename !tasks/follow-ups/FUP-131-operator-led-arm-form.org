@@ -1,0 +1,102 @@
+#+TITLE: Operator-led arm form — top-level `$lhs => rhs` as a statement
+#+STATE: TODO
+#+CUSTOM_ID: FUP-131-operator-led-arm-form
+#+PRIORITY: C
+#+LAYER: metasystem
+#+EFFORT: 2d
+#+DEPENDS_ON: PLAN-111
+
+* What this is
+
+A top-level reactive arm written as a STATEMENT, with `=>` as the separator and
+no enclosing `@match { … }` block:
+
+#+begin_src spacetime
+$loaded        => ready;
+$count > 5     => &badge();
+$isAuthorized  => &adminPanel();
+#+end_src
+
+i.e. the `arm` capture type (created by PLAN-111 W3 for use *inside* `@match`)
+promoted to a standalone, top-level statement form. Sugar over
+`@when $loaded { &ready() }` / `@match $x { true => &tpl() }`.
+
+* Status: HARD — empirically confirmed, deferred from PLAN-111
+
+PLAN-111 was scoped to *remove* meta-compiler special-cases (token → boundary
+→ collapse → generalize). This form *adds* CST routing, so it is a separate
+concern. Verified empirically (not guessed):
+
+#+begin_src
+$ cat > /tmp/xxxxx/proto.st <<'EOF'
+%capture_type arm { $lhs:expr "=>" $rhs:expr ";" }
+%macro guard-arm {
+  %order 700
+  %form { $lhs:expr "=>" $rhs:expr ";" }
+  %binds { noop(lhs: $lhs, rhs: $rhs) }
+}
+$loaded => ready;
+$count > 5 => &badge();
+EOF
+$ cargo run -q -- inspect /tmp/xxxxx/proto.st --layer parse
+✗ Failed to parse /tmp/xxxxx/proto.st: 2 parse errors:
+  1: expected scope block, directive, or declaration at offset 192
+  2: expected scope block, directive, or declaration at offset 209
+#+end_src
+
+The form REGISTERS and is DECLAREABLE (capture-led `$` forms already work —
+`parse_form_pattern` sets `directive_name = "$"` for `$`/`&` heads, and
+`match_directive_prefix` has the `$` branch). It is the CST GROUPING that fails.
+
+* Root cause (two CST gaps)
+
+**Gap 1 — routing.** `is_variable_declaration`
+(src/syntax/events/grammar/directives.rs:864) decides whether a `$`-led node
+becomes a full declaration (→ `variable_ref`, which calls `inline_args` and
+groups a run) or a bare `$name` (→ `variable_ref_inline`, node closes at
+`$name`). It recognizes `$name` followed by `:` / `<-` / `;` / `{` / a type
+ident. For `$count > 5 => …` the token after `$count` is `>` (GT) → not
+recognized → routes to `variable_ref_inline` → node closes at `$count`, the
+`=> …` tail is orphaned and rejected as an invalid statement.
+
+**Gap 2 — consequence grouping.** Even if routed to `variable_ref` →
+`inline_args`, `inline_args` breaks at `L_PAREN` (directives.rs:308). So a
+template-invocation consequence `&badge(args)` splits at `(`. A bare-expr
+consequence (`$loaded => ready;`) groups cleanly; a `&tpl(args)` consequence
+does not, without further grouping work.
+
+* Why it's its own FUP, not PLAN-111
+
+PLAN-111's W1–W4 *delete* Rust special-cases (the `=>` token is the only
+addition). This form *adds* CST routing logic — the opposite direction. Folding
+it in would muddy the cutover and risk the clean "remove, don't add" review.
+The `=>` token from PLAN-111 W1 is a prerequisite; this FUP builds on it.
+
+* Implementation sketch (when picked up)
+
+1. Widen `is_variable_declaration` to recognize a `$`-led node whose run
+   contains a `FAT_ARROW` (PLAN-111's token) as a declaration — route it to
+   `variable_ref` so the full `$lhs => rhs;` groups into one VARIABLE_REF node.
+   Concretely: lookahead-scan for FAT_ARROW before the next `;` / `}` / newline
+   boundary; if present, treat as a declaration.
+2. Make `inline_args` group through the `=> consequence` — either consume to
+   the terminating `;` when a FAT_ARROW has been seen in this run, or give the
+   `arm` form its own grouping path. The template-invocation `(` break is the
+   subtlety to design (Gap 2).
+3. Reuse the `arm` capture type from PLAN-111 W3 — the `%form` is
+   `$lhs:expr "=>" $rhs:expr ";"` (directive_name `$`), already declareable.
+
+* What it opens up (honest)
+
+`$cond => consequence` as a bare reactive arm — a shorthand for `@when`/`@match`.
+Marginal expressive gain (the `=>` already lives, fully powered, inside
+`@match`/`@handle`); the value is ergonomics, not capability. Pick up only if a
+concrete ergonomic need justifies the CST grouping work.
+
+* Acceptance (when implemented)
+
+- `$loaded => ready;` and `$count > 5 => &badge();` parse and match the
+  `guard-arm`-style macro end-to-end (no orphan-token errors).
+- `$loaded` alone (no `=>`) still parses as a bare var-ref (no regression to
+  `variable_ref_inline`).
+- A `$x => y;` and a `@match $z { _ => y; }` share the SAME `arm` capture type.

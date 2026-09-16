@@ -1,0 +1,33 @@
+#+TITLE: segment_component_body panics on multibyte char at depth-0 (char-boundary slice)
+#+STATE: DONE
+#+SESSION_ID: 14fc108ed3772fa8
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-04T14-32-37-965Z_14fc108ed3772fa8.jsonl]]
+#+CUSTOM_ID: BUG-062-segment-component-body-panics-on-multiby
+#+COMPLETION_HASH: 60ef5fbd2a37070b
+
+* Initial Message
+
+Ok, start with Phase B. Use a wave manifest with in-chat mid-flight check-ins exlpaining what's going on, what' you've done, and what you're doing next. use main thread for architectural work and reviewer swarms in between waves. add as many gap implementation as needed; you have unlimited time budget. file FEAT/BUG you find mid-flight using the org tool and fix/implement them mid-flight
+
+* Symptom
+`classify_construct_start(inner, i)` does `&inner[i..]` where `i` is a byte index advanced
+byte-by-byte by segment_component_body's default (HTML-content) branch. When a multibyte UTF-8
+char (e.g. `…`, `—`, non-ASCII) sits at tag-depth 0, `i` lands mid-char and the slice panics:
+`byte index N is not a char boundary; it is inside '…'`.
+
+* Root cause
+Shared segmenter (src/syntax/events/form_compiler.rs ~1829). Pre-existing: parse_component_body
+hits it too; only surfaced now because the Phase B FLEET differential (FEAT-079 B3c) harvested a
+real @template body containing `…` at depth 0.
+
+* Fix (structural)
+classify_construct_start guards `inner.is_char_boundary(i)` up front: a construct never starts
+mid-multibyte-char (all construct triggers $ @ . # [ & and `<-` are ASCII; UTF-8 continuation
+bytes are >=0x80, never a trigger). Not a boundary -> return None (HTML content); the byte loop
+advances to the next boundary safely.
+
+* Found by / fixed in
+FEAT-079 Phase B B3c fleet differential. Regression test: the fleet differential itself (panics
+pre-fix), plus a targeted unit test with a multibyte body.
+
+NOTE [2026-06-08]: Fixed: classify_construct_start guards inner.is_char_boundary(i) -> None (HTML content). Regression test multibyte_at_depth_zero_no_panic (… — café at depth 0). lib 2156/0.

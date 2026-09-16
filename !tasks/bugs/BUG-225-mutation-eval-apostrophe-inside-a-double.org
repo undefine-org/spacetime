@@ -1,0 +1,161 @@
+#+TITLE: Mutation eval: semicolon inside a string literal severed the statement (SyntaxError at runtime, green compile)
+#+STATE: DONE
+#+SESSION_ID: 153da24d967d2bb2
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-25T12-50-40-345Z_153da24d967d2bb2.jsonl]]
+#+CUSTOM_ID: BUG-225-mutation-eval-apostrophe-inside-a-double
+#+COMPLETION_HASH: c42ba12f43064a98
+
+* Initial Message
+
+ok my friend, I want us to think deeply about a system that lets you ask me questions that we need to answer to bring the right vision to the next version of backdesk-new (commit the current projects/backdesk-new into its own git repo before we start, by the way)
+
+You should look into your intuition and online about how to ask the sharpest questions that lead to the right insights, both for you and for me. Amongst the copy- and brandig-specific theories you should pull, also use Ericksonian hypnotherapy principles applied to both the brainstorming process, and the copywriting process.
+
+Your final output should be sets of guidelines to provide agents when they want to make new webpages or when they want to update them.
+
+Let's design and brainstorm this. Please come back to me with your exploration results, and don't make assumptions/form settled hypotheses until we discuss them together. Let's go for depth of understanding before producing any work
+
+** Symptom
+
+A signal mutation whose string literal contains an apostrophe compiles clean
+but throws at click time. The handler is registered, the element initialises,
+and nothing happens when the user clicks.
+
+Browser console:
+
+#+begin_example
+[ST] Mutation eval: SyntaxError: Invalid or unexpected token
+"G0 feeling ✗  (control — a universal affect, not a structure)
+G1 …"
+#+end_example
+
+** Repro (minimal)
+
+#+begin_src spacetime
+@data inline $msg : "idle";
+
+<button class="go">go</button>
+<span class="out"></span>
+
+.go  { @on click { $msg <- "the opposite ('lose control') is absurd"; } }
+.out { text <- $msg; }
+#+end_src
+
+- =cargo run -- check= → ✓ passes
+- click → =SyntaxError=, =$msg= never updates, no visible failure on the page
+
+Also triggered by ordinary prose apostrophes — =nobody's record=, =you're=,
+=partner's tab= — which makes it very easy to hit when writing natural copy.
+
+** Observed
+
+- =method/05-COPY.st.md= (=.lint-bad= handler) and =method/index.st.md=
+  (=.sd-a= / =.sd-c= handlers), 2026-07-25.
+- Sibling handlers in the SAME file whose strings had no apostrophe worked
+  correctly, which is what isolated the cause.
+
+** Cause (hypothesis — not yet confirmed in source)
+
+The mutation body is carried to the runtime as =body.js_statements= (a string
+array) and evaluated. The apostrophe appears to terminate or mis-nest a quote
+during that eval-string construction. Emitted form seen in the bundle:
+
+#+begin_example
+body = { js_statements: ["$verdict <- \"G0 feeling ✗ … 'lose control' …\""] }
+#+end_example
+
+The double quotes are escaped for the JS string; the single quotes are not
+handled, so whatever wrapper the evaluator applies breaks. Needs confirming
+against the mutation emitter + the runtime eval path before fixing.
+
+** Impact
+
+*Silent runtime failure with a green compile.* The compile gate says ✓, so the
+defect only surfaces if someone clicks the exact control in a browser. Any
+=.st= writing user-facing English is exposed — apostrophes are unavoidable in
+natural copy, and the failure mode (button does nothing) is easy to misread as
+a CSS/selector problem rather than a string-escaping one.
+
+** Workaround
+
+Rephrase to avoid the apostrophe. Lossy — it distorts copy to satisfy the
+compiler, which is backwards.
+
+** Fix direction
+
+Escape (or properly quote) single quotes on the mutation-eval path, alongside
+the existing double-quote escaping. Then:
+
+- unit test: mutation string containing =' " \ ` ${}= round-trips intact
+- e2e test: a fixture page whose handler sets a string with an apostrophe,
+  asserting the bound element's text after click
+- ideally, remove the eval path entirely if the statement can be compiled to a
+  direct assignment — the escaping class of bug disappears with it
+
+** Acceptance
+
+- The minimal repro above updates =.out= to the literal text, apostrophe intact.
+- =method/= demos restored to natural phrasing (=nobody's record=, =you're=).
+- A RED→GREEN test covering apostrophes and the other quote/escape characters.
+
+NOTE [2026-07-25]: FIXED + verified RED→GREEN.
+
+Title corrected: the trigger is a **semicolon**, not an apostrophe. My first
+hypothesis (apostrophe) was WRONG — bisecting the two verdict strings in
+=method/05-COPY.st.md= showed the only characters unique to the failing one were
+=✗ ; F I L B=, and the semicolon was the culprit. The apostrophe was an
+innocent bystander that happened to co-occur. Recorded because the wrong
+hypothesis cost a rebuild cycle and the correction is the useful part.
+
+** Root cause (confirmed in source, not inferred)
+
+=src/syntax/events/form_compiler.rs=, =CaptureType::MutationActions= built
+=js_statements= with a bare =inner.split(';')=. A =;= inside a quoted value is
+CONTENT; the naive split treated it as a separator, so
+
+: $v <- "false for nobody; every owner wants control";
+
+reached the runtime as two fragments and the eval threw
+=SyntaxError: Invalid or unexpected token=.
+
+Three further sites shared the flaw:
+- two in the =@on= validator (=form_compiler.rs=, incl. the stdlib-unavailable
+  fallback path)
+- =lower_mutation_body_text= (=src/pipeline/mod.rs=), which additionally must
+  stay byte-lossless because it splits and rejoins
+
+** Fix
+
+=split_semicolons(text, raw)= — one quote-and-escape-aware scanner tracking
+="=, ='= and backtick, exposed as two intention-named wrappers:
+- =split_statements_outside_strings= — trimmed, empties dropped (statement lists)
+- =split_statements_outside_strings_raw= — verbatim, empties kept, so
+  =join(";")= round-trips byte-identically (rewrite-and-rejoin callers)
+
+Deliberately NOT changed: the =@exports= split at =form_compiler.rs:3365= — it
+parses identifiers, never strings, so string-awareness would be dead complexity
+there.
+
+** Verification
+
+- 8 unit tests (=split_semicolons_tests=): plain split, semicolon in double /
+  single / backtick literals, escaped quote, apostrophe-in-double-quotes, mixed
+  literal+separator, empties dropped, and a raw round-trip property test.
+- e2e: =tests/bugs/BUG-225-mutation-eval-semicolon-inside-string-literal.test.st=
+  — 4 tests through the real runtime (the layer the unit tests cannot reach:
+  that the mutation actually EXECUTES and the whole string arrives).
+- *RED→GREEN proven*: with the fix reverted, 3 of 4 e2e tests fail on exactly
+  the semicolon assertions while the apostrophe test stays green — which is
+  itself the evidence that the original apostrophe hypothesis was wrong.
+- Full suite: 2808 lib + 202 integration + 438 v8, all green.
+- Browser-verified live on =method/05-COPY= and =method/index=: both demos work,
+  semicolon and apostrophe both render intact, zero console errors.
+
+** Copy restored
+
+The workaround phrasing was reverted — =method/= now carries the natural
+=nobody's record=, =you're=, and ='lose control of your business'= that the bug
+had forced out. A compiler defect must not be allowed to leave permanent
+distortions in prose.
+
+Commit: 2205fdc3 (fix + unit tests, with method/), e2e test follows.

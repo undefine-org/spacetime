@@ -1,0 +1,101 @@
+#+TITLE: `@template` declarations are invisible to `@data forms` — a markup catalog cannot exist
+#+STATE: DONE
+#+PRIORITY: #B
+#+CATEGORY: BUG
+#+CUSTOM_ID: BUG-343
+
+* Symptom
+
+A page that imports the showcase patterns and enumerates `@data forms $forms`
+gets the patterns' `@form` declarations (`--sc-min-title`, `--sc-enter`, …) but
+NOT the `@template`s those files exist to provide:
+
+: kinds seen: 35 easing, 41 style, 2 score, 1 motion, 0 markup
+
+Every one of the 11 curated showcase patterns is a `@template`
+(`&showcase-hero-minimal($title, $subtitle, $cta)`), so the catalog rail sees
+a pattern library's supporting styles and none of its patterns.
+
+* Root cause
+
+`build_forms_json` (src/compiler.rs:3013) keeps a match only when
+`is_form_declaring_macro` says yes, and that predicate (src/parser/mod.rs:2181)
+asks the registry a single question: does this macro `%registers form`?
+
+`@template` registers a DIFFERENT entity — `%registers template($name)` in
+stdlib/macros/template.st:109 — as does `template-inline`. So templates are
+excluded structurally, not by a filter anyone chose.
+
+This is correct as far as it goes: `@data forms` means forms. The gap is that
+there is no `@data templates` (nor any way to enumerate the template registry),
+so the one kind of declaration a PATTERN library is made of is the one kind no
+page can list.
+
+* Why it matters
+
+The showcase tree ships 11 curated patterns with structured doc-comment
+metadata (scenario / style / school / description / dependencies / screenshot /
+useWhen — stdlib/showcases/SCHEMA.md) and `stdlib/showcases/index.st` is a pure
+import manifest that compiles to ZERO pages. Nobody can look at the library.
+Building the front door means enumerating templates, which today is impossible
+without hand-writing the list — exactly the hand-maintained index the `@data
+forms` rail was built to abolish.
+
+* Note on the doc-comment header (separate, also worth fixing)
+
+`stdlib/showcases/index.st:5` and SCHEMA.md:4 both describe a
+`cargo run -- showcase` CLI and a runtime `@showcases` registry that parse the
+7 metadata fields. NEITHER EXISTS:
+
+: $ cargo run -- showcase
+: error: unrecognized subcommand 'showcase'
+
+and `@showcases` appears nowhere outside those two prose mentions. The metadata
+contract is real and consistently authored across all 11 files; the machinery
+described as consuming it is fiction. Either build it or stop claiming it.
+
+* Acceptance
+
+1. Templates are enumerable as data by the same rail as forms — `@data
+   templates $t ;` (+ a `from <field> <value>` slice), rows carrying at least
+   name / params / doc / source / origin, mirroring the forms row shape.
+2. The showcase doc-comment fields (scenario, style, school, description,
+   useWhen) reach those rows, so a gallery can group and filter by them
+   without re-parsing anything by hand.
+3. A gate that imports 2+ showcase patterns and asserts their templates appear
+   with their metadata. RED-check by reverting the collection change.
+4. index.st / SCHEMA.md stop describing a CLI and registry that do not exist —
+   or those ship.
+
+* Notes
+
+Found while building the missing showcase front door (the W2 restyle has no
+servable page). Filed rather than folded in: adding a whole `@data templates`
+surface is a new authoring rail, and the elegance bar says a new mechanism
+earns its place only if it deletes special-cases — this one needs its own
+design pass, not an opportunistic branch inside a demo commit.
+
+** NOTE FIXED (PLAN-144 W2, commit ec7eb087)
+`%registers` was already the generic entity rail (29 driver, 16 binding, 7 form,
+4 host, 2 template, 2 type); the catalog was asking it a form-shaped question.
+`declares_entity(ast, macro, entity)` is now the general predicate and
+`is_form_declaring_macro` delegates to it with "form", so all 8 existing call
+sites keep their exact meaning.
+
+Surface: `@data declarations $x from <entity> ;`, with `@data forms` kept as
+sugar for `entity form`. Rows gain `fields` — the `/// key: value` doc lines
+parsed into a map (option A: `///` was ALREADY consumed as `doc`, so this adds
+no second place to say the same thing).
+
+Needed one more fix: a single-pattern module documents ITSELF at the top (header
+at line 1, `@template` at line 15), so `doc_comment_before` correctly found no
+contiguous block. Added `file_header_doc` as a FALLBACK — a declaration's own
+block always wins.
+
+An unknown entity is REFUSED (E0959), not answered with an empty list; the valid
+names come from the registry so they cannot drift.
+
+Gates: tests/bug_343_declarations_as_data_test.rs (5), RED-checked 0/5.
+`forms_rows_are_unchanged` is the load-bearing one (catalog rail must stay 46
+rows, 12 project / 34 stdlib). The CLI/registry fiction in index.st + SCHEMA.md
+was deleted in W3.

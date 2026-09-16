@@ -1,0 +1,124 @@
+#+TITLE: @object inside @each silently emits no geometry (check passes, build produces nothing)
+#+STATE: ITEM
+#+CUSTOM_ID: BUG-235-object-inside-each-silently-emits-no-geo
+
+* Summary
+
+A `3d` `@object` written inside an `@each` body compiles clean, builds clean, and emits
+*zero geometry*. No diagnostic at `check`, no warning at `build`, no runtime error — the
+scene simply renders empty.
+
+Found 2026-07-26 while probing whether a data-driven 3D graph is expressible (Knowledger
+PLAN-001, library exploration screen). The probe is the natural first thing anyone writes
+when they want one object per row of data.
+
+* Reproduction
+
+Both files build successfully. Only one produces geometry.
+
+** Fails — `@object` inside `@each`
+
+#+begin_src spacetime
+@import "stdlib/3d"
+@import "stdlib/macros/each"
+@import "stdlib/macros/data-kind"
+
+@type Node { id: string; label: string; x: number; y: number; z: number; }
+
+@data inline $nodes Node[] : [
+  { id: "a", label: "Statute", x: 0, y: 0, z: 0 },
+  { id: "b", label: "Note",    x: 1, y: 1, z: 0 }
+] ;
+
+canvas.kg {
+  @stage(camZ: 8) {
+    @light directional(intensity: 2)
+    @each $nodes as $n {
+      @object(shape: "icosahedron", size: 0.5, posX: $n.x, posY: $n.y, posZ: $n.z)
+    }
+  }
+}
+#+end_src
+
+** Passes — same object, static
+
+#+begin_src spacetime
+@import "stdlib/3d"
+
+canvas.kg {
+  @stage(camZ: 8) {
+    @light directional(intensity: 2)
+    @object(shape: "icosahedron", size: 0.5, posX: 1)
+  }
+}
+#+end_src
+
+** Measured difference
+
+Both emit a ~1.13 MB bundle (three.js vendored in both cases), so the size is no signal.
+
+| Bundle | `icosahedron` refs | `new THREE.Mesh` sites |
+|--------+--------------------+------------------------|
+| static control | 2 | 4 |
+| inside `@each` | *0* | *0* |
+
+The node data does reach the bundle (`Statute` appears), so `@data inline` is fine. It is
+specifically the `@object` expansion that vanishes.
+
+Artifacts left in place at `scratch/kg-probe/` (`probe.st`, `control.st`, and both built
+outputs) for whoever picks this up.
+
+* Why this is worse than it looks
+
+Not the missing feature — the *silence*.
+
+`cargo run -- check` is the contract this repo teaches authors to trust. E0928 exists
+precisely so that a renamed event is a compile error rather than a runtime surprise, and
+the LiveView bridge's whole pitch is "COMPILE error, not a runtime surprise". Here the
+checker passes, the build reports `✓ Build complete`, and the author gets an empty canvas
+with nothing anywhere telling them why.
+
+An author's next move is to assume they got the `@stage` camera wrong, or the light, or
+the material — i.e. to debug the parts that *are* working. That is an expensive hour, and
+it lands on someone evaluating the 3d module for the first time, which is the worst
+possible moment.
+
+* Root cause — not investigated
+
+Deliberately not guessed at. Two candidates worth checking first, both cheap:
+
+1. `@each` unrolls into DOM/template emission, and `@object` is a *scene-graph* macro
+   whose expansion targets the enclosing `@stage` rather than the DOM. If the two
+   expansion passes do not compose, `@object` may be looked for in a phase where the
+   `@each` body no longer exists.
+2. Macro ordering: `%order` on `object` vs `each`. If `@each` expands after the 3d pass has
+   already collected stage children, the objects inside it are simply never seen.
+
+NB `stdlib/3d/` contains no `@each` usage anywhere, and `projects/spatial-showcase/`
+composes its scene from static `@object` calls only — so this combination appears never to
+have been exercised.
+
+* Desired outcome, in preference order
+
+1. *Make it work.* `@each` over a collection, one `@object` per row, positions bound from
+   the row. This is the natural way to render any data-driven 3D scene and its absence is
+   the gap between "3D hero decoration" and "3D as a data view".
+2. *Failing that, diagnose it.* A hard error at `check` — "`@object` is not expandable
+   inside `@each`; the 3d scene graph is built at stage scope" — with the sanctioned
+   alternative named. A refusal that teaches is fine; silence is not.
+
+Option 2 is a small change and should probably land regardless of when option 1 does.
+
+* Related
+
+- `stdlib/3d/macros/object.st` — the macro, `%scope selector`
+- `stdlib/3d/primitives/three-object.st` — the emitter
+- `stdlib/macros/each.st` — keyed iteration, enter/exit/move transitions
+- `stdlib/3d/tests/` — no test covers `@each` + `@object`
+
+* Impact on the filer
+
+Knowledger's library exploration screen wanted one body per library entry, positioned by
+authority depth. Blocked on this for the 3D route; the 2D route (`@template &` + `@flip` +
+`@reveal` + `@scroll`) is unaffected and remains available, so this is not urgent for that
+project — it changes which visual approach is taken, not whether the screen can be built.

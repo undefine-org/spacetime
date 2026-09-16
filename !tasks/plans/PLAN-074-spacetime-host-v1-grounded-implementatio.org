@@ -1,0 +1,193 @@
+#+TITLE: Spacetime Host v1 — grounded implementation plan (accounts, R2 orchestrator, media)
+#+STATE: ITEM
+#+SESSION_ID: 153115a0b151f3c0
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-15T18-54-16-774Z_153115a0b151f3c0.jsonl]]
+#+CUSTOM_ID: PLAN-074-spacetime-host-v1-grounded-implementatio
+
+* Initial Message
+
+Please help me review all of this but
+1. read the notes in the architecture
+2. get your facts straight about each version
+3. look at options for CDN static hosting that we could use to make sure content is served globally and well, without having to host the actual files on the server (and then the Spacetime Hosting server is just an orchestrator for all of that)
+
+* Initial Message
+
+User: "well, also, push-online is technically more complex than what we
+want, because we just want an orchestrator between R2 and our service,
+instead of actually hosting the files. Also, show me how you would enable
+quick and efficient video transcoding and media management on Cloudflare,
+is there something specific around this?"
+
+Followed by: "ok then. let's plan the v1. what will it look like?"
+
+* Context
+
+Follow-up to PLAN-073 (Spacetime Host conceptualization + storage/serving
+redesign). This item is the CONCRETE v1 implementation plan, grounded in 6
+parallel explore-agent reads this session (3 on ~/code/ora/push-website's
+actual source, 3 on this repo's actual source) rather than the prior
+session's higher-level sketch.
+
+Two user corrections drove this plan:
+1. push-online-server is NOT a wholesale fork target -- most of its
+   serving/storage machinery (serve.rs, host_router.rs, DomainCache, local
+   extract_archive write path) is dead weight once R2+Worker+KV serves
+   traffic. Verified: push-online has no accounts/login system (single
+   static PUSH_ONLINE_API_KEY env var), no preview/production pointer
+   concept, and its Cloudflare integration is a stub (no working API
+   calls found, just types) -- all confirmed via direct source reads,
+   not assumed.
+2. Media (images + video) should route through Cloudflare Images /
+   Cloudflare Stream rather than raw R2 objects -- eliminates the
+   original "images only, no video" v1 constraint. Verified pricing/
+   mechanics: Images ($5/100K stored, $1/100K delivered, free transforms
+   under 5K/mo, 100 named variants); Stream (free ingress+encoding, $5/1K
+   min stored, $1/1K min delivered w/ bandwidth included, direct creator
+   uploads via pre-signed single-use URL, one webhook subscription per
+   account for transcode-complete notification).
+
+* Deliverable
+
+Full grounded plan: [[file:../../research/spacetime-host-v1-plan.org][research/spacetime-host-v1-plan.org]]
+
+Covers: §0 ground-truth corrections (what's actually reusable from
+push-online vs. dead weight vs. net-new, in a precise table), §1 two-lane
+storage architecture (R2 for site bytes, Cloudflare Images/Stream for
+media), §2 accounts/auth design (net-new, magic-link + CLI session
+handoff, no prior art existed), §3 trimmed SQLite schema (concrete DDL),
+§4 crate-by-crate v1 scope for all 6 commercial/host crates, §5 concrete
+OSS-side (verse) edit targets (exact function signatures/line numbers for
+the CLI shim in src/main.rs, the @deploy macro modeled on host.st/
+cms-hint.st's verified anatomy, the __host__ widget modeled on
+compile_admin()'s verified compile pattern in src/server.rs), §6 API
+contract table, §7 revised wave-by-wave build order (10 waves, smaller/
+more granular than the original conceptual sketch since so much reuse was
+corrected away), §8 open questions.
+
+* Key decisions
+
+1. push-online reuse is THIN, not wholesale: only Project/Domain struct
+   shapes, the tar-entry validation loop (retargeted to write to R2
+   instead of local disk), the SQLite schema shape (trimmed), and the
+   SslStatus/CreateCustomHostnameRequest TYPES survive. Auth, serving
+   (serve.rs/host_router.rs/DomainCache), the local-disk write path, and
+   the Cloudflare API calling code are either dropped or built net-new.
+2. Media is a first-class two-lane design: R2 for site bytes (HTML/CSS/
+   JS), Cloudflare Images for photos, Cloudflare Stream for video --
+   NEVER routed through the routing Worker (spacetime-host-edge), fully
+   offloaded to Cloudflare's specialized CDNs for those content types.
+3. Video is recommended as a v1 LAUNCH feature, not deferred -- Stream's
+   free ingress/encoding removes the actual cost/complexity blocker that
+   justified deferring it in the original ask.
+4. Accounts/auth is minimal-viable for v1: magic-link email + CLI
+   session-code polling handoff (not full OAuth/device-flow against a
+   third-party IdP) -- sized as real but small work, explicitly flagged
+   as a new wave (Wave 1) since it has zero prior art.
+5. Cloudflare-for-SaaS custom-hostname API calling code must be written
+   net-new (Wave 4) -- push-online's version is a stub, not a working
+   integration, despite earlier assumption it could be forked wholesale.
+
+* Next steps
+
+- [ ] User decides open questions in the v1 plan doc (§8): video as
+      launch feature vs fast-follow (recommended: launch), magic-link
+      email delivery mechanism (existing provider vs new setup -- blocks
+      Wave 1 sizing), Cloudflare for SaaS plan tier confirmation (blocks
+      Wave 4), image dedup hash location (recommended: client-side/CLI).
+- [ ] Once open questions resolved, begin Wave 0.5 (R2 bucket + KV
+      namespace provisioning, spacetime-host-edge Worker's routing logic
+      -- currently a 501 stub committed in the prior session).
+- [ ] Waves 1-6 execute in the order given in §7 of the plan doc; each
+      wave has a concrete, checkable acceptance criterion (not "looks
+      done").
+
+* State
+
+DRAFT / grounded v1 plan delivered this session. Implementation not
+started -- still gated on the 4 open questions in §8 before Wave 0.5
+begins.
+
+NOTE [2026-07-16]: Follow-up: user asked for auth architecture options (cleanest/simplest
+infra), floated Elixir+Ash+AshAuthentication as an option "if Ash proves
+really good." Researched three paths directly (Ash Authentication docs,
+Clerk/Supabase Auth/WorkOS pricing, Rust-native DIY patterns) and
+presented a full tradeoff comparison in chat. User picked WorkOS.
+
+Revision applied to research/spacetime-host-v1-plan.org:
+- §2 rewritten: identity delegated entirely to WorkOS AuthKit (magic-link,
+  device-flow, future SSO) instead of a hand-rolled accounts/magic-link
+  system. Verified WorkOS has an OFFICIAL Rust SDK (`cargo add workos`,
+  reqwest-based) and a purpose-built CLI device-flow endpoint
+  (/authorize/device) that IS the gh-auth-login-style browser/CLI handoff
+  the original design was going to hand-roll -- net LESS code than the
+  original plan, not equivalent work moved around. accounts table now
+  keys off workos_user_id instead of owning a password/magic-link table.
+- Rejected Elixir+Ash for v1 specifically: elixir/spacetime_lv is a BARE
+  Phoenix LiveView app today (verified via mix.exs, zero Ash dependency
+  currently) -- introducing Ash+AshAuthentication for auth-only would mean
+  a second deployed BEAM runtime a full product-cycle earlier than
+  PLAN-073's own v2/v3 sequencing (Elixir was slotted for v3
+  live-collaboration only). More infra, not less; Elixir/Ash preference
+  logged for v3 live-collab reconsideration only, not v1 auth.
+- §3, §4, §6, §7, §8 updated to match: new auth.rs module in
+  spacetime-host-core, revised /auth/device + /auth/exchange routes
+  (replacing /auth/login + /auth/confirm + /auth/session/{code}), Wave 1
+  resized smaller (WorkOS owns email entirely), open question #2
+  (email delivery mechanism) marked RESOLVED -- WorkOS sends the email
+  natively, only remaining action is WorkOS account + AuthKit dashboard
+  setup (no code decision).
+- commercial/host/Cargo.toml: added `workos = "0"` to
+  workspace.dependencies. Verified via `cargo metadata` the 5-crate
+  native workspace still resolves cleanly (workos not yet consumed by any
+  crate, declared only).
+
+3 of 4 original open questions remain (video launch timing, Cloudflare
+for SaaS plan tier, image dedup hash location) -- only email delivery
+resolved this round.
+
+NOTE [2026-07-16]: Follow-up: added Stripe billing to v1 as a full new \u00a79 (user has an
+existing Stripe account, wants payments now). Stripe Checkout + Customer
+Portal (hosted pages, zero custom billing UI), webhook handler updating
+accounts.stripe_customer_id/plan/subscription_status. Crate split:
+async-stripe-webhook (rc.5, near-stable) for signature verification only;
+plain reqwest for the two outbound calls (Checkout/Portal session
+creation, both simple documented REST calls) since async-stripe's core
+crate is still alpha.9 -- avoiding the alpha-risk dependency for a
+2-endpoint surface. Folded into Wave 3 (alongside the CLI shim + @deploy
+macro). accounts table gained 3 columns (stripe_customer_id, plan,
+subscription_status). New spacetime-host-core::billing.rs module.
+
+Also updated Waves 7-8 (v2) to reflect the Elixir/Ash reversal decided
+this session in the conceptual doc (research/spacetime-host-architecture.org,
+see PLAN-073's note) -- Wave 7 now stands up ash/ash_postgres in the
+already-existing elixir/spacetime_lv for agency<>client RBAC
+(Ash.Policy.Authorizer) + hosted admin as a LiveView; Wave 8 adds Phoenix
+Channels/Presence live collaborative editing (pulled forward from v3) +
+GitHub commit. v1's own waves (0-6) are UNCHANGED by the Elixir decision
+-- v1 stays 100% Rust.
+
+commercial/host/Cargo.toml: added async-stripe-webhook = "1.0.0-rc.5" to
+workspace.dependencies. Verified via cargo metadata the 5-crate native
+workspace still resolves cleanly. No Elixir code written this turn --
+that's v2 scope (Wave 7+), still conceptual only.
+
+* Migration note (session continuation)
+
+MIGRATED: active implementation tracking has moved to commercial/host's
+own org store. User relocated the session's cwd to commercial/host
+specifically so org tool usage stays scoped to this product's own repo.
+See commercial/host/!tasks/plans/PLAN-001-spacetime-host-v1-implementation-executi.org
+for all subsequent work (client-module builds, Biscuit RBAC, Elixir Mox
+demo, Nix flake, doc reorg, Typst reports). This item (and PLAN-073)
+remain as the historical record of the conceptualization phase -- do not
+delete, but do not update further; PLAN-001 in commercial/host is now
+authoritative for active status.
+
+Docs also migrated: docs/architecture/{PRODUCT_ARCHITECTURE,
+V1_IMPLEMENTATION_PLAN}.org in commercial/host are now the canonical
+copies (moved, cross-references updated); this repo's copies
+(research/spacetime-host-architecture.org, research/spacetime-host-v1-plan.org)
+remain as-is for verse's own history but should be considered frozen --
+edit the commercial/host copies going forward.
+

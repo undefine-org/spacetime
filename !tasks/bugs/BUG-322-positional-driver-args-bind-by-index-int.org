@@ -1,0 +1,109 @@
+#+TITLE: Positional driver args bind BY INDEX into the primitive signature — `@on &.time(300ms)` silently animates nothing
+#+STATE: DONE
+#+SESSION_ID: 1534a2eae1903af0
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-18T13-07-01-638Z_1534a2eae1903af0.jsonl]]
+#+CUSTOM_ID: BUG-322-positional-driver-args-bind-by-index-int
+#+COMPLETION_HASH: 106465043a4b1175
+
+* Initial Message
+
+so how do I use it? i launched it and little seems to actually work or be interactive. use the browser tool and see if there are errors in the code and stuff. please be thorough and make sure all expectred storiees work. work autonomously and complete as you go
+
+* Summary
+
+An UNNAMED driver argument (`@on &.time(300ms)`) is lowered as a bare
+positional and bound BY INDEX into the target primitive's parameter list. The
+index is almost never the parameter the author meant, so the arg lands in the
+wrong slot and the animation is silently dead. Named args
+(`@on &.time(duration: 300ms)`) are correct — so the surface LOOKS supported
+and every string-level gate passes.
+
+This is the BUG-252 class again: `tests/sip_001_w3_on_head_test.rs` asserts
+`js.contains("__drive_visible_")` and passes while nothing on the page moves.
+
+* Reproduction (browser-verified, both directions)
+
+Same file, same forms, only the arg SHAPE differs.
+
+Positional (`scratch/visprobe/index.st`):
+
+#+begin_src spacetime
+.a { @on &.visible(300ms) { opacity: 0 -> 1; } }
+.b { @on &.time(300ms)    { opacity: 0 -> 1; } }
+.c { @on &.load(300ms)    { opacity: 0 -> 1; } }
+#+end_src
+
+Sampled opacity in Chromium over 700ms: `a=0 b=0 c=0` at every sample. Nothing
+ever moves.
+
+Named (`scratch/visprobe2/index.st`, `duration: 300ms`): `b` and `c` ramp
+0 -> 0.222 -> 0.444 -> 0.667 -> 0.833 -> 1 across exactly 300ms. Correct.
+
+* Root cause
+
+`src/pipeline/drivers.rs:2427` — in `driver_param_args`, an arg with no name
+becomes `BindArg::Positional(setting_bind_value(&value))`. Positional binds
+fill the primitive's params in declaration order, after `&el`:
+
+| driver     | primitive      | slot 1 after &el | `(300ms)` becomes | consequence                                                      |
+|------------+----------------+------------------+-------------------+------------------------------------------------------------------|
+| `.visible` | `intersection` | `threshold`      | `threshold: 300`  | IntersectionObserver gets a nonsense threshold (valid range 0-1)  |
+| `.time`    | `time-driver`  | `name`           | `name: 300`       | publishes `ST.set(el, "300", progress)` while the animation       |
+|            |                |                  |                   | watches `__drive_time_2` — the two never meet                     |
+| `.load`    | `load-driver`  | `name`           | `name: 300`       | same split                                                        |
+
+Emitted JS confirms all three (`scratch/visprobe/dist/spacetime.js`):
+`threshold: 300`, `const timelineName = 300`, `ST.set(el, "300", progress)`,
+`ST.watch(root, "__drive_time_2", …)`, and `const dur = 1000` — the author's
+300ms never reaches any animation.
+
+* Why index-binding is the wrong rule here
+
+A driver's author-facing param list and the primitive's signature are
+DIFFERENT vocabularies — the registry already knows this and renames across
+them with `param_map` (data, not Rust branches). Positional binding bypasses
+`param_map` entirely and assumes the two orders coincide. They don't, and
+nothing checks it.
+
+* Fix options
+
+** A. Type-directed positional binding (recommended)
+
+A `300ms` literal is a DURATION; bind it to the first primitive param whose
+declared type accepts a duration, not to slot 1. The primitive signature is
+already introspectable — `typed_primitive_arg` reads
+`registry.get_primitive(primitive).params` for exactly this kind of question.
+Fits "one sigil, one meaning": the value's TYPE says where it goes.
+
+** B. Registry-declared positional slot (data, minimal)
+
+Add a `positional_param: duration` field to each `%registers driver(...)`
+entry — the same shape as `param_map`/`progress_export`. `.time` and `.load`
+declare `duration`; `.visible` declares `threshold`. An unnamed arg fills THAT
+param. Explicit, one line per driver, no inference.
+
+** C. Refuse unnamed args (loudest, smallest)
+
+E09xx "positional driver args are ambiguous — write `duration: 300ms`". Honest
+and immediate, but `@on &.visible(300ms)` reads naturally and appears in the
+repro suite.
+
+Recommendation: **B then A** — B makes today's four drivers correct with pure
+registry data; A generalizes it once a driver has two plausible unnamed params.
+Whichever lands, a `--cdp` gate must assert the element MOVED, per AGENTS
+("a source assertion is not a behavior assertion").
+
+* Blast radius
+
+Every `@on <driver>(<unnamed>)` in the tree. Known: `tests/repro/gh-6-*`
+(passes headless only because the IntersectionObserver shim fires once with
+ratio=1 — see the sibling `.visible` scrub bug), and any project page using the
+shape.
+
+NOTE [2026-08-07]: 2026-08-07 Census attribution. BUG-322 is the ROOT CAUSE of the largest failure bucket in the headless suite: 8 of 27 failures are "Timeline <name> not registered", all from `@on &.visible(800ms)`-style POSITIONAL args (tests/unit/macros/on-hover.test.st and neighbours). Verified: that source emits `__stThreshold = 800`.
+
+Honest delta from BUG-323's fix: tests/unit/macros/on-hover.test.st was 2 passed / 4 failed BEFORE the BUG-323 commit (worktree at 40e4ab0a~1) and is 2 passed / 7 failed after. The new range guard THROWS on `threshold: 800` where the old code silently built a nonsense observer, so 3 tests moved from silent-wrong to loud-fail. Confirmed by disabling only the throw (7 failures -> 4). This is the intended direction per the AGENTS silent-drop doctrine, but it means fixing BUG-322 should recover ~8 suite failures at once, and those three should be re-checked as part of its acceptance.
+
+NOTE [2026-08-07]: FIXED (PLAN-139 W1, 19c50b4a). Registry-declared positional slots: each `%registers driver(...)` names what an unnamed arg means for it (`positional_params: "duration"`), as DATA like param_map. Nine drivers declare one. Gate tests/bugs/BUG-322-positional-driver-arg-reaches-its-param.test.st RED-checked under --cdp (2 failed -> 3 passed), negative-first so a silently-dropped arg cannot pass. Recovered the whole 'Timeline not registered' bucket: tests/unit/macros/on-hover.test.st 4 failed -> 0.
+
+NOTE [2026-08-07]: FIXED (PLAN-139 W1, 19c50b4a). Registry-declared positional slots: each `%registers driver(...)` names what an unnamed arg means for it (`positional_params: "duration"`), as DATA like param_map — nine drivers declare one, no Rust branch per driver. Gate tests/bugs/BUG-322-positional-driver-arg-reaches-its-param.test.st RED-checked under --cdp (2 failed -> 3 passed), negative-first so a silently-dropped arg cannot satisfy it. Recovered the whole "Timeline not registered" bucket: tests/unit/macros/on-hover.test.st 4 failed -> 0.

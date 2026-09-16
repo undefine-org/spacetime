@@ -1,0 +1,47 @@
+#+TITLE: inline @template body renders nothing (only external data-component templates work)
+#+STATE: DONE
+#+SESSION_ID: 14f48ced503111a7
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-05-29T18-28-09-664Z_14f48ced503111a7.jsonl]]
+#+CUSTOM_ID: BUG-035-inline-template-body-renders-nothing-onl
+#+EFFORT: 4h
+#+LAYER: coding-agent
+#+COMPLETION_HASH: 05d99f4ae799f41a
+
+* Initial Message
+
+try again
+
+* Source
+Discovered while building the FEAT-041 full-Spacetime showcase. Probed whether an inline @template (HTML body defined in .st) can back an @each list.
+
+* Problem
+An inline @template with an HTML body COMPILES CLEAN but renders NOTHING. @each over a source whose item template is an inline @template produces zero DOM nodes. Only EXTERNAL templates (separate files served as `<template data-component="name">`, as examples/cart-demo uses) are found by each-with-templates' findTemplate() (which does document.getElementById / querySelector / `template[data-component]`).
+
+* Repro
+  /tmp/tmpl/index.st:
+    @template &chip($label) { <span class="chip">{$label}</span> }
+    @data tags: string[] { src: inline; value: ["alpha","beta","gamma"]; }
+    .tag-row { @each($tags as $t) { &chip($t); } }
+  => `cargo run -- check` passes; serve + load => 0 .chip elements; served index.html is a ~261-byte empty shell with NO <template> tag emitted.
+
+* Root cause (hypothesis)
+The inline @template definition is not emitted into the page as a discoverable `<template data-component="chip">` node (nor registered in window.IK.templates / a runtime template registry). So each-with-templates findTemplate() returns null and render() bails ("template not found"). cart-demo works only because product-card/cart-item are EXTERNAL `<template data-component>` files.
+
+* Impact
+Blocks full-Spacetime (.st-only, no external component files) list rendering — a core FEAT-041 goal. Combined with BUG-028 (inline-HTML @each body => E0804) and FEAT-043 (.st-only page gen incomplete), there is currently NO working full-Spacetime path for @each lists; the only verified path is external `<template data-component>` + index.html (cart-demo).
+
+* Acceptance
+- An inline @template &name(...) { <html/> } is emitted as a discoverable template (e.g. `<template data-component="name">` injected into the document, or registered in the runtime template registry) so each-with-templates findTemplate() locates it.
+- The /tmp/tmpl repro renders 3 .chip spans (alpha/beta/gamma) with {$t} interpolated.
+- Regression test (codegen: inline @template emits a template node/registration; + live render).
+
+* Notes
+Relevant: stdlib/macros/template.st, stdlib/primitives/template.st, stdlib/primitives/data/each.st (findTemplate ~L32/L236). Likely needs the @template macro to emit an inline `<template data-component>` into <body> (or a JS registration) at compile time. Pairs with FEAT-043 (full-.st page gen). NB filed under degraded read-tooling — verify findTemplate + template emit paths carefully before fixing.
+
+NOTE [2026-05-30]: CANNOT REPRODUCE / FALSE ALARM (verified 2026-05-30, HEAD 9aa147ef). Re-tested cleanly: inline @template &chip($label){ <span class="chip">$label</span> } + @data tags inline + .tag-row { @each($tags as $t){ &chip($t); } } RENDERS CORRECTLY — 3 chips (alpha/beta/gamma) with $label interpolated, registered in window.Spacetime.templates (['chip']), NO external .js component files. The original "renders nothing / HTTP 500" report was stale-stdlib-cache + degraded-read-tooling noise from the earlier session (same condition that caused the BUG-033 broken-commit incident). 
+
+Root mechanism (confirmed by reading stdlib/primitives/template.st + each.st): register-template stores factory in Spacetime.templates.set(name); each-with-templates invokes via Spacetime.templates.get(name). Same registry → inline templates and @each find each other. findTemplate()'s window.__templates/data-component path is only the FALLBACK for external web-component files (cart-demo) — not needed for inline @template.
+
+∴ Full-Spacetime @each lists ALREADY WORK via @template (not raw inline HTML). What does NOT work: (a) raw-inline-HTML @each body <li>{$i}</li> → BUG-028 (E0804, still open, lower priority since @template is the idiomatic path); (b) file-scope inline HTML dropped entirely → FEAT-043 (still open). Repro project: /tmp/fst. Closing BUG-035; superseded understanding folded into PLAN-023.
+
+NOTE [2026-06-01]: DISSOLVED by PLAN-023 rewrite (2026-05-30). The window.__templates vs <template data-component> discovery split is killed: static lists SSG-unroll to real HTML and need NO <template> at all; dynamic lists keep ONE discovery path (Spacetime.templates factory). @template becomes "name an HtmlExpr-with-holes". Registry sprawl (window.__templates/__pendingTemplates/IK.templates/findTemplate 4-way) deleted in PLAN-023 Wave 5.

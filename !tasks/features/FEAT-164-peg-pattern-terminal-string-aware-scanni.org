@@ -1,0 +1,94 @@
+#+TITLE: PEG pattern terminal + string-aware scanning — char classes, counted reps, case-fold (CSS-value W0)
+#+STATE: DONE
+#+SESSION_ID: 153f5ed0617636c7
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-26T21-12-46-213Z_153f5ed0617636c7.jsonl]]
+#+CUSTOM_ID: FEAT-164-peg-pattern-terminal-string-aware-scanni
+#+COMPLETION_HASH: c6f155129d911872
+
+* Initial Message
+
+@data inline $brand Brand : {
+  "ink":    "#e8eef7",
+  "bg":     "#0b0e14",
+  "panel":  "#121722",
+  "accent": "#5eead4",
+  "dim":    "#8b96a8",
+  "rule":   "#222b3a"
+};
+
+Could we have this be written like { ink: #e8eef7; ... } instead of that? Basically, if I define a field to be color, then I can use CSS, and basically if ther's a serialised data, it's the string (or it's the Js repr of it? let me know what the representations should look like). This is part of a wider effort to support all CSS value types more natively in Spacetime (tell me what that would mean that I didn't see yet)
+
+* Initial Message
+
+Wave 0 of PLAN-122 (native CSS value types). The PEG combinator engine (%capture_type) has no char-level terminal: leaves today are ident/string/number/expr/balanced/skip_block etc. (src/parser/meta_ast.rs CaptureType enum). Hex colors (`#e8eef7` — 3/4/6/8 hex digits) are inexpressible: `#e8eef7` lexes as HASH+IDENT but `#123456` as HASH+NUMBER, and a PEG cannot count digits. This FEAT adds the ONE new engine leaf that turns every domain-lexer concern into stdlib data, plus fixes the string-awareness bug class that would otherwise ship inside typed seeds.
+
+* Target
+
+- src/parser/meta_ast.rs — CaptureType: add ONE data-parameterized variant (e.g. Pattern(PatternSpec)), sibling to how Balanced(char) is parameterized. NOT one variant per domain type — this is the last leaf the engine ever needs.
+- src/syntax/events/extractors/custom.rs — BalancedExtractor: string-aware scanning.
+- src/syntax/events/form_compiler.rs — compile `%char_class` / pattern productions from stdlib.
+- Kernel number token (src/syntax/cst/lexer.rs) — audit only this wave.
+
+* Change
+
+1. Pattern terminal: char classes ([0-9a-fA-F]), counted repetition ({3|4|6|8} — exact-set counts, not just {n,m}), literal chars, ordered choice. REGULAR-ONLY: no backreferences, no nesting → guaranteed linear time (PLAN-122 C8). stdlib authors must not be able to write catastrophic-backtracking lexers.
+2. Case-fold flag on patterns and keyword sets: CSS units/functions/keywords are ASCII case-insensitive (RGB(), PX, RED are legal). Declared once on the terminal, not per-grammar (C9).
+3. String-aware balanced/pattern scanning (C1): delimiters inside string literals must not split. This is the BUG-225 / BUG-040 / BUG-041 class — RED repros already exist in the tracker; adopt them as this FEAT's regression tests. Without this, typed seeds like { quote: "a;b" } ship a silent-corruption class.
+4. AUDIT kernel number token (C2): CSS numbers include -5px, +.5rem, .5, 1e3px (sign, leading dot, e-notation). Verify the number token covers the CSS <number> production BEFORE any lexer cutover; fix now if short so the W3 golden baseline isn't wrong.
+5. AUDIT unit-bag fossils (C7): the global merge list (lexer.rs:252-264) includes `m` — CSS has no `m` (only s/ms). Grep stdlib/demos/examples/tests/projects for bare-`m` duration literals and decide: minutes-extension (declare in %unit_set) or fossil (fix call sites). Must be settled before %unit_set time { s ms us fps } freezes in W1.
+
+* Edge
+
+- Pattern terminal operates on RAW TEXT spans, not lexer tokens → the lexer's context-sensitivity (COLOR only in value position, lexer.rs:405-420) becomes unnecessary later; don't build on token kinds.
+- First-char dispatch keeps PEG cost bounded: a grammar only tries `#`-led productions where a color leaf is expected. Memoize at # / number starts.
+- Error messages are DATA on the terminal ("expected 3/4/6/8 hex digits") — diagnostics quality is part of the deliverable, gate on diagnostics snapshots.
+
+* Accept (RED→GREEN)
+
+- %capture_type test grammar with xdigit{3|4|6|8}: #e8eef7/#fff/#11223344 match; #e8ef (5) and #e8eef71 (7) reject with the declared message + span. Case-folded #E8EEF7 matches.
+- "a;b" and "}" inside string literals do not split balanced(';') — BUG-225/040/041 repros green.
+- Number audit report committed (sign/dot/e-notation verdict + any fix).
+- Unit audit report committed (`m` verdict + call-site list).
+- Zero behavior change on the corpus: full suites green (cargo test --lib · --test integration_tests · --test v8_runtime_test · headless).
+
+* Relation
+
+Parent: PLAN-122. Blocks W1 (FEAT for CSS scalar capture types). Adopts BUG-225, BUG-040, BUG-041 as regression tests. Enables the eventual deletion of lexer.rs tier-2 (W3).
+
+NOTE [2026-08-02]: 2026-07-31 re-verify: RED gates re-sourced. BUG-225 is DONE (both items bearing that number — block-comment blank line, and mutation-eval semicolon-in-string), so it is no longer available as a repro. The LIVE string-awareness repros are BUG-040 (%emit js body capture breaks on JS regex char-classes containing quotes) and BUG-041 (backtick inside a regex char class breaks stdlib parse) — both still ITEM, both the same "delimiter scan is not string-aware" class this FEAT fixes. Added scope: the BUG-250 CSS-template-vs-expression heuristic (src/compiler.rs lower_css_binding_value, commit 2b02b7fc) ships a discrimination table by text-scanning ("letters left after stripping strings and $reads ⇒ CSS template"); adopt its test cases (1px solid $brand.rule · calc(100% - $x) · translate($x,$y) · $items.length · $a + 1 · $open ? 'x' : 'none') as a corpus this wave's terminal + W1's grammars must classify identically BY PARSE. Also note PLAN-121 W1.3 (dashed_ident, 05da65fe) measured the per-capture-type Rust tax at 14 sites — that is the number this FEAT's successor waves remove.
+
+NOTE [2026-08-02]: 2026-07-31 SOURCE RE-VERIFY before implementation — this FEAT is SMALLER and more precisely located than filed. Three corrections:
+
+(1) `CapturePatternAst::CharClass { chars, negated }` ALREADY EXISTS (src/parser/meta_ast.rs) with a working parse surface (src/parser/mod.rs) and a compiled `CharClassExtractor` (src/syntax/events/extractors/custom.rs:796). So "add char classes" is DONE. What is missing for a hex-colour grammar is only: (a) COUNTED REPETITION — CaptureModifier has Required/Optional/ZeroOrMore/OneOrMore, no `{3|4|6|8}` counted form, which is exactly what a hex literal needs; (b) a CASE-FOLD flag; (c) CharClassExtractor matches only the FIRST CHAR OF A TOKEN and consumes the whole token (`text.chars().next()`), so it cannot walk digits within a token — a counted-rep hex match needs sub-token, byte-level scanning.
+
+(2) `BalancedExtractor` IS ALREADY string-aware AND comment-aware (custom.rs:574-690): it byte-scans from the first token's offset, skips '"'/'\''/'`' strings with backslash escapes, skips // and /* */ comments, and bounds the scan to the token slice. That work landed with BUG-100/BUG-225. Crack C1 as originally written ("balanced is not string-aware") is therefore ALREADY FIXED for the extractor path. Do not redo it.
+
+(3) BUG-040/BUG-041 are NOT in the extractor — they are one layer lower, in `emit_body` (src/syntax/events/grammar/meta.rs), which counts L_BRACE/R_BRACE TOKENS produced by the Spacetime lexer. A JS regex char class containing a quote or backtick (/[&<>"']/g, /(['"`])/g) makes the LEXER open a STRING token that swallows braces, so the depth counter never reaches 0 → "expected R_BRACE, found EOF" (BUG-040) or a silently dropped primitive (BUG-041). The fix is the same SHAPE as the one BalancedExtractor already uses — byte-level scanning with foreign-code awareness (JS strings, template literals, regex literals incl. char classes, comments) instead of trusting Spacetime STRING tokens inside a foreign-code body. BUG-040's own "Option A/B" analysis says exactly this.
+
+REVISED SCOPE for this FEAT: (i) counted repetition `{n}` / `{a|b|c}` on capture modifiers + byte-level sub-token matching in CharClassExtractor + case-fold flag — the minimum that makes a hex-colour grammar expressible in stdlib; (ii) foreign-code-aware emit_body scanning, closing BUG-040 + BUG-041 (the RED gates); (iii) the C2 number-completeness and C7 unit-fossil audits, unchanged. Note (i) and (ii) share the principle "a delimiter's meaning belongs to the grammar that owns the text, not to the outer lexer" — which is PLAN-122's thesis in miniature, arriving twice.
+
+NOTE [2026-08-02]: 2026-07-31 AUDITS COMPLETE (C7 and C2), both answered from source rather than assumed.
+
+C7 — the `m` unit is NOT a fossil. VERDICT: it is a live Spacetime-ism meaning MINUTES, and it must be preserved in %unit_set time. Evidence: src/syntax/conversions.rs:20 `"m" => (value * 60_000.0) as u32` with its own test at :81 (`parse_duration_with_unit("1m") == 60000`); six author-facing uses of `refresh: 5m` / `10m` across stdlib/macros/data-kind.st:182, stdlib/macros/data.st:9, stdlib/macros/type-data.st:65, examples/data-binding-demo.st:22+26, tests/parser/syntax/macros.st:267. So `m` is a DURATION unit in the data-refresh domain, not a stray CSS unit. Consequence for W1 (FEAT-165): `%unit_set time { s ms us fps m }` — and note this makes the CSS/Spacetime unit distinction real, since `m` is legal in `refresh:` but meaningless in a CSS declaration. That is an argument FOR per-position unit sets (the driver/property decides which units it accepts) rather than one global time set, and it retro-justifies PLAN-122's decision that the unit bag was never a lexer concern. PLAN-128 R1 consequence: `at 2m` under a `&.time` score would be legal by this table unless the score's domain narrows it — a decision the registry should make explicitly, not inherit by accident.
+
+C2 — kernel <number> is INCOMPLETE. VERDICT: no e-notation. Evidence: src/syntax/cst/lexer.rs:62 `#[regex(r"[0-9]+(\.[0-9]+)?")]` Number, :66 `#[regex(r"\.[0-9]+")]` LeadingDecimalNumber. So `.5` IS covered (a separate token) and `1.5` is covered, but `1e3` / `1E3` / `1e-3` is NOT — CSS's <number> production explicitly permits scientific notation (`1e3px` is a valid length). Sign is handled downstream by the negative-number disambiguation at :433, not in the token. ACTION for W3 (FEAT-167): the P0 golden baseline must NOT enshrine this — either extend the number regex to `[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?` (plus the leading-dot variant) BEFORE snapshotting, or record the limitation explicitly in the goldens so the cutover doesn't silently inherit it. Low practical impact (no repo usage found) but it is precisely the kind of quiet incompleteness a token-parity harness would bless forever.
+
+NOTE [2026-08-02]: COMPLETE 2026-07-31 across commits aae443a8, 67d8a1a5, 05f83468.
+
+Delivered, in the order the evidence dictated rather than the order filed:
+
+1. STRING-AWARENESS (aae443a8). Fixed at the LEXER, not the extractor. The filed premise was wrong in two ways, both corrected from source: BalancedExtractor was already string- and comment-aware (BUG-100/225 work), and BUG-072's "a string never crosses a newline" rule had already rescued the multi-line form of BUG-040/041. The surviving residue was one asymmetric branch — an unterminated string at EOF still consumed the remainder — so a quote in a `%emit js` regex char class ate the block's closing brace only on the single-line/last-line form. Made EOF recover like newline. Explicitly NOT done: no JS sub-grammar in the lexer (BUG-040 Option A), no bespoke brace scanner in emit_body (Option B); both would have added a parallel scanning path for a one-branch defect. BUG-040 and BUG-041 both closed.
+
+2. WORKAROUND SWEEP (67d8a1a5). The thirteen `\x22`/`\x27` sites that existed only because of the above now read `/"/g` and `/'/g`. The emitted bundle had been carrying both spellings for the same operation.
+
+3. COUNTED REPETITION + CASE-FOLD + SUB-TOKEN MATCHING (05f83468). `[0-9a-fA-F]{3|4|6|8}` parses and matches, so a hex-colour grammar is writable in stdlib for the first time. `CaptureModifier::Counted(CountSet)` keeps the permitted lengths as DATA (one mechanism for hex, ISO years, anything length-discriminated); CountSet is fixed-capacity to preserve `Copy`, sorted descending so longest-match-first is free. CharClassExtractor gained ranges (`a-f`), ASCII case-folding (CSS is case-insensitive, so `#E8EEF7` matches `[0-9a-f]`), and byte-level sub-token scanning — the crux, since `#e8eef7` lexes HASH+IDENT but `#123456` lexes HASH+NUMBER and only a character scan sees one shape. Over-long runs REJECT rather than truncate to a legal prefix.
+
+SCOPE CORRECTION worth keeping: `CapturePatternAst::CharClass` already existed, so "add char classes" was never the work. What was missing was counting, folding, and sub-token scanning.
+
+MEASUREMENT (feeds PLAN-122 / FEAT-165 / FEAT-168): adding ONE data-parameterized modifier arm forced considered changes at nine consumer sites — extractors ×2, form_compiler ×3, form_scoring, metasystem::signature, LSP ×2, treesitter_gen. Each got a real arm, never a `_ =>`: at form level Counted behaves as Required (the count lives inside the capture type), and tree-sitter approximates with repeat1 because it has no counted combinator and length enforcement belongs to the compiler. This is the same tax PLAN-121's dashed_ident paid at 14 sites — now measured twice, which is the argument for W1/W4.
+
+AUDITS (recorded in full in the earlier note): C7 — `m` is NOT a fossil, it means minutes (conversions.rs:20, `refresh: 5m` across stdlib/examples/tests) and must stay in the time unit set, which argues for per-position unit sets. C2 — kernel `<number>` lacks e-notation (`1e3px`); `.5` is covered; must be fixed or explicitly recorded before W3 snapshots token goldens.
+
+GATES: 8 new (5 extractor + 3 parser) + 5 emit-body (BUG-040/041 + three controls). Suites: lib 2967/0, integration 202/0, headless tests/unit/data 11/11.
+
+NOT IN SCOPE, deliberately: the general pattern terminal with alternation/anchors. Counted classes covered every case W1 needs (hex, units, keywords compose from existing combinators), so the smaller mechanism shipped. Revisit only if a W1 grammar proves it insufficient.

@@ -1,0 +1,198 @@
+#+TITLE: parse_component_body drops HTML after state decl + multiline desync
+#+STATE: REVIEW
+#+SESSION_ID: 14fc108ed3772fa8
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-04T14-32-37-965Z_14fc108ed3772fa8.jsonl]]
+#+CUSTOM_ID: BUG-059-parse-component-body-drops-html-after-st
+
+* Initial Message
+
+hey what would it look like if the admin app were done multi-file? what reactive primitives and modular programming principles (and other missing constructs that you find) do you need to make this an amazing DX for developing this kind of app?
+
+* Parent
+[[id:PLAN-030-spacetime-app-platform-declarative-schem]] — Wave 0, the KEYSTONE. Blocks
+FEAT-071..076. Nothing in the platform works until this is fixed.
+
+* Summary
+=parse_component_body()= (=src/syntax/events/form_compiler.rs:1701=) segments a
+=@template= body with LINE-ORIENTED, first-token heuristics rather than the
+brace/tag-aware tokenizer used everywhere else in the compiler. Three failure modes
+result, all verified by reading EMITTED JS (not check exit codes):
+
+1. *state-before-HTML drops the HTML*. A body whose first non-trivia line is a state
+   decl (=$count number: 0;=) followed by HTML emits =html: ""= — the markup is lost.
+2. *multiline HTML desyncs* =html_tag_depth=, so a trailing behavior block
+   (=.b { @on click { ... } }=) is consumed as HTML and the referenced =$count= is
+   reported as =E0806 "references an undefined state variable"=.
+3. *unrecognized constructs are swallowed*. Any token the line-classifier does not
+   recognize (e.g. =&$w()=, =@match=, =[slot]<-$x=) falls through into the HTML
+   string and silently no-ops — check still passes.
+
+This single parser is why Spacetime's component model "exists" on paper (PROJ-101..106
+landed) but collapses on any REAL multi-element component, and therefore why the CMS
+admin is still a 1330-line hand-written =%emit js= block.
+
+* Reproduction (verified 2026-06-06)
+Build (not just check) and read =dist/spacetime.js=:
+
+** R1 — state-before-HTML drops HTML
+#+begin_src spacetime
+@template &c(){ $n number: 0; <div class="c"><b>hi</b></div> }
+.l { &c(); }
+#+end_src
+Emitted: =html: ""=. Expected: =html: "<div class=\"c\"><b>hi</b></div>"=.
+Control: the SAME body with HTML before state (=<div>..</div> $n number: 0;=) preserves
+HTML. Pure-HTML (no state) preserves HTML. ∴ the state decl is the trigger.
+
+** R2 — multiline desync → false E0806
+#+begin_src spacetime
+@template &counter($l) {
+  $count number: 0;
+  <div class="c">
+    <span class="v"></span>
+    <button class="b">+</button>
+  </div>
+  .b { @on click { $count <- $count + 1; } }
+}
+.list { &counter("Likes"); }
+#+end_src
+=cargo run -- check= → =error[E0806]: $count + 1; } } references an undefined state
+variable=. The byte-identical single-line body passes check (but still drops HTML per R1).
+
+** R3 — unknown construct swallowed
+#+begin_src spacetime
+@template &host($w){ <div class="h"></div> .h { &$w(); } }
+.l { &host("a"); }
+#+end_src
+=check= passes; emitted =html: "<div class=\"h\"></div> .h { &$w(); }"= — the dispatch
+call is literal text. (This is WHY FEAT-073 cannot rely on check; it needs new grammar
+HERE, in parse_component_body.)
+
+* Root cause detail
+=parse_component_body= walks =inner.lines()= and classifies each line by its first
+token (=$=, =.=, =[=, =@=, =<=, =&=), maintaining =html_tag_depth= via
+=update_html_tag_depth= (line 2856). Problems:
+- HTML detection is line-granular; an element split across lines, or HTML following a
+  non-HTML line on the same logical flow, is mis-bucketed.
+- =html_tag_depth= is advanced only on the "default: HTML content" branch (end of loop),
+  but state/CSS/directive lines =continue= before depth is updated, so interleaved
+  content desyncs the counter.
+- The =else { default HTML }= path is the catch-all that swallows anything unrecognized.
+
+* Approach
+Replace the line-heuristic segmentation with a BRACE/TAG-AWARE mini-tokenizer that
+walks the body once at byte/token granularity, tracking three depths (angle-bracket
+HTML tag depth, brace depth, paren depth) and emitting typed segments:
+  state-decl | exports-block | css-or-behavior-block | content-injection |
+  class-toggle | template-ref | dispatch-call | match-block | html-run | directive-block
+HTML runs accumulate verbatim (including newlines) between non-HTML segments; segment
+boundaries are recognized only at tag-depth 0 AND brace-depth 0, so a =.b { ... }=
+block after a multiline =<div>...</div>= is correctly seen as a behavior block, and a
+state decl before HTML does not consume the HTML.
+
+Keep the structured =ComponentBodyDef= output shape (html, states, directives,
+injections, exports, css_rules, refs, selector_refs, diagnostics) — only the
+SEGMENTER changes. Add new segment kinds (dispatch-call, match-block, attr-injection)
+as EMPTY-producing stubs here so FEAT-073 can fill lowering without re-touching the
+segmenter. =[slot]<-$x= attribute-target injection (currently a parse error) is fixed
+as part of the injection segment (FEAT-072 depends on it but the PARSE belongs here).
+
+* Files
+- =src/syntax/events/form_compiler.rs= — =parse_component_body= (1701) + helpers
+  =update_html_tag_depth= (2856), =has_component_body_sections= (2752),
+  =consume_braced_section= (2831), =is_state_declaration= (2809), =parse_injection= (2110).
+- =src/syntax/form_match.rs= — =ComponentBodyDef= / =ComponentDirective= / =ContentInjection=
+  if new segment kinds need representation (attr-target injection; dispatch/match stubs).
+- =src/pipeline/mod.rs= — =check_undefined_state_refs= (1083): once segmentation is
+  correct the false E0806/E0905 disappears; keep the diagnostic for genuinely-undefined
+  refs and add a regression that R2 compiles clean.
+- =src/pipeline/scope.rs= — verify scope tree reflects multiline bodies (inspect --layer scopes).
+
+* Edge cases (MUST all be covered by tests)
+- state decl FIRST, then multiline HTML, then a behavior block (R1+R2 combined).
+- multiple state decls interleaved with HTML.
+- HTML containing =>= and =<= in text/attributes (e.g. =a < b=, =data-x="a>b"=) must not
+  desync tag depth — tokenizer must only count real tags.
+- void elements (=<img>=, =<br>=) and self-closing (=<x/>=) must not increment depth.
+- a =.selector { color: red }= pure-CSS block vs =.selector { @on click {..} }= behavior
+  block vs =.cls: $flag;= class toggle — all three must classify correctly post-state.
+- =[slot="v"] <- $n;= and =src <- $.url;= attribute-target injections parse (no
+  "expected '{' after selector").
+- comments (=//=, =/* */=, =<!-- -->=) inside the body.
+- empty body, body with only state, body with only HTML (all preserved as today).
+
+* Test plan (emitted-JS asserted — NO check-only greens)
+- UNIT (form_compiler.rs #[test]): feed each edge-case body to =parse_component_body=,
+  assert the =ComponentBodyDef= fields directly (html non-empty and exact; states len;
+  directives len/kind; injections target+var). Add a R1 test (html preserved with
+  state-first) and an R3 test (dispatch text NOT in html once FEAT-073 lands; for now
+  assert it is recognized as a dispatch segment stub, not html).
+- SNAPSHOT (insta): registerTemplate payload for the R2 counter has html != "" and a
+  click directive.
+- PIPELINE (integration_tests.rs): R2 compiles with ZERO diagnostics (regression for
+  false E0806).
+- V8/headless: the R2 counter renders the button + increments $count on click
+  (proves directives wired end-to-end). =cargo run --features headless -- test tests/=.
+- FULL SUITE green: --lib, integration, v8_runtime_test, headless.
+
+* Acceptance criteria
+- [ ] R1 emits the full =<div class="c"><b>hi</b></div>= html (no drop).
+- [ ] R2 compiles clean (no E0806) AND renders + increments in headless.
+- [ ] R3 dispatch call is NOT swallowed into html (recognized as a segment; lowering
+      is FEAT-073, but the segmenter must surface it, not bury it).
+- [ ] =[slot]<-$x= parses without error.
+- [ ] All four test tiers green; emitted JS asserted for every case.
+- [ ] No regression in existing template/each snapshots (audit any insta diffs).
+
+* RESOLUTION (2026-06-06, main thread)
+
+** Root cause (corrected by instrumentation, not hypothesis)
+Dumped `ComponentBodyDef` for R1/R2/CONTROL directly. The bug was NOT "multiline
+desync" as first hypothesized — it was line-atomic classification:
+- A single line holding `$decl; <html>` was consumed wholesale as ONE construct, so
+  whichever came second (HTML or decl) was dropped (R1 + CONTROL).
+- The injection probe (`contains(" <- ")`) fired BEFORE the behavior-block check, so
+  `.b { @on click { $x <- v } }` was misread as a content injection and the @on
+  directive was LOST → downstream false E0806. The canonical scoped-behavior form
+  (`.sel { @on ... }`, per template-component-model.org) was therefore NEVER wired.
+- The fast-path gate `has_component_body_sections` was ALSO line-atomic and diverged
+  from the parser, so `<div/> $n number:0;` on one line bypassed the full parse.
+
+** Fix
+- New brace/tag/string-aware `segment_component_body()` scanner splits the body into
+  typed `BodySegment`s at true construct boundaries (HTML tags via `scan_html_tag`
+  with void/self-closing/comment handling; brace blocks via `scan_brace_block`;
+  `;`-or-line via `scan_to_semicolon[_or_line]`). Construct-start recognized at tag
+  depth 0 even mid-HTML-run, flushing the pending HTML first.
+- `classify_construct_start` decides state-decl / @exports / directive / css-or-behavior
+  block / class-toggle / injection / ref / dispatch by leading token + terminator.
+- The full parse loop now iterates segments (each a COMPLETE construct), reusing every
+  existing `parse_*` helper unchanged. Behavior blocks recognize an inner `@on` FIRST
+  via re-segmentation + new `parse_on_event_block_scoped` (binds to enclosing selector).
+- `has_component_body_sections` delegates to the segmenter — ONE segmentation truth.
+- Deleted now-dead `consume_braced_section` + `update_html_tag_depth`.
+
+** Verification (emitted-JS + V8 DOM, NOT check-only)
+- 5 unit regressions in form_compiler.rs (bug059_*): state-then-html, html-then-state,
+  multiline behavior block captures the OnEvent directive, `<` in text stays HTML,
+  void element no desync. All green.
+- 2 V8 tests (tests/v8_runtime_test.rs): (a) emitted JS carries html + OnEvent +
+  Increment payload; (b) end-to-end — counter renders under .list, click increments
+  scoped `count` 0→1 via ST.get. Both green.
+- Existing 18 component_body + 115 form_compiler tests: all still green.
+- Full lib: 2117 pass / 8 fail — the 8 are PRE-EXISTING (5 stale snapshots [BUG-038]
+  + 3 html_* file-scope [PLAN-023 W1]), confirmed by clean-HEAD baseline. ZERO new
+  regressions; +2 net pass.
+- Full v8: 295 pass / 12 fail — the 12 are PRE-EXISTING media_dedup/selector_init
+  [BUG-039 cluster], confirmed by baseline (12 before, 12 after). +2 net pass.
+
+** Acceptance criteria status
+- [x] R1 emits full html (no drop)
+- [x] R2 compiles clean (no E0806) AND directive captured + increments in V8
+- [x] [slot]<-$x parses (slot-injection test green)
+- [x] all test tiers green except pre-existing-unrelated failures (baselined)
+- [x] no regression in existing component_body/template tests
+- [ ] R3 dispatch surfacing → deferred to FEAT-073 (segmenter surfaces &$w() as a ref
+      segment now; lowering is FEAT-073 as planned)
+
+Files: src/syntax/events/form_compiler.rs (segmenter + loop rewrite + scoped @on +
+gate unification + 5 regression tests), tests/v8_runtime_test.rs (2 e2e tests).

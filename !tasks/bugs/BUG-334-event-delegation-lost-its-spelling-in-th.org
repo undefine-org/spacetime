@@ -1,0 +1,240 @@
+#+TITLE: Event delegation lost its spelling in the @on sigil cutover
+#+STATE: DONE
+#+SESSION_ID: 153497be379ff5cc
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-18T12-18-12-318Z_153497be379ff5cc.jsonl]]
+#+CUSTOM_ID: BUG-334-event-delegation-lost-its-spelling-in-th
+#+COMPLETION_HASH: 5d70fb9142e17ae8
+
+* Initial Message
+
+ok can you explain to me waht's left to make the whole thing pass with the leniency removal? YOu can also pinpoint parts of the stdlib that would need updates anyway, if you believe breaking but necessary changes would go in the way of SPacetime (e.g. like we did with `@on)
+
+* Symptom
+
+Delegated event binding \u2014 one handler on a container, dispatched to matching
+descendants \u2014 has NO spelling after the BUG-329 cutover.
+
+The retired form was:
+
+#+begin_src spacetime
+.list { @on click [data-option-id] { $selected <- $.dataset.optionId; } }
+#+end_src
+
+declared by =%macro on-mutation-dispatcher= (deleted):
+
+#+begin_src spacetime
+%form { @on $event:event_name $target:selector { $body:mutation_actions } }
+%binds { on-mutation-handler(&self, event: $event, target: $target, actions: $body) }
+#+end_src
+
+The surviving head has no target slot:
+
+#+begin_src spacetime
+%macro on-driver-body {
+  %form { @on $driver:driver_expr $as:on_as? { $body:on_motion_body } }
+}
+#+end_src
+
+* Why this is worse than a plain gap
+
+It fails SILENTLY. A selector written in the old target position\u2014
+=@on &.click [data-option-id] { \u2026 }= \u2014 does not error: it parses as a NESTED
+SCOPE BLOCK inside the handler body. The driver binds to =&self=, no =target=
+capture is produced, and the delegation target is absorbed. The author gets a
+handler on the CONTAINER that never dispatches to the descendant they named,
+with zero diagnostics.
+
+That is the exact failure shape this whole arc exists to delete: a page that
+compiles clean and does not do what it says.
+
+* Evidence
+
+=src/pipeline/integration_tests.rs::test_parse_on_mutation_with_delegation= is
+=#[ignore]='d with this gap named. Its assertions were rewritten to document the
+ACTUAL behaviour (matches =on-driver-body=, =driver.member == click=, NO target
+capture) rather than a dead macro name, so un-ignoring it asserts reality.
+
+The primitive still exists and still takes a target:
+=%primitive on-mutation-handler(&el, event: ident, target: selector?, actions: expr)=
+(=stdlib/primitives/animation/drivers.st:1964=) \u2014 only the SURFACE that fed it
+=target= is gone. So this is a grammar gap, not a runtime one.
+
+* Fix direction
+
+Two options, both grammar-only:
+
+1. Extend =on-driver-body= with an optional target, mirroring the retired form:
+   =%form { @on $driver:driver_expr $target:selector? $as:on_as? { $body:on_motion_body } }=
+   and forward =target= to =on-mutation-handler=. Cheapest, and reuses a
+   primitive parameter that is already there and already plumbed.
+2. A dedicated capture type (=on_delegate=) in the =on_as= style, so the clause
+   is named and self-documenting: =@on &.click via [data-option-id] { \u2026 }=.
+
+Option 1 is smaller; option 2 reads better and cannot be confused with a nested
+scope block \u2014 which is precisely how the current silence happens. Prefer 2 if
+the ambiguity above is judged the real defect.
+
+* Gate (required either way)
+
+A =--cdp= behaviour test: a container with two matching descendants, one click
+on each, asserting the handler fired with the RIGHT descendant as =$=. A parse
+assertion cannot see the silent-absorption failure \u2014 the parse SUCCEEDS today.
+
+Plus a refusal test: whatever spelling is NOT chosen must be diagnosed, so a
+selector in the wrong position stops being silently absorbed.
+
+NOTE [2026-08-07]: Second, sharper reproduction found in the existing suite:
+tests/integration/reactive_properties.rs::test_on_event_space_selector_compiles.
+
+It is better evidence than the pipeline test cited above, because of WHERE it
+fails. The test asserts, in order:
+
+  1. diag_count == 0        \u2014 PASSES
+  2. js contains `delegateSelector = ".inc"`  \u2014 FAILS
+
+So the page compiles with ZERO diagnostics and the delegation target is simply
+gone. That is the silent-absorption failure predicted in the report, now
+observed rather than reasoned about: `.inc` in the target position parses as a
+nested scope block, the driver binds `&self`, and no `target` capture is
+produced. An author gets a handler on the container that never dispatches to
+the child they named, and nothing anywhere says so.
+
+Marked `#[ignore]` with the diagnosis inline, NOT rewritten to assert current
+behaviour \u2014 the current behaviour is the bug. When a delegation spelling lands,
+removing the `#[ignore]` asserts the real contract with no other edit.
+
+Also re-confirmed the runtime half is intact and still expects a target:
+`on-mutation-handler` reads `delegateSelector` and calls `e.target.closest(...)`
+(stdlib/primitives/animation/drivers.st:1978). Fix remains grammar-only.
+
+NOTE [2026-08-08]: RE-VERIFIED at HEAD (2026-08-07) with an emit diff, not a check exit code.
+
+Repro: `.list { @on &.click(from: ".item") { $n <- 1; } }` with real markup.
+`spacetime check` says PASSES — that silence IS the bug.
+
+Emit evidence (dist/spacetime.js ~:7004):
+
+    const delegateSelector = null;
+    const handler = function(e) {
+      // Event delegation: if target specified, find matching element
+      let $ = __stTargetEl;
+      if (delegateSelector) { $ = e.target.closest(delegateSelector); ... }
+
+So the RUNTIME delegation path is fully implemented and correct — it is the
+authored selector that never arrives: `delegateSelector` is hardcoded `null`.
+
+Proof it is the grammar and not codegen: building the page WITH `(from: ".item")`
+and WITHOUT it produces BYTE-IDENTICAL spacetime.js. The clause is parsed,
+accepted, and discarded.
+
+Method note (AUD-011): my first two probe attempts were VACUOUS — one grepped an
+empty dist/ (a styles-only page exports `Pages: 0` with a ✓), the other matched
+`closest(`/`matches(` from the runtime library rather than page code. Only the
+A/B diff of two builds is sound here, because page JS is bundled INTO
+spacetime.js alongside the runtime — grepping for a bare token cannot tell the
+two apart. Use a distinctive marker ($zzmarker <- 4242) to locate page code.
+
+NOTE [2026-08-08]: REFRAMED (2026-08-07) — the premise is wrong. Delegation never had an
+author-facing spelling to lose, and it does not need one.
+
+** `&name` already does this, and already works
+
+stdlib/syntax/element-ref.st declares `&name selector;` — it binds a name to an
+element and registers it as `window.__stRefs[name]`. `@on` already accepts it:
+
+: &item .item;
+: .list { @on &item.click { $n <- 1; } }
+
+VERIFIED by emit, not by exit code. A/B build diff:
+
+: const __stTargetEl = ST.ref("item");   // @on &item.click
+: const __stTargetEl = el;               // @on &.click
+
+So the `&name.event` rail is live. `&` means "an element" in BOTH spellings
+(`&.click` = this one, `&item.click` = the named one) and the leaf after the dot
+is the driver. Adding `target: "..."` would name an element a SECOND way, which
+is the learnable-by-pattern violation — and it would be a param on ONE
+primitive, so every future driver would have to redeclare it, whereas the sigil
+composes for free.
+
+** Delegation's two motives are already covered by selector scope
+
+ST.ref returns a SINGLE element, so `&name` alone covers neither "many
+elements" nor "elements added later". But `ST.registerSelectorInit`
+(public/runtime/st.js:195, comment: "Used by generated code to support
+@each/@template created elements") plus a MutationObserver on document.body
+({childList, subtree}) feeding `ST._scheduleInit` covers both.
+
+Verified on a real build of an @each list with `.row { @on &.click { … } }`:
+
+: ST.registerSelectorInit('.row', init);
+: ST._scheduleInit(document.body);
+
+and init attaches the listener with an idempotency guard (`__stOnBound` Set) and
+an ST.onCleanup teardown. So EVERY row gets a handler, including rows appended
+later.
+
+∴ `.item { @on &.click { … } }` is behaviorally equivalent to the proposed
+`@on &.click(from: ".item")` on the parent, needs no new vocabulary, and reads
+as what it is.
+
+** Recommendation
+
+Close as NOT A DEFECT. `delegateSelector` stays an internal parameter of
+on-mutation-handler, hardcoded null because nothing author-facing sets it.
+BUG-352's validation then turns `from:` into a real error naming the accepted
+params instead of silence — which is the whole fix.
+
+The one thing genuinely lost is the ONE-listener-instead-of-N optimization. That
+is a PERFORMANCE concern, not a syntax one: if it ever measurably bites, the
+compiler should choose delegation as an emit strategy when a selector scope sits
+inside a repeat — invisible to the author. If it must ever be surfaced, spell it
+as a strategy (`delegated: true`), never as an element name, so "one way to name
+an element" survives.
+
+** My error
+
+I traced from the implementation upward (primitive declares `target: selector?`
+→ runtime has a delegation path → param_map exists → surface it). Every step
+true, conclusion wrong. I never asked why an element would need naming twice
+when `&` is already the facet for naming elements — and `@on &voice.playback` is
+written in a comment in the very primitive I was reading.
+
+Generalizes: an unwired internal parameter is NOT evidence of a missing feature.
+It is equally consistent with one deliberately not surfaced, or superseded by a
+better mechanism — both true here. Same shape as the `once:` error in this arc.
+The habit that catches both: look for the existing affordance before adding a
+parallel one.
+
+Full analysis: !tasks/plans/PLAN-145-delegation-is-not-a-param.md
+
+NOTE [2026-08-08]: CLOSED as NOT A DEFECT — delegation needs no author-facing param.
+
+`&` is already the facet for naming an element: `&.click` = this element,
+`&item.click` = the element named `item` (stdlib/syntax/element-ref.st declares
+`&name selector;`). Verified by emit diff, not exit code:
+
+:   const __stTargetEl = ST.ref("item");   // @on &item.click
+:   const __stTargetEl = el;               // @on &.click
+
+And delegation's two motives are covered by selector scope: ST.registerSelectorInit
+(public/runtime/st.js:195, "Used by generated code to support @each/@template
+created elements") plus a MutationObserver on document.body feeding _scheduleInit
+wires EVERY matching element, including ones added later. Verified on a real
+@each build.
+
+∴ `.item { @on &.click { … } }` is behaviorally equivalent to the proposed
+`@on &.click(from: ".item")` on the parent, and needs no new vocabulary.
+
+As of BUG-352 the old spelling is now a loud refusal instead of silence:
+
+: error[E0960]: unknown argument `from` for driver `click`
+:   — declared parameters: actions, event, target
+
+The one genuine loss is one-listener-instead-of-N. That is a PERFORMANCE
+concern: if it ever measurably bites, the compiler should choose delegation as
+an emit strategy when a selector scope sits inside a repeat — invisible to the
+author. If it must ever be surfaced, spell it as a strategy (`delegated: true`),
+never as an element name, so "one way to name an element" survives.
+
+Full analysis: !tasks/plans/PLAN-145-delegation-is-not-a-param.md

@@ -1,0 +1,146 @@
+#+TITLE: Dev server blanks SSG text holes until first mutation (production is correct)
+#+STATE: ITEM
+#+CUSTOM_ID: BUG-236-dev-server-blanks-ssg-text-holes-until-fi
+
+* Summary
+
+Under =serve=, a text hole bound to a local-state signal renders its correct SSG value in
+the served HTML and is then *blanked* by hydration. It stays empty until something writes
+the signal. Under =build= the same page is correct.
+
+This is a *verification-integrity* bug more than a rendering bug: the dev server is the
+surface every agent and author checks a page on, and it disagrees with what ships. An
+author looking at =serve= sees an empty span and "fixes" a page that was never broken;
+worse, an agent verifying copy in a browser reads blank text and may conclude a value is
+missing from the data when it is present.
+
+Found 2026-07-25 while building the capability inventory for the dynamic pass
+(=method/11-DYNAMIC=), probing whether reactive text interpolation was safe to recommend.
+
+* Reproduction
+
+#+begin_src spacetime
+$label string: "idle";
+$n number: 7;
+
+<title>holebug</title>
+<main>
+  <p class="out">label=`$label` n=`$n`</p>
+  <button class="b">go</button>
+</main>
+.b { @on click { $n <- $n + 1; } }
+#+end_src
+
+** Served HTML — correct, both holes carry their initial value
+
+#+begin_src html
+<p class="out">label=<span data-st-hole="0">idle</span> n=<span data-st-hole="1">7</span></p>
+#+end_src
+
+** After hydration under =serve= — both holes empty
+
+: label= n=
+
+=SpacetimeLocal['label']= is =="idle"== and =window._localState['label']= is =="idle"== at
+the moment of observation. The values are present; the DOM is not showing them.
+
+** After clicking (writes =$n=) — only the written signal recovers
+
+: label= n=8
+
+=$n= repaints because its =local:n:updated= listener fires. =$label= is never written, so
+it stays blank *for the life of the page*.
+
+** Same page under =build= — correct
+
+: label=idle n=7
+
+* Evidence
+
+| surface            | scripts | =_localState= keys | initial render |
+|--------------------+---------+--------------------+----------------|
+| =serve= (port 3507)  | 7       | 111                | BLANK          |
+| =build= (static)     | 1       | 2                  | CORRECT        |
+
+The dev server injects four extra runtime bundles — =migrations/runtime.js=,
+=inspect/runtime.js=, =host/runtime.js= and two inline blocks — which seed ~110 additional
+local-state keys of their own. The production page loads a single =spacetime.js=.
+
+* Analysis (partial — root cause NOT confirmed)
+
+The emitted binding is:
+
+#+begin_src js
+(() => {
+  const apply = () => (SpacetimeLocal['n']);
+  const render = () => {
+    let __v;
+    try { __v = apply(); } catch (e) { return; }
+    document.querySelectorAll("[data-st-hole=\"0\"]").forEach((node) => {
+      node.textContent = (__v === undefined || __v === null) ? '' : __v;
+    });
+  };
+  document.addEventListener("local:n:updated", render);
+  if (document.readyState === 'loading') { document.addEventListener('DOMContentLoaded', render); } else { render(); }
+})();
+#+end_src
+
+The blanking branch is =__v === undefined ? '' : __v=. So =render()= must be running at a
+moment when =SpacetimeLocal[name]= is =undefined=, i.e. *before* the seeding statement
+=window._localState["label"] = "idle"= has executed.
+
+In the emitted bundle the seed offsets (297028, 300345) DO precede the binding offsets
+(303506, 304072), and that ordering is identical in the production bundle — which works.
+So raw statement order in the bundle is not by itself the discriminator. What differs
+under =serve= is that additional runtime bundles run interleaved and =ST._ensureLocalProxy()=
+migrates =window.SpacetimeLocal= onto a *new* Proxy over =_localState=. Note also
+=SpacetimeLocal !== window._localState= on both surfaces (proxy wrapper), so that is not
+the discriminator either.
+
+*Not yet established:* precisely which injected bundle causes the early =render()=, and
+whether the fix belongs in the emitted binding (make the initial render non-destructive)
+or in the dev-server injection order.
+
+* Suggested fix (two candidates, first preferred)
+
+1. *Make the initial render non-destructive.* An =undefined= read at hydration time means
+   "not seeded yet", NOT "the value is empty". The SSG span already holds the correct
+   text. Skipping the write when =__v === undefined= on the FIRST render preserves the
+   server-rendered value and costs nothing, because any later real write dispatches
+   =local:<name>:updated= and repaints:
+
+   #+begin_src js
+   // first render only: undefined = not-yet-seeded, keep the SSG text
+   if (__v === undefined && !node.__stHoleHydrated) return;
+   node.__stHoleHydrated = true;
+   #+end_src
+
+   This is robust against ANY future injection-order change, which candidate 2 is not.
+
+2. Guarantee local-state seeding runs before any hole binding under =serve=.
+
+Candidate 1 also fixes the general class: a hole whose signal is seeded asynchronously
+(e.g. from =@data fetch=) currently flashes blank rather than showing its SSG value.
+
+* Impact
+
+- Every =serve=-based visual verification of a page using reactive text is reading a
+  false negative. This includes browser checks by agents.
+- A signal that is never written after load stays blank permanently under =serve=.
+- Production is unaffected — so this has likely been mistaken for "the dev server is
+  just slow to hydrate" rather than recognised as a stable wrong state.
+
+* Workaround
+
+Verify reactive text on a =build= + static server, not on =serve=:
+
+#+begin_src sh
+cargo run -q -- build projects/<name>/
+(cd projects/<name>/dist && python3 -m http.server 8000)
+#+end_src
+
+* Files
+
+- =src/emit/html_hydrate.rs= — =emit_text_hole= (span + initial value) and =emit_binding=
+  (the =textContent= write containing the blanking branch)
+- =public/runtime/st.js= — =ST._ensureLocalProxy=, =ST._bridgeExport=

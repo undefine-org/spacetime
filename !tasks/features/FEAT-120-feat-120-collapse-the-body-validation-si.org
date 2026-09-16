@@ -1,0 +1,213 @@
+#+TITLE: FEAT-120: collapse the body-validation side-lane into the canonical diagnostic channel (Route A)
+#+STATE: DONE
+#+SESSION_ID: 150962ecfcb3e4dc
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-14T22-52-45-426Z_150962ecfcb3e4dc.jsonl]]
+#+CUSTOM_ID: FEAT-120-feat-120-collapse-the-body-validation-si
+#+COMPLETION_HASH: af1faacd398f6840
+
+* Initial Message
+
+ok now let's think more deeply, since this is only about validation, where else in the meta-compiler is there validation? If you look at that part, is it mergeable with this, to completely remove this side-lane in the meta-compiler? draw diagrams to help you understand
+
+* Goal
+
+Delete the meta-compiler's SECOND validation world. After FEAT-119, =ComponentBodyDef=
+is no longer a payload struct — it is a *transport envelope* (=diagnostics:
+Vec<ComponentBodyDiag>= + =section_transitions: u32=) improvised because parse-time
+body lints had no first-class channel. This FEAT removes the envelope entirely:
+body validation produces canonical =Diagnostic= like its 11 =check_*= siblings, landing
+through ONE drain.
+
+End state (ruthless — the side-lane ceases to exist):
+- =ComponentBodyDef= : DELETED.
+- =ComponentBodyDiag= : DELETED (its 4 fields, incl. the dead =line_offset=, gone).
+- =CapturedValue::ComponentBody(ComponentBodyDef)= → =CapturedValue::ComponentBody= (bare
+  marker; realizes FEAT-119 option (b) fully — capture carries NOTHING).
+- The two pipeline drain bridges (=mod.rs:1405= E0900-bridge, =mod.rs:1829= W0700) : DELETED.
+- The dead E0920/E0921/E0922 bridge arms (no producers exist) : DELETED.
+- ONE new channel: =StFile.diagnostics: Vec<Diagnostic>=, threaded to the pipeline via
+  =CompileContext.body_diagnostics= and drained by a single =output.diagnostics.extend(...)=.
+- Exactly ONE diagnostic type remains in the compiler: =Diagnostic=.
+
+* Architecture (why this is mergeable, and the root defect it fixes)
+
+The 11 canonical =check_*= passes and the 1 body-validator differ on ONE axis — WHEN they run:
+
+| pass                      | reads                       | runs at  | produces            |
+|---------------------------+-----------------------------+----------+---------------------|
+| 11 × =check_*=            | World A (scopes, matches)   | pipeline | canonical Diagnostic|
+| =validate_component_body= | raw body text (=inner: &str=)| parse    | ComponentBodyDiag → smuggled |
+
+Two facts forced the smuggle (the root defect):
+1. =compile_verbose(matches, context)= has NO source text → cannot re-slice + re-validate
+   raw body at pipeline time → body validation MUST happen at parse.
+2. =parse() -> Result<StFile, ParseErrors>= and =StFile= has NO diagnostics field → a
+   parse-time lint has nowhere canonical to land → it hitches a ride INSIDE the capture
+   that flows forward to the pipeline, where two bridges convert it back to =Diagnostic=.
+
+∴ The side-lane is a workaround for a MISSING CHANNEL, not an intrinsic second world.
+Route A supplies the channel (=StFile.diagnostics=), generalizing it so ANY future
+parse-time lint lands canonically — no new envelope is ever re-improvised.
+
+** The single production site (the ruthless realization)
+
+Move the validator OUT of the capture extractor (=form_compiler.rs:1365=) and INTO the
+scope-building loop in =cst_to_stfile_with_registry= (=src/parser/mod.rs= ~466–564). At
+that loop, for every body-bearing directive, these ALL coexist:
+- =body= (the CST Body node) + =body_range= / =body_span= (byte span)
+- =tmpl_name= (the template name — REQUIRED by W0700, which the extractor never had)
+- =source= (the full file text — for real spans)
+
+So validation can emit canonical =Diagnostic= WITH real spans AND the template name,
+straight into =file.diagnostics=. This is strictly more capable than the old extractor
+site (which lacked the name and used a meaningless =line_offset: seg_idx=). It also folds
+the separate =@exports= E0904 harvest (=parser/mod.rs:707=) into the same site — both
+producers unify.
+
+* Blast radius (verified)
+
+10 files, ~43 =ComponentBodyDef= refs, ~25 =ComponentBodyDiag=, ~21 =section_transitions=,
+~29 =validate_component_body=, 7 =line_offset= (all dead).
+
+| file                                       | change                                                                 |
+|--------------------------------------------+------------------------------------------------------------------------|
+| =src/parser/ast.rs=                         | + =StFile.diagnostics: Vec<Diagnostic>= (=#[serde(default, skip_serializing)]=) |
+| =src/syntax/form_match.rs=                  | DELETE =ComponentBodyDef=, =ComponentBodyDiag=; =ComponentBody(ComponentBodyDef)= → =ComponentBody=; fix =is_present=/=display=/=to_js= arms; DELETE =get_component_body= |
+| =src/syntax/mod.rs=                         | drop =ComponentBodyDef=, =ComponentBodyDiag= from re-export                |
+| =src/syntax/events/form_compiler.rs=        | =validate_component_body(inner) -> ComponentBodyDef= → =validate_component_body(inner, base_offset, span, name) -> Vec<Diagnostic>=; helper sigs (=reify_block=, =parse_on_event_block(_scoped)=, =parse_exports_block=) take =&mut Vec<Diagnostic>=; DELETE the extractor call at 1365 (returns bare =ComponentBody=) |
+| =src/parser/mod.rs=                          | CALL validator in scope loop → =file.diagnostics.extend(...)=; fold E0904 exports harvest into same site; drop the =get_mut("body")= diag-injection at 706 |
+| =src/pipeline/mod.rs=                         | + =CompileContext.body_diagnostics=; + builder =with_body_diagnostics=; =output.diagnostics.extend(...)= (ONE drain); DELETE E0900 bridge loop (1405) + dead E0920/21/22 arms; DELETE W0700 drain (1829) — W0700 now emitted by the validator directly; rework test helpers (=make_template_fm*=) |
+| =src/sync/handlers.rs=                       | =CapturedValue::ComponentBody(body)= display arm → bare =ComponentBody= ("(component body)") |
+| =src/pipeline/expand.rs=                     | =is_component_body= matches bare =ComponentBody=; generic =to_js= arm → bare |
+| =src/editable/schema.rs=                     | drop the now-unused =ComponentBodyDef= import (line 26)                    |
+| =src/pipeline/scope.rs=                      | fix the stale doc-comment reference                                     |
+| =src/syntax/events/component_body_corpus.rs= | golden snapshots now assert =Vec<Diagnostic>= JSON, not =ComponentBodyDef=; fleet-differential + idempotence + panic-safety tests repoint to the new signature |
+
+* Decisions
+
+- *Route A over B*: A adds the missing channel (=StFile.diagnostics=) so the WHOLE class of
+  parse-time lints lands canonically; B would relocate body validation to the pipeline but
+  leave the "parse lints need a channel" gap open for the next feature to re-improvise.
+  A also forces REAL spans (the validator gets =base_offset= + =span=), killing the
+  =line_offset= rot as a side effect.
+- *Validator runs in the scope loop, not the extractor*: only there is =tmpl_name= available
+  (W0700 needs it) alongside =body= + =span= + =source=. This is the site that already
+  produces every other World-A fact (html/states/exports/refs) — one producer, one place.
+- *Capture collapses to a bare marker*: =ComponentBody= carries nothing. The presence of the
+  capture still marks "this match has a body" for =expand.rs='s =is_component_body= branch,
+  but it transports no data.
+- *Byte-identical rawBody preserved*: this FEAT touches NO emit path — the factory body still
+  serializes from the World-A scope (=component_body_to_js_from_scope=). The W1 oracle
+  (=feat119_oracle_rawbody_js_all_field_kinds=) MUST stay green untouched.
+- *Diagnostic parity is the gate*: the exact same E-codes/W-codes fire on the exact same
+  inputs, only landing through the canonical path. Golden corpus snapshots re-baseline from
+  =ComponentBodyDef= JSON to =Diagnostic= JSON; the SET of codes per case must not change.
+
+* Open questions (resolve empirically during impl)
+
+- *Q1 — span granularity*: old bridge spanned the whole =fm.span=; new validator can span the
+  offending SEGMENT (=base_offset + seg byte range=). DECISION: emit segment-precise spans
+  (strictly better diagnostics). Verify =check= output still resolves the file + a sane caret.
+  If segment offsets prove unreliable for any arm, fall back to =body_span= for that arm only.
+- *Q2 — does =StFile.diagnostics= want =#[serde(skip_serializing)]=?* The diags are consumed
+  in-process (pipeline drain), never serialized to a layer artifact. Default to skip; revisit
+  if =inspect --layer parse= should surface them.
+
+* Waves (each compiles + passes all 4 tiers independently — NO half-states)
+
+** W1 — add the channel (additive, no behavior change)
+- + =StFile.diagnostics: Vec<Diagnostic>= (=src/parser/ast.rs=), =#[serde(default, skip_serializing)]=.
+- + =CompileContext.body_diagnostics: Vec<Diagnostic>= + =with_body_diagnostics(...)= builder
+  (=src/pipeline/mod.rs=); wire =compiler.rs= to pass =ast.diagnostics.clone()=.
+- + =output.diagnostics.extend(context.body_diagnostics.clone())= at the drain point.
+- Channel is EMPTY (nothing populates =ast.diagnostics= yet) → zero behavior change.
+- GATE: =cargo check= + =cargo test --lib= green; =inspect= unaffected.
+
+** W2 — convert the validator to emit canonical Diagnostic
+- Change =validate_component_body(inner: &str) -> ComponentBodyDef= →
+  =validate_component_body(inner, base_offset, fallback_span, name) -> Vec<Diagnostic>=.
+  Build each =Diagnostic::error/warning(code, msg).with_span(seg_span).with_hint(...)=; map the
+  string codes (E0900/E0904/E0906) to =DiagnosticCode= variants; FOLD W0700 in here (it has
+  =section_transitions= + =name= locally — emit the warning directly instead of returning a count).
+- Convert helper sigs to =&mut Vec<Diagnostic>=: =reify_block=, =parse_on_event_block=,
+  =parse_on_event_block_scoped=, =parse_exports_block=.
+- NB: prefer to LAND the variant change (W3) and this (W2) together if the borrow/type churn is
+  smaller as one wave — collapse W2+W3 if so.
+- GATE: =cargo test --lib=; corpus golden snapshots re-baselined (=INSTA_UPDATE=always=), diff
+  reviewed to confirm code SET unchanged per case.
+
+** W3 — move production to the scope loop; collapse the capture marker
+- In =cst_to_stfile_with_registry= scope loop (=parser/mod.rs= ~466–564): slice inner body from
+  =&source[body_range]= (strip outer braces), call the new validator with =base_offset= = inner
+  start, =name= = =tmpl_name=, push results into =file.diagnostics=.
+- Fold the =@exports= E0904 harvest (currently =parser/mod.rs:700-711= injecting into
+  =body.diagnostics=) into =file.diagnostics= at the same site; DELETE the =get_mut("body")= block.
+- Capture: =CapturedValue::ComponentBody(ComponentBodyDef)= → =CapturedValue::ComponentBody=.
+  Fix arms: =is_present= (=> true=), =display= ("[component-body]"), =expand.rs= =is_component_body=
+  match + generic =to_js= arm, =sync/handlers.rs= display arm. DELETE =get_component_body=.
+- Extractor at 1365: returns bare =ComponentBody= (no validation there anymore).
+- GATE: all 4 tiers; rawBody oracle byte-identical; =check= on a malformed-body fixture still
+  reports the same E-codes (now via =file.diagnostics= → =output.diagnostics=).
+
+** W4 — delete the bridges + the dead types
+- DELETE the E0900 bridge loop (=pipeline/mod.rs:1405-1424=) and the dead E0920/E0921/E0922
+  match arms.
+- DELETE =check_interleaved_html_css= W0700 drain (=:1829=) — W0700 now emitted in the validator.
+  (Confirm no other caller; remove the fn + its =output.diagnostics.extend= line.)
+- DELETE =ComponentBodyDef= + =ComponentBodyDiag= (=form_match.rs=); drop from =syntax/mod.rs=
+  re-export; drop dead import in =editable/schema.rs=; fix =pipeline/scope.rs= doc comment.
+- =grep -rn "ComponentBodyDef\|ComponentBodyDiag\|section_transitions\|line_offset" src/= →
+  returns ZERO (or only deletion-confirming test names).
+- GATE: all 4 tiers green; the grep proof; =cargo check= clean (no unused-import warnings).
+
+** W5 — tests + invariant + docs
+- Repoint =component_body_corpus.rs= golden/differential/idempotence/panic tests to the new
+  signature; snapshots assert =Vec<Diagnostic>= JSON.
+- Add FEAT-120 tests (in =compiler.rs= snapshot_tests or pipeline tests):
+  - T1: a malformed-body =@template= surfaces E0900 via =output.diagnostics= (was the bridge).
+  - T2: =@exports= with a bad entry surfaces E0904 via the unified site.
+  - T3: interleaved HTML/CSS template surfaces W0700 (now validator-emitted) with the template name.
+  - T4: a clean body produces ZERO diagnostics (no envelope, no noise).
+  - T5: INVARIANT — =grep= proof folded into a =#[test]= or doc note: exactly one diagnostic
+    type (=Diagnostic=) reaches =output.diagnostics= from body validation.
+- Update the FEAT-119 comments in =parser/mod.rs= / =expand.rs= / =sync/handlers.rs= that say
+  "the capture is now only a validation channel" → "the capture carries nothing; body
+  validation lands in =file.diagnostics=".
+- GATE: all 4 tiers; commit.
+
+* Test matrix (codes that MUST fire identically pre/post)
+
+| input                                   | code  | pre (bridge)        | post (canonical)         |
+|-----------------------------------------+-------+---------------------+--------------------------|
+| unrecognized body segment               | E0900 | bridge @ 1405       | validator → file.diagnostics |
+| =`$x`= hole used as state decl          | E0900 | bridge              | validator (segment span)  |
+| malformed =&ref= (no args)              | E0900 | bridge              | validator                 |
+| =@exports { bad }=                      | E0904 | exports harvest     | unified scope-loop site   |
+| malformed scoped =@on= in =.sel{}=      | E0906 | bridge              | validator (reify_block)    |
+| interleaved HTML↔CSS (transitions > 1)  | W0700 | =:1829= drain        | validator (has name+count) |
+| clean body                              | —     | empty payload       | empty Vec (no noise)      |
+
+* Acceptance (observable)
+- =cargo test --lib= + =cargo test --test integration_tests= + =cargo test --test v8_runtime_test=
+  green (modulo the 9 pre-existing FUP-055 v8 failures, unchanged).
+- =cargo run --features headless -- test tests/ --headless= matches the 356/251 baseline (verify
+  by stash-test if the count shifts).
+- =feat119_oracle_rawbody_js_all_field_kinds= green, byte-identical (NO emit change).
+- =grep -rn "ComponentBodyDef\|ComponentBodyDiag\|section_transitions\|line_offset" src/= → 0
+  live refs.
+- =cargo run -- check= on a malformed-body fixture reports the SAME E-codes as before the cutover.
+
+* Provenance
+- Builds directly on FEAT-119 (which shrank =ComponentBodyDef= to the validation channel and
+  proved World A is the sole emit producer). FEAT-120 removes the channel itself.
+- AGENTS rule alignment: "one need = one implementation" (one diagnostic type, one drain);
+  "a closed Rust enum the runtime doesn't enforce is rot" (=ComponentBodyDiag= duplicates
+  =Diagnostic=); deletes a parallel impl rather than maintaining it.
+
+NOTE [2026-06-15]: FEAT-120 COMPLETE (all 5 waves, Route A). The body-validation side-lane is eliminated: ComponentBodyDef + ComponentBodyDiag are DELETED, the ComponentBody capture is a bare presence-marker carrying nothing, and both pipeline bridges (E0900 loop + W0700 drain) plus the dead E0920/21/22 arms are gone. There is now exactly ONE diagnostic type (Diagnostic) and ONE drain.
+
+Root defect fixed: parse-time body lints had no first-class channel, so they smuggled through the capture and were re-derived at two pipeline sites. Route A supplied StFile.diagnostics (the missing channel) + CompileContext.body_diagnostics, drained once into output.diagnostics. The validator (validate_component_body) now returns Vec<Diagnostic> and runs in the cst_to_stfile scope-building loop — the single site where the template name (W0700 needs it), body span, and source all coexist — emitting SEGMENT-PRECISE spans (killing the dead line_offset). The @exports E0904 harvest folds into the same site. Bonus: main.rs now maps E0900/E0904/E0906/W0700 string codes so `check` displays body errors with their real code (was the E0806 fallback — a pre-existing lossy round-trip).
+
+Open questions resolved: Q1 (span granularity) — emit segment-precise spans, verified via T4 + `cargo run -- check` (error[E0900] at line 3 `$broken`). Q2 (StFile.diagnostics serde) — #[serde(skip)], consumed in-process.
+
+Verification: 2289 lib + 172 integration green; rawBody oracle byte-identical (NO emit path touched); v8 425 pass / 9 pre-existing FUP-055 failures (unchanged); headless 356/251 identical to baseline. Corpus golden snapshots regenerated to diagnostics-only shape. grep over src/ shows ZERO live ComponentBodyDef/Diag refs (only historical comments). Commits: W1 (channel additive), W2-W4 (atomic cutover), W5 (e2e tests + invariant).

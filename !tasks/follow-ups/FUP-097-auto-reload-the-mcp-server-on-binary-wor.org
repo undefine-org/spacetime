@@ -1,0 +1,97 @@
+#+TITLE: Auto-reload the MCP server on binary + workbench-stdlib change (tight edit-see loop)
+#+STATE: ITEM
+#+SESSION_ID: 1510d7e0efe8848c
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-20T17-53-05-983Z_1510d7e0efe8848c.jsonl]]
+#+CUSTOM_ID: FUP-097-auto-reload-the-mcp-server-on-binary-wor
+
+* Initial Message
+
+please showcase this (I reloaded the session, you can start the MCP), then tell me what we should do next
+
+* Problem (recurring friction, observed all session 2026-06-20/21)
+Every iteration on the MCP builder hits a manual-restart wall. Verifying a change
+live requires the human to restart the MCP server, because:
+
+1. RUST changes (the server itself — projection like stage_node_params, action
+   handlers like mcp_node_param, the structure walk, EditAst) are compiled into
+   the `spacetime` binary the MCP server runs. A running server holds the OLD
+   binary in memory; `.st` disk-overlay does nothing for Rust. The binary even
+   builds to a SEPARATE target dir (/home/user/.cache/cargo-target-mcp) to avoid
+   relinking the live binary (commit fb944a4f: rebuilding the server's own target
+   dir relinks + crashes the running process). So: rebuild -> MANUAL restart.
+
+2. WORKBENCH STDLIB changes (stdlib/__mcp__/env.st body + workbench/*.st +
+   primitives/*.st + styles.st) ARE disk-overlaid (FUP-071, src/mcp/stdlib_source.rs)
+   -- BUT the `mcp-workbench` function is COMPILED ONCE at mount and its
+   html/css/js cached (bundle_cache keyed by (fn_id, revision)). The overlay is
+   read at COMPILE time; the workbench isn't recompiled while the same revision is
+   mounted. So a styles.st / env.st edit needs a re-mount or restart to take
+   effect. (This bit BUG-136's CSS fix: the [data-active] selector change was on
+   disk but the served /css still had the old [data-active="true"].)
+
+This double wall means: land a Rust+stdlib builder change -> ask human to restart
+-> re-mount workbench -> re-compose guest -> re-verify. Several times per feature.
+It is the single biggest drag on the builder's edit->see loop.
+
+* Goal
+A `spacetime mcp` dev mode that auto-reloads on change so the agent (or human)
+sees Rust + workbench-stdlib edits live WITHOUT a manual restart, WITHOUT
+crashing the live process (respecting the fb944a4f constraint).
+
+* Proposed design (two independent rungs -- ship rung B first, it's cheaper)
+
+** Rung A -- binary auto-reload (Rust changes)
+A supervisor that owns the MCP stdio/socket transport and hot-swaps the worker:
+- `spacetime mcp --watch` spawns the actual server as a CHILD process and watches
+  the built binary (or watches src/ + rebuilds itself with a debounce).
+- On a new binary: start a NEW child, hand off the listening socket (SO_REUSEPORT
+  or an fd pass), drain the old child's in-flight requests, then SIGTERM it. The
+  MCP CLIENT sees one stable endpoint (the supervisor), so no client restart.
+- State (instances, functions, region_mounts) must survive the swap: either
+  (a) the supervisor holds the Store out-of-process (heavier), or (b) the new
+  child re-derives state from a snapshot the old child serializes on handoff
+  (Store is already largely JSON-shaped -- workbench_snapshot is the seed).
+- MUST NOT rebuild into the live binary's own target dir (fb944a4f). Keep the
+  cargo-target-mcp split; the supervisor triggers the rebuild, never in-place.
+- Fallback: if handoff fails, report a clear "restart needed" rather than crash.
+
+** Rung B -- workbench recompile-on-change (stdlib CSS/template) -- DO FIRST
+Cheaper, no process juggling. Invalidate the workbench compile when its stdlib
+sources change on disk:
+- Watch stdlib/__mcp__/**/*.st (the overlay roots from candidate_stdlib_roots).
+- On change: bump the mcp-workbench function's revision (or evict its
+  bundle_cache + page-html cache) so the next page load / poll RECOMPILES from
+  the disk-overlaid sources. resolve_mcp_stdlib_source already reads disk; this
+  just forces a recompile so the read happens again.
+- The workbench page already polls (1Hz @mcp-region); a revision bump + the
+  existing FEAT-124 hot-swap fingerprint path refreshes the shell. For CSS, the
+  served /css is regenerated from the recompiled bundle.
+- Acceptance: edit stdlib/__mcp__/workbench/styles.st, reload the workbench page
+  (no server restart) -> new CSS served.
+
+* Why now / impact
+- Unblocks autonomous live verification: the agent could drive the FULL
+  edit->build->verify loop (rung A) or at least the stdlib half (rung B) without a
+  human in the loop.
+- Directly accelerates PLAN-051 (builder) + PLAN-052 (convergence) + every future
+  MCP-surface change. This session's B4 + BUG-136 each cost a human restart.
+
+* Constraints / prior art
+- fb944a4f: NEVER rebuild into the live binary's target dir (relink crashes it).
+  The cargo-target-mcp split exists for this reason.
+- FUP-071 (stdlib_source.rs): the disk-overlay precedence is already in place;
+  rung B builds directly on it (add cache invalidation + a watcher).
+- BUG-118: bundle_cache exists to avoid per-poll recompiles (CPU wedge) -- rung B
+  must invalidate surgically (on file change), not disable the cache.
+
+* Acceptance (observable)
+- Rung B: edit stdlib/__mcp__/workbench/styles.st -> reload the workbench page ->
+  the change is in the served /css, NO server restart.
+- Rung A: rebuild the binary -> the next MCP tool call reflects new Rust behavior
+  (e.g. a new snapshot field) within N seconds, NO client reconnect, state kept.
+
+* Provenance
+Filed 2026-06-21 at the user's explicit request after the B4 + BUG-136 builder
+work each required a manual MCP restart to live-verify. The agent can drive its
+own `cargo run -- serve` dev server for GUEST pages, but the MCP WORKBENCH itself
+(host chrome + Rust projections) has no such loop -- this FUP closes that.

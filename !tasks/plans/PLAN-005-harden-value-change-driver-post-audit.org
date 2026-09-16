@@ -1,0 +1,90 @@
+#+TITLE: Harden value-change-driver post-audit
+#+STATE: DONE
+#+SESSION_ID: 14a6fc9e2ae99112
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-03-30T12-34-37-355Z_14a6fc9e2ae99112.jsonl]]
+#+CUSTOM_ID: PLAN-005-harden-value-change-driver-post-audit
+
+
+* Initial Message
+
+bro just vendor or install all of pretext bro
+
+* Context
+
+Post-implementation audit of PLAN-004 (pretext integration into value-change-driver)
+identified 8 findings. All are in the value-change-driver JS emit block
+(=stdlib/primitives/animation/drivers.st=), its codegen tests
+(=tests/value_change_test.rs=), the emoji behavioral test
+(=tests/unit/animations/value-change.test.st=), and =.gitignore=. No Rust
+compiler changes required.
+
+Findings by severity:
+- *Regression* (1): stale getComputedStyle — font changes between animation cycles produce wrong measurements
+- *Resource leak* (1): zombie observer re-attach after destroy() during animation
+- *Dead code* (1): newWordWidths computed but never consumed
+- *Test gap* (1): no negative assertion for paddingTop/marginTop
+- *Robustness* (1): emoji test uses escaped surrogates that may break through Spacetime parser
+- *Hygiene* (1): node_modules not in .gitignore
+- *Clarity* (1): kfToCss transform-only contract undocumented
+- *Diagnostic* (1): pretext height divergence detection (debug-gated)
+
+All 8 changes are in the same 4 files and have zero interdependencies. Executor
+should apply them as a single pass and verify with one test run.
+
+Key file locations:
+- Driver: =stdlib/primitives/animation/drivers.st= lines 654-994 (=%emit js= block)
+- Codegen tests: =tests/value_change_test.rs=
+- Behavioral test: =tests/unit/animations/value-change.test.st=
+- Gitignore: =.gitignore=
+
+* Verification
+
+#+begin_src bash
+# All codegen tests (19 existing + 1 new = 20)
+cargo test --test value_change_test
+
+# Full lib tests (regression check)
+cargo test --lib
+
+# Site compilation
+cargo run -- check ora-ventures.com/
+
+# Test HTML build
+cargo run --features headless -- test tests/unit/animations/value-change.test.st -o /tmp/vc-tests.html
+
+# Gitignore entry
+grep node_modules .gitignore
+#+end_src
+
+* Execution Manifest
+
+| Order | Item | Effort | Dependencies |
+|-------+------+--------+--------------|
+|     1 | [[id:FUP-001-harden-value-change-driver-post-pretext]] | 2h | none |
+
+Single item — all 8 fixes are small, non-overlapping edits to 4 files.
+Total: ~2h.
+
+** Completion [2026-03-30]
+
+*** Verification
+
+| Command | Result |
+|---|---|
+| =cargo test --test value_change_test= | 20/20 passed (19 existing + 1 new =test_compile_value_change_no_box_model_mutation=) |
+| =cargo test --lib= | 1965/1965 passed |
+| =cargo run -- check ora-ventures.com/= | 30/30 files passed |
+| =cargo run --features headless -- test tests/unit/animations/value-change.test.st -o /tmp/vc-tests.html= | ✓ HTML written |
+| =grep node_modules .gitignore= | =node_modules/= confirmed |
+
+*** Artifacts
+
+Changed files:
+- =stdlib/primitives/animation/drivers.st= — Fixes 1,2,3,5,7 (moved getComputedStyle, removed dead newWordWidths, zombie observer guard, kfToCss comment, debug diagnostic)
+- =tests/value_change_test.rs= — Fix 8 (paddingTop/marginTop negative assertion test)
+- =tests/unit/animations/value-change.test.st= — No net change (Fix 6 attempted then reverted)
+- =.gitignore= — Fix 4 (node_modules/)
+
+*** Deviations
+
+*Fix 6 (literal emoji) reverted.* The Spacetime parser panics on literal multi-byte UTF-8 characters: =expand.rs:747= performs byte-index slicing that hits a non-char-boundary inside the 4-byte 👋 (U+1F44B) sequence. The original escaped surrogates (=\\ud83d\\udc4b\\ud83c\\udf0d=) are correct for this context — they are ASCII text inside a JS =eval()= string that JavaScript interprets at runtime. The parser only processes the source text, which with escaped surrogates is all ASCII. A future fix should address the byte-vs-char-index bug in =expand.rs= (separate item)."

@@ -1,0 +1,282 @@
+#+TITLE: Fix evaluate_match macro lookup for form-directive macros
+#+STATE: DONE
+#+SESSION_ID: 14aefc02b33c29f0
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-04-05T17-39-49-068Z_14aefc02b33c29f0.jsonl]]
+#+CUSTOM_ID: BUG-014-fix-evaluate-match-macro-lookup-for-form
+#+EFFORT: S
+#+PRIORITY: #A
+#+LAYER: pipeline
+
+NOTE [2026-04-05]: Fixed by adding form-directive lookup fallback in both evaluate_match (evaluate.rs) and resolve_evaluated (resolve.rs). The root cause was that form_match.macro_name contains the directive name (e.g. \"on\") but macros are registered by their full name (e.g. \"on-event-dispatcher\"). Both functions now fall back to get_all_macros_by_form_directive + scoring when get_macro returns None.
+
+* Initial Message
+
+now run a visual verification please. I want the website to be feature-complete
+
+* Problem
+
+=evaluate_match()= in =src/pipeline/evaluate.rs= (line 117) looks up macro definitions using:
+
+#+begin_src rust
+let macro_def = registry.get_macro(&form_match.macro_name);
+#+end_src
+
+For =@=-prefixed directives, =form_match.macro_name= is derived from the directive name (e.g. ="on"= from =@on=), NOT the macro's registered name (e.g. ="on-event-dispatcher"=). The registry stores macros by their actual names, so =get_macro("on")= returns =None=.
+
+This causes =evaluate_match= to skip the macro body entirely (returning an empty =EvaluatedMatch= with =body_was_evaluated = false=). Any macro that:
+1. Uses =@directive= form syntax (where the directive name differs from the macro name)
+2. Has conditional =%binds= (inside =%if=/=%elif= blocks in the body)
+
+...silently drops all its binds. The resolve stage later finds the macro via form-directive lookup, but =resolve_single= only handles top-level =%binds=, not conditional ones.
+
+** Affected macros (5)
+- =on-event-dispatcher= (=@on= form) — breaks =@on visible=, =@on hover= (animation form), =@on click= (animation form), =@on focus= (animation form)
+- =responsive= — breaks responsive conditionals
+- =state-machine= — breaks state machine transitions
+- =waapi-on-event= — breaks WAAPI event animations
+- =waapi-timeline= — breaks WAAPI timelines
+
+** Why @after and @on click (mutation) work
+- =@after= macro has top-level =%binds= (no conditionals), so =resolve_single= handles it directly
+- =@on click { mutations }= matches =on-mutation-dispatcher-simple=, which also has top-level =%binds=
+
+** Observable symptom
+On ora-ventures.com, the hero animation chain starts with =@on visible line-1(600ms, immediate: true)=. Since =load-driver= is never instantiated, the =line-1= timeline is never created. All downstream =@after= timelines wait forever, leaving all hero content at =opacity: 0=. The page appears to only show "You can make" / "Donnez à" (the first line, which also has a =@reveal= that works independently).
+
+The =cargo run -- inspect --layer emit= output shows ="// Primitive not found: on"= confirming the failure.
+
+** Reproduction
+
+#+begin_src sh
+cat > /tmp/test-visible.st << 'EOF'
+.hero {
+    @on visible fade-in(600ms) {
+        opacity: 0 -> 1;
+    }
+}
+EOF
+cat > /tmp/test-visible.html << 'EOF'
+<html><head></head><body><div class="hero">Hello</div></body></html>
+EOF
+cargo run -- inspect --layer emit /tmp/test-visible.st 2>&1 | tail -5
+# Output: "// Primitive not found: on"
+#+end_src
+
+* Implementation
+
+** File: =src/pipeline/evaluate.rs=
+
+*** The fix (line 117)
+
+Replace:
+#+begin_src rust
+let macro_def = registry.get_macro(&form_match.macro_name);
+#+end_src
+
+With form-directive-aware lookup that mirrors =resolve_single='s logic:
+#+begin_src rust
+let macro_def = registry.get_macro(&form_match.macro_name)
+    .or_else(|| {
+        // Form-directive macros: form_match.macro_name is the directive name
+        // (e.g. "on" from @on), not the macro's registered name (e.g. "on-event-dispatcher").
+        // Use form-directive lookup with scoring to find the right macro definition,
+        // matching the same logic used in resolve_single().
+        let matching = registry.get_all_macros_by_form_directive(&form_match.macro_name);
+        if matching.is_empty() {
+            return None;
+        }
+        // Score each candidate against the form match captures and pick the best
+        let input = crate::syntax::events::form_compiler::CaptureMapInput {
+            captures: &form_match.captures,
+        };
+        matching.into_iter()
+            .filter_map(|m| {
+                crate::syntax::events::form_compiler::score_macro_form(m, &input)
+                    .map(|s| (m, s))
+            })
+            .max_by_key(|(_, score)| *score)
+            .map(|(m, _)| m)
+    });
+#+end_src
+
+*** Required imports
+
+At the top of =evaluate.rs=, add (if not already present):
+#+begin_src rust
+use crate::syntax::events::form_compiler::{CaptureMapInput, score_macro_form};
+#+end_src
+
+Verify =CaptureMapInput= and =score_macro_form= are =pub= in =src/syntax/events/form_compiler.rs=. They should already be since =resolve_single= uses them. Check lines around the struct definition and function definition.
+
+*** Edge case: multiple matching macros
+
+When multiple macros share the same =@= directive (e.g. =on-event-dispatcher=, =on-mutation-dispatcher=, =on-mutation-dispatcher-simple= all use =@on=), the scoring picks the best-fit based on capture overlap. The =on-event-dispatcher= will score highest for =@on visible fade-in(600ms)= because it has the most matching parameters (=name=, =duration=, =threshold=, etc.).
+
+*** What NOT to change
+
+- Do NOT change =resolve_single= or =resolve_evaluated= — they already work correctly when =evaluate_match= provides the right output
+- Do NOT change =FormMatch.macro_name= — it's used elsewhere and changing it would be a wider refactor
+- Do NOT change the =get_macro= method — direct name lookup is correct for macros that use their actual name
+
+** Test
+
+Add to the test module at the bottom of =evaluate.rs=:
+
+#+begin_src rust
+#[test]
+fn test_evaluate_match_finds_form_directive_macros() {
+    // Simulates @on visible: form_match.macro_name = "on" (from @on directive),
+    // but the macro is registered as "on-event-dispatcher" with form @on ...
+    use crate::metasystem::registry::MetaRegistry;
+    use crate::parser::ast::*;
+    use crate::syntax::form_match::CapturedValue;
+
+    let mut registry = MetaRegistry::new();
+
+    // Register a macro named "test-dispatcher" with form @test ...
+    // that has a %if $event == "visible" { %binds { ... } } body
+    let macro_def = MacroDefAst {
+        name: "test-dispatcher".to_string(),
+        form: Some(crate::parser::ast::FormDef {
+            directive_name: "@test".to_string(),
+            params: vec![
+                FormCapture { name: "event".to_string(), capture_type: "ident".to_string(), default: None },
+            ],
+            body_capture: None,
+        }),
+        binds: vec![], // No top-level binds — they're in the %if body
+        body: vec![
+            MacroBodyItem::If(MetaIfClause {
+                condition: MetaIfCondition::Equals("event".to_string(), "visible".to_string()),
+                then_body: vec![
+                    MacroBodyItem::Binds(vec![
+                        BindDecl {
+                            primitive: "test-driver".to_string(),
+                            args: vec![],
+                            outputs: vec![],
+                            span: crate::parser::SourceSpan::default(),
+                        },
+                    ]),
+                ],
+                elif_clauses: vec![],
+                else_body: None,
+            }),
+        ],
+        order: Some(700),
+        scopes: vec![],
+        derives: vec![],
+        requires: vec![],
+        registers: vec![],
+        states: None,
+        source_file: Some("test.st".to_string()),
+        span: crate::parser::SourceSpan::default(),
+    };
+    registry.register_macro(macro_def);
+
+    // Create a form match with macro_name = "test" (from @test directive)
+    let form_match = FormMatch {
+        macro_name: "test".to_string(), // Directive-derived name, NOT "test-dispatcher"
+        captures: [
+            ("event".to_string(), CapturedValue::Ident("visible".to_string())),
+        ].into_iter().collect(),
+        capture_spans: Default::default(),
+        selector: Some(".hero".to_string()),
+        span: crate::parser::SourceSpan::default(),
+        source_file: None,
+    };
+
+    let result = evaluate_match(&form_match, &registry).unwrap();
+
+    assert!(
+        result.body_was_evaluated,
+        "evaluate_match must find the macro via form-directive lookup"
+    );
+    assert!(
+        !result.bind_decls.is_empty(),
+        "The %if $event == \"visible\" branch must produce bind_decls. Got: {:?}",
+        result.bind_decls
+    );
+    assert_eq!(
+        result.bind_decls[0].primitive, "test-driver",
+        "Must resolve to the conditional bind's primitive"
+    );
+}
+#+end_src
+
+NOTE: The test constructs AST nodes directly. The exact struct fields for =MacroDefAst=, =FormDef=, =MetaIfClause=, =MacroBodyItem=, =BindDecl=, =FormMatch= etc. may need adjustment to match the current definitions. Before writing the test, read the struct definitions in:
+- =src/parser/ast.rs= for =MacroDefAst=, =MacroBodyItem=, =MetaIfClause=, =FormDef=, =BindDecl=
+- =src/syntax/form_match.rs= for =FormMatch=
+- =src/metasystem/registry.rs= for =MetaRegistry::register_macro=
+
+If constructing these AST nodes is too complex, an alternative integration-style test:
+
+#+begin_src rust
+#[test]
+fn test_evaluate_conditional_binds_via_form_directive() {
+    // This is a simpler test that verifies the lookup path works
+    // by checking that evaluate_match can find a macro when
+    // form_match.macro_name doesn't match the macro's registered name
+    use crate::metasystem::registry::MetaRegistry;
+
+    let registry = MetaRegistry::new();
+
+    let form_match = FormMatch {
+        macro_name: "nonexistent".to_string(),
+        captures: Default::default(),
+        capture_spans: Default::default(),
+        selector: None,
+        span: crate::parser::SourceSpan::default(),
+        source_file: None,
+    };
+
+    // Should return Ok with body_was_evaluated = false (not panic or error)
+    let result = evaluate_match(&form_match, &registry).unwrap();
+    assert!(!result.body_was_evaluated);
+}
+#+end_src
+
+** Full pipeline integration test
+
+Also add an integration test that exercises the full pipeline with =@on visible=:
+
+Add to =src/pipeline/integration_tests.rs=:
+
+#+begin_src rust
+#[test]
+fn test_on_visible_produces_load_driver() {
+    let source = r#"
+.hero {
+    @on visible fade-in(600ms) {
+        opacity: 0 -> 1;
+    }
+}
+"#;
+    let (matches, _css, _registry) = compile_to_form_matches(source);
+
+    // Find the @on match
+    let on_match = matches.iter().find(|m| {
+        m.macro_name == "on" && m.captures.get("event").map_or(false, |v| v.to_string_value() == "visible")
+    });
+    assert!(on_match.is_some(), "Should have an 'on' FormMatch for @on visible. Got: {:?}", matches.iter().map(|m| &m.macro_name).collect::<Vec<_>>());
+
+    // Now check that resolve produces load-driver
+    let registry = load_test_registry(); // Or however the integration tests get a full registry
+    let evaluated = crate::pipeline::evaluate::evaluate(&matches, &registry).unwrap();
+    let resolved = crate::pipeline::resolve::resolve_evaluated(&evaluated, &registry).unwrap();
+
+    let has_load_driver = resolved.iter().any(|p| p.primitive_name == "load-driver");
+    assert!(has_load_driver, "Must resolve to load-driver primitive. Got: {:?}",
+        resolved.iter().map(|p| &p.primitive_name).collect::<Vec<_>>());
+}
+#+end_src
+
+NOTE: The integration test helpers (=compile_to_form_matches=, =load_test_registry=) may have different names. Check =src/pipeline/integration_tests.rs= for existing test patterns and use the same helpers.
+
+* Acceptance Criteria
+
+1. =cargo run -- inspect --layer emit /tmp/test-visible.st= no longer shows ="Primitive not found: on"= — it should show IntersectionObserver JS code
+2. =cargo test --lib -- pipeline::evaluate::tests::test_evaluate_match_finds_form_directive_macros= passes
+3. =cargo test --lib -- pipeline::integration_tests::test_on_visible_produces_load_driver= passes
+4. =cargo test --lib= passes (all existing tests)
+5. =cargo run -- serve ora-ventures.com/= → hero animation chain fires in browser (opacity transitions from 0 to 1 on all hero elements)
+6. No =%elif= macros are affected: responsive, state-machine, waapi-on-event, waapi-timeline all continue to work (covered by existing tests)

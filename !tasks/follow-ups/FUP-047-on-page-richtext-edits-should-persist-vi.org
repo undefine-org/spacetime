@@ -1,0 +1,49 @@
+#+TITLE: On-page @richtext edits should persist via EditJson (close the round-trip)
+#+STATE: DONE
+#+SESSION_ID: 1503ca05d05c0c62
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-10T14-32-18-497Z_1503ca05d05c0c62.jsonl]]
+#+CUSTOM_ID: FUP-047-on-page-richtext-edits-should-persist-vi
+#+COMPLETION_HASH: 94e52990fe16ac1a
+
+* Initial Message
+
+(b) -> what would that achieve?
+(c) -> is an FUP filed?
+(d) -> yeah what about integration points with stdlib/__admin__? I'd LOVE so automatic content editing on the website directly. This is a DESIGN investigation, let's think about what's most Spacetimey. At the same time, you may think about showing me how you'd use this to edit blogs and whatnot.
+
+Also, think about how you could set up a default editable flow and leverage Spacetime's introspection to automatically augment the admin side with editable-everything, optionally improvable with something akin to the @cms block
+
+* Context
+W1 of editable-everything (commit 7b2fb1ba) shipped the on-page STRUCTURED rich-text
+surface: @richtext renders a published page that reads as a blog and edits in place
+(gate:edit-mode + the schema bake). Typing routes beforeinput → AST op → reproject, and
+the surface stores the doc AST on the host (host.__stDoc) + fires a bubbling `input`
+event (editable-surface.st publish()) — exactly the hook the admin's @on input uses to
+send EditJson.
+
+* Gap
+On a PAGE (not the admin drawer) nothing LISTENS for that input event, so an on-page
+edit updates the live doc + DOM but is NOT persisted back to the data file. The admin
+wires `.ad-form @on input [data-path] → ST.adFieldInput → EditJson → dev-ws → disk`;
+a page has no equivalent. The round-trip is open at the last hop.
+
+* Fix (small, reuses everything)
+Add a default persist listener for @richtext hosts on a page — when edit-mode is on and
+a `[data-st-editable]` host bound to a `$`-path fires `input`, send an EditJson patch for
+that data path (the host already knows its bindPath; the doc AST is host.__stDoc). This
+is the page-side analogue of adFieldInput. Likely a small primitive in stdlib/editable
+(or fold into @edit-toggle / a new @editable-persist that the page includes), riding the
+existing dev-ws + EditJson + server schema-validation + sanitize path (no new channel).
+EditJson already validates the doc against the editable schema server-side (FEAT-099).
+
+* Acceptance
+Edit a paragraph on the editable-blog demo with edit-mode on → reload → the change
+survives (written to the post's data file). A headless/CDP test drives an input on a
+$-path @richtext host and asserts an EditJson message was dispatched with the doc AST.
+
+* Provenance
+Surfaced as the W4 tail of the editable-everything D0 design (research/spacetime-
+editable-everything-D0.org). Local-dev-only (no auth, per the user); prod content-store
+is out of scope until there is a deployed target.
+
+NOTE [2026-06-12]: DONE (commit 7657050b). On-page @richtext edits persist to disk, proven end-to-end under real Chromium: edit the blog h2 → reload → change + all marks survive. The persistence rail existed; wiring the page case surfaced + fixed 6 root gaps: (1) surface persist hook w/ uniform $x.f / $x[i].f path parse + dirty-gating; (2) dev-save data branch generalized to explicit {file,path}; (3) data-source registers backing file in _dataRegistry at init (no race, real path); (4) server synthesize_st_only_shell injects dev-tools runtime in --debug (.st-only parity); (5) server editable_schema_for_site resolves imports so builtin marks are visible (was failing closed → clobbering content); (6) public/runtime/st.js core registries made idempotent (double-runtime load was wiping _dataRegistry). lib 2254, surface 6, editable_model 38, integration 172.

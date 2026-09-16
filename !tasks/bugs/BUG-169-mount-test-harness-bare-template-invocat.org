@@ -1,0 +1,91 @@
+#+TITLE: @mount test harness: bare template invocation `&card("x");` renders element but never resolves its holes (named-ref form `&inst &card("x");` works)
+#+STATE: ITEM
+#+SESSION_ID: 152939d2e5b25e66
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-09T16-24-34-454Z_152939d2e5b25e66.jsonl]]
+#+CUSTOM_ID: BUG-169-mount-test-harness-bare-template-invocat
+
+* Initial Message
+
+can dom-refs (`&my-template(..., ...) { ... }`) contain all of ST? As in, html, CSS, ST syntax through macros, etc. and then it gets its scope solved to be within the template? Or does it have some special case?
+
+The goal is to empower the 'element-ref as function' way of creating Spacetime affordances the most blessed way to build encapsulation and whatnot. I would like to do that for Ora Ventures, whose website we want to rewrite completely to be attractive to Chief AI Officers at big groups in emerging markets, as well as capital-rich SMBs that want to be more dynamic and competitve. That website should be sober, have crisp but minimal copy, and showcase Spacetime features in a way that is unique and helps us convert more (so think of advanced interactions and motions in terms of high-convertion)
+
+Come back with your plan, sources, inspirations, for the copy
+Come back with your analysis for the &... thing
+
+* Found via
+PLAN-070 W5 (doc+fixture convergence) \u2014 writing regression fixtures for
+=stdlib/macros/template.st='s invocation-style doc examples inside
+=@mount { }=. A BARE invocation's holes never interpolate; the identical
+template invoked via a NAMED ref DOES interpolate correctly.
+
+* Repro (RED, confirmed 2026-07-09 on main, headless backend)
+#+begin_src spacetime
+@import "stdlib/testing/test"
+@test "bare vs named" {
+  @mount {
+    @template &card($label) { <div class="card">`$label`</div> }
+    .host { &card("Hello"); }               // BARE
+  }
+  @then .card { text == "Hello"; }           // FAILS: got "`$label`" (unresolved hole)
+}
+#+end_src
+
+Changing ONLY the invocation to a named ref fixes it:
+#+begin_src spacetime
+.host { &inst &card("Hello"); }             // NAMED
+@then &inst .card { text == "Hello"; }       // PASSES
+#+end_src
+
+The element ITSELF renders either way (=@assert exists .host .card= passes for
+both \u2014 see the pre-existing =template-factory.test.st= fixture, BUG-105,
+which only asserts existence and therefore never caught this). Only the
+=`$label`= HOLE fails to resolve for the bare form \u2014 the literal backtick
+text =`$label`= is what ends up in the DOM instead of "Hello".
+
+* Scope note
+This is a =@mount=/=.test.st= HARNESS-SPECIFIC bug \u2014 confirmed NOT present in
+a real compiled site (=cargo run -- build=): the identical bare-invocation
+shape renders + resolves its hole correctly when built and served for real
+(verified manually via dev server + puppeteer during PLAN-070 W4/W5 work).
+So the bug is isolated to whatever separate compile/mount path
+=@mount { … }= uses for its content (the =%$content.js= sub-program
+re-compile mentioned in =stdlib/testing/test.st=), not the production
+compiler/runtime pipeline PLAN-070 hardened.
+
+* Hypothesis (not yet traced to root cause \u2014 needs its own investigation)
+A named-ref invocation (=&inst &card(...)=) likely goes through a different
+FormMatch/primitive-binding path than a bare one (=&card(...);= with no
+ref) inside the =@mount= sub-program's isolated re-compile. Worth checking:
+- Whether the mount harness's template-factory REGISTRATION (via
+  =register-template=) timing races the bare invocation's factory lookup
+  differently than the named-ref path.
+- Whether =ST.watchScoped='s scoped-resolution walk (the same "instance
+  scope first, then ancestors, then global" lexical chain BUG-165/166/167's
+  analysis relied on) resolves against a DIFFERENT root element for a
+  bare vs. named invocation inside the =@mount= DOM \u2014 the named form gives
+  the created element a stable =ST.set(container, refName, element)= handle
+  the harness's own DOM inspection might depend on, while a bare invocation
+  has no such handle for the harness to locate/settle before asserting.
+- Start from =stdlib/testing/test.st='s =@mount= implementation
+  (=%$content.js= interpolation) and the =invoke-template= primitive's mount
+  timing (=stdlib/primitives/template.st=).
+
+* Acceptance
+1. RED fixture above (bare form) passes: =@then .card { text == "Hello"; }=
+   after the fix.
+2. Named-ref form (already passing) keeps passing \u2014 regression guard.
+3. =tests/fixtures/native-template/template-doc-examples.test.st= (added
+   during PLAN-070 W5) can be simplified back to bare invocations matching
+   the doc's own examples verbatim, once fixed (currently written with
+   named-ref workarounds to route around this bug \u2014 tracked with an inline
+   comment pointing at this item).
+4. Existing =template-factory.test.st= (BUG-105) fixture strengthened to
+   also assert on hole content, not just existence \u2014 it would have caught
+   this originally.
+
+* Related
+- tests/fixtures/native-template/template-factory.test.st (BUG-105 \u2014 same
+  bare-invocation shape, existence-only assertion masked this)
+- tests/fixtures/native-template/template-doc-examples.test.st (PLAN-070
+  W5 \u2014 written with named-ref workarounds pending this fix)

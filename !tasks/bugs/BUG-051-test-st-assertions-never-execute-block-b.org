@@ -1,0 +1,75 @@
+#+TITLE: .test.st assertions never execute — :block body emitted as dead string literal
+#+STATE: DONE
+#+SESSION_ID: 14f94e45c6c3f247
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-02T11-06-49-499Z_14f94e45c6c3f247.jsonl]]
+#+CUSTOM_ID: BUG-051-test-st-assertions-never-execute-block-b
+#+COMPLETION_HASH: 3104d93cc15ceb29
+
+* Initial Message
+
+let's think about how we'll extend the stdlib for Spacetime using this as a philosophical underpinning: https://www.gingerbill.org/article/2025/09/08/package-managers-are-evil/
+
+
+In the context of integrating pretext to make text layout much simpler in Spacetime, especially in ora-ventures.com's hero section (projects/ora-ventures.com/ has some older syntax which the implementation agent will have to fix).
+
+Gather your thoughts and come up with your own understanding of the nuances of going that way for this project. Remember that the stdlib/ folder is going to go from having `macros/` and `primitives/` to a modular architecture for folders, which is how we are going to make the pretext macros btw.
+
+This is pretext: https://github.com/chenglou/pretext
+
+Also think about stuff we could put in the demos/ folder to showcase the integration with pretext and the latest Spacetime features. Let's not do ora-ventures.com just yet, let's first think about a nice framework for making the stdlib library both lean and "fusion-engine-included", and showcase that with pretext. Consider all angles
+
+* Severity
+CRITICAL. Every =.test.st= assertion across the project is VACUOUS — the test
+body never executes. =@assert (1 === 2)=, =@then .missing should exist=, and a
+mutated =ST.get(el,'count') === 999= ALL pass. The playwright_st + headless
+suites give false green.
+
+* Reproduction
+#+BEGIN_SRC
+@import "stdlib/testing/test"
+@test "bare assert no fixture" {
+  @assert (1 === 2) "must fail"
+}
+#+END_SRC
+=cargo run --features headless -- test /tmp/x.test.st --headless= → "1 passed".
+
+* Root cause (chain)
+1. =@test= macro form is =@test $name:string { $body:block }=; emit is
+   =window.__spacetime_register_test(%$name, async () => { %$body.js });=
+2. =parse_capture_type_name= (src/syntax/events/form_compiler.rs:1431) maps
+   ="block" => CaptureType::HtmlBlock=.
+3. HtmlBlock captures as =CapturedValue::String(inner)= (form_compiler.rs:1077) —
+   the raw body SOURCE TEXT, with nested directives UNcompiled.
+4. =%$body.js= is substituted by =substitute_params_simple= →
+   =captured_value_to_emit_string(String, Some("js"))= (src/pipeline/evaluate.rs:425):
+   the =(String, _)= arm returns =s.clone()=, IGNORING the =.js= field.
+5. Result emitted: the raw body text as a string-literal expression with a
+   trailing =.js=. The async test fn body does nothing; nothing throws; "passes".
+
+Confirmed PRE-EXISTING (reproduces at commit fdf1dc3b, before PLAN-024).
+
+* What "block" capture must actually do
+=$body:block= / =$content:block= must yield a structured value exposing:
+- =.html= -> raw inner text (what @fixture innerHTML needs)
+- =.js=   -> COMPILED nested directives (matched_children FormMatches lowered to JS)
+The compiled children already exist on =body_node.matched_children= (used by the
+=$children*= collector -> =CapturedValue::Block=). The fix must route =:block= to a
+Named/Block value AND make the =.js= / =.html= field accessor compile the Block
+(via the resolve.rs nested_form_matches path) rather than stringify it.
+
+* Scope / impact
+Touches: capture-type mapping (form_compiler), body-capture construction, and the
+macro emit field-accessor substitution (evaluate.rs) + nested compile (resolve.rs).
+Foundational — own work item, NOT folded into PLAN-024 W4. Once fixed, audit ALL
+existing .test.st for assertions that were silently passing.
+
+* Discovered
+During PLAN-024 W4 while adding pretext text-module playwright tests; the new
+tests appeared to pass even when assertions were deliberately false.
+
+* Fix plan
+[[id:PLAN-026-fix-block-body-capture-so-test-st-assert]] — deferred from PLAN-024 W4 by decision; W4 verifies pretext fusion via Rust integration tests instead.
+
+NOTE [2026-06-03]: Root cause (block body emitted as dead string literal) FIXED in commit 97723e7c (PLAN-026 W1): :block bodies now compile via the .js field accessor through resolve_var_ref->apply_param_field_accessor + rematch_with_registry + Arc<MetaRegistry> in EmitContext. Proven by snapshot test_and_fixture_js (fixture now emits createElement/innerHTML/appendChild, was the literal). lib 2093 green.
+
+NOTE: this bug (the :block dead-literal) is resolved, but full .test.st GATING is still blocked by a SEPARATE cluster of pre-existing testing-macro defects surfaced once bodies compiled: @assert swaps condition/message; @then/@eval/@wait/@mock don't match. Tracked as BUG-053 -> FEAT-054 (gate) -> FEAT-055 (text tests). Run suites stay vacuous until those land.

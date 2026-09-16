@@ -1,0 +1,184 @@
+#+TITLE: Kernel lexer cutover — dissolve tier-2 domain lexing into grammar leaves (W3)
+#+STATE: ITEM
+#+SESSION_ID: 153f5ed0617636c7
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-26T21-12-46-213Z_153f5ed0617636c7.jsonl]]
+#+CUSTOM_ID: FEAT-167-kernel-lexer-cutover-dissolve-tier-2-dom
+
+* Initial Message
+
+@data inline $brand Brand : {
+  "ink":    "#e8eef7",
+  "bg":     "#0b0e14",
+  "panel":  "#121722",
+  "accent": "#5eead4",
+  "dim":    "#8b96a8",
+  "rule":   "#222b3a"
+};
+
+Could we have this be written like { ink: #e8eef7; ... } instead of that? Basically, if I define a field to be color, then I can use CSS, and basically if ther's a serialised data, it's the string (or it's the Js repr of it? let me know what the representations should look like). This is part of a wider effort to support all CSS value types more natively in Spacetime (tell me what that would mean that I didn't see yet)
+
+* Initial Message
+
+Wave 3 of PLAN-122. Shrink the lexer to a frozen universal kernel; the domain tier (COLOR regex, unit bag, number+unit merge, value-position hash promotion) is DELETED because grammars now own domain patterns at their leaves (W0/W1). Not a .st twin of the lexer — the context-sensitivity dissolves: "value position" was grammatical knowledge all along, and the grammar now has it.
+
+* Target
+
+- src/syntax/cst/lexer.rs — kernel freeze: ws/comments/ident/number/string/punct/sigils. Delete: Color regex (:64-75), unit list (:252-264), number+unit merge (:332-371), hash→COLOR promotion (:405-420).
+- Consumers (measured in design): ~12 files touching NUMBER_WITH_UNIT, ~26 touching Color-ish symbols — incl. syntax/events/extractors/simple.rs, form_compiler.rs, events/grammar/properties.rs + directives.rs, cst/parser.rs:3508-3559 (css value parts), serializer.rs, lsp/*.
+- Bootstrap gate: stdlib/** must parse under kernel-only tokens (kernel-honesty test).
+
+* Change (phase-gated; parity is mechanical proof, not confidence)
+
+- P0 GOLDEN BASELINE: token-stream dump of the CURRENT lexer over the corpus (stdlib/ + demos/ + examples/ + tests/fixtures/ + projects/) committed as goldens. MUST follow W0's number audit (C2) — never enshrine wrong tokenization. Diagnostics snapshots too, not just tokens (error wording must not regress).
+- P1 SHADOW PARITY: kernel + pattern-terminal path runs alongside the old lexer per compile; assert identical token streams on every corpus file. Gate: zero diffs + full suites green. The dual lexer is a TEST HARNESS, not a shipped parallel impl — deleted at P4 (cutover rule).
+- P2 CONSUMER MIGRATION: consumers switch from token-matching to grammar-produced captures, class by class (extractors → form_compiler → grammar/properties → serializer → LSP). LSP moves to grammar-POSITION queries ("inside a color capture") — better hover/completion, but it's real work in the audit, not free.
+- P3 DELETE tier-2: COLOR regex, unit bag, merge pass, promotion pass, and the dead CaptureType arms if W1 hasn't already. Selector ambiguity resolved structurally (selector grammar has no color leaf).
+- P4 delete the shadow harness.
+
+* Edge
+
+- Style declarations stay opaque text + lightningcss validation until property-contextual typing (still deferred, PLAN-122 tier-c) — no behavior change there, no regression surface.
+- `%` and `m` legacy merges: membership decisions from W0's unit audit (C7) are inputs; semantic catches surface here.
+- Perf: PEG backtracking bounded by first-char dispatch + memoization at # / number starts; benchmark lexing corpus before/after (2× acceptable, 10× is not).
+- FEAT-109 CONFLICT (flagged on PLAN-122): its Tier 1 infers value types from lexer token kinds (Color/NUMBER_WITH_UNIT) — those tokens die here. Inference must migrate to reading grammar/capture results. Coordinate before P2.
+
+* Accept (RED→GREEN)
+
+- P1 zero token-stream diffs on the corpus; diagnostics snapshots stable.
+- Suites green at every phase gate (cargo test --lib · --test integration_tests · --test v8_runtime_test · headless).
+- P3: tier-2 code deleted; lexer.rs contains the kernel only; stdlib kernel-only parse test green.
+- Parity harness deleted at P4 — no shipped dual implementation.
+
+* Relation
+
+Parent: PLAN-122. Blocked by W1 (grammars must own the domains before the lexer stops pre-committing them). Resolves the lexer half of the type-as-text drift class (BUG-192). Requires reconciliation with FEAT-109 Tier 1.
+
+* W1.2/W3 MERGED CUTOVER — IN FLIGHT (session 153f5ed0)
+
+The review swarm caught a sequencing error and it is worth recording as the
+wave's main lesson: I flipped NAME resolution (parse_capture_type arms deleted,
+scalars resolve to stdlib) BEFORE flipping the LEXER tier. That cannot work, and
+it is the same lesson W1 already recorded one level down — a grammar cannot
+match tokens the lexer has fused. `@fade-in(distance: 40px)` failed with
+E0946 "Expected `$distance:Custom(\"length\")`, got token NUMBER_WITH_UNIT".
+Full suite at that point: lib 3072/14 FAILED, integration 188/15 FAILED.
+
+∴ the name flip and the tier flip are ONE cutover. Landed together.
+
+** Three P1s found by review, all verified in source, all fixed
+
+1. `time` had NO stdlib production. The deleted Rust arm mapped BOTH "time" and
+   "duration" to Duration; css-values.st declared only `duration`. An
+   unregistered %capture_type resolves through form_compiler.rs's
+   `.or_else(|| extractors.get(&Expr))` — a SILENT lenient fallback. So ~69
+   `$x:time` sites would have quietly accepted arbitrary expressions.
+   Fixed: `%capture_type time { $d:duration }`. The gate is NEGATIVE
+   (`duration: banana` must be REFUSED) because a positive-only test passes
+   just as happily with the alias absent.
+
+2. Scalars reified to RECORDS, not strings. Sequence/Choice extractors return
+   CapturedValue::Named when a grammar has named parts, so `8px` became
+   `{n:"8", u:"px"}` and codegen emitted a JS object where every consumer wants
+   "8px". Contradicts PLAN-122's core decision (repr = CSS string, always).
+   Fixed: reify_scalar_source_text in wrap_reifier, registry-keyed exactly like
+   param_list/properties/keyframes.
+
+3. Every scalar needed a `( $ref:binding )` arm. A value position in Spacetime
+   is reactive (`duration: $speed`); literal-only grammars rejected ordinary
+   corpus usage. Arm is listed LAST so a literal always wins the alternation.
+
+** The token-shape migration (the actual remaining work)
+
+At Kernel tier `300ms` is NUMBER("300") IDENT("ms") and `50%` is NUMBER PERCENT.
+Every position that consumed ONE fused NUMBER_WITH_UNIT token must now consume
+the adjacent pair. Two distinct layers, both needed:
+
+- CST parser (src/syntax/cst/parser.rs) — DONE. Added `bump_value_atom()` +
+  `next_is_adjacent_unit()`: adjacency is decided by POSITION (prev.offset +
+  prev.len() == cur.offset), with NO opinion about which units exist. That
+  opinion now lives in css-values.st, once. Wired into parse_meta_default_value
+  and the primary-expression value arm. This fixed
+  `duration: time = 300ms` in signal-flip.st/websocket.st.
+
+- Form matcher arg collection (src/syntax/events/grammar/directives.rs:~443) —
+  OUTSTANDING. The per-token bump loop splits `500ms` into two ARG children,
+  giving "Unexpected N extra inline token(s) after directive".
+
+Corpus signal on examples/mobile-tasks: 8 errors -> 6 after the binding arms.
+
+* LANDED (session 153f5ed0) — commits ea4cbdff, f125a65f, f4126fe5, f731c963, 6b94985f, 0f2b292c
+
+Net **-487 lines of Rust** in the final deletion commit alone. The CSS domain now
+lives in `stdlib/capture-types/css-values.st` and nowhere else.
+
+** What the review swarms caught that the suite did not
+
+Two swarms ran; between them they found SEVEN defects, every one of which the
+test suite was green through. The pattern is worth keeping:
+
+*** Swarm 1 (before the tier flip) — 3 P1s
+1. `%capture_type time` did not exist. An unregistered name resolves through
+   `form_compiler`'s `.or_else(|| extractors.get(&Expr))` — a SILENT lenient
+   fallback — so ~69 `$x:time` sites would have accepted arbitrary expressions.
+2. Scalars reified to RECORDS (`{n:"8",u:"px"}`) where consumers want `"8px"`.
+3. Every scalar needed a `( $ref:binding )` arm; a value position is reactive.
+
+*** Swarm 2 (after the cutover) — 4 more
+4. `#e8eef7z` ACCEPTED — six legal digits banked, scan stopped at `z`, six is a
+   permitted count. Fixed by requiring the run to END AT A TOKEN BOUNDARY.
+5. `40 px` ACCEPTED as a length, emitting the literal string `"40 px"`.
+   `SequenceExtractor` skips inter-element trivia for every grammar in stdlib, so
+   the unit terminals now opt in via `CaptureExtractor::requires_adjacency`.
+6. `50%` REFUSED as a length. `score_measure` is `(length | duration)`, so this
+   broke every clip driver — `clip_driver_test` was 0/4 and I had never run that
+   target. Now 4/4.
+7. `RGB(1,2,3)` / `TRANSPARENT` REFUSED. CSS keywords are ASCII
+   case-insensitive; `LiteralExtractor` compared exactly.
+
+**The lesson: every one of these was invisible to a positive-only test.** The
+wave's gates now live in `tests/css_scalar_acceptance_test.rs` and are mostly
+NEGATIVE. The percentage gate was verified to FAIL when its fix is reverted.
+
+** The sequencing error, recorded so it is not repeated
+
+I flipped NAME resolution before LEXER tokenization, as two waves. That cannot
+work — a grammar cannot match tokens the lexer has fused, which is the lesson W1
+had already recorded one level down. 29 tests went red. The two flips are ONE
+cutover.
+
+** The duplicate table (FUP-151, walked into)
+
+`parse_capture_type_name` in `form_compiler.rs` is a second copy of
+`parse_capture_type` in `parser/mod.rs`. I migrated one and not the other, and
+nothing failed: the name simply kept resolving to its Rust arm on that path
+while the stdlib production sat unused. Both are migrated now, each carrying a
+test that names the other.
+
+** Attribution discipline
+
+A concurrent agent was working in the same tree. Rather than guess, the tier was
+flipped back and forth to MEASURE: Domain gave 13 integration failures, Kernel
+15. The 2-failure delta became BUG-285 (nested `%rewrite` resolution), with the
+evidence in the report. Eleven `on-cutover#...` failures occur at BOTH tiers and
+belong to SIP-001c. Five lib snapshot failures are the concurrent agent's
+BUG-271 work — my commits touch no `emit/` or runtime files.
+
+** Final state
+
+- lib 3056 passed / 10 failed, integration 188 / 15 — unchanged across a
+  -487-line deletion.
+- Corpus 19/30 example+demo projects clean (was 18); `demos/3d` 16 errors -> 0.
+- Colour acceptance, in BOTH a declaration and a directive arg:
+  `#c65b3c #fff #fffa #11223344 #E8EEF7 50% $binding` accepted;
+  `#e8ee1 #e8eef71 #e8eef7z #zz "40 px" "duration: banana"` refused.
+- `LexTier` deleted on schedule; `grep -rn "LexTier|with_tier" src/ tests/` is empty.
+
+** Deliberately NOT done
+
+A malformed value in a PLAIN CSS DECLARATION still reaches the stylesheet.
+Filed as FUP-176 with the design and the reason: `StatePropertyAst` carries no
+span, so a spanned diagnostic needs spans threaded through the property AST —
+a subsystem, not a leaf, and it fails the elegance bar as a fold-in. Verified
+from crate source that lightningcss 1.0.0-alpha.67 cannot report it either:
+`Property::parse` deliberately downgrades a failed typed parse to
+`Ok(Property::Unparsed)`, so the warnings sink stays empty.

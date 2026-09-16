@@ -1,0 +1,305 @@
+#+TITLE: Remove World B: emit serializes World A, retire ComponentBodyDef payload
+#+STATE: DONE
+#+SESSION_ID: 150962ecfcb3e4dc
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-14T22-52-45-426Z_150962ecfcb3e4dc.jsonl]]
+#+CUSTOM_ID: FEAT-119-remove-world-b-emit-serializes-world-a-r
+#+COMPLETION_HASH: 24458e7c440daa30
+
+* Initial Message
+
+ok
+
+#+LAYER: pipeline
+#+EFFORT: L
+
+* Initial Message
+
+Continuation of FEAT-115/Q4. The doc claims =ComponentBodyDef= (the capture
+payload struct) is "irreducible — the shape of the compile→runtime problem
+itself." That is false. It is a *copy* of World A, kept in sync by an overwrite,
+serialized by a hand-rolled serializer that re-implements =serde= for 3/5 fields.
+
+User question answered: *what is emit output for in the final meta-compiler
+architecture?* → Emit's sole purpose is to **project the World-A IR
+(ScopeBlock graph) into runtime artifacts (JS/CSS strings).** CSS is emitted from
+scopes; JS bindings are emitted from scopes; =rawBody= is no different — it is the
+template scope projected to runtime JS. =ComponentBodyDef= pretended to be BOTH the
+IR (introspectable structure) AND the emit output (runtime payload). In the final
+architecture those are two stages with one direction of flow:
+
+  parse → World A (ScopeBlock graph)  = the IR / truth / introspectable model
+  emit  → runtime strings             = the ONE projection of World A → runtime
+
+The capture-carried copy is World B. Remove it.
+
+* Intention & Purpose
+
+End state: **one producer (World A), one validator (the body lints), one emit
+projection (serde of the scope + builder codegen).** The capture stops carrying a
+structured payload. Every consumer reads World A.
+
+Concretely:
+- =ComponentBodyDef { html, states, exports, refs, diagnostics, section_transitions }=
+  → =ComponentBodyValidation { diagnostics, section_transitions }= (drop the 4
+  payload fields; keep ONLY the validator-output channel).
+- =ScopeBlock= gains =html: String= for Construct scopes (persist the CST
+  =reconstruct_template_body_html= currently stranded in the local =template_html=
+  map). It already holds =exports= + =refs=; states live in =local-state= matches.
+- The **overwrite** in =parser/mod.rs= (copies scope→capture) is DELETED — there are
+  no payload fields left to overwrite.
+- Factory emit: =component_body_to_js_with_params(body)= →
+  =component_body_to_js_from_scope(scope, element_params)=. Serde-serializes
+  =html/states/exports/refs= (the =serde_json::to_value= path =main.rs:3621= already
+  uses for the whole =StFile=) + =component_builder_js= codegen + the =Expr=-initial
+  raw-JS guard. Threaded a =scopes_by_name= map into =expand_typed= (one param;
+  =context.scopes= is already in hand at the call site, mod.rs:954).
+- Pre-expand validators read the scope: E0402 (=body.refs= → =scope.refs=),
+  W0700 (=body.section_transitions= → validator channel), E0900 bridge
+  (=body.diagnostics= → validator channel).
+- =sync/handlers.rs= + =editable/schema.rs= read =html= from the matching
+  =ScopeBlock= (both already =parse()= the file → have =ast.scopes=).
+- =inspect --layer parse= body summary reads =ScopeBlock= (the structured truth),
+  not the courier — strictly MORE honest introspection.
+
+* What emit output IS (the architecture answer, durable)
+
+Emit = the projection stage. Input: World-A IR. Output: runtime JS/CSS strings.
+A =@template= body is not special: its runtime =rawBody= object is the template
+=ScopeBlock= serialized (=serde=) plus a =builder= function (HTML→reactive-DOM
+codegen — the one genuinely non-JSON, non-serde piece, keyed off =html= alone).
+
+The "DTO" is therefore not a parsed representation — it is **emit output**, the same
+category as emitted CSS. It belongs in the emit lane, produced from World A at emit
+time, not parsed into a struct at parse time and copied.
+
+* Irreducible residue (what legitimately survives)
+
+1. =builder= — =component_html_to_exprs(html) → emit_builder_root_scoped=. A JS
+   *function*; cannot be JSON. Emit codegen, keyed off =html=.
+2. =initial: Expr= — the one state field where serde's ="…"= quoting is wrong (value
+   is live JS). One =RawValue= / custom-Serialize guard.
+3. =ComponentBodyValidation { diagnostics, section_transitions }= — the body
+   validator's OUTPUT channel (E0900/E0906/W0700). Not payload; rides the capture as
+   a thin result, drained at pipeline/mod.rs:1319/1519.
+
+None of these is =ComponentBodyDef= as it stands.
+
+* Blast radius (11 capture-read sites, mapped)
+
+| site | reads | repoint to |
+|------+-------+-----------|
+| parser/mod.rs:690 (OVERWRITE) | writes payload | DELETE |
+| pipeline/expand.rs:338 (factory) | html/states/exports/refs/builder | scope (serde) |
+| pipeline/expand.rs:1753 (to_js fallback) | generic | trivial |
+| pipeline/mod.rs:746 (E0402) | body.refs | scope.refs |
+| pipeline/mod.rs:776 (&name scan) | body.html | scope html |
+| pipeline/mod.rs:1319 (E0900 bridge) | body.diagnostics | validation channel |
+| pipeline/mod.rs:1519 (W0700) | body.section_transitions | validation channel |
+| sync/handlers.rs:949 | body.html | scope html |
+| sync/handlers.rs:1284 (display) | body.states.len() | scope states |
+| editable/schema.rs:456 | body.html → exprs | scope html |
+| cli/inspect.rs (parse layer) | format(body) | scope |
+
+* Waves (each keeps the build + full suite green)
+
+** W1 — Serde-ify the factory serializer (Axis A, zero data-flow change)
+Replace the 3 hand-rolled verbatim-=serde_json= branches (html/exports/refs) and
+the =states= loop in =component_body_to_js_with_params= with =serde= of the
+=ComponentStateDecl/ExportDecl/TemplateRef= structs (identical output shape, proven
+by the runtime contract template.st:285/297). Keep =ComponentBodyDef= as input.
+Guard =initial: Expr= raw-JS. ACCEPTANCE: byte-identical =rawBody= for the
+=component_body_corpus= + factory snapshot tests; =cargo test --lib= green.
+
+** W2 — Persist html on the Construct ScopeBlock
+Add =ScopeBlock.html: String= (=skip_serializing_if = "String::is_empty"=). Fill it
+in =cst_to_stfile= from the existing =template_html= map. ACCEPTANCE: =inspect
+--layer scopes= shows html on template scopes; existing tests green.
+
+** W3 — Factory emit reads the scope; delete the overwrite
+Thread =scopes_by_name: &HashMap<String,&ScopeBlock>= into =expand_typed= (built
+from =context.scopes= at mod.rs:954). =component_body_to_js_from_scope(scope, params)=.
+DELETE the overwrite (parser/mod.rs:680-710). ACCEPTANCE: factory output
+byte-identical to W1; the overwrite removal changes nothing (proves the copy was
+redundant); full suite green.
+
+** W4 — Repoint pre-expand validators + sync + editable + inspect to World A
+E0402/W0700/E0900-bridge read scope/validation-channel; sync & editable read
+=scope html=; parse-layer body summary reads =ScopeBlock=. ACCEPTANCE: E-code tests
+(E0402/E0900/E0905/W0700) green; sync content-edit + editable-schema tests green;
+=inspect --layer parse= shows structured body from World A.
+
+** W5 — Shrink the struct: ComponentBodyDef → ComponentBodyValidation
+Drop =html/states/exports/refs= fields. Rename. =validate_component_body= returns
+=ComponentBodyValidation=. Update the differential corpus to assert only
+=diagnostics + section_transitions=. ACCEPTANCE: =grep -rn ComponentBodyDef src/=
+returns only the rename target + comments; all four suites green
+(=--lib=, =integration_tests=, =v8_runtime_test=, headless).
+
+
+
+** CORRECTION (triple-check, 2026-06-14): states/initial is NOT pure serde
+
+=CapturedValue= derives DEFAULT serde (externally tagged): =Bool(false)= →
+={"Bool": false}=, =Expr("x+1")= → ={"Expr": "x+1"}=. But the runtime reads
+=state.initial= as a BARE value (=ST.set(el, var_name, initial)=, template.st:285),
+and =Expr= must land as UNQUOTED live JS. So the =states= =initial= field REQUIRES
+the hand-rolled unwrap (=Bool→bare=, =Number→bare=, =String→quoted=, =Expr→raw JS=).
+It is NOT redundant serde — it is a genuine emit transform.
+
+Revised W1 split of the 5 factory fields by what they actually need:
+- =html= → =serde_json::to_string(&str)= (already serde; pure)
+- =exports= → =serde= of =ExportDecl {var_name, mutable}= (plain struct, bare-keyed
+  shape; runtime reads =.var_name/.mutable=) — PURE serde ✓
+- =refs= → =serde= of =TemplateRef {ref_name, template_name, args, is_collection}=
+  (plain struct; runtime reads =.template_name= etc.) — PURE serde ✓
+- =states= → custom emit transform on =initial= (the =CapturedValue= unwrap). NOT
+  pure serde. Keep a small dedicated serializer (=state_decl_to_js=) that emits
+  ={var_name, type_name, initial: <unwrapped>}=. This is irreducible residue #4.
+- =builder= → codegen (residue #1).
+
+∴ Honest residue is FOUR items, not three: builder · Expr-initial unwrap (folded
+into a =states= emit fn) · validation channel · (the =states= emit fn itself). The
+=html/exports/refs= 3 fields ARE pure serde and collapse; =states= keeps a typed
+emit helper that takes =&[ComponentStateDecl]= (sourced from =scope_states(scope)=,
+World A) — no =ComponentBodyDef= needed. The architecture conclusion is UNCHANGED:
+the struct dies, emit reads World A; only the count of irreducible emit-transforms
+is corrected 3→4.
+
+
+* DECISION: Option (b) — capture carries NO payload; scope is the sole source
+
+Chosen for IR purity + a COMPILE-TIME-CHECKABLE invariant surfaced through the
+existing diagnostics machinery (=cargo run -- check=). The capture's =body= slot
+becomes a bare marker; emit resolves =scopes_by_name[name]= → serializes the scope.
+
+** The invariant (grounded in real code)
+
+INVARIANT (I1): every body-bearing construct match resolves to exactly one
+World-A Construct scope keyed =@template:<name>=.
+
+Why it is TOTAL and checkable — verified facts:
+1. The body-bearing set is CLOSED and all forms carry =$name:ident=:
+   - =@template &name($p) { $body:component_body }=    (macros/template.st:104)
+   - =&name($p) { $body:component_body }= (template-inline)  (macros/template.st:138)
+   - =@editable-mark &name(...) { $body:component_body }=    (macros/editable.st:60)
+   - =@editable-block &name(...) { $body:component_body }=   (macros/editable.st:90)
+   There is NO anonymous component_body form. =is_body_bearing_construct= is
+   registry-derived (=r.is_body_bearing(name)=, parser/mod.rs:393) — the predicate
+   and the =$name= capture are the SAME registry entries (kinds-as-data; no Rust enum
+   to drift).
+2. =template-invoke= (=&card("x"){ body }=) is NOT a component — its body is
+   =html_block=, not =component_body= (macros/template.st:174). Inline INVOCATION
+   bodies never enter this world; only DEFINITIONS do, and definitions are named.
+3. The scope is BUILT for every named body in =cst_to_stfile= (parser/mod.rs:484:
+   =selector = format!("@template:{}", tmpl_name)=). One scope per definition.
+4. CROSS-FILE is already flat: =resolve_imports= merges imported ASTs into ONE
+   =merged= file — =target.scopes.extend(source.scopes…)= (parser/mod.rs:209) AND
+   matches — BEFORE compile. =CompileContext::with_scopes(ast.scopes.clone())=
+   (compiler.rs:649) therefore holds EVERY file's template scopes co-resident with
+   the matches. A cross-file template definition is in =context.scopes= exactly like a
+   local one. No per-file lookup, no missing import.
+
+∴ I1 cannot be violated by author code through the normal surface — the only way a
+match lacks a scope is an INTERNAL invariant break (a body-bearing macro whose
+scope-builder didn't run). That is precisely what a compile-time assertion should
+catch, and it costs the user nothing in the common case.
+
+** New diagnostic: E0924 (internal) — body construct without resolved scope
+
+Add =E0924= to =src/diagnostics/codes.rs= (next free in the template band; E0923 is
+last used). Severity: ERROR. Fires at the emit boundary (the =scopes_by_name= lookup)
+when a body-bearing match's =name= has no =@template:<name>= scope. Message names the
+construct + template name + source_file; hint: "internal: the body scope was not
+built — file a bug" (this is a compiler invariant, not an author error). Surfaced by
+=cargo run -- check= through the SAME =diagnostics.render()= path
+(main.rs:970) as every other code. This converts a would-be SILENT empty-body emit
+(the (b) risk you flagged) into a LOUD, located compile error.
+
+NB harmony: E0924 is the runtime-enforcement of the closed body-bearing kinds — the
+"closed Rust enum whose arms the runtime doesn't enforce is rot" rule (AGENTS).
+Today the =Construct= scope contract is ASSUMED; E0924 makes it CHECKED.
+
+** Anonymous / inline / cross-file — concrete grounding (→ tests)
+
+Real-world worked cases the cutover + I1 must satisfy. Each becomes a headless test.
+
+T1 (named, local) — the baseline:
+  @template &counter($label) { $count number: 0; <div class="counter">…</div> }
+  .sidebar { &counter("Likes"); }
+  → scope =@template:counter= built; emit serializes it; rawBody.states=[count].
+
+T2 (inline-defined, no @ prefix) — template-inline:
+  &greeting(`$name`) { <p>Hello, `$name`!</p> }
+  → STILL named (=greeting=); scope =@template:greeting=; same path. "Inline" here
+    means "defined without the @template directive", NOT anonymous.
+
+T3 (anonymous INVOCATION with body) — the false-alarm case:
+  .card-list { &card("Title") { <p>Body</p> } }
+  → this is =template-invoke=, body = html_block, NOT a component_body. It does NOT
+    participate in World B at all — no scope keyed, no rawBody, no E0924. The inline
+    body is passed as a factory ARG (fills the first &param). TEST asserts it is
+    untouched by the cutover (regression guard: invocation bodies ≠ definition bodies).
+
+T4 (cross-file definition) — import boundary:
+  // components/counter.st:  @template &counter($label) { … }
+  // page.st:  @import "components/counter.st";  .side { &counter("A"); }
+  → resolve_imports merges counter.st's scope into the page AST; =context.scopes=
+    has =@template:counter=; emit resolves it across the file boundary. TEST: a
+    two-file fixture; assert page rawBody has counter's states/builder.
+
+T5 (nested template definition) — definition inside a definition:
+  @template &outer() { $x string: "hi"; @template &inner() { … } &inner(); }
+  → BOTH =@template:outer= and =@template:inner= scopes exist (one per definition,
+    parser/mod.rs builds each). Each emits from its own scope. TEST: assert two
+    distinct rawBody objects, inner not nested in outer's payload.
+
+T6 (the invariant tripwire) — RED test for E0924:
+  Construct a match whose scope was deliberately not built (unit-level: a
+  body-bearing FormMatch with name "ghost" + empty scopes vec) → emit must produce
+  E0924 naming "ghost", NOT a silent empty rawBody. This is the guarantee (b) buys
+  over (a): the miss is a located compile error, surfaced by =check=.
+
+T7 (editable bodies share the rail):
+  @editable-mark &bold(...) { <strong>…</strong> }
+  → body-bearing (component_body); scope =@template:bold= (same Construct key,
+    FEAT-116 generalized identity). editable/schema.rs reads html FROM THE SCOPE.
+    TEST: editable-schema.json unchanged vs pre-cutover snapshot.
+
+** Why (b) > (a) for Spacetime specifically (the IR/introspection argument)
+
+(a) carries a pre-rendered STRING on the capture → opaque to every inspect layer
+except Emit; the capture-type lies (=String= where a body was). (b) keeps the
+capture a typed marker and the PAYLOAD in World A, so:
+- =inspect --layer scopes= shows the FULL structured body (states/exports/refs/html)
+  — already true, now the SOLE source.
+- =inspect --layer parse= shows the marker + points at the scope — honest.
+- =inspect --layer emit= shows the serialized rawBody — the projection.
+- the name→scope edge is a CHECKABLE graph property (I1/E0924), not an implicit copy.
+This matches Spacetime's "IR is the truth, layers introspect it, check surfaces
+violations" model. (a)'s string is introspection-opaque; (b)'s edge is introspectable
+AND enforceable.
+
+** Revised W3/W5 for (b)
+
+W3: thread =scopes_by_name: &HashMap<String,&ScopeBlock>= (built from
+=context.scopes= at mod.rs:954, keyed by =strip_prefix("@template:")=) into
+=expand_typed=. The =body= arm (expand.rs:338) resolves the scope by the sibling
+=name= capture and calls =component_body_to_js_from_scope=. On miss → push E0924.
+DELETE the overwrite. The capture =body= becomes =CapturedValue::ComponentBody=
+marker with NO fields read.
+
+W5: =ComponentBodyDef= → (i) =ComponentBodyValidation { diagnostics,
+section_transitions }= returned by =validate_component_body=, carried on the capture
+ONLY as the validator channel; (ii) the marker variant carries nothing else. All
+payload reads are gone (W3/W4), so the 4 fields delete cleanly.
+* Acceptance (whole FEAT)
+
+- =ComponentBodyDef= the payload struct no longer exists; emit projects World A via
+  =serde_json::to_value(scope-projection)= + builder codegen.
+- The parser overwrite (scope→capture copy) is deleted.
+- Every consumer (factory, validators, sync, editable, inspect) reads World A.
+- All four test tiers green; no =rawBody= byte drift (snapshot-locked at W1).
+- =cargo run -- inspect --layer scopes= and =--layer parse= both show the structured
+  template body sourced from World A.
+
+NOTE [2026-06-15]: FEAT-119 COMPLETE (all 5 waves). World B (the parallel payload representation) is removed: ComponentBodyDef shrank from a 6-field payload struct to a 2-field validation channel { diagnostics, section_transitions }. The factory rawBody is serialized from the World-A @template:<name> ScopeBlock (component_body_to_js_from_scope), proven byte-identical to the old capture path by the frozen W1 oracle. The scope->capture OVERWRITE is deleted; World A (states/html/exports/refs on the scope) is the single producer. Every consumer (factory emit, E0402/E0918 validators, editable/schema, sync content-edit, provenance injection) reads World A. Dead capture-path serializers (component_body_to_js/_with_params/component_builder_js) deleted. INVARIANT I1 enforced via E0925 (BodyScopeMissing) through check; Q1 (reachability) + Q2 (marker carries the validation result, not nothing) resolved empirically. Verification: 2271 lib + 172 integration green; rawBody oracle byte-identical; v8 425 pass (9 pre-existing FUP-055 failures unchanged); headless 356/251 identical to baseline (251 pre-existing, not FEAT-119). Commits: W1 b28d46d3, W2 5b5f648e, W3, W4, W5 + comment refresh.

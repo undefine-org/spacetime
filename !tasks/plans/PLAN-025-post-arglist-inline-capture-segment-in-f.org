@@ -1,0 +1,134 @@
+#+TITLE: Post-arglist inline capture segment in form patterns
+#+STATE: DONE
+#+SESSION_ID: 14f48ced503111a7
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-05-29T18-28-09-664Z_14f48ced503111a7.jsonl]]
+#+CUSTOM_ID: PLAN-025-post-arglist-inline-capture-segment-in-f
+#+COMPLETION_HASH: 1054f22a6ae0102c
+
+* Initial Message
+
+ok cool, show me what changes you'll do to cart-demo and ruthlessly delete legacy and any path that supported it and any other deprecated/legacy path you encounter along your exploration to fulfil FEAT-047 (maximalist interpretation)
+explain the bugs you filed
+
+* Goal
+Make `%form` patterns able to capture inline elements BETWEEN the parenthesized arg-list `)`
+and the body `{` — the `: $returnType:typeref` run in `@fn`/`@compute`. Fixes BUG-045
+(returnType silently dropped; @compute E0804; projects/jallete never compiled). General fix,
+not a special-case.
+
+* Non-goals
+- NOT touching the operator algebra (`:` stays "type/static annotation").
+- NOT re-introducing deleted legacy data macros.
+- NOT changing how pre-arglist inline / params / body_params are matched.
+
+* Root cause (verified)
+FormClause (src/parser/meta_ast.rs:286) has 3 ordered segments only: inline_elements
+(before `(`), params (inside `()`), body_params/body_capture (inside `{}`). The run between
+`)` and `{` has no home. parse_form_pattern (src/parser/mod.rs:3476) grabs body via
+`after_params.find('{')` and discards the `)`..`{` text. The events directive grammar ALREADY
+captures those tokens (second `inline_args(p)` call at directives.rs ~40, "Consume trailing
+tokens between ')' and '{'"), flattening them into ctx.inline_tokens — so the matcher's main
+cursor reaches them after step 2; only the FormClause model + form-pattern parser + a matcher
+step are missing.
+
+* Children
+- [[id:PLAN-025-post-arglist-inline-capture-segment-in-f::PA-001]] Model: FormClause.post_arg_inline
+- [[id:PLAN-025-post-arglist-inline-capture-segment-in-f::PA-002]] Parser: parse the )..{ run
+- [[id:PLAN-025-post-arglist-inline-capture-segment-in-f::PA-003]] Matcher: step 3.5
+- [[id:PLAN-025-post-arglist-inline-capture-segment-in-f::PA-004]] Scoring + construction cutover
+- [[id:PLAN-025-post-arglist-inline-capture-segment-in-f::PA-005]] returnType reachable for @fn/@compute
+- [[id:PLAN-025-post-arglist-inline-capture-segment-in-f::PA-006]] Tests + snapshots + project verify
+
+* Design — Execution Manifest
+
+** PA-001 Model: FormClause.post_arg_inline
+Add `pub post_arg_inline: Vec<FormInlineElement>` (with `#[serde(default)]`) to FormClause
+(meta_ast.rs:286). Derive `Default` on FormClause so the ~37 struct-literal sites can append
+`..Default::default()` instead of every site spelling the new field. Field holds the inline
+elements parsed from the `)`..`{` run, same element vocabulary as inline_elements.
+
+** PA-002 Parser: parse the )..{ run
+In parse_form_pattern (mod.rs:3476), in the `Some(paren_start)` branch after computing
+`after_params` and locating `brace_start`: parse `after_params[..brace_start]` (the run before
+the body, after `)`) via the existing parse_form_inline_elements into post_arg_inline. When
+there is no body (`{` absent), parse all of after_params. Set the new field on the FormClause
+built at mod.rs:3594. Guard: a leading `:` in that run is a literal element (already handled by
+parse_form_inline_elements which emits Literal(":")), and the typeref capture follows.
+
+** PA-003 Matcher: step 3.5 (match post_arg_inline)
+In form_compiler.rs::try_match, AFTER step 3 (ARG_LIST params) and BEFORE step 4 (BODY):
+iterate self.form.post_arg_inline matching each element against the MAIN `cursor` (which, post
+step-2 + flattened trailing ARG tokens, is positioned at the `)`..`{` tokens) using the same
+match_inline_element path. Must run on BOTH the has-ARG_LIST and no-ARG_LIST branches (a form
+can have post-arg inline whether or not params matched). Apply optional/default semantics
+identically to inline_elements.
+
+** PA-004 Scoring + construction-site cutover
+Update form_scoring.rs if it counts inline elements for specificity (post_arg_inline literals
+like `:` should contribute like inline literals so `@fn(...)‌: T {…}` out-scores a barer form).
+Append `..Default::default()` (or the explicit field) to all FormClause struct literals
+(~37 sites, mostly tests) so the crate compiles.
+
+** PA-005 Make returnType reachable for @fn/@compute
+With PA-001..003, `@fn $name($params): $returnType:typeref { $body }` and the @compute twin
+capture returnType. compute-fn already requires it; fn-registry keeps it optional. No stdlib
+form change needed beyond what already exists (the @compute deps:param_list fix is separate,
+already applied). Verify projects/jallete builds.
+
+** PA-006 Tests + snapshots + project verify
+- lib: parser test — @fn/@compute returnType captured (value == "string"/"number").
+- integration: compile @compute multi-dep + returnType -> compute-fn binds, no E0804.
+- regression: a form with NOTHING between )..{ still matches (no over-consumption).
+- golden snapshots regenerated where form structure is dumped.
+- projects/jallete + checkout-helper.st compile clean (the @compute consumer).
+- Full gate: lib + integration + headless + v8 baseline unchanged.
+
+* Acceptance
+@fn returnType captured; @compute compiles + jallete builds; no regression in )..{-empty forms;
+full gate green (lib 2077+, integration, headless 441, v8 12-preexisting BUG-039).
+
+* Dependencies
+PA-001 -> PA-002 -> PA-003 -> PA-005 -> PA-006; PA-004 parallel after PA-001.
+
+** ITEM Model: FormClause.post_arg_inline field + Default derive
+:PROPERTIES:
+:CUSTOM_ID: PLAN-025-post-arglist-inline-capture-segment-in-f::PA-001
+:END:
+Add `pub post_arg_inline: Vec<FormInlineElement>` with `#[serde(default)]` to FormClause (src/parser/meta_ast.rs:286). Derive Default on FormClause so struct-literal sites can use ..Default::default(). Field holds inline elements parsed from the `)`..`{` run.
+
+** ITEM Parser: parse the )..{ run into post_arg_inline
+:PROPERTIES:
+:CUSTOM_ID: PLAN-025-post-arglist-inline-capture-segment-in-f::PA-002
+:DEPENDS: PLAN-025-post-arglist-inline-capture-segment-in-f::PA-001
+:END:
+In parse_form_pattern (src/parser/mod.rs:3476) Some(paren_start) branch: parse after_params[..brace_start] (or all after_params when no body) via parse_form_inline_elements into post_arg_inline; set on FormClause at mod.rs:3594. Leading `:` becomes Literal(":") then typeref capture follows.
+
+** ITEM Matcher: step 3.5 match post_arg_inline against main cursor
+:PROPERTIES:
+:CUSTOM_ID: PLAN-025-post-arglist-inline-capture-segment-in-f::PA-003
+:DEPENDS: PLAN-025-post-arglist-inline-capture-segment-in-f::PA-002
+:END:
+In form_compiler.rs::try_match, AFTER step 3 (ARG_LIST params) BEFORE step 4 (BODY): match each self.form.post_arg_inline element against the main cursor (positioned at )..{ tokens post step-2 + flattened trailing ARG tokens) via match_inline_element. Run on BOTH has-ARG_LIST and no-ARG_LIST branches. Optional/default semantics identical to inline_elements.
+
+** ITEM Scoring + construction-site cutover
+:PROPERTIES:
+:CUSTOM_ID: PLAN-025-post-arglist-inline-capture-segment-in-f::PA-004
+:DEPENDS: PLAN-025-post-arglist-inline-capture-segment-in-f::PA-001
+:END:
+Update form_scoring.rs so post_arg_inline literals (e.g. `:`) contribute to specificity like inline literals. Append ..Default::default() (or explicit field) to all ~37 FormClause struct literals so the crate compiles.
+
+** ITEM Make returnType reachable for @fn/@compute
+:PROPERTIES:
+:CUSTOM_ID: PLAN-025-post-arglist-inline-capture-segment-in-f::PA-005
+:DEPENDS: PLAN-025-post-arglist-inline-capture-segment-in-f::PA-003
+:END:
+With PA-001..003, @fn $name($params): $returnType:typeref { $body } + @compute twin capture returnType. compute-fn requires it; fn-registry keeps it optional. No stdlib form change beyond existing (@compute deps:param_list fix is separate, already applied). Verify projects/jallette builds.
+
+** ITEM Tests + snapshots + project verify
+:PROPERTIES:
+:CUSTOM_ID: PLAN-025-post-arglist-inline-capture-segment-in-f::PA-006
+:DEPENDS: PLAN-025-post-arglist-inline-capture-segment-in-f::PA-005
+:END:
+lib parser test: @fn/@compute returnType captured (=="string"/"number"). integration: @compute multi-dep+returnType binds, no E0804. regression: )..{-empty form still matches (no over-consume). Regenerate golden snapshots. projects/jallette + checkout-helper.st compile clean. Full gate: lib + integration + headless 441 + v8 12-preexisting.
+
+NOTE [2026-06-02]: DONE. Added FormClause.post_arg_inline segment so %form can capture inline elements between ) and { (the `: $returnType:typeref` run). PA-001 model field + Default derive (meta_ast.rs); PA-002 parse )..{ run in parse_form_pattern (mod.rs); PA-003 matcher step 3.5 in form_compiler.rs try_match (the run is inherently optional — skipped when cursor has no post-arglist tokens, so one @fn/@compute form matches both `n(p):T{}` and `n(p){}`); PA-004 score_form_match scores post_arg_inline captures + cutover ~36 FormClause literal sites with the new field; PA-005 verified @fn returnType=="string" + @compute returnType=="number" (was E0804); PA-006 gate. Also fixed @compute deps: params->param_list (accepts $-prefixed signal refs). NOTE: model+parser+scorer pieces were absorbed into another agent's vendor commits (5888eeb4..7860a561); the matcher+tests committed separately at 1dcd9ac3. Filed BUG-046 (jallete's @compute still blocked by body-paren-$ parse bug, BUG-040/041 family, independent of returnType). GATE: lib 2089, integration 162, headless 441, v8 12-preexisting (BUG-039), zero new regressions.

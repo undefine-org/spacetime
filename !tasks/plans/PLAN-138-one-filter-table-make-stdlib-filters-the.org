@@ -1,0 +1,112 @@
+#+TITLE: One filter table: make stdlib filters the single source, evaluated at build and runtime (GH-11)
+#+STATE: ITEM
+#+SESSION_ID: 154d0baaa942d918
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-08-06T12-08-13-733Z_154d0baaa942d918.jsonl]]
+#+CUSTOM_ID: PLAN-138-one-filter-table-make-stdlib-filters-the
+
+* Initial Message
+
+exlpain #30, and for #14 and #11, does the new @on's text-change facet solve this?
+
+#+STATE: ITEM
+#+PRIORITY: A
+
+* The reported bug
+
+`@each` unrolled at build time emits the filter as literal page text:
+
+#+begin_src html
+<li><span data-st-hole="0"></span> | uppercase</li>
+#+end_src
+
+Runtime renders it correctly, so view-source and the hydrated page disagree.
+
+* The real defect (found while sizing the fix)
+
+`| uppercase` is not implemented once. It is implemented THREE times, and the three
+disagree about which filters even exist:
+
+| where                        | implements                                                          |
+|------------------------------+---------------------------------------------------------------------|
+| `stdlib/primitives/data/filters.st` (15 `%primitive`) | capitalize currency date-format filter group-by lowercase map number-format slice sort take truncate unique uppercase reduce |
+| `public/runtime/st.js`       | alpha currency darken lighten lowercase mix number truncate uppercase |
+| `public/runtime/data-binding.js` | capitalize lowercase pluralize uppercase                        |
+
+Consequences measured on the built binary:
+- `capitalize` is DECLARED in stdlib and appears in NEITHER runtime table under a plain
+  build — `grep -c capitalize spacetime.js` = 0. It fails at build time (leaks as text)
+  AND at runtime (no implementation). The declared surface is a promise nothing keeps.
+- `darken`/`lighten`/`mix`/`alpha` exist in st.js but are declared nowhere in stdlib.
+- `pluralize` exists only in data-binding.js.
+
+So GH-11 is not "the SSG path lacks a feature the runtime has". It is "there is no single
+answer to what `| uppercase` means", and the SSG path is simply the one that agrees with
+nobody.
+
+This is the same structural mistake as GH-28 (the LSP kept its own macro registry), GH-27
+(the ambiguity lint recomputed a decision already made), GH-30/32 (the editor re-derived
+what the compiler knew). Four issues in the same backlog, one shape: **a second source of
+truth that nothing forces to agree with the first.**
+
+* Non-negotiable constraint
+
+AGENTS.md: Rust must NOT re-implement a construct stdlib defines in Spacetime. Porting the
+filter bodies into `ssg_unroll.rs` would fix the symptom and deepen the disease — a fourth
+table. Explicitly out of scope.
+
+* Design: one table, two call sites
+
+** Step 1 — stdlib is the only declaration
+`filters.st` already declares each filter as a `%primitive` with a typed signature and a
+`%emit js` body. That is the source of truth. Delete the ad-hoc object literals in
+`st.js` and `data-binding.js`; the runtime filter table becomes GENERATED from the
+registry, exactly as the LSP now serves the compiler's registry instead of a copy.
+
+Filters currently only in st.js (`darken`/`lighten`/`mix`/`alpha`) are color operations,
+not data filters — they either gain `%primitive` declarations in stdlib or move behind the
+color primitives that own them. Either way they stop being a private table.
+
+** Step 2 — the pipe is parsed once, into the IR
+Today the build-time path never parses `| uppercase` at all: `fill_holes` substitutes the
+hole value and copies the remaining bytes verbatim, so the pipe survives as text. The
+runtime re-parses filter strings at render time (`st.js` has its own parser for
+`currency("$")`).
+
+Parse the pipeline ONCE, at compile time, into an IR node on the hole:
+`hole(item, filters: [ {name, args} ])`. Both consumers then read structure rather than
+re-parsing text. This kills the third parser and makes an unknown filter a COMPILE error
+(`E09xx: unknown filter 'capitalise'`) instead of two different silent failures.
+
+** Step 3 — build-time evaluation seam
+`ssg_unroll::render_row` needs to evaluate a declared filter against a known value. The
+seam is the existing JS evaluation the compiler ALREADY hosts — the same engine that runs
+`--headless` tests. A filter primitive's `%emit js` body is a pure string→string function;
+build-time unroll evaluates it with the row value and substitutes the result.
+
+This is the honest version of "teach the build-time path to evaluate stdlib filters": it
+runs the SAME body the browser will run, so parity is structural rather than maintained.
+
+Purity gate: only filters marked pure may run at build time. A filter touching `Date.now`
+or `document` must refuse (and say so) rather than bake a build-time value into static
+HTML — the fidelity-ladder rule from GH-17, applied to evaluation instead of assertions.
+
+* Acceptance (RED first, in this order)
+
+1. RED gate: `tests/repro/gh-11-ssg-filters/check-contract.sh` asserts the SSG'd HTML for
+   `` `$item` | uppercase `` contains `ADA` and does NOT contain the literal `| uppercase`.
+   Watch it fail before writing the fix.
+2. A parity gate: for every filter declared in `filters.st`, build-time output == runtime
+   output for the same input. This is the gate that makes drift impossible to reintroduce,
+   and it must enumerate the registry rather than a hand-written list.
+3. `capitalize` works at build AND runtime (it currently works at neither).
+4. An undeclared filter is a compile error naming it, not silent text.
+5. A non-pure filter refuses at build time with a named reason.
+
+* Why this is worth a wave and not a patch
+
+The one-line version — teach `fill_holes` to recognise `| name` and call a Rust match on
+the name — is roughly 20 lines and would close GH-11 today. It is the wrong fix: it adds
+the fourth implementation, it cannot express `currency("$")` without a fourth parser, and
+it guarantees that the next filter someone adds to stdlib silently does nothing in
+view-source. The measured `capitalize` hole is exactly what that class of shortcut
+produces over time.

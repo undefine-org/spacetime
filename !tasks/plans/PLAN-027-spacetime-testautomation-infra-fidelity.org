@@ -1,0 +1,110 @@
+#+TITLE: Spacetime test+automation infra: fidelity ladder, CDP substrate, generative testing
+#+STATE: ITEM
+#+SESSION_ID: 14f94e45c6c3f247
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-02T11-06-49-499Z_14f94e45c6c3f247.jsonl]]
+#+CUSTOM_ID: PLAN-027-spacetime-testautomation-infra-fidelity
+
+#+TITLE: Spacetime test+automation infra: fidelity ladder, CDP substrate, generative testing
+Full-arc redesign of Spacetime's test + automation infrastructure. Supersedes the
+BUG-053/FEAT-054/FEAT-055 framing (those become W0 here). One engine, tiered
+fidelity, CDP substrate (chromiumoxide as a Cargo dep — NOT a vendored .st), a
+from-scratch block-assertion test grammar built on %capture_type, generative
+testing (property/fuzz/hypothesis) derived from @type, deterministic animation
+testing via seekable drivers + virtual clock, and a natural extension into live
+browser automation (kernel.sh CDP-compatible).
+
+* North star
+A Spacetime program describes behavior. A RUNTIME executes it against a WORLD.
+Testing, scripting, and automation differ only in (a) which world and (b) what
+you assert. ⇒ ONE vocabulary (@mount/@when/@then/@observe/@wait), many worlds.
+
+* Backends (settled)
+- V8 (rustyscript) STAYS — required by %emit build-js (i18n/locale,
+  stdlib/primitives/i18n.st:42; called at expand.rs:239). It is the pure/logic rung.
+- LinkeDOM = the DOM provider for V8 (logic rung). Not a runner.
+- chromiumoxide (pure-Rust CDP) ADDED to Cargo (NOT vendored — it is part of the
+  compiler crate's deps). Provides layout/timing/paint rungs + automation.
+- Playwright npm-driver crate REMOVED (replaced by chromiumoxide).
+- kernel.sh = same CDP endpoint, remote: @drive … via kernel <wsUrl>. Reuses
+  kernel-images (warm snapshot/restore Chromium), neko (live view), profiles, replays.
+
+* THE FIDELITY LADDER (anti-rot keystone)
+| rung   | world                     | tests                              | backend         |
+| pure   | no DOM, no time           | stagger math, take, fold           | V8              |
+| logic  | LinkeDOM + fake rAF       | reactivity, signals, event wiring  | V8 + LinkeDOM   |
+| layout | real CSSOM, getComputedStyle | @balance, pretext reflow, visible | CDP             |
+| timing | real rAF / seekable clock | reveal stagger, easing, transitions | CDP             |
+| paint  | pixels                    | visual regression                  | CDP + screenshot|
+build-js = pure/logic rung at BUILD time (same V8 embed, different caller).
+RULE: an assertion's vocabulary infers its MINIMUM rung; @test … needs <rung>
+can only RAISE it. A layout assertion on the logic backend is a COMPILE ERROR,
+never a silent pass. This permanently kills the BUG-051/053 false-green class.
+
+* See child FEATs (waves) for the execution manifest.
+
+* Execution manifest (waves)
+Sequential W0→W7, W8 parallelized last. Difficulty ★.
+- W0 [[id:FEAT-056-w0-grammar-bedrock-fix-capture-type-for]]        ★★☆ grammar bedrock (was BUG-053)
+- W1 [[id:FEAT-057-w1-fidelity-ladder-rung-enum-needs-decla]]       ★★★ fidelity ladder + refuse-to-fake
+- W2 [[id:FEAT-058-w2-cdp-substrate-chromiumoxide-warm-chro]]       ★★★★ CDP substrate (chromiumoxide)
+- W3 [[id:FEAT-059-w3-assertion-grammar-mount-block-claims]]        ★★★ @then{claims} + @mount; delete @fixture
+- W4 [[id:FEAT-060-w4-generative-testing-property-fuzz-from]]       ★★★ @property/@fuzz from @type
+- W5 [[id:FEAT-061-w5-animation-testing-virtual-clock-timel]]       ★★★ virtual @clock; animation moat
+- W6 [[id:FEAT-062-w6-coverage-cdp-profiler-span-mapped-st]]        ★★☆ coverage (read of owned structures)
+- W7 [[id:FEAT-063-w7-automation-drive-via-localkernel-obse]]       ★★★★ @drive automation (kernel.sh)
+- W8 [[id:FEAT-064-w8-mechanical-cutover-rewrite-all-test-s]]       ★★☆ corpus rewrite (parallel subagents)
+
+* Dependency DAG
+W0 → W1 → W2 → W3 → {W4, W6, W7}; W3 → W5 (needs W2); W4 → W5(@hypothesis);
+W8 ⟸ {W0, W3, W5}. W6/W7 ⟸ W2+W3.
+
+* Supersedes
+- [[id:BUG-053-testing-macros-then-eval-wait-mock-unmat]] → folded into W0 (FEAT-056).
+- [[id:FEAT-054-make-test-st-assertions-gate-fix-testing]] → W0 + W8.
+- [[id:FEAT-055-gate-stdlib-text-module-test-st-in-playw]] → W8 (CDP runner registration).
+
+* Spinoffs
+- [[id:FUP-024-namespace-module-reference-system-supers]] (general namespacing; W3 @self is the light attempt).
+
+* K-decisions (settled with user)
+- K1: @self spelling is light/provisional; whatever works wins; general namespacing → FUP-024.
+- K2: virtual clock seam approved (W5 spine).
+- K3: HARD cutover — delete all then-*/@fixture/eval(eval()); choking feature ⇒ BUG (worst case FUP), never leave fallback.
+- K4: full FEAT tree first → user review → execute W0→W8 sequential, W8 parallel.
+- Backend: chromiumoxide = Cargo dep (NOT vendored .st). V8 stays (build-js/locale).
+* Priority + mandate updates (user R1/R2)
+- R1: W4 (FEAT-060) + W6 (FEAT-062) raised to #A — the "money shot". Both carry an
+  INTROSPECTION + LEAN-META mandate: use generative/coverage pressure to (1) build a
+  single first-class introspection surface (Spacetime.types / Spacetime.forms) shared
+  by LSP+docs+generator+coverage, and (2) collapse redundant meta-compiler paths;
+  file BUGs/FEATs for every gap that increases macro-power or trims the compiler.
+- R2: W2 Chromium provisioning settled = (a) local auto-discover + doctor hint AND
+  (c) kernel-images Docker as canonical CI substrate; one connector for local/CI/kernel.
+
+* SESSION OUTCOME — all 8 waves addressed
+| wave | status | deliverable |
+| W0 | DONE | assertions gate (async-await + grammar fixes) |
+| W1 | DONE | fidelity ladder + refuse-to-fake gate |
+| W2 | DONE | CDP substrate (chromiumoxide warm browser, Playwright removed) |
+| W3 | DONE | @then{claims} grammar + @mount real + LIVE component testing |
+| W4 | DONE | @property/@fuzz + seeded shrink + cargo-fuzz crate |
+| W5 | DONE | virtual @clock + @record-timeline + @timeline assertions |
+| W6 | DONE | directive-coverage moat (--coverage/--min-directive) |
+| W7 | DONE | @drive live automation + via-kernel endpoint + screenshots |
+| W8 | SEED | transform proven; mass-cutover deferred (FEAT-064) on foreign-CMS build breakage |
+
+Spinoffs filed: FEAT-065 (%for/claim follow-on), FEAT-066 (@mount file/@self),
+FEAT-070 (JS->.st source coverage), BUG-057 (CMS @media regression), BUG-058
+(bare-block directives in @drive), FUP-024/025.
+
+THE VISION REALIZED: the test infra now mounts REAL Spacetime components, drives
+them with real events, observes real reactive + animated state DETERMINISTICALLY
+(virtual clock), generates+shrinks property cases, fuzzes the parser, gates on a
+FIDELITY LADDER backed by a real warm browser (CDP), measures DIRECTIVE COVERAGE
+(the moat), and DRIVES LIVE PAGES with the same probe vocabulary (test ≡
+automation, kernel.sh-compatible). 
+
+KNOWN: 8 lib failures + BUG-057 are from an interleaved concurrent CMS session
+(commits 74d2dbb3/1483e36b touching the type/HTML pipeline) \u2014 NOT this testing
+work. All testing-infra suites green (import 21, parser_fuzz 3, text 8, rung/
+coverage/cdp units). W8 mass-cutover awaits a green build.

@@ -1,0 +1,134 @@
+#+TITLE: G2: EditAst addressing for &template invocations (ElementRef nodes)
+#+STATE: DONE
+#+SESSION_ID: 1510d7e0efe8848c
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-20T17-53-05-983Z_1510d7e0efe8848c.jsonl]]
+#+CUSTOM_ID: FUP-093-g2-editast-addressing-for-template-invoc
+#+COMPLETION_HASH: a686c6f7dbe60dc4
+
+* Initial Message
+
+launch the workbench and let me drive it for a bit (give me the link) while you explore the various plans that it was building upon (all the way to PLAN-049) and we thoroughly design the multi-frame drag-canvas (W4's strip is the non-canvas bridge), file-scope page mounts (FUP-061), the
+ __mcp__/__admin__/__dev__ convergence (north-star, two-consumer rule).
+
+* Parent
+Split out of FUP-089 (keystone resolution) as a discrete, owner-tracked build
+task. See FUP-089 for the full mechanism read.
+
+* Why #A
+Gates PLAN-051 B5 Instance mode (editing a &card call's args = the two-level
+model's instance half) AND the @editor(&template) target. The two-level toggle is
+owner-locked "from the start", so this is on the critical path to the full builder
+(not just a refinement).
+
+* The gap (verified 2026-06-20)
+EditAst's address resolver (handle_edit_ast_inner -> parse_ast_selector) matches a
+directive by macro_name against ast.scopes[].matches (FormMatch). But &template
+INVOCATIONS are NOT FormMatch directives: they parse as ElementRefStmt/ElementRef
+CST nodes (src/syntax/cst/ast.rs:549-554). So "<css> §card" will NOT locate a
+&card(...) call -> the instance-args editor + the &template editor target have no
+write path.
+
+* The fix
+Add a DISTINCT address-resolution path for template invocations:
+- resolve a &name(args) call's source span via the element-ref AST (ElementRef
+  carries the call + its args; find the target invocation by its position/scope or
+  a data-st-id-style provenance).
+- once the span is known, REUSE apply_text_patch (the same named-arg patcher that
+  already handles paren-arg-lists) to rewrite the invocation's named args.
+- expose this as an EditAst arm (or extend the selector grammar with a template-
+  invocation form, e.g. "<css> &card" or an &-prefixed selector) so the inspector
+  emits a correct-by-design patch.
+
+* Open sub-questions (resolve during build)
+- How to uniquely address ONE invocation when a template is called N times in a
+  scope? (occurrence index, or a provenance id on the rendered call.)
+- Does the structure projection (PLAN-051 B1) already carry each invocation's
+  addressable identity? If so, reuse it (the projection knows the call site).
+
+* Acceptance
+- A &card(title: "Hi") invocation's named arg is editable: EditAst Ack -> .st
+  updated -> hot-reload renders. Per-invocation targeting works when a template is
+  called multiple times.
+- Reuses apply_text_patch for the actual text rewrite (no parallel patcher).
+- Tests: element-ref span resolver unit; multi-invocation targeting; a live
+  builder gate editing one &card instance's arg.
+
+* Gates PLAN-051 B5 (Instance mode) + the @editor(&template) target.
+
+* Complete implementation design (2026-06-20, turnkey) \u2014 ready to build as one verified unit
+Investigated deeply this session. The pieces + their exact sites:
+
+** What's already proven (no work needed)
+- apply_text_patch (src/sync/handlers.rs:626) rewrites a named arg WITHIN a span
+  by finding `key:` and replacing the value to the next depth-0 terminator,
+  INCLUDING the `)` of a paren-arg-list (BUG-098 logic). So given an invocation's
+  span, patching its named args WORKS TODAY (verified for @macro params, FUP-089).
+- TemplateRef is harvested with span info available: scope_refs builds from
+  m.span.start (parser/mod.rs); the FormMatch HAS the span.
+
+** The 3 layers to build
+1. CARRY THE SPAN: add `pub span: SourceSpan` to TemplateRef
+   (src/syntax/form_match.rs:205). BLAST RADIUS (measured): 11 construction sites
+   + Serialize (so every bundle `refs: [...]` snapshot changes) + the feat119
+   oracle. Use #[serde(default)] + #[serde(skip_serializing_if)] to MINIMIZE
+   snapshot churn (a default/zero span serializes to nothing). Populate it in
+   invoke_refs_from_matches (parser/mod.rs, the helper extracted this session)
+   from m.span.
+2. PROJECT THE ADDRESS: in stage_structure_from_bundle (src/mcp/live.rs), add to
+   each node an `addr: { file, invoke_span: [start,end] }` (file = the guest's
+   resolve context). The walk already has the TemplateRef per child; carry its
+   span through `walk(... r, ...)` (r already passed for ref_name/args).
+3. EDITAST BY SPAN: extend the EditAst handler (src/sync/handlers.rs
+   handle_edit_ast_inner) with an invocation-address form. Cleanest: a selector
+   like `<file> @invoke <start>-<end>` OR a new patch field `__invoke_span`.
+   Resolve to the span directly (no parse_ast_selector CSS lookup needed \u2014 the
+   span IS the address), then call apply_text_patch(content, start, end, patch)
+   with the named-arg patch. REUSES apply_text_patch (no parallel patcher).
+
+** Disambiguation is FREE with spans
+The span uniquely identifies ONE invocation (vs occurrence-index gymnastics). A
+template called N times -> N distinct spans in the projection -> the inspector
+edits exactly the selected instance. No data-st-id hashing needed for the .st
+edit (data-st-id stays for the rendered-DOM click->select mapping; the span is
+the source-write address).
+
+** Build + verify as ONE unit (why not piecemeal)
+The 3 layers only deliver value together + need the edit->render round-trip
+verified live (mount a guest with &card("A") twice, edit instance 1's arg in the
+inspector, confirm ONLY that instance updates + source patched). Build behind a
+single commit with: a handler unit test (patch one invocation's named arg by
+span, assert the .st diff), a multi-invocation test (two &card calls, patch the
+2nd, assert the 1st is untouched), and a live builder gate. Do NOT land the
+TemplateRef span field alone (wide snapshot churn for no standalone value).
+
+** Sequencing
+After BUG-130 (so @each-driven children are addressable too) OR independently for
+statement-form invocations. Pairs with PLAN-051 B5 two-level Instance mode (the
+inspector's editable rows write through this).
+
+* Layers 1+2 LANDED (2026-06-20, commit 0f28ba5b)
+- L1: TemplateRef.span (#[serde(skip)]) populated by scope_refs/harvest_dynamic_refs.
+  serde(skip) kept ALL refs: snapshots stable (no churn) — the blast-radius concern
+  is resolved (skip = invisible to serialization). 7 construction sites updated.
+- L2: stage_structure_from_bundle projects each node's invoke_span ({start,end}),
+  distinct per invocation, root &main has none. Test asserts distinct spans.
+  Read side complete: the EditAst address flows parser->bundle->projection.
+
+* REMAINING: Layer 3 (the EditAst handler arm) \u2014 turnkey
+The inspector emits an edit -> needs an EditAst path that patches by invoke_span.
+Build:
+1. Extend the EditAst selector grammar OR add a patch field for span-addressing.
+   Cleanest: a patch field `__invoke_span: [start, end]` (sibling to __content/
+   __st_id) on the EditAst message; when present, skip parse_ast_selector entirely
+   and use the span directly.
+2. In handle_edit_ast_inner (src/sync/handlers.rs:1127), branch on __invoke_span:
+   read the file, call apply_text_patch(content, start, end, patch) with the
+   named-arg patch (the SAME patcher proven for directives in commit 55152d04).
+3. The inspector's editable rows emit EditAst{ file, patch: {__invoke_span:[s,e],
+   <param>: <value>} } for the SELECTED node (its invoke_span from the projection).
+Acceptance: a handler test patching &card("A")'s arg by its span (assert .st diff
++ sibling invocation untouched); multi-invocation targeting; the G1 insert-absent-
+param (FUP-092) composes for defaulted args. The named-arg patch + the span both
+exist + are tested in isolation now \u2014 L3 is wiring them.
+
+NOTE [2026-06-21]: COMPLETE 2026-06-20 (commits 0f28ba5b L1+2, 3a5ea455 L3). Full G2 vertical, unit-tested end-to-end: TemplateRef.span (serde-skip, no snapshot churn) -> stage_structure invoke_span (per-instance, distinct spans) -> EditAst __invoke_span branch patching named args by span via apply_text_patch. Tests: per-instance patch (one of two &card calls, sibling untouched), out-of-bounds reject, unknown-key guard. 2472 lib green. Remaining tail: positional-arg invocations (&card("A") has no key: to find) = G3, deferred (stdlib/builder use named args). The builder two-level Instance-mode write path is now unblocked.

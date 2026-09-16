@@ -1,0 +1,97 @@
+#+TITLE: The EDN→st printer over-escapes a string literal in a mutation
+#+STATE: TODO
+#+CUSTOM_ID: BUG-377-the-edn-st-printer-over-escapes-a-strin
+
+* Symptom
+
+`spacetime st` prints a `.st` file that verse cannot read back as the same
+program. The round trip is not identity:
+
+#+begin_src spacetime
+// source
+.b { @on &.click { $draft <- ""; } }
+#+end_src
+
+#+begin_src clojure
+;; spacetime edn — CORRECT
+[:st/named {"mut" [:st/named {"expr" [:st/expr "\"\""] "target" draft}]}]
+#+end_src
+
+#+begin_src spacetime
+// spacetime st — WRONG, one escape level too many
+.b { @on &.click { $draft <- \"\"; } }
+#+end_src
+
+* Why it is silent, and therefore worse than a crash
+
+The printed file CHECKS CLEAN (`spacetime check` → ✓). The parser accepts
+`\"\"` and reads it as a two-character string (backslash, quote), so the defect
+survives every gate and only appears in the browser, as a value nobody wrote.
+
+Compiled side by side, from the SAME original source:
+
+| built from      | emitted handler body      | what the browser assigns |
+|-----------------+---------------------------+--------------------------|
+| the source      | `"$draft <- \"\""`        | `""` — the signal clears |
+| the printed .st | `"$draft <- \\\"\\\""`    | `\"\"` — literal garbage |
+
+* Reproduction
+
+#+begin_src sh
+cat > both.st <<'EOF'
+@import "macros/data-kind";
+@import "macros/drivers";
+@data local $draft : string = "";
+@template &shell() { <main><input class='c'></main> }
+.c { @on &.input { $draft <- $.value; } }
+.c { @on &.click { $draft <- ""; } }
+EOF
+
+spacetime edn both.st > rt.edn     # correct: [:st/expr "\"\""]
+spacetime st  rt.edn               # WRONG:  $draft <- \"\";
+spacetime check rt.st              # ✓ passes — this is the silent part
+#+end_src
+
+Note `$.value` on the neighbouring line survives intact: the bug is specific to
+a STRING LITERAL expr, which is the only expr carrying quotes of its own.
+
+* Where
+
+The `:st/expr` arm of the EDN→st printer. `spacetime edn` is correct, so the
+escaping is applied on the way OUT, not on the way in — the expr text is
+escaped a second time as though it were being embedded in an EDN string, when
+what is being written is `.st` source, where the quotes are literal.
+
+`$.value` is unaffected because it contains no quote to escape, which is why
+this was invisible until a page cleared a signal to `""`.
+
+* Found by
+
+beam-lisp's `spell`: the chat composer clears its draft after a send
+(`$send($draft); $draft <- "";`). Spell emits EDN and calls `spacetime st` to
+produce the page, so the printed page carried `\"\"` and the input never
+cleared — the next keystroke wrote the still-visible text back into the signal
+and the second message arrived as "first messagesecond". Observed in a browser
+as user bubbles `["first message", "first message SECOND"]`.
+
+This makes the bug reachable by any tool that generates pages through EDN,
+which is the whole point of the EDN surface (PLAN-148).
+
+* Fix
+
+Print `:st/expr` text VERBATIM into `.st` source. It is already source text —
+the EDN reader unescaped it on the way in, and re-escaping it on the way out is
+what breaks the round trip.
+
+* Gate
+
+A round-trip property test, since this is exactly what identity means:
+`st → edn → st` must produce a byte-identical program for a page containing a
+string-literal mutation, and building both must produce the same handler body.
+An assertion on the printed text alone is not enough — the printed file PASSES
+`check`, so only comparing the two builds (or reparsing and comparing the EDN)
+catches it.
+
+Worth a survey: every other `:st/*` node whose payload can contain a quote
+(attribute values, template text, `@data` defaults) is suspect for the same
+double-escaping, and the same property test would cover them.

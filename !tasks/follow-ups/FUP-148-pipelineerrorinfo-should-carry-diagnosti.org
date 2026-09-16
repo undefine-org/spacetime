@@ -1,0 +1,78 @@
+#+TITLE: PipelineErrorInfo should carry DiagnosticCode, not a re-parsed string
+#+STATE: ITEM
+#+SESSION_ID: 153497be379ff5cc
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-18T12-18-12-318Z_153497be379ff5cc.jsonl]]
+#+CUSTOM_ID: FUP-148-pipelineerrorinfo-should-carry-diagnosti
+#+LAYER: diagnostics
+
+Found while wiring E0938 (PLAN-117 W2). A real defect that SILENTLY MISLABELS
+diagnostics, and a textbook instance of the AGENTS.md rot rule:
+
+#+begin_quote
+a closed Rust enum whose arms the runtime doesn't all enforce is rot — prefer a
+registry-keyed reference (kinds-as-data) over growing the enum.
+#+end_quote
+
+* The defect
+
+A pipeline diagnostic's code makes a round trip through a STRING:
+
+#+begin_example
+Diagnostic { code: DiagnosticCode::E0938 }
+  -> diag_to_pipeline_error_info()   (src/compiler.rs:1980)
+  -> PipelineErrorInfo { code: "E0938" }   (a String)
+  -> src/main.rs:1694-1722  match on the string, arm per code
+  -> DiagnosticCode::E0938
+#+end_example
+
+That match is an arm-per-code table with =_ => DiagnosticCode::E0806= as the
+fallback. *A code missing from the table is silently relabelled E0806* — the
+diagnostic still fires, with the right message and hint, under the WRONG NAME.
+
+Observed twice now:
+- E0938 (this session) printed as =error[E0806]= until an arm was added.
+- E0900 / E0904 / E0906 had the same fate before FEAT-120 patched them; the
+  comment at =src/main.rs:1715= records it.
+
+Anyone adding a diagnostic must know to edit a match arm in =main.rs= that has
+nothing to do with their feature. Nothing enforces it: no test fails, no warning
+fires, the code just comes out wrong.
+
+* Why it exists (do not simply delete the fallback)
+
+=PipelineErrorInfo= is a serialisable transport struct (crosses the MCP/JSON
+boundary and the =check= reporter). Its =code= being a =String= is what makes it
+serialisable without exposing the enum. So the fix is not "remove the string" but
+"make the round trip total".
+
+* Fix options
+
+1. *Carry the enum.* =PipelineErrorInfo { code: DiagnosticCode }= with
+   =#[derive(Serialize, Deserialize)]= on =DiagnosticCode= (serde already
+   handles fieldless enums; =as_str= gives the wire format). Deletes the match
+   entirely. Preferred.
+2. *Make the parse total.* =DiagnosticCode::from_str(&str) -> Option<Self>= as
+   the INVERSE of =as_str=, generated from ONE list (macro or a
+   =const= table), so adding a code updates both directions at once. Then
+   =None= means "genuinely unknown", not "pretend it is E0806".
+
+Either way the =_ => E0806= fallback must become an explicit UNKNOWN, or an
+error, never a plausible-looking wrong code.
+
+* Acceptance
+
+- a diagnostic whose code is not in any hand-written table still displays its own
+  code
+- a test asserts the ROUND TRIP for every variant: for each =DiagnosticCode=,
+  =parse(as_str(c)) == c=. This is what makes the class of bug unrepresentable
+  rather than merely fixed once.
+- =grep= finds no arm-per-code match on diagnostic strings outside the codes
+  module
+
+* References
+
+- =src/main.rs:1694-1722= (the table + fallback)
+- =src/compiler.rs:1980= =diag_to_pipeline_error_info=
+- =src/diagnostics/codes.rs= (=as_str= at :633+, =is_error= at :785+ — two more
+  hand-maintained per-variant lists with the same hazard)
+- found by: PLAN-117 W2, wiring E0938

@@ -1,0 +1,62 @@
+#+TITLE: SIP-001's `form_application` capture type cannot match (`"--"` is never a token)
+#+STATE: ITEM
+#+CUSTOM_ID: BUG-242-form-application-grammar-cannot-match
+
+* Verified (2026-07-26, PLAN-121 W1 review)
+
+SIP-001 declares (timeline spec ~L165):
+
+#+begin_src spacetime
+%capture_type form_application { "--" $form:ident ( $params:params )? }
+#+end_src
+
+This can NEVER match. `--rise` is lexed as a SINGLE `IDENT` token by the
+`RawToken::Minus` ladder (`src/syntax/cst/lexer.rs` — the same ladder that
+yields `-42`, `-45deg`, `-webkit-*`, `--custom-prop`). There is no separate
+`--` token for the `"--"` literal to consume.
+
+Measured:
+
+| grammar                                     | input    | result                                  |
+|---------------------------------------------+----------+-----------------------------------------|
+| =form_application { "--" $form:ident }=     | =--rise= | ✗ E0946: expected form_application, got IDENT |
+| =form_application { $form:ident }=          | =--rise= | ✓ matches, captures =form: --rise=       |
+
+So the SIP's own author-facing surface — `@on &.visible --rise;`, the FIRST
+example in the launch article — does not parse under the SIP's own declared
+grammar.
+
+* Why this was invisible until now
+
+BUG-229. Before the E0946 gate, this grammar failed silently: the directive
+matched nothing, produced no diagnostic, and `check` was green. The SIP could
+carry an unmatchable capture type through five revisions with no signal. The
+gate reported it on the first attempt to use it.
+
+* The fix, and what it means for DASHED_IDENT
+
+The capture must accept the dashed-ident as ONE token, then verify the `--`
+prefix — not try to consume `--` separately:
+
+#+begin_src spacetime
+%capture_type form_application { $form:dashed_ident ( $params:params )? }
+#+end_src
+
+This is precisely the argument for the `DASHED_IDENT` SyntaxKind recommended in
+SIP-001c (P3 in the preliminary-work plan): without a token kind, a capture
+type cannot say "an ident that IS a form reference" — it can only say "any
+ident", which would also accept a bare `rise` and lose the distinction the `--`
+sigil exists to draw.
+
+∴ DASHED_IDENT is not the cosmetic labelling change SIP-001c described ("stops
+the parser re-deriving it with `text.starts_with`"). It is REQUIRED for the
+forms surface to be expressible at all. SIP-001c's cost estimate is corrected
+accordingly.
+
+* Acceptance
+
+- `@on &.visible --rise;` parses under the real declared grammar.
+- A bare `rise` (no dashes) in form position is REJECTED — the sigil must carry
+  meaning, or it is decoration.
+- SIP-001 and SIP-001c record the corrected `form_application` and the upgraded
+  justification for DASHED_IDENT.

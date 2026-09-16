@@ -1,0 +1,98 @@
+#+TITLE: Named template-invocation args don't bind to params at render (positional-only factory)
+#+STATE: DONE
+#+SESSION_ID: 1510d7e0efe8848c
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-20T17-53-05-983Z_1510d7e0efe8848c.jsonl]]
+#+CUSTOM_ID: BUG-131-named-template-invocation-args-dont-bind
+#+COMPLETION_HASH: 86c39dd93c867ca9
+
+* Initial Message
+
+please showcase this (I reloaded the session, you can start the MCP), then tell me what we should do next
+
+* Symptom
+A template invoked with NAMED args renders the holes LITERALLY instead of binding
+the values:
+
+  @template &card($title, $price) { <div><h3>`$title`</h3><p>`$price`</p></div> }
+  @template &main() { &card(title: "Espresso", price: "$3.50"); }
+
+renders `title: "Espresso"` as the literal text of the `$title` hole (and likewise
+for $price), instead of `Espresso`. POSITIONAL args bind correctly:
+`&card("Espresso", "$3.50")` -> holes resolve to Espresso / $3.50.
+
+Live-verified during the MCP builder showcase (2026-06-21):
+- inst-2 (named): 4 .sc-card nodes, holes show `title: "Espresso"` literally + a
+  stray `[object Object]` node.
+- inst-3 (positional): 3 .sc-card nodes, holes show `Espresso` / `$3.50` correctly.
+
+* Root cause (VERIFIED, not guessed)
+public/runtime/templates.js factory (~line 344-362) binds invocation args
+POSITIONALLY ONLY:
+
+    paramSpecs.forEach((spec, i) => {
+      if (args[i] !== undefined) data[spec.name] = args[i];   // positional bind
+    });
+
+The compiled bundle stores a named arg as the RAW source string, NOT a parsed
+{name,value} pair. From inst-2's bundle (GET /bundles), &main's refs are:
+
+    args: ["title: \"Espresso\"", "price: \"$3.50\""]
+
+i.e. the whole `name: value` text is one positional arg slot. The factory assigns
+that string to `data.title` (slot 0) verbatim -> the `$title` hole interpolates
+`title: "Espresso"` literally. The value is never split on `:`, never unquoted,
+never matched to the param by NAME.
+
+Two layers are implicated:
+1. COMPILE: the invocation arg parser keeps named args as one stringly slot
+   (`name: value`) rather than emitting a structured {name, value} the runtime can
+   key by param name. (Positional args ARE unquoted/structured -> they work.)
+2. RUNTIME: templates.js binds only by position; it has no named-arg branch to
+   place `value` at `data[name]` regardless of slot order.
+
+* Why this matters (keystone)
+- The MCP builder uses NAMED args everywhere (the inspector/structure projection
+  pairs params with named values; the contract is name-keyed).
+- FUP-093/G2 (DONE) WRITES named args by span (`&card(title: "X")`) — the write
+  path exists, but the RENDER path can't display what it writes. G2 + this fix
+  together make the builder's two-level edit visibly correct.
+- Named args are the ergonomic, order-independent call form; positional-only is a
+  real language gap, not just a builder issue.
+
+* Secondary findings from the same showcase (file as sub-bugs or fold in)
+- B) `[object Object]` stray text node in the standalone render of a named-arg
+  guest (inst-2) — likely the same unparsed-arg path leaking a non-string.
+- C) Region-COMPOSE (host+region mount, the workbench stage) emits EMPTY
+  `main.html` for a statement-form `&main` (refs populated, html ""), so the stage
+  paints nothing even for POSITIONAL args via @mcp-region. Standalone mount of the
+  SAME guest renders. So region-compose has a separate render gap from the
+  named-arg bind bug. (GET /bundles?region=stage shows main.body.html == "".)
+- D) Guest `@style` is dropped in the region bundle (css: "" in
+  /bundles?region=stage) though present standalone. Pairs with (C) — the
+  region-compose bundle projection omits guest CSS.
+
+* Fix direction (most rigorous)
+1. Compile: emit named args as structured pairs in the ref's `args` (e.g. an
+   {name, value} object or a parallel `arg_names` array), keeping positional args
+   as today. The TemplateRef projection (src/mcp/live.rs already strips the
+   `name:` prefix for display — see commit 7351d23a) confirms the data is
+   recoverable; do it ONCE at compile, not in two consumers.
+2. Runtime: in the factory, if a ref arg carries a name, assign
+   `data[name] = value` (after unquote/resolve) instead of positional slot. Keep
+   positional fallback. One code path, named XOR positional per arg.
+3. Test: a v8_runtime_test asserting a named-arg invocation binds holes (RED today),
+   plus a headless render assertion; an integration test on the compiled ref shape.
+
+* Acceptance
+- `&card(title: "X", price: "Y")` renders holes X / Y (any arg order).
+- Positional invocations unchanged (regression-guarded).
+- No `[object Object]` leakage.
+- Region-compose (C) + CSS (D) tracked (here or split) so the workbench stage
+  paints the composed guest.
+
+* Provenance
+Surfaced live via puppeteer during the builder showcase, 2026-06-21. Root cause
+read directly from templates.js + the live /bundles JSON (not inferred). Relates
+to FUP-093/G2 (named-arg WRITE, DONE) and BUG-130 (each-driven refs).
+
+NOTE [2026-06-21]: FIXED + LIVE-VERIFIED 2026-06-21 (commit 52a7daa2). Both emit paths: (1) body-ref via TemplateRef.arg_names (serde-skip when all-None, zero snapshot churn) + normalize_invocation_args splitter + runtime ST.buildTemplateArgs branding {__stNamedArgs}; (2) selector-init via stdlib invoke-template primitive using ST.resolveRawInvocationArgs (splits raw 'name: value' -> delegates to buildTemplateArgs). Factory binds by name, order-independent, positional regression-guarded. Tests: 5 lib + 3 v8. LIVE on dev server (port 41999): &card(title:"Espresso",price:"$3.50") renders Espresso/$3.50 not literal. Sub-findings B/C/D (object Object, region-compose empty main.html, dropped @style) tracked separately — C/D are the region-compose paint issue (next).

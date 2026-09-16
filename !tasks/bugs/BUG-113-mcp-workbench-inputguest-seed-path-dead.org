@@ -1,0 +1,26 @@
+#+TITLE: MCP workbench: st_mount host/region drops the `input` arg (composed guest never seeded)
+#+STATE: DONE
+#+SESSION_ID: 150f785b33edb744
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-19T16-17-16-496Z_150f785b33edb744.jsonl]]
+#+CUSTOM_ID: BUG-113-mcp-workbench-inputguest-seed-path-dead
+#+COMPLETION_HASH: 688c19cbf3ca66c6
+
+VERIFIED root cause (source-traced 2026-06-19, post-review). The composition path silently discards mount `input`.
+
+SYMPTOM (live): st_mount name=greeter host=inst-1 region=stage input={"name":"Reviewer"} → guest renders empty $name. GET /bundles?region=stage → "input": {}.
+
+ROOT CAUSE (two edits, one path):
+1. src/mcp/tools.rs::st_mount — when `host` is present (the compose branch, ~L511-537), the parsed `input` (L482) is NEVER passed to mount_into_host. `input` only reaches the STANDALONE path (mount_function, L539). So composing always drops input.
+   CodePath: src/mcp/tools.rs::st_mount  (the `if let Some(host_id) = non_empty_arg(args,"host")` block)
+2. src/mcp/live.rs::LiveServer.mount_into_host (L694-745) — signature takes (host_id, region, function_key) only; it inserts region_mounts but has no input param and never writes region_mount_input.
+   CodePath: src/mcp/live.rs::mount_into_host
+
+The READ side is correct: instance_bundles (live.rs:1059) seeds the guest from instance.region_mount_input.get(region) → registerBundle. Only the WRITE from mount input is missing. (mcp_param DOES write region_mount_input, live.rs:1232 — so inspector param edits seed correctly; ONLY the initial mount input is dropped.)
+
+FIX: thread `input` (object → map<string,string>) through st_mount's host branch into mount_into_host, which seeds host.region_mount_input.entry(region).or_default() before inserting region_mounts. Mirror the mcp_param write shape.
+
+CORRECTION TO ORIGINAL FILING: the original body also claimed (a) file-scope `@param $x` not captured and (b) multi-param sigs drop all but first and (c) type/default lost. ALL THREE ARE FALSE — disproven via guess-gate: `@param` is NOT a Spacetime construct (only `///` doc-comment text); the real param grammar is SPACE-type + `= default` (stdlib/capture-types/param_list.st), and unit test src/syntax/events/extractors/custom.rs:1306 proves multi-param + type + default extraction works. My R3 tests used invalid colon syntax (`$title : "x"`), so those guests legitimately had empty/partial contracts. The ONLY real seed bug is the dropped mount input above.
+
+Evidence: @research/mcp-workbench-review-2026-06-19-round3.org Part 2 R3-C1; @research/mcp-workbench-review-2026-06-19-round3-corrections.org (verification log). Memory EP-ba2b208b8a2ac87a.
+
+NOTE [2026-06-19]: FIXED (PLAN-048 S1). mount_into_host now takes `input: &Value` and seeds host.region_mount_input (scalars coerced via json_value_to_param_string; null/composite skipped). st_mount host-branch passes the parsed input. Unit test mount_into_host_seeds_region_input_from_mount_input. Live-verified: st_mount name=greeter host=inst-1 input={"name":"World"} → /bundles?region=stage input={"name":"World"} AND the browser stage renders "Hello, World" (was "Hello," empty). Commit pending.

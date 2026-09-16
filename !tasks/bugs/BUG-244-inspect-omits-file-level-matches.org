@@ -1,0 +1,57 @@
+#+TITLE: `inspect --layer expansion` omits FILE-LEVEL matches (shows only scoped ones)
+#+STATE: ITEM
+#+CUSTOM_ID: BUG-244-inspect-omits-file-level-matches
+
+* Correction — this was first filed as a compiler bug. It is not.
+
+Originally filed as "a user directive at top level is silently dropped", on the
+evidence that =inspect --layer expansion= showed the directive when nested in a
+scope and nothing when at top level.
+
+**That diagnosis was wrong**, and the review that caught it was right. Measured
+by observable effect rather than by the inspector:
+
+#+begin_src spacetime
+%macro tl-probe {
+  %order 700
+  %form { @tl-probe $name:ident { $body:properties } }
+  %binds { set-style(&self, property: "color", value: "red") }
+}
+
+@tl-probe alpha { background: blue; }   // TOP LEVEL
+#+end_src
+
+=build= emits =spacetime.js= containing the =setProperty= calls (5 occurrences).
+The directive MATCHED and EXPANDED. Meanwhile =inspect --layer expansion= on the
+same file prints "No macro expansions found".
+
+* The actual defect
+
+=rematch_with_user_macros_in= appends every augmented match not contained by a
+scope to =ast.matches= (=src/parser/mod.rs:2205-2231=), and the compiler consumes
+that flat list (=src/compiler.rs:929-969=). But =inspect= iterates only
+=ast.scopes= / =scope.matches= (=src/cli/inspect.rs:2026-2034=, =2106-2126=), so
+file-level matches are invisible to it.
+
+* Why this matters more than a cosmetic gap
+
+=inspect --layer expansion= is the primary tool for answering "did my directive
+match?", and it was used exactly that way throughout PLAN-121 W1/W2. A tool that
+reports a WORKING construct as missing manufactures phantom bugs — this one
+produced a bogus bug report, a wrong entry in SIP-001c, and a test asserting
+behavior that was never broken.
+
+It is the mirror image of BUG-229: there the compiler was silent about a real
+failure; here the inspector is silent about a real success. Both make a green
+signal meaningless.
+
+* Fix
+
+Have =inspect= render =ast.matches= (file-level) in addition to
+=scope.matches=, ideally labelled by position so the distinction stays visible.
+
+* Acceptance
+
+- =inspect --layer expansion= shows a top-level user directive.
+- A test compares =inspect= output against an observable compile effect for the
+  same construct at top level and in a scope, so the two can't diverge again.

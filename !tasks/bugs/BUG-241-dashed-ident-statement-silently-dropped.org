@@ -1,0 +1,121 @@
+#+STATE: DONE (2026-07-26) — FIXED: parse_body_item dispatch arm + E0947 hard error (user ruling)
+#+CUSTOM_ID: BUG-241-dashed-ident-statement-silently-dropped
+
+* Resolution (2026-07-26)
+
+Green-lit by the user: ONE dispatch arm in =parse_body_item=
+(src/syntax/cst/parser.rs) plus registry validation — not a =%form= (both
+registration shapes were spiked here and never consulted; the gap was
+body-position dispatch, not registry coverage).
+
+What landed:
+1. **CST**: new =FORM_REF= node kind + =at_dashed_form_ref()= guard (dashed
+   IDENT not followed by =:= — a colon keeps custom properties on the
+   property path). Arm order: after the element-scope check, before the
+   CSS-property fallthrough whose no-colon arm just BUMPED the ident (the
+   drop site). Args kept via the existing =parse_arg_list=.
+2. **AST**: =ScopeBlock::form_refs= / =NestedScope::form_refs=
+   (=FormRefUse { name, args, span }=) — the splice is CARRIED, not dropped.
+3. **Validation**: =validate_form_refs= runs after the initial parse AND
+   after the user-macro rematch (idempotent). A name no =@form= declaration
+   registers is a HARD =E0947= with a did-you-mean over the declared forms.
+   "Declared" = a match of any macro whose =%registers= clause names
+   category =form= (stdlib form.st OR a same-file user macro) — registry
+   DATA, not a Rust list. Identity via =matched_macro=, since
+   =FormMatch.macro_name= is the directive's public name (="form"= for all
+   six kind macros).
+
+Deliberately NOT in this fix: EXPANSION (splicing the declared body into the
+host scope) — that is W3 scope. A validated splice is inert by design, never
+invisible. The general solution — registry-driven body-item dispatch,
+rethinking the matcher's ASSIGNMENT phase — is FUP-155.
+
+Blast radius swept: zero existing =.st= files in examples/, demos/, stdlib/,
+tests/fixtures/, projects/ contain a bare =--x;= statement, so the new hard
+error breaks nothing in the repo. Tests: tests/bug_241_form_splice_test.rs
+(6) + 3 CST unit tests + the inverted surface test in
+tests/sip_001_w2_form_surface_test.rs.
+
+* Historical record — the measurements that led here
+
+* Verified behavior (2026-07-26, PLAN-121 W1.2)
+
+Three positions for a dashed-ident, tested through `build` and
+`inspect --layer parse`:
+
+| position  | source                      | result                       |
+|-----------+-----------------------------+------------------------------|
+| property  | =--brand: red;=             | ✓ preserved (real custom prop) |
+| value     | =width: --double(20px);=    | ✓ preserved verbatim           |
+| statement | =--card-surface;=           | ✗ SILENTLY DROPPED             |
+
+`inspect --layer parse` on a scope containing =--card-surface;= plus one real
+declaration reports =css_declarations: 2= for two real declarations and 1 for
+one — i.e. the bare statement never becomes a declaration, produces no CST
+node, and emits no diagnostic. It simply vanishes.
+
+* Consequence for SIP-001c
+
+This is the ONE unverified assumption the `--` sigil decision rested on
+(recorded as such in SIP-001-PRELIMINARY-WORK P2 and PLAN-121 W1.2). The
+result is neither the hoped-for "already works" nor the feared "cannot work":
+
+- The two positions CSS itself defines (property, value) already work and are
+  untouched. `--` as a value-position custom function (`--double(20px)`) passes
+  through today, so `@form`'s FUNCTION kind needs no parser change.
+- Statement position (`--card-surface;`, the MIXIN splice) does not parse. It
+  needs a real grammar addition, not merely a token label.
+
+So SIP-001c's claim "zero registry change, one lexer change" is INCOMPLETE for
+the splice form specifically. It remains true for the other kinds.
+
+* Why silence is the real defect here
+
+Independent of SIP-001: a bare `--foo;` in a CSS-ish body is *plausible author
+input* (it is valid CSS grammar — a custom property with no value is invalid,
+but the token sequence parses), and Spacetime discards it with no warning. An
+author who typo's a declaration loses it invisibly. That deserves a diagnostic
+regardless of whether the splice form is ever adopted.
+
+* VERIFIED CAUSE (2026-07-26, PLAN-121 W2.3)
+
+Option 1 below ("register a =%form= for statement-position dashed-idents") was
+spiked and **does not work as stated**. Two measurements:
+
+1. =%form { $name:dashed_ident ";" }= — registers under prefix ='$'=
+   (=extract_prefix()= = =form.directive_name.chars().next()=), i.e. the BINDING
+   bucket, which a bare =--x;= never reaches. Silent no-op.
+2. =%form { --splice $name:ident ";" }= — registers under ='-'=, and is STILL
+   never consulted: =parse_body_item= dispatches on =AT_SIGN=, =DOLLAR=,
+   =AMPERSAND=, =COLON= and the combinators. An IDENT beginning with =-= falls
+   to the CSS-property arm, which discards it when no =:= follows.
+
+∴ the gap is not registry coverage but BODY-POSITION DISPATCH: there is no arm
+that routes a leading-dash IDENT to the form registry. A =%form= alone cannot
+fix this; the parser must first ask the registry about this token.
+
+That makes the splice a strictly bigger change than SIP-001c estimated — it is
+the one place the =--= surface needs a parser change, not just a capture type.
+NB the fix is still DATA-shaped once the arm exists: one dispatch arm that
+consults the registry, then every form is a registry entry.
+
+* Options for the splice form (decide before W2 builds on it)
+
+1. Register a `%form` for statement-position dashed-idents, so a splice is an
+   ordinary registry entry (`--name;` -> apply form `name`). Fits the
+   metasystem: the variant is DATA, not a parser branch.
+2. Give statement position a leading marker so it is unambiguous at the token
+   level. Costs the CSS-native look that motivated `--`.
+3. Keep `@apply --name;` (CSS's own `@apply` shape) for the splice, and use
+   bare `--name(...)` only in value position. Most CSS-faithful; costs the
+   "no keyword needed" claim in SIP-001c.
+
+Option 1 is preferred on the elegance bar (extension of the existing registry,
+no new subsystem, deletes nothing but adds no Rust match arm either), but it
+must be spiked before SIP-001c's `@form` surface is treated as settled.
+
+* Acceptance
+
+- `--card-surface;` either applies a form, or errors naming what it expected.
+- A bare `--foo;` never silently disappears.
+- SIP-001c records the verified table above in place of its assumption.

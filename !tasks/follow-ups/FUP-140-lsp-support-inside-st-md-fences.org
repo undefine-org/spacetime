@@ -1,0 +1,112 @@
+#+TITLE: FUP-140 — LSP features inside `.st.md` fences (hover, completion, go-to-def)
+#+DATE: 2026-07-24
+
+* FUP-140 LSP support inside literate fences
+:PROPERTIES:
+:CUSTOM_ID: FUP-140
+:STATE: TODO
+:PRIORITY: #C
+:END:
+
+** Context
+
+SIP-002 / PLAN-114 shipped literate Spacetime (=.st.md=). W4 landed DIAGNOSTIC
+line-mapping: a parse error inside a ` ```st ` fence is reported at the author's
+=.st.md= line and column, rendered against their own document.
+
+That fixed the COMPILER's output. It does not touch the EDITOR. Opening a
+=.st.md= in an LSP-aware editor today gives:
+
+- no hover (types, signatures, directive docs) inside fences
+- no completion (directives, `$signals`, `&templates`, stdlib macros)
+- no go-to-definition / find-references across fences
+- no semantic tokens \u2192 fences render as plain markdown code blocks
+
+The language server treats the file as markdown it does not own. Everything
+inside the fences is invisible to it.
+
+** Why it is not just "point the server at .st.md"
+
+The server's whole surface is offset-addressed against a document it assumes IS
+Spacetime source:
+
+- =src/lsp/document.rs= \u2014 =DocumentStore= caches raw text + =line_starts= per
+  URI (=open= / =change= / =get=).
+- =src/lsp/position.rs= \u2014 =offset_from_position= / =position_from_offset= /
+  =span_to_range= / =range_to_span= convert LSP =Position= \u2194 byte offsets
+  against THAT text.
+- =hover.rs=, =completion.rs=, =definition.rs=, =references.rs=, =colors.rs=,
+  =diagnostics.rs= all consume those offsets.
+
+For a literate document the text the USER edits and the text the ANALYZER needs
+are different strings. Every request must translate in, and every response must
+translate back out.
+
+** Approach
+
+1. *Tangle on open/change.* =literate::tangle()= is pure (no fs, no globals), so
+   the server can tangle in =DocumentStore::open= / =change= and cache BOTH the
+   original and the tangled text plus the =LineMap=. Cost is a single linear
+   scan per keystroke-batch \u2014 acceptable; measure before optimizing.
+
+2. *Translate request positions IN* (editor \u2192 tangled). Needed for hover,
+   completion, definition: the user's cursor is in =.st.md= coordinates.
+
+3. *Translate response ranges OUT* (tangled \u2192 editor). Needed for every result
+   that carries a range: hover range, definition target, reference list,
+   semantic tokens, diagnostics.
+
+*** The missing primitive
+
+=LineMap::translate_offset(out_offset, tangled, original)= exists (W4) and
+covers step 3. Step 2 needs its INVERSE \u2014 source \u2192 tangled \u2014 which does not
+exist. The map is currently one-directional: =out_to_src: Vec<usize>= indexed by
+output line.
+
+Options: build a parallel =src_to_out= vector at tangle time (cheap, one extra
+=Vec<usize>=; ambiguous for source lines that produce NO output \u2014 e.g. a fence
+marker line \u2014 which should map to the nearest following emitted line), or
+binary-search the existing vector (no extra memory, ambiguous in the same way,
+and O(log n) per lookup instead of O(1)).
+
+Prefer the explicit =src_to_out= vector: the ambiguity has to be resolved
+deliberately either way, and an explicit table makes the choice reviewable.
+
+*** Behavior inside PROSE
+
+A cursor in prose is not in the program. The server should return "no result"
+cleanly (empty hover, no completion) rather than mapping to a nearby fence and
+answering about code the user is not looking at \u2014 a confidently wrong hover is
+worse than none. The =LineMap= can already tell prose from spliced lines if the
+tangler records the segment kind; today it records only the line number, so
+this needs a small addition (e.g. a parallel =kind: Vec<SegmentKind>=).
+
+** Non-goals for a first cut
+
+- Formatting inside fences.
+- Markdown language features (the markdown LS, if any, can co-exist).
+- Live-preview / notebook-style execution.
+
+** Priority rationale
+
+#C. Literate documents COMPILE, SERVE, and REPORT ERRORS correctly today \u2014 the
+correctness story is complete. This is editor ergonomics. Revisit when =.st.md=
+adoption grows past demos + docs readers, or if authors report the missing
+completion as a real drag (it will be felt most when writing a long fence, where
+signal/template names are far from the cursor).
+
+** Test plan (when picked up)
+
+- Round-trip property: for every offset in a tangled document, =src\u2192out\u2192src=
+  is identity on spliced (verbatim) regions.
+- Hover at a known symbol inside a fence returns the same result as hovering the
+  equivalent =.st= file.
+- A cursor in prose returns no hover and no completions (explicitly asserted \u2014
+  this is the "confidently wrong" guard).
+- A =.st= file's LSP behavior is byte-identical before/after (no regression on
+  the non-literate path).
+
+** Related
+
+- PLAN-114 (SIP-002 waves) \u2014 W4 shipped the diagnostic half of this.
+- =docs/language/literate.md= \u2014 documents the limitation for authors.

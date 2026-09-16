@@ -1,0 +1,58 @@
+#+TITLE: Macro %binds yields not registered as signals — hardcoded primitive map shadows the registry (E0405 on @realtime/@presence)
+#+STATE: DONE
+#+SESSION_ID: 1510a559ccf03ced
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-20T14-12-20-403Z_1510a559ccf03ced.jsonl]]
+#+CUSTOM_ID: BUG-126-macro-binds-yields-not-registered-as-sig
+#+COMPLETION_HASH: 7d05decaf63edc88
+
+* Initial Message
+
+ok i want you to design a prototype a deep integration between Spacetime and elixir, especially Phoenix LiveView and it should be a la Djinn.LiveView (~/code/ora/monorepo).
+
+What could it look like? Show me your DSL design so we can think about it together. Look at the recent Spacetime $host improvements and whatnot, maybe you can extend it to a canonical host for Phoenix LiveView that makes the integration insanely seamless and self-aware (re-uses the power of Elixir macros/Spark and the introspectability of Spacetime to deliver an experience that leverages the best of both).
+
+* Symptom
+Any macro whose only output is via `%binds { prim(...) -> { $a, $b } }` (no
+`%registers binding($x)`) raises E0405 "Binding in '<scope>' references '<x>',
+which does not exist" when its yields are referenced (e.g. in `@each`).
+
+Reproduced (2026-06-20):
+- `@realtime todos: Todo[] { channel: "todos" }` then `@each($items ...)` → E0405 on `items`.
+- `@presence(room: "r") as v` then `@each($users ...)` → E0405 on `users`.
+- The repo's OWN `examples/realtime-demo/presence.st` fails identically — pre-existing.
+
+* Root cause
+`src/analysis/signals.rs::collect_form_match_signals` discovers a directive's
+yielded signals from a HARDCODED `HashMap<&str, Vec<&str>>` listing only
+pointer/scroll/gesture/tick/resize/intersection/media/mutation/fetch. Macros
+outside that list (realtime, presence, signal-call, collection, …) contribute
+NO signal names, so `Analysis::reactive_source_names()` never learns them and
+`validate_binding_sources()` rejects every reference.
+
+This is the AGENTS anti-pattern: a hardcoded Rust list shadowing the
+self-describing registry. The `%binds … -> { $items }` clause ALREADY declares
+the yields as data; the registry even indexes them (`MetaRegistry.provider_index`
+via `rebuild_provider_index`, queryable with `get_providers`). The analyzer just
+doesn't consult it.
+
+* Fix
+Drive signal discovery from the registry, not the map. Add a registry-aware pass
+that, for each FormMatch, resolves its macro (`get_macro_by_form_directive`) and
+registers every `%binds` output (resolving `as $alias` / `${$name}_x` patterns
+against the match's captures) as a tracked signal. Keep/retire the hardcoded map
+as a fallback only for primitives invoked without a matching macro form.
+
+* Acceptance
+- `@realtime`/`@presence`/`@data collection`/`@data signal` yields resolve; no
+  E0405 when referenced.
+- `examples/realtime-demo/presence.st` passes `check`.
+- `cargo test --lib` green; a new RED→GREEN test asserts a `%binds`-only macro's
+  yield is referenceable.
+- Hardcoded map no longer the source of truth (registry is).
+
+* Impact on the LiveView-Kanban prototype
+Blocks the SHARED substrate's dedicated `@presence` cursors + the contended-drag
+tension moment (needs presence yields). Worked around in the demo via a
+`@data collection via dev-ws` peer model; this fix restores the first-class path.
+
+NOTE [2026-06-20]: Fixed 2026-06-20. Root cause: analysis/signals.rs collect_form_match_signals used a hardcoded primitive→yields map; macros yielding only via %binds (realtime/presence/collection/signal) were absent → E0405. Fix: added Analysis::register_macro_yield_signals (analysis/mod.rs) reading %binds outputs from the MetaRegistry (resolves ${$cap} aliases via resolve_yield_name); wired into main.rs + doctor.rs before validate_binding_sources. Test: analysis::tests::test_bug126_binds_yields_register_as_signals (literal + alias + negative control). Verified: presence/realtime repros pass; examples/realtime-demo/presence.st fixed (corrected its $cursors.users→$users misuse too); cargo test --lib 2442 passed.

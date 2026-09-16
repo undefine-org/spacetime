@@ -1,0 +1,38 @@
+#+TITLE: Multi-line nested inline value: literal not captured
+#+STATE: DONE
+#+SESSION_ID: 14f48ced503111a7
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-05-29T18-28-09-664Z_14f48ced503111a7.jsonl]]
+#+CUSTOM_ID: BUG-031-multi-line-nested-inline-value-literal-n
+#+EFFORT: 4h
+#+LAYER: coding-agent
+#+COMPLETION_HASH: 04beb9a553fe2b85
+
+* Initial Message
+
+my friend, I want you to do two things that are quite related to each other:
+1. look at projects/unkn for the way it structures its files and tell me how you would have structured it
+2. look up reactive bindings and how they are done in Spacetime (the $ sigil), as well as full-spacetime work (as in, not using index.html, only index.st and generating the html from it by putting the html inline).
+
+The goal is to build a project that showcases reactive bindings, so that websites can start dealing with userland values instead of just animation-specific values (although one of the strengths of Spacetime is its ability to bring reactive bindings to the animation sphere).
+
+The goal of this is both to make a showcase demo (in demos/) and to use that to find all the BUGs and FEATs and REFACTORs that we need to implement. Do NOT use the 'emacs' way of managing tasks; only the Spell-native way. Think a bit about the type of demo that would make sense to showcase reactive bindings; get inspiration by choosing from awwwards.com too
+
+* Source
+Found verifying BUG-029 (cart-demo). @data src: inline; value: [...] works when value: is single-line, but a MULTI-LINE nested array/object literal is not captured (the value never reaches the runtime; @each renders nothing).
+
+* Evidence (verified)
+- single-line: value: [ {"id":"p1","name":"Moroccan Rug",...}, {...} ];  => emits, renders 2 cards live (port 4798).
+- multi-line: same content split across lines => emitted JS contains 0 occurrences of the value; @each renders nothing.
+
+* Root cause (hypothesis)
+ExprExtractor (src/syntax/events/extractors/expr.rs) tracks bracket depth and stops at ';' / closing bracket at depth 0 — it WOULD handle nesting. So the break is upstream: the @data form body parser likely splits the brace block into lines / clauses BEFORE the extractor runs, so a value: whose literal spans newlines is truncated at the first newline. Investigate how form body clauses (src: / value: / cache:) are tokenized in the metasystem form matcher — newlines inside a clause value must not terminate the clause.
+
+* Fix direction
+Ensure clause-value capture for value:$value:expr? consumes a full balanced literal across newlines. Either feed the whole brace-block token stream to ExprExtractor (it already balances) or stop splitting clause values on newline when bracket depth > 0.
+
+* Acceptance
+- examples/cart-demo/index.st (multi-line value:) emits the products and renders 4 product cards live.
+- A test asserts a multi-line inline value: array compiles AND the value literal appears in emitted JS.
+- single-line inline value: stays working.
+
+NOTE [2026-05-29]: Fixed in 1d0e915f. Root cause: parse_body_properties (form_compiler.rs) split the @data body on raw newlines (inner.lines()), truncating multi-line value: literals. Rewrote it to split statements at ';' and keys at ':' on balanced bracket depth 0 (string/bracket aware). Verified live: cart-demo (4-product multi-line value:) renders all 4 cards with correct data. Unit tests added (multi-line nested + single-line). NOTE discovered: cart-demo's &product-card template lacks the [data-add-to-cart] button its .product-grid handler expects — separate authoring gap, filed as follow-up.

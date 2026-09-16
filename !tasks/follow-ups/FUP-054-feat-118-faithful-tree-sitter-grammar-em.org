@@ -1,0 +1,43 @@
+#+TITLE: FEAT-118: faithful tree-sitter grammar emission (the bundle's grammar half)
+#+STATE: ITEM
+#+SESSION_ID: 1508cbf54b12d2b0
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-14T11-53-10-188Z_1508cbf54b12d2b0.jsonl]]
+#+CUSTOM_ID: FUP-054-feat-118-faithful-tree-sitter-grammar-em
+
+* Initial Message
+
+look at ~/code/ora/verse and how it generates tree-sitter from the meta-compiler language.
+
+your goal is to look at how pi-* crates manage dynamic language profiles. Consider runtime/kdl/some other addition (also consider something specific to Spacetime. Weigh in all the options and show me your reasoning).
+
+Please understand the nuances of the work here. You are also free to propose improvements to the tree sitter generator and to the Spacetime LSP to make it world-class, as it hasn't been touched in a while and could benefit from some love. Since I am the creator of both Spell and Spacetime, I would LOVE to make the two seamlessly work with each other (also look at the Spacetime MCP btw).
+
+Deep architecture dive first, then come back with your insights, revelations, challenges (to me and to you), questions, and overall state of things
+
+Parent: FEAT-118. The profile half of the Spell bundle is DONE (export-spell-profile, commit 09e316a2). This is the GRAMMAR half that composes with it.
+
+CONTEXT (from unification spec §4): the current treesitter_gen emits a generic CSS-ish grammar + a flat @name list; the structured per-directive emitter (treesitter_gen/emit.rs::emit_directive_rule + params/body) is DEAD CODE (#![allow(dead_code)]). To give Spell full .st outline/::§, the grammar must be FAITHFUL — named declaration nodes (macro_def/primitive_def/capture_type_def/template_def) so the profile's declarations resolve to real tree-sitter node kinds.
+
+SCOPE:
+1. Resurrect treesitter_gen/emit.rs: walk the registry, emit one rule per top-level %-construct (the finite, stable definition forms) + keep generic directive parsing for the open-ended @directive space (spec §4.2 strategy a+b split).
+2. Emit node-types.json alongside (tree-sitter generate already produces it for the existing grammar; ensure the faithful grammar's node-types covers the named decl nodes).
+3. Wire into export-spell-profile (or a sibling command) so one invocation drops the full bundle: profile.json + grammar.js + node-types.json (+ optional .wasm, Spell L3).
+4. Align node kind names with the profile's kind_aliases (macro/primitive/capture_type/template) so Spell's §kind map lines up with real ts nodes.
+
+VALUE: completes the zero-drift bundle — Spell L2/L3 can then load .st with full structural intelligence. The profile half already delivers declarations/refs; this adds the parseable grammar Spell's tree-sitter layer needs.
+
+NOTE [2026-06-14]: DEEPER SCOPING (investigated, not started): the dead emitter is COMPLETE and substantial — emit.rs::emit_directive_rule + emit_inline_element + emit_params + emit_body_params (all behind #![allow(dead_code)]). Resurrection = wire emit_directive_rule output into BASE_GRAMMAR's {{DIRECTIVE_RULES}} slot (currently gets a comment) + the choice into {{DIRECTIVE_CHOICE}}, in generate_grammar (emit.rs:17).
+
+KEY RISK identified: ~270 directive rules emitted into one grammar WILL surface LR conflicts — tree-sitter generate is conflict-prone; resolving needs iterative precedence/conflict tuning (generate->conflict->fix->regenerate cycles). This is a MULTI-CYCLE milestone, not a single edit. A half-resolved grammar (unresolved conflicts) is a broken artifact at rest.
+
+VALIDATION available: tree-sitter CLI 0.22.6 present in tree-sitter-spacetime/node_modules/.bin (can `tree-sitter generate` to validate each iteration). NB profile.json's kind_aliases reference per-construct kinds (macro/primitive/capture_type/template) but TODAY's node-types.json has only 35 GENERIC kinds (directive/meta_directive/scope_block) — faithful grammar must add named decl nodes (macro_def/primitive_def/capture_type_def/template_def) so Spell's §kind map resolves to real ts nodes. The shipped profile is internally consistent (declarations carry `construct`, kind_aliases map §kind->construct) so it works for SYMBOL-level intelligence NOW; faithful grammar adds POSITIONAL parsing.
+
+RECOMMENDED APPROACH next session: incremental — emit named decl-nodes for the FINITE top-level %-constructs first (macro_def/primitive_def/capture_type_def), validate parse, THEN tackle the open-ended @directive space (which is where conflicts concentrate). Spec §4.2 strategy a+b split.
+
+NOTE [2026-06-14]: CORE DONE (committed dfc6bb80, 2249 lib green). Faithful def nodes shipped: base_grammar.js specializes %macro/%primitive/%capture_type -> macro_def/primitive_def/capture_type_def, each with field('name'); added to GLR conflicts array (resolved the bare-identifier ambiguity tree-sitter flagged). export_profile gains ts_node_kinds bridging §function->[macro_def,primitive_def], §decl->[capture_type_def]. Regenerated grammar.js+node-types.json (38 named, +3 _def)+parser.c. VALIDATED via tree-sitter CLI 0.22.6: generate succeeds, real stdlib presets.st parses to 2 macro_def nodes with name fields.
+
+The Spell bundle is now SELF-CONSISTENT: profile declarations -> ts_node_kinds -> grammar def nodes -> name fields. Spell L2 can load .st with symbol-level + positional intelligence.
+
+REMAINING (incremental, lower priority): the open @directive space still uses generic directive/meta_directive parsing (spec §4.2: this is the conflict-heavy long tail, intentionally deferred — the finite top-level definition forms were the high-value 80%). A future step could specialize per-directive rules via the now-resurrectable emit_directive_rule, but that's the LR-conflict-prone work and the generic parsing is adequate for editor highlighting today.
+
+NEXT: bundle-dir emission (one command dropping profile.json + grammar.js + node-types.json together) would complete the packaging; minor. The big pieces (profile + faithful grammar) are both done.

@@ -1,0 +1,49 @@
+#+TITLE: put_function_from_args compiles the source twice
+#+STATE: DONE
+#+SESSION_ID: 150ccb99745d347e
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-17T14-25-31-601Z_150ccb99745d347e.jsonl]]
+#+CUSTOM_ID: FUP-066-put-function-from-args-compiles-the-sour
+#+COMPLETION_HASH: f516f6bf080cd827
+
+* Initial Message
+
+continue
+
+* Summary
+=put_function_from_args= (src/mcp/tools.rs) compiles the registered source TWICE
+per registration: once via =compile_to_bundle= (FEAT-132 contract param
+extraction) and once via =compile_option= (html/css/js for the page). Both parse,
+=resolve_imports=, and run =Compiler::from_ast(...).compile()= on the same source.
+
+* Impact
+- Registering any non-trivial function pays the full compile cost twice. Not a
+  hot path (put is interactive, not per-frame), so P3.
+- Secondary risk: the two helpers can DIVERGE on error semantics. The W4 reviewer
+  found exactly this \u2014 =compile_to_bundle= returns =Ok(has_errors=true)= for a
+  semantic error while =compile_option= sets =compile_ok=false=. The W4 gap-fix
+  already gated =contract_params= on =!bundle.has_errors=, so they agree on
+  mountability now, but a single shared compile would make divergence
+  structurally impossible.
+
+* Proposed fix
+Introduce one shared compile/extract that runs =Compiler::from_ast= ONCE and
+returns { html, css, js, diagnostics, bundle/contract_params } from the same
+=CompiledSpacetime= + AST. =compile_to_bundle= and =compile_option= both already
+wrap =Compiler::from_ast(&ast).compile()=; unify them behind a single entry that
+yields both projections. Care: =compile_to_bundle= lives in src/mcp/bundle.rs and
+is also called by the =/bundles= endpoint and tests \u2014 keep that API, add a
+combined helper used by =put_function_from_args=.
+
+* Acceptance
+- =put_function_from_args= compiles the source exactly once.
+- =compile_option= and the contract extraction read the SAME compile result
+  (no possibility of divergent ok/has_errors).
+- Existing tests stay green (bundle tests, contract_params_tests,
+  contract_gate_tests, origin tests).
+
+* Origin
+PLAN-041 W4 reviewer swarm (FEAT-130/132), P3 finding. The P2 sibling (params
+surfaced for has_errors bundles) was fixed in the W4 gap-fix; this is the
+remaining perf/structure cleanup.
+
+NOTE [2026-06-18]: DONE in PLAN-042 commit 11c41afc. put_function_from_args now compiles the source EXACTLY ONCE. bundle.rs gained compile_pipeline (parse+resolve+compile, once) + bundle_from_compiled (pure projection) + a new compile_function returning CompiledFunction { bundle, html, js }; compile_to_bundle keeps its public signature (still used by /bundles + tests). tools.rs: removed the dead compile_option; the put path calls compile_function and derives the page OptionOutcome via OptionOutcome::from_compiled from the SAME CompiledSpacetime the contract params came from — so the page `ok` and bundle.has_errors can no longer diverge (the divergence the W4 reviewer found is now structurally impossible). Tests: single_compile_tests {clean_source agrees, semantic_error unifies failure}. cargo test --lib mcp 38/0.

@@ -1,0 +1,37 @@
+#+TITLE: Native signal-call live transport — .st send emit over the LV socket (retire phx-click shim)
+#+STATE: DONE
+#+SESSION_ID: 1510a559ccf03ced
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-20T14-12-20-403Z_1510a559ccf03ced.jsonl]]
+#+CUSTOM_ID: FEAT-137-native-signal-call-live-transport-st-sen
+#+COMPLETION_HASH: 35419951a5334118
+
+* Initial Message
+
+ok i want you to design a prototype a deep integration between Spacetime and elixir, especially Phoenix LiveView and it should be a la Djinn.LiveView (~/code/ora/monorepo).
+
+What could it look like? Show me your DSL design so we can think about it together. Look at the recent Spacetime $host improvements and whatnot, maybe you can extend it to a canonical host for Phoenix LiveView that makes the integration insanely seamless and self-aware (re-uses the power of Elixir macros/Spark and the introspectability of Spacetime to deliver an experience that leverages the best of both).
+
+* Parent: FEAT-136 (Wave C). Follow-up surfaced building the counter vertical.
+
+* Goal
+Let the Spacetime .st itself drive the Phoenix LiveView wire: `@host $c :
+live("CounterLive")` + `@data signal $inc() { send emit "inc" }` should fire a phx
+event over the LIVE socket (Phoenix's own channel), correlate the `{:reply}`, and
+decode it through the receive arms — retiring the Wave-C `phx-click` shim so the
+.st's `@host live()` binding (and its Wave-B E0928 contract check) drives the wire
+end to end.
+
+* Where
+stdlib/primitives/signal.st already pools a ws socket + __corr correlation; the
+`live` transport is a specialisation: speak Phoenix's channel framing (phx_join,
+the LV event/reply envelope) instead of a raw ws. The @host live() macro already
+exists (stdlib/macros/host.st). Needs: a live-transport branch in signal-call that
+reuses window.liveSocket (the Phoenix JS socket) rather than opening its own.
+
+* Acceptance
+- demos/liveview-counter (the @host live() .st) drives a real CounterLive with NO
+  phx-click buttons in render_host — the .st's own buttons fire the events.
+- The {:reply} from handle_event decodes into the receive sum (Bumped/Failed).
+- @drive test clicks the .st button, asserts server-driven re-render.
+
+NOTE [2026-07-22]: DONE 2026-07-22. Native live transport shipped + proven end-to-end on a real Phoenix socket. (1) stdlib/primitives/signal.st: doLiveRequest — the `live` host transport branch in doRequest; routes `send emit "<evt>"` through window.__stLiveBridge (mounted by the host LV's SpacetimeBridge hook), normalises {:reply, %{tag, reply}} into the Reply envelope {type: tag, reply/payload: body}, decodes through the SAME receive arms (discriminator = tag; `$.reply` works). Correlation = Phoenix's ref, no __corr. (2) assets/js/app.js: SpacetimeBridge mounts the __stLiveBridge.pushEvent dispatcher (+destroyed cleanup). (3) elixir/spacetime_lv layout rework: NEW frontend/ project root — $hosts.st (@host $counter : live("SpacetimeLvWeb.CounterLive")), counter.st (page imports ./$hosts.st; @import of the $-named file compiles clean), CounterLive.contract.json sidecar. Old priv/spacetime/counter/ + priv/static/spacetime/counter.{js,css} removed; bundle now builds to priv/static/spacetime/counter/spacetime.{js,css}. (4) CounterLive handle_event inc/dec now answer {:reply, %{tag: "ok", reply: count}}; render_host emits the plain skeleton (buttons WITHOUT phx-click — the .st owns controls). PROOF: cargo check frontend/ GREEN + E0928 RED→GREEN (send emit "increment" → compile error); mix precommit green incl. new CounterLiveTest (host markup, refute phx-click, assert_reply %{tag:"ok", reply:1→2→1}); puppeteer e2e on :4001 — 3×inc→"3", dec→"2", one HANDLE EVENT per click. Two pre-existing failures fixed en route: mix.exs missing :req dep (AccountVerifier broke --warnings-as-errors), stale page_controller_test asserting the Phoenix landing page on / (replaced by CounterLiveTest). Compiler bug found + worked around + filed: @on nested inside a selector block hoists the binding to the OUTER element (one click fired every nested handler) — buttons must use top-level selector blocks (see BUG item). Follow-ups in README: skeleton emission from compiler, assign-diff subscribe channel, pushes/stream, multi-LV __stLiveBridge scoping.

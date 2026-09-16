@@ -1,0 +1,97 @@
+#+TITLE: MCP tab/compose path ignores project index.html shell and @locale build scripts — composed stage renders empty
+#+STATE: DONE
+#+SESSION_ID: 15250fe86b2ee48b
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-06T10-47-30-988Z_15250fe86b2ee48b.jsonl]]
+#+CUSTOM_ID: PLAN-066-mcp-tab-compose-path-ignores-project-ind
+#+COMPLETION_HASH: 3b2a4922bf11eb88
+
+* Initial Message
+
+look up https://paper.design and check against the Spacetime workbench. Can you tell me what you can learn, design-wise (UI and UX and design language) to get something cool?
+
+## Summary
+
+Opening a project's `.st` entry as an MCP tab (`st_tab_open`) and composing it onto the workbench stage (`mcp_compose` / "Open on stage") silently renders BLANK or near-empty when that entry relies on either:
+
+1. a sibling `index.html` shell that the `.st` file composes INTO via CSS selectors (e.g. `.site-header`, `main`, `footer` defined in `index.html`, populated by `&unkn-nav()` etc targeting those selectors) — the compiled HTML output is then legitimately `0 bytes` because the `.st` file itself declares no root-level markup, all of it lives in `index.html`.
+2. `@locale(...)` + build scripts (`projects/*/landing/index.st` pattern) — the real dev server (`server.rs::try_serve_locale`) executes build scripts via a v8 runtime (`build_runtime::execute_build_scripts`) to materialize the locale HTML; the MCP path never does this.
+
+## Root cause
+
+`src/mcp/bundle.rs::compile_function` / `compile_to_bundle` call ONLY `Compiler::from_ast(&ast).compile()` — the raw AST→HTML/CSS/JS compile. They never:
+- look for a sibling `index.html` (as `server.rs::try_serve_locale`, `index_handler`, `catch_all_handler` all do via `derive_st_path`/`html_path.exists()` checks and page-shell merge), and
+- never execute `@locale` build scripts (`build_runtime::execute_build_scripts`), which the same `server.rs` locale-serve path treats as a first-class case.
+
+This means `src/mcp/live.rs`'s `put_source` / `mount_into_host` / `mount_function` are a SEPARATE, simplified compile pipeline from the real `serve`/`build` pipeline in `server.rs` — they diverge structurally, not just by accident. Confirmed via `st_inspect{fn_id}`: a tab opened from `projects/unkn/index.st` (relies on `index.html` shell) compiles `ok` with `html_len: 0`; composing it onto the workbench stage yields a near-invisible collapsed guest root (`.unkn-stat` template shell leaking through at ~8px height, no header/main/footer). A tab opened from `projects/ora-ventures.com/landing/index.st` (`@locale`) compiles `ok` with `html_len: 0, css_len: 0, js_len: 0` — total blank.
+
+## Repro (verified this session, fresh instance `inst-2`)
+
+1. `st_env_open{path:"projects/unkn"}` → env-2
+2. `st_tab_open{env:"env-2", entry:"index.st"}` → fn-2, compiles ok
+3. `st_inspect{fn_id:"fn-2"}` → contract shows only scattered template-local bindings (`unkn-stat-card`, `unkn-service-card`, etc), NOT the actual page structure (nav/hero/roster/etc) — confirms the compile only captured root-level `@each` cards, not the `.site-header`/`main`/`footer` composition that lives in `index.html`.
+4. Click "Open on stage" for the unkn tab (via UI, confirmed the click IS mechanically fine — toast reads "Composed fn-2 into inst-2 region 'stage'.")
+5. Stage DOM: `.mcp-stage-empty` correctly `display:none`, but the only guest content in `.mcp-stage` is `<div class="unkn-stat"><span class="unkn-stat__value"></span><span class="unkn-stat__label"></span></div>` at `height: 7.6px` — the stat-card template rendered with no data, no page shell, nothing else.
+6. Function card confirms: `fn-2 r1 env-2/unkn home Env(env-2) 0B html · 57541B css · 1005519B js`.
+7. Same pattern for `env-1/landing/index.st` (`@locale`): `fn-3 ... 0B html · 0B css · 0B js`.
+
+## Fix direction
+
+`compile_function`/`compile_to_bundle` (or a new wrapper used by `put_source`) should, when compiling an ENV-origin (file-backed) entry:
+- check for a sibling `index.html` (same `derive_st_path`/existence check `server.rs` uses) and if present, treat the compiled HTML as a fragment to merge into that shell's `body` region (mirroring `render_page_shell` / the existing `index.html` DOM merge in `server.rs`'s handlers), OR at minimum surface this discrepancy to the agent/user via a compile diagnostic ("this entry composes into an index.html shell not present in the MCP compile — result may be incomplete") rather than silently reporting `compile_ok: true, html_len: 0`.
+- detect `@locale` in the AST and either execute build scripts (reusing `build_runtime::execute_build_scripts`, same as `server.rs`) or surface a clear diagnostic that MCP compose does not support locale-routed entries yet.
+
+Either way: **`compile_ok: true` + `html_len: 0` for an entry that visibly has a full page of markup on disk is a lie the tool tells the agent** — worth gating explicitly rather than leaving it as a silent footgun.
+
+## Verification once fixed
+
+- Re-run repro steps above against `projects/unkn/index.st` and `projects/ora-ventures.com/landing/index.st`.
+- Compose each onto a fresh workbench stage; the guest DOM under `.mcp-stage[data-st-region="stage"]` must show the real page shell (`.site-header`, `main > section...`, `footer` for unkn; the locale-routed hero/pillars content for ora-ventures), not just orphaned `@each` card templates.
+- `st_inspect{fn_id}` `html_len` should be non-zero for both.
+
+NOTE [2026-07-06]: ## Additional bug found + fixed during implementation: subdirectory entry import resolution
+
+While live-verifying the MCP-SHELL fix against `projects/ora-ventures.com/landing/index.st` (a subdirectory entry with `@locale` + a relative `@import "../modules/_theme.st"`), discovered `compile_pipeline`'s import resolution ALWAYS used `ws_root.join("<bundle>.st")` as the pseudo main-file path, regardless of the entry's REAL on-disk location. For any subdirectory entry (not at the env root) with a `../`-relative import, this produced a bogus "Import resolution failed" error — reproduced live: `st_tab_open{env:"env-2", entry:"landing/index.st"}` failed to compile entirely (not just the MCP-SHELL/LOCALE warning gap this ticket was originally about).
+
+### Fix
+`compile_pipeline` now accepts `entry_path: Option<&Path>` and uses it (when given) as the import-resolution `main_path` instead of the ws_root pseudo-path. `compile_function` (used by `put_source_with_entry`, which `st_tab_open`/`open_tab_action` now call) threads its existing `entry_path` param through. `compile_to_bundle` (used by bundle re-polling / structure introspection, not entry-opening) keeps passing `None` — unchanged behavior there, out of scope for this ticket.
+
+### Verified live (rebuilt `spacetime` MCP binary, restarted server, re-ran against real projects)
+1. `st_tab_open{env:"env-1"(unkn), entry:"index.st"}` → `"Tab tab-1 (unkn home) registered as fn-2 — composable onto the stage, with 1 warning(s): ! [MCP-SHELL] this entry has no file-scope HTML of its own; it composes into the sibling shell .../projects/unkn/index.html ... See PLAN-066."` — the MCP-SHELL warning now surfaces directly in the tool response, no second st_inspect round-trip needed.
+2. `st_tab_open{env:"env-2"(ora-ventures.com), entry:"landing/index.st"}` — before the import-path fix, failed entirely with "Import resolution failed: Could not resolve import '../modules/_theme.st'"; this was the trigger for finding the second bug, now fixed (see next step for post-fix confirmation, to be run in a follow-up verification since it needs ANOTHER server rebuild+restart cycle after this second fix — tracked here, do not close the ticket until that confirmation is added).
+
+### Regression tests added (all passing, 2566/2566 full `cargo test --lib`)
+- `mcp::bundle::tests::locale_entry_warns_but_still_compiles`
+- `mcp::bundle::tests::shell_composing_entry_warns_when_sibling_html_exists`
+- `mcp::bundle::tests::no_sibling_html_yields_no_shell_warning`
+- `mcp::bundle::tests::subdirectory_entry_resolves_relative_import_against_its_own_dir`
+- `mcp::live::routing_tests::put_source_with_entry_surfaces_warning_diagnostics_on_clean_compile`
+
+### Also fixed (was silently dropping the new warnings)
+`put_source`/`put_source_with_entry`'s SUCCESS branch previously discarded `bundle.diagnostics` unconditionally (`Vec::new()`) whenever `compile_ok` was true — meaning the new MCP-SHELL/MCP-LOCALE warnings would have compiled correctly into the `Bundle` but never reached the `FunctionRecord`, the `st_tab_open` summary text, or the browser `mcp_tab_open` action's toast. Fixed in three places: `put_source_with_entry`'s ok-branch now maps `bundle.diagnostics` into `OptionDiagnostic`s instead of discarding; `st_tab_open`'s summary text (tools.rs) and `open_tab_action`'s summary+data (live.rs, the browser click path) now render warning counts + the formatted diagnostics when present, instead of only ever showing them on the `compile_ok: false` branch.
+
+NOTE [2026-07-06]: ## Final live verification (post import-path fix, fresh rebuild+restart)
+
+Both real-world repro cases now confirmed working end-to-end against the actual MCP server (not just unit tests):
+
+1. `st_tab_open{env:"env-1", entry:"landing/index.st"}` (ora-ventures.com, subdirectory entry with `@locale` + a relative `../modules/_theme.st` import) → COMPILES CLEANLY now (previously failed outright with "Import resolution failed"), and correctly surfaces BOTH warnings in the tool response:
+   `Tab tab-1 (landing) registered as fn-1 — composable onto the stage, with 2 warning(s):
+     ! [MCP-LOCALE] ... the MCP compose path does not execute them ...
+     ! [MCP-SHELL] ... composes into the sibling shell .../landing/index.html ...`
+
+2. `st_tab_open{env:"env-2", entry:"index.st"}` (unkn, pure index.html-shell composition) → still compiles ok, correctly surfaces:
+   `Tab tab-2 (unkn home) registered as fn-2 — composable onto the stage, with 1 warning(s):
+     ! [MCP-SHELL] ... composes into the sibling shell .../unkn/index.html ...`
+
+Both are now IMPOSSIBLE to silently misread as "fully working" — the agent/human driving `st_tab_open` sees the truth immediately, no second `st_inspect` round-trip.
+
+## Status: CLOSING
+
+Root cause fully diagnosed, fixed, and unit+live verified:
+- `src/mcp/bundle.rs`: `compile_pipeline`/`compile_function` gained `entry_path: Option<&Path>` — enables (a) correct relative-import resolution against the entry's real directory (previously always broken for subdirectory entries), and (b) two new completeness diagnostics (MCP-LOCALE, MCP-SHELL) that tell the truth about what the MCP compose path can and cannot render.
+- `src/mcp/live.rs`: `put_source` split into `put_source`/`put_source_with_entry`; the success-path diagnostics-discard bug fixed (bundle warnings now survive onto `FunctionRecord.diagnostics` even when `compile_ok: true`); `open_tab_action` (browser click path) updated to thread `entry_path` + surface warnings in its toast/data, matching `st_tab_open`.
+- `src/mcp/tools.rs`: `st_tab_open` now calls `put_source_with_entry` directly (dropped the `put_function_from_args` indirection, which had no entry-path field to carry); success-path summary text now shows warning diagnostics inline.
+- 5 new regression tests, 2566/2566 full `cargo test --lib` passing.
+- This PLAN did NOT touch `compile_to_bundle` (used for bundle re-polling/structure introspection, not entry-opening) — it keeps its prior behavior (`entry_path: None`), correctly out of scope.
+
+## Deferred (separate, tracked in PLAN-067)
+The unrelated MCP-instance HTTP wedge discovered mid-session remains open, root-cause unconfirmed, tracked separately in PLAN-067 — not blocking this closure.

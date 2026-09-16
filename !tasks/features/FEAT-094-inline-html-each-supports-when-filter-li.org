@@ -1,0 +1,45 @@
+#+TITLE: Inline-HTML @each supports when-filter (live search/filter)
+#+STATE: DONE
+#+SESSION_ID: 14f94e45c6c3f247
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-02T11-06-49-499Z_14f94e45c6c3f247.jsonl]]
+#+CUSTOM_ID: FEAT-094-inline-html-each-supports-when-filter-li
+#+COMPLETION_HASH: 91a7a1d7003f6f2f
+
+* Initial Message
+
+what's next to make this super usable? especially for e.g. multiple dispatch and making it useful as an actual browser. also, could you create a basic Markdown parser in pure Spacetime (only scoped to spacetime-docs for now, if needed), that you would use to integrate Markdown files already written about testing? How hard would that be?
+
+* Goal
+Inline-HTML ~@each($src as $i) { <html> }~ has NO ~when $filter~ form (only the
+template-invocation each-filtered does, stdlib/macros/each.st:103). So a reactive
+search/filter over an inline-HTML list silently drops the filter \u2014 the ~when~
+clause is absorbed and the list is unfiltered. Add filter support to each-inline,
+mirroring each-with-templates' machinery (evaluateFilter/applyFilter/
+getFilterStateVars + per-dep local:<var>:updated subscription).
+
+* Target
+- stdlib/macros/each.st ~each-inline~: add a SECOND %form
+  ~@each($source as $item, when $filter:expr) { $body:html_block }~ binding
+  ~each-inline(&self, source, item, html, filter: $filter)~. Keep the existing
+  unfiltered form.
+- stdlib/primitives/data/each-inline.st: add ~filter: string? = null~ param; port
+  evaluateFilter (resolve $item.field via itemData, $stateVar via SpacetimeLocal/
+  ST.get), applyFilter (toggle el.style.display per row), getFilterStateVars +
+  subscribe ~local:<var>:updated -> applyFilter~. Apply filter after each render.
+
+* Edge
+- Filter must run AFTER nested-each expansion (BUG-081) \u2014 rows exist before
+  filtering. Item-var resolution in the filter expr must use the OUTER item var.
+- SSG: a filtered inline-each is reactive (depends on runtime signals), so the SSG
+  unroll should render ALL rows (no filter at build time) and the runtime hides
+  non-matches on first paint \u2014 matches each-with-templates (renders all, then
+  applyFilter). Acceptable: initial HTML shows all, hydrate filters.
+
+* Acceptance
+- demos/spacetime-docs/reference.st: typing in the search box live-hides
+  non-matching cards; clicking a kind chip filters by kind (CDP: visible-card
+  count drops). 
+- A headless/unit check that each-inline with a when-form binds filter.
+- Full lib + integration green.
+
+NOTE [2026-06-10]: DONE. each-inline-filtered %macro (each.st, %order 597, form @each($s as $i, when $filter:expr){$body:html_block} -> each-inline(... filter:$filter)). each-inline primitive gains filter param + ported evaluateFilter/applyFilter/getFilterStateVars from each-with-templates: rows tagged el.__stItem, display toggled per filter, re-filter on local:<var>:updated. Proven live: search "scene" -> 266->1, kind chip "data" -> 8 cards (all data). NOTE: filter expr must avoid method-on-substituted-path ($m.name.indexOf breaks the naive $var.path regex); use (\"\"+$m.field) or string concat then .indexOf. Two-way input: @on body $ = event target, so $.value / $.dataset.kind (NOT bare value / this). lib 2179/0, integration 169/0.

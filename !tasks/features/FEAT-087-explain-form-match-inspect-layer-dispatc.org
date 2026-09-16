@@ -1,0 +1,97 @@
+#+TITLE: explain_form_match + inspect --layer dispatch (catalog + probe)
+#+STATE: DONE
+#+SESSION_ID: 14f94e45c6c3f247
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-02T11-06-49-499Z_14f94e45c6c3f247.jsonl]]
+#+CUSTOM_ID: FEAT-087-explain-form-match-inspect-layer-dispatc
+#+COMPLETION_HASH: 0b971c06e2a32edc
+
+* Initial Message
+
+what's next to make this super usable? especially for e.g. multiple dispatch and making it useful as an actual browser. also, could you create a basic Markdown parser in pure Spacetime (only scoped to spacetime-docs for now, if needed), that you would use to integrate Markdown files already written about testing? How hard would that be?
+
+* Parent
+[[id:PLAN-033-world-class-spacetime-macro-dispatch-ref]]. SUBSTRATE — everything projects from this.
+
+* Goal
+Surface Spacetime's predicate-dispatch resolution as a read-only projection: an
+EXPLAINER that returns per-term score reasons, and an ~inspect --layer dispatch~
+that emits the macro catalog (grouped by directive) and, with ~--probe~, the full
+scored resolution table for a call.
+
+* Target files
+- ~src/syntax/form_scoring.rs~ — add ~explain_form_match~ + ~ScoreExplanation~/~ScoreTerm~; refactor ~score_form_match~ to delegate.
+- ~src/cli/inspect.rs~ — add ~InspectLayer::Dispatch~ (+ from_str/all_names/as_str), ~DispatchLayerOutput~ structs, ~build_dispatch_output~, pretty printer. Mirror the Registry layer (it is the no-file precedent).
+- ~src/main.rs~ / CLI arg plumbing — add ~--probe <string>~ option to ~inspect~ (passes through to the dispatch layer).
+- ~src/metasystem/registry.rs~ — if needed, a ~pub~ helper that returns candidates for a directive with scores (reuse ~get_all_macros_by_form_directive~ + ~score_macro_form~, both already pub).
+
+* Contract — the explainer (ONE source of truth)
+#+begin_src rust
+pub struct ScoreTerm { pub element_label: String, pub points: i32, pub verdict: String } // verdict: "matched" | "missing" | "type-mismatch" | "literal-miss" | "absent-ok"
+pub struct ScoreExplanation { pub total: Option<u32>, pub terms: Vec<ScoreTerm> }
+pub fn explain_form_match(form: &FormClause, input: &impl FormMatchInput) -> ScoreExplanation;
+// Fast path MUST delegate so they cannot diverge:
+pub fn score_form_match(form: &FormClause, input: &impl FormMatchInput) -> Option<u32> {
+    explain_form_match(form, input).total
+}
+#+end_src
+Each branch in today's ~score_form_match~ (form_scoring.rs:49) becomes a pushed
+ScoreTerm with the SAME points (+3 literal, +2 required capture/comparison, +1
+optional/param, −100 literal-miss) and the SAME None-rejections (required missing,
+type mismatch) — but recorded as terms with a verdict before returning. ~total~ =
+None iff any hard-reject term fired.
+
+* Contract — the dispatch layer JSON
+#+begin_src
+{ "layer":"dispatch",
+  "directives":[ { "directive":"@data",
+    "overloads":[ { "macro":"data-fetch", "signature":"@data fetch $name:binding $type? : $src:expr ;",
+                    "doc":"remote/async source", "scopes":["file","selector"], "binds":["fetch-source"] }, … ] } ],
+  "probe": null }   // when --probe absent
+#+end_src
+With ~--probe "@data fetch $api : \"/url\""~:
+#+begin_src
+"probe": { "call":"@data fetch $api : \"/url\"", "directive":"@data",
+  "candidates":[ { "macro":"data-fetch", "total":6, "winner":true,
+                   "terms":[ {"element_label":"literal `fetch`","points":3,"verdict":"matched"},
+                             {"element_label":"$name:binding","points":2,"verdict":"matched"},
+                             {"element_label":"$src:expr","points":1,"verdict":"matched"} ] },
+                 { "macro":"data-inline", "total":null, "winner":false,
+                   "terms":[ {"element_label":"literal `inline`","points":-100,"verdict":"literal-miss"} ] } ],
+  "ambiguous":false, "margin":3 }
+#+end_src
+Probe parsing: feed the call string through ~crate::syntax::events::parse_matches(call, &registry)~
+to get the directive + captures; build a ~CaptureMapInput~ (form_scoring.rs:341);
+score every ~get_all_macros_by_form_directive(directive)~ candidate via the
+explainer. ~margin~ = winner.total − best-viable-runner-up.total. ~ambiguous~ =
+two viable candidates share the top total.
+
+* Edge cases
+- Call with no directive match → ~candidates:[]~, ~probe.directive~ still echoed.
+- Selector-scoped forms: pass ~--selector~ (existing InspectFilter field) so
+  ~macro_scope_matches~ participates (mirror find_macro_for_match's selector arg).
+- Literal-match tracking: the explainer needs ~literal_matched(idx)~ from the
+  input; ~CaptureMapInput~ may default-true. If positional literal tracking is
+  unavailable from a bare call parse, record verdict "literal-untracked" with the
+  form's declared points and NOTE it (don't fake a −100). File a BUG if this makes
+  the probe lie about a real call; otherwise acceptable for v1.
+
+* Acceptance
+- ~cargo run -- inspect --layer dispatch~ → JSON/pretty catalog, every macro under
+  its ~@directive~ with a rendered signature (signature string may be minimal here;
+  FEAT-089 owns the rich formatter — a directive_name-only fallback is fine for 087).
+- ~cargo run -- inspect --layer dispatch --probe "@data fetch $x : \"/u\"" --format json~
+  → resolution table; winner=data-fetch, total 6, data-inline total null with a
+  literal-miss term.
+- Unit tests: (a) ~score_form_match == explain_form_match(...).total~ over a sample
+  of stdlib forms (the delegation invariant); (b) a probe over a known
+  multi-overload directive picks the right winner with the expected breakdown.
+- Full lib + integration green.
+
+* Notes
+- ~FormClause~, ~FormInlineElement~, ~FormCapture~, ~CaptureType~, ~CaptureModifier~
+  are all ~Serialize~ (meta_ast.rs:303+) — the catalog can serialize forms directly
+  if a string signature isn't ready.
+- Do NOT add scoring special-cases; the explainer must be a faithful 1:1 of the
+  existing branch logic.
+
+NOTE [2026-06-10]: DONE. explain_form_match (1:1 of score_form_match, fast path delegates) + ScoreExplanation/ScoreTerm + capture_type_label; inspect --layer dispatch (catalog grouped by directive + signatures + docs) and --probe (scored resolution table via literal-aware ProbeInput so keyword literals only score +3 when present in the call text — honest losing-candidate breakdowns). Garbage call → error, no panic. Tests: delegation invariant over all branches, literal/capture term recording, missing-reject, catalog grouping, fetch-probe winner+breakdown, garbage-probe. lib 2168/0, integration 168/0.

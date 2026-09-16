@@ -1,0 +1,99 @@
+#+TITLE: `@form` kind inference does not discriminate — the first body-consuming form wins
+#+STATE: DONE (2026-07-26) — FIXED by design change: explicit leading kind marker, user ruling
+#+CUSTOM_ID: BUG-245-form-kind-inference-does-not-discriminate
+
+* Resolution (2026-07-26)
+
+User ruling: =@form='s kind is an EXPLICIT LEADING MARKER —
+=@form <kind> --name { … }=, kind ∈ style | value | motion | easing | score |
+markup, always required. Implemented in =stdlib/macros/form.st= as six sibling
+macros (kind-is-the-macro, the =data-kind.st= idiom), each discriminated by a
+ONE-ALTERNATIVE UNION capture =$kind:("motion")= at token 2.
+
+Why a union capture and not a bare literal: a literal miss is a
+=LiteralMismatch=, which the reporter deliberately SUPPRESSES (literals also
+discriminate sibling overloads and CSS queries) — a misspelt kind would have
+compiled green and silently dropped, the exact failure class this bug belongs
+to. A union-capture miss is a =CaptureTypeMismatch=, which IS reported (E0946),
+and =match_sink.rs= merges the six siblings' one-word unions into the full
+vocabulary: =Expected `$kind` to be one of `style` | `value` | …=.
+
+The body capture type no longer selects anything; per-kind body validation
+(SIP-001c §4 E-FORM-BODY) is additive FUP work. Inference may return as a
+convenience via lightningCSS classification: FUP-154. SIP-001c v3 §1 carries
+the design; =tests/sip_001_w2_form_surface_test.rs= locks it
+(=the_marker_selects_the_macro=, =typo_kind_is_a_hard_error_naming_the_vocabulary=,
+=trailing_kind_word_is_rejected=).
+
+Everything below is the historical record of WHY inference was abandoned.
+
+* The claim under test
+
+SIP-001c's central `@form` mechanism: ONE directive whose KIND is inferred from
+its BODY — declarations (≡ =@mixin=), =result:= (≡ =@function=), keyframes,
+curve, score lines, markup. No kind keyword; the body decides.
+
+* Measured (2026-07-26, PLAN-121 W2 review)
+
+Two macros declaring the SAME surface with DIFFERENT body capture types:
+
+#+begin_src spacetime
+%macro form-decls { %order 700
+  %form { @form $name:dashed_ident { $body:properties } } … }
+
+%macro form-kf { %order 710
+  %form { @form $name:dashed_ident { $frames:keyframes } } … }
+
+.host {
+  @form --surface { background: blue; }      // want: declarations
+  @form --rise    { opacity: 0 -> 1; }       // want: KEYFRAMES
+}
+#+end_src
+
+=inspect --layer expansion= reports:
+
+: @form(name: --surface, body: [properties])
+: @form(body: [properties], name: --rise)
+
+**Both** were claimed by the DECLARATIONS form. The keyframes body was captured
+as properties; the keyframes macro never matched. `check` is green.
+
+* Cause
+
+Matching returns the FIRST successful body-consuming candidate
+(=src/syntax/events/match_sink.rs:164-205=), equal-permissive body types tie in
+registry specificity (=src/syntax/registry.rs:103-152=), and the =keyframes=
+capture accepts any nonempty body as raw text
+(=src/syntax/events/form_compiler.rs:1509-1513=).
+
+∴ selection is registration-order dependent, and =properties= vs =keyframes= is
+not a discrimination at all — both accept the same input.
+
+* Consequence for SIP-001c
+
+"Kind inferred from body" is NOT implementable on the current matcher without
+one of:
+
+1. **Body capture types that actually discriminate.** =keyframes= would have to
+   REJECT a body with no transition (=a: 1 -> 2=), and =properties= reject one
+   with transitions. Today both are permissive, so no ordering can help.
+2. **An explicit kind marker** — which the SIP deliberately avoids ("No =@apply=
+   keyword needed"), so adopting it is a real design change, not an
+   implementation detail.
+
+(1) preserves the design and is the smaller change in surface terms, but it
+means tightening two capture types that other constructs already rely on —
+measure that blast radius before committing.
+
+* Why this was invisible
+
+The W2.3 tests only exercised the DECLARATIONS kind, so a mechanism that never
+discriminates passed as "working". Same shape as W1's finding that the spikes
+tested simplified stand-ins: a single-variant test of a multi-variant mechanism
+proves nothing about the mechanism.
+
+* Acceptance
+
+- One positive per promised kind, each proving the RIGHT form claimed it.
+- A mixed-kind body is REJECTED (SIP-001c's stated negative).
+- If (2) is chosen, SIP-001c's "no kind keyword" claim is amended.

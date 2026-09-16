@@ -1,0 +1,41 @@
+#+TITLE: BUG-281 clip consumers with descendant selectors dead
+#+TODO: TODO DOING | DONE CANCELLED
+#+STARTUP: overview
+
+* DONE [#A] @on &.clip consumers with descendant selectors silently dead
+:PROPERTIES:
+:CUSTOM_ID: BUG-281
+:PRIORITY: #A
+:LAYER: pipeline
+:DISCOVERED: 2026-08-04
+:FIXED: 2026-08-04
+:END
+
+** Symptom
+Every consumer in demos/effect-gallery (`.g-kara .w1 { @on &.clip {…} }`)
+emitted `processScope(scope, elements, "__drive_clip_N")` — a synthetic name
+nothing publishes. All 33 consumers compiled clean and never moved.
+score-launch was unaffected (single-class selectors only).
+
+** Root cause
+selector_element() (src/pipeline/score.rs) required the WHOLE selector to be a
+single class: `.g-kara .w1` contains a space → None → fallback to the
+synthetic counter. The inherited-naming rule (W5a/D1: the name IS the
+address) thus only held for single-class consumers.
+
+** Fix
+selector_element takes the LAST compound of the selector (split on
+combinators) — combinators are address, not identity. Compound of two classes
+still refuses (never guess). One rule, both call sites (score.rs:778,
+drivers.rs:2018) route through inherited_progress_name.
+
+** Gates
+- src/pipeline/score.rs::selector_element_reads_the_last_compound (RED→GREEN)
+- tests/gallery/effect-gallery.test.st (4 CDP behavior probes — karaoke,
+  pixelate stagger, ticker, morph — all dead before this fix)
+- Emission: gallery dist now has 33 __clip_* joins, 0 __drive_clip
+
+** Adjacent contract (documented in demos/effect-gallery/README.md)
+Placement name must equal the consumer's LAST class (`&w1` ↔ `.g-kara .w1`).
+A mismatched name still compiles clean and never moves — a loud
+unmatched-consumer diagnostic is a candidate follow-up (not filed).

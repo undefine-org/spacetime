@@ -1,0 +1,30 @@
+#+TITLE: Workbench UI never renders compile diagnostics (errors OR warnings) anywhere — only a silent button hide
+#+STATE: ITEM
+#+SESSION_ID: 15250fe86b2ee48b
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-06T10-47-30-988Z_15250fe86b2ee48b.jsonl]]
+#+CUSTOM_ID: PLAN-068-workbench-ui-never-renders-compile-diagn
+
+* Initial Message
+
+look up https://paper.design and check against the Spacetime workbench. Can you tell me what you can learn, design-wise (UI and UX and design language) to get something cool?
+
+## Summary
+
+The MCP workbench (`stdlib/__mcp__/`) never renders a function's compile diagnostics ANYWHERE in the visual UI — not compile errors, not the new PLAN-066 completeness warnings (MCP-SHELL/MCP-LOCALE), nothing. The ONLY visual signal a broken/incomplete function gets is `data-compile-ok="false"` hiding the "Open on stage" button on its TAB card (`stdlib/__mcp__/workbench/styles.st:975`). The function GALLERY cards (`.mcp-function-card`) don't even do that much — confirmed live, a function with `compile_ok: true` and an active MCP-SHELL warning renders identically to a fully-correct one (`0B html · 57541B css · 1015649B js Delete`, no badge/tooltip/asterisk of any kind).
+
+This means: everything PLAN-066 fixed at the TOOL level (an agent driving `st_tab_open` now sees the warning inline in the response text) is STILL INVISIBLE to a human clicking through the workbench UI itself. A person composing a broken/incomplete tab onto the stage via clicks alone has no way to discover WHY the result looks wrong, short of asking an agent to run `st_inspect`.
+
+## Repro (verified this session)
+
+1. Compose `env-2/unkn home` (carries an `MCP-SHELL` warning after the PLAN-066 fix) onto the workbench stage.
+2. Inspect `.mcp-function-card` in the DOM: `"function fn-2 r1 env-2/unkn home Env(env-2) 0B html · 57541B css · 1015649B js Delete"` — no diagnostic surfaced.
+3. `grep -rln "diagnostics" stdlib/__mcp__/` → **zero files**. The entire workbench UI template tree never references a function's `diagnostics` field, despite `FunctionRecord.to_json()` (src/mcp/live.rs) including it in every function's JSON.
+
+## Fix direction
+
+`stdlib/__mcp__/workbench/cards.st`'s function/tab card templates should render a small warning/error badge (reusing the SAME severity-glyph convention `format_record_diagnostics` already established server-side: `!` for warning, `x` for error) when `record.diagnostics` is non-empty, with the message(s) available on hover/click (a `title` attribute at minimum for v1; a proper disclosure panel as a follow-up). This is a pure Spacetime-native UI change (no custom JS per AGENTS.md) — the data is already in the snapshot JSON (`workbench_snapshot()` → `to_json()` includes `diagnostics`), it's purely a template gap.
+
+## Verification once fixed
+
+- Compose `env-2/unkn home` (or any function carrying an MCP-SHELL/MCP-LOCALE warning) onto the stage; the function/tab card must show a visible warning indicator.
+- Compose a function with a genuine compile ERROR; its card must show a visible error indicator DISTINCT from the warning one (severity must be legible without reading server logs).

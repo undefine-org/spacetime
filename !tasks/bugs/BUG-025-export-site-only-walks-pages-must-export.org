@@ -1,0 +1,87 @@
+#+TITLE: export_site only walks pages/ — must export every *.html with co-located *.st
+#+STATE: DONE
+#+SESSION_ID: 14e121318404696e
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-05-14T16-26-19-537Z_14e121318404696e.jsonl]]
+#+CUSTOM_ID: BUG-025-export-site-only-walks-pages-must-export
+#+EFFORT: S
+#+LAYER: build
+
+* Initial Message
+
+most of the routes of the projects/unkn are not presetn in the dist folder, why?
+
+* Initial Message
+
+most of the routes of the projects/unkn are not present in the dist folder, why?
+
+> should work for all *.html and *.st files bro, wtf. In the future we can think of a manifest file in .st or .kdl (file as an FUP with a subagent deciding the architecture), but for now file a BUG to allow ANY *.html and *.st to be part of the final dist.
+
+* Intention & Purpose
+
+=cargo run -- build projects/<name>/= MUST produce a =dist/= mirroring every route the site declares on disk. Today it only mirrors the root =index.html= plus anything under =pages/=. Sibling-route directories (=about/=, =contact/=, =talent/<person>/=, …) silently vanish from =dist/=, breaking deploys.
+
+Goal: any =*.html= (with optional co-located =*.st=) anywhere under the site root participates in the export, with its relative path preserved in =dist/=.
+
+* Reproduction
+
+#+begin_src bash
+cargo run -- build projects/unkn/
+find projects/unkn/dist -name index.html
+#+end_src
+
+Expected: one =index.html= per route (=about/=, =contact/=, =expertise/=, =privacy/=, =talent/=, =talent/<person>/= ×9, =terms/=, =work/=, plus root).
+
+Actual: only =projects/unkn/dist/index.html=. All sibling routes are absent.
+
+Side observation: =projects/unkn/dist/talent/gabrielle-figueiredo/spacetime.{js,css}= exists without an =index.html=. That pair is a side-effect of =cargo run -- serve= having previously hit that route — proof that the dev server and the static exporter disagree on what "a route" is.
+
+* Root Cause
+
+=src/export.rs::export_site= (and =process_pages_dir=) only know two HTML sources:
+
+#+begin_src rust
+// src/export.rs:62–78
+let index_html = site_dir.join("index.html");
+if index_html.exists() { /* copy to dist/index.html */ }
+
+let pages_dir = site_dir.join("pages");
+if pages_dir.is_dir() {
+    process_pages_dir(&pages_dir, site_dir, output_dir, &mut report)?;
+}
+#+end_src
+
+Anything outside =site_dir/index.html= and =site_dir/pages/**/*.html= is invisible to the exporter. =projects/unkn/= uses a flat sibling-route layout (=about/index.html=, =talent/jessica-lee/index.html=, …), so 100% of its non-root routes are dropped.
+
+Additionally, only the root =index.st= is compiled. Per-route =index.st= files (if a route wants its own bundle) are never compiled by =build=, even though =serve= compiles them on demand.
+
+* Fix (this BUG, narrow scope)
+
+Replace the =index.html + pages/= special case with a generic walker:
+
+1. Walk =site_dir= recursively for every =*.html= file.
+2. Skip a denylist of build/asset/source-control dirs: =dist=, =.git=, =node_modules=, =assets=, =data=, =locales=, =Fonts=, =Logos=, =Guide=, =Website_Content=, =_references=, =notes=, =tests= — and any dir starting with =.= or =_= (TBD: confirm against existing projects).
+3. For each discovered =*.html=, process via =process_html= and emit at the same relative path under =output_dir=.
+4. For each discovered =index.st= sibling of an emitted HTML (other than the root), compile it and emit per-route =spacetime.{js,css}= alongside — matching the layout =serve= already produces. (If we keep a single root bundle for v1, document it; root bundle currently includes everything via =@import=, so per-route compile may be unnecessary for unkn specifically.)
+5. Preserve current =data/=, =assets/=, =locales/= copy behavior.
+
+* Out of Scope (track as FUP)
+
+- *Manifest-driven routing* (=routes.kdl= or =@route= in =index.st=) — explicit declaration, virtual routes, redirects, per-route metadata. File as FUP, dispatch a subagent to design the architecture (manifest format, discovery vs. declaration precedence, route metadata schema, interaction with =serve= and =doctor=).
+- Per-route bundle splitting / code-splitting policy.
+- Cleaning up stray =dist/<route>/spacetime.{js,css}= produced by =serve= when no matching HTML route exists.
+
+* Acceptance
+
+- =cargo run -- build projects/unkn/= produces =dist/<route>/index.html= for every =<route>/index.html= in the source tree.
+- =cargo run -- build projects/undefine.org/= and other existing projects remain green (no route loss, no route duplication).
+- New integration test: a fixture site with =index.html=, =a/index.html=, =a/b/index.html=, =pages/c/index.html=, plus a denylisted =assets/ignored.html=, exports exactly the first four and skips the fifth.
+- =@tasks= validation passes.
+
+* Notes
+
+- Watch for macOS =Finder= duplicates in source trees (=foo 2.html=, =reasons 2.json=). Either denylist the = 2.= suffix or document that source hygiene is the author's responsibility. Currently =projects/unkn/data/= ships several of these — orthogonal cleanup.
+- The walker should be deterministic (sorted) to keep =ExportReport.pages_exported= stable across runs.
+
+NOTE [2026-05-14]: Spawned manifest-design follow-up: [[id:FUP-022-design-route-manifest-st-route-or-routes]].
+
+NOTE [2026-05-14]: Fixed: src/export.rs now walks every *.html under site_dir with a denylist, compiles each route's nearest-ancestor index.st into a co-located spacetime.{js,css}, and injects relative hrefs. Verified with 11 unit + 7 integration tests and end-to-end re-export of projects/unkn (16 pages, 75 files copied, was 1 page before).

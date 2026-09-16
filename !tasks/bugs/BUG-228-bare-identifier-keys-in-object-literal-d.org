@@ -1,0 +1,63 @@
+#+TITLE: Bare-identifier keys in object-literal @data seeds fail to parse (quoted keys required)
+#+STATE: ITEM
+#+SESSION_ID: 153c9c68ea93c166
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-24T17-46-26-602Z_153c9c68ea93c166.jsonl]]
+#+CUSTOM_ID: BUG-228-bare-identifier-keys-in-object-literal-d
+
+* Initial Message
+
+look at the spacetime_lv and do a review and show me the features that would be most exciting for you to do there
+
+* Initial Message
+Surfaced by FUP-142 forms spike (2026-07-24) while adding a local values signal.
+
+* Symptom
+An `@data inline` (and likely any @data kind taking an expr seed) rejects a
+JS-style object literal with BARE identifier keys, but accepts QUOTED keys.
+
+RED:
+: @data inline $values : { email: "", password: "" } ;
+→ compile error at the closing brace:
+:   × expected scope block, directive, or declaration
+:   ╭─[…/signup.st:49:52]
+:   49 │ @data inline $values : { email: "", password: "" } ;
+:      ·                          ^ (col 52 = the `}` / trailing region)
+
+GREEN (workaround):
+: @data inline $values : { "email": "", "password": "" } ;
+
+* Why it matters
+JS object literals with bare keys are the overwhelmingly common form; requiring
+quoted keys is a surprising papercut and diverges from the JS the rest of a body
+accepts (e.g. `Object.assign({}, x, { column: $col })` with a bare key works
+INSIDE an @on body — see board.st:183 — so the seed-expr parser is stricter than
+the statement-body parser: an inconsistency).
+
+* Hypothesis
+The `$value:expr` capture for @data seeds uses an expr grammar that treats `{` as
+a scope-block opener rather than an object literal, so a bare `ident:` inside
+looks like a nested declaration. Quoted keys avoid the ident path. The @on body
+path (which DOES accept bare keys) uses a different (JS statement) parser.
+
+* Fix direction
+Make the @data seed-expr object-literal parsing consistent with the statement-body
+JS parser (bare identifier keys allowed). Do NOT special-case forms — this is a
+general expr-parsing consistency fix. Confirm across @data inline / fetch default
+/ derive seeds.
+
+* RED→GREEN test
+A compile test: `@data inline $x : { a: 1, b: 2 } ;` compiles and seeds
+`{a:1,b:2}`; currently errors, should pass.
+
+* Repro fixture
+elixir/spacetime_lv/frontend/signup.st (SPIKE 3 variant used the quoted-key
+workaround). Minimal repro is the one-liner above.
+
+* Relation
+Orthogonal to forms; found via FUP-142. A typed @data subscribe/form (FUP-144)
+sidesteps it for the forms case by knowing its fields, but the parser
+inconsistency should be fixed regardless.
+
+NOTE [2026-07-26]: EXPANDED SCOPE (2026-07-24, FUP-144/PLAN-118): the same balanced(';') limitation also blocks NESTED-object seeds in @data body captures — `initial: { "a": { "b": "" } }` fails identically in BOTH `@data fetch { initial: … }` AND the new `@data subscribe … { initial: … }` (data-subscribe-seeded). Root cause: a nested `{...}` VALUE is pre-split into a child BODY node, so it's missing from BalancedExtractor's flat inline token slice; scan_end stops before the nested content and the balance never closes. So this bug has TWO faces: (1) bare-identifier keys (original), (2) nested object values in body `initial:` captures. Fixing the BalancedExtractor scan_end to cover pre-split child-BODY tokens would resolve both and unblock nested subscribe/fetch seeds (FUP-144 W1 deferred that). Test surface: scratch/fup144/twolevel.st reproduces the nested case; a `@data fetch` nested initial reproduces it without any FUP-144 change.
+
+NOTE [2026-07-26]: Resolution path changed by PLAN-122 (native CSS value types): TYPED @data inline seeds (typeref present, e.g. `$brand Brand : { ink: #e8eef7; ... }`) bypass the bespoke seed-expr parser entirely — typeref-directed record capture (FEAT-166, W2) parses the seed against the @type's fields, so this bug dies by DELETION on that surface rather than by BalancedExtractor surgery. PLAN-120 remains the fix-of-record for UNTYPED expr seeds (@data inline without typeref, @data fetch/derive/subscribe seeds) — both faces (bare keys + nested objects) still apply there.

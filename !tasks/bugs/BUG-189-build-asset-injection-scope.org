@@ -1,0 +1,44 @@
+#+TITLE: spacetime build without --output injects assets into ALL .html files under the CWD subtree
+#+STATE: DONE
+#+SESSION_ID: 153497c78a510229
+#+CUSTOM_ID: BUG-189-build-asset-injection-scope
+#+COMPLETION_HASH: 28881b83012e239c
+
+* Source
+GitHub issue #2 (undefine-org/spacetime).
+
+* Symptom
+`spacetime build main.st` run from a directory REWRITES every `.html` file in
+the ENTIRE current-working-directory subtree -- including unrelated vendored
+docs (e.g. stdlib/3d/vendor/three, stdlib/text/vendor/pretext) -- injecting
+Spacetime asset links into them.
+
+* Root cause (verified 2026-07-18)
+src/main.rs::run_build (~L1195): when `--output` is not given,
+`out_dir = std::env::current_dir()`, then asset injection walks
+`collect_html_files(&out_dir, ...)` RECURSIVELY. Clean repro: building
+/tmp/faketree/main.st injected links into the unrelated
+/tmp/faketree/sub/vendor/thirdparty.html. Explicit `--output <dir>` scopes
+correctly.
+Also implicated: src/export/mod.rs::export_site L75.
+
+* Impact
+Destructive, silent, repo-wide side effect from a routine command; dirties
+vendored submodules (1856 files under stdlib/3d/vendor/three, 16 under
+stdlib/text/vendor/pretext when run from repo root). Breaks the "build is
+safe anywhere" expectation.
+
+* Test pin (RED)
+tests/bug_189_build_asset_injection_scope_test.rs (Rust integration test,
+drives the built binary via env!("CARGO_BIN_EXE_spacetime")).
+- Test 1 (RED): build without --output must NOT mutate .html files outside
+  the entry's own output scope.
+- Test 2 (GREEN control): explicit --output scopes injection correctly.
+Run: `cargo test --test bug_189_build_asset_injection_scope_test`
+
+* Fix direction
+When --output is absent, default the injection walk to the entry file's own
+directory (or a dist/ sibling), never the recursive CWD subtree; warn when
+injection would touch files outside the project root.
+
+NOTE [2026-07-19]: FIXED (PLAN-078): run_build's default out_dir is now the ENTRY FILE's directory (never the process CWD), so the post-build recursive asset-link injection is scoped to the built project's own directory. Artifacts (spacetime.js/css) land next to the source entry. Explicit --output behavior unchanged (pin control). Pin 2/2 green.

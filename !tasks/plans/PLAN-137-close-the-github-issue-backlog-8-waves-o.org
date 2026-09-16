@@ -1,0 +1,557 @@
+#+TITLE: Close the GitHub issue backlog — 8 waves, one invariant per wave
+#+STATE: ITEM
+#+SESSION_ID: 154d0baaa942d918
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-08-06T12-08-13-733Z_154d0baaa942d918.jsonl]]
+#+CUSTOM_ID: PLAN-137-close-the-github-issue-backlog-8-waves-o
+
+* Initial Message
+
+please look at all open issues in the github and compare to main. Cluster them by category, root-cause, impact, and ways to solve. See if any work that's been done on main in the past two weeks addresses them. Then give me practical next steps, and give me an instructional explanation of each issue that an intern would benefit from
+
+#+STATE: ITEM
+
+* North star
+
+Thirty issues were filed against Spacetime by one reader working through the language.
+Twenty-one were reproduced against main on 2026-08-06 (tests/repro/gh-<N>-*/); nine are
+already fixed. What remains is not thirty problems. It is **six invariants that the
+compiler does not yet hold**, plus three feature gaps and one architectural duplication.
+
+Every wave below fixes ONE invariant and closes the issues that were symptoms of it. A
+wave is done when the invariant is enforced by machinery, not when the listed symptoms
+stop reproducing — otherwise the next spelling of the same mistake ships next month.
+
+The invariants, in one line each:
+
+- I1  A rule the compiler cannot place is SKIPPED with a diagnostic. It never aborts the pass and never absorbs its siblings.  (W1)
+- I2  Every implemented analysis runs on the production `check` path, and its output is visible without a flag.               (W2)
+- I3  A bounded region must be FULLY consumed by its match, or the match fails with a diagnostic.                             (W3)
+- I4  Every `%form` capture has a consumer, and every author-written shape either binds or is diagnosed.                       (W4)
+- I5  A backend that cannot provide a rung REFUSES by name; a DOM transform is idempotent or reads from a snapshot it owns.    (W5)
+- I6  A constraint knowable at compile time is declared as DATA on the macro, not enforced by a runtime guard.                 (W6)
+
+Then: W7 closes the three feature gaps (font-face, page head, SSG filter parity), and
+W8 deletes the LSP's parallel registry.
+
+* Prerequisite: W0 — unblock and bank the repros
+
+** W0.1 HEAD build state — RESOLVED 2026-08-06 19:03
+During the repro sweep, HEAD (f13a9783) failed to build (`parse_matches` MetaRegistry
+signature mismatch, `ProjectOverlay` not-an-iterator) from concurrent WIP in src/. That
+WIP has since landed: `cargo build --features headless` is GREEN (25s, 5 warnings).
+
+All verdicts in this plan were subsequently RE-VERIFIED on the clean HEAD binary. The six
+behavioral gates that existed at the time were re-run against it:
+- GREEN (fixed):  #6 hold-end-state, #10 template-each-twice, #19 selector-init
+- RED (live):     #23 `@then .wrap: $frame == "2" (got 0)`
+- RED (live):     #8  leaked directive source as page text
+- RED (live):     #17 `Cannot read properties of undefined (reading 'trim')`
+The fixed/broken split is therefore confirmed on current main, not inferred from an
+intermediate binary.
+
+** W0.1b No Chromium in this environment
+`--cdp` gates cannot be RUN here (no chromium/chrome binary on PATH). Every gate this plan
+describes as needing layout/timing/paint/CSSOM or a real ResizeObserver is written as a
+`.cdp.test.st` and left UNRUN, marked as such. Per FIDELITY_LADDER, an unrunnable gate is
+recorded honestly rather than downgraded into a headless assertion that would pass for the
+wrong reason. CI (or a dev machine with Chromium) must run these before the matching wave
+is called done.
+
+** W0.2 Promote the repros into permanent gates
+`tests/repro/gh-<N>-*/` currently holds 21 investigations. Each one that corresponds to a
+STILL-OPEN issue becomes that issue's RED gate, moved to its wave's test home:
+- behavioral repros -> tests/<area>/<name>.test.st (headless or --cdp per rung need)
+- compile-output repros -> a Rust integration test asserting the DIAGNOSTIC (not the string in emitted JS)
+
+Rule (AGENTS.md, BUG-252): a gate for a feature whose job is to MOVE something must assert
+it moved, on --cdp. A gate that has never been seen to fail is not yet a gate — write it
+RED first, watch it fail, then fix.
+
+** W0.3 File the two secondary findings from #23
+Both were reported inside #23 and must not be lost when it closes:
+- `@cursor` appends `.st-cursor` at translate3d(0,0,0) with no gate on first pointermove:
+  an accent ring parks in the top-left corner on every cold load. Suggested: start at
+  opacity 0, reveal on first pointer event.
+- `check` warns "Data source 'frame' is defined but never used" for a signal written by
+  12 `@on click { $frame <- N }` handlers and read from CSS as `var(--st-frame)`. Signal
+  WRITES and `--st-*` mirror reads do not count as uses. (Interacts with W2: making
+  warnings visible by default makes this false positive louder, so fix it in W2.)
+
+* W1 — I1: a failed rule is skipped, never fatal   [#23]   PRIORITY 1
+
+** Why first
+#23 is the highest-blast-radius open defect in the tracker. One cosmetic line
+(`body:hover .nope { opacity: 1 }`) deletes EVERY directive after it in source order.
+The reporter lost 20 directives from a 2100-line stylesheet — a 12-frame configurator, an
+acuity chart, a marquee's scroll-velocity, and the primary CTA's magnetism — with `check`
+passing, `doctor` reporting 0 errors, and `Spacetime.review()` scoring 10/10.
+
+** Verified state (tests/repro/gh-23-poison-descendant/)
+- `check`: passes, zero diagnostics
+- parse layer: `.btn-a` directives:1, `body:hover .nope` css-only, `.btn-b` directives:0
+- built JS: contains `frame <- 1`, does NOT contain `frame <- 2`
+- behavioral gate: `@then .wrap: $frame == "2"` FAILS (got 0)
+
+** Scope
+1. Find where rule-scope resolution aborts rather than skips. The directives are already
+   gone by the PARSE layer, so the failure is in scope resolution / directive extraction,
+   not in emit.
+2. Convert abort -> skip-with-diagnostic. Precedent exists: E0602 "Scope selector does not
+   match any element" already fires for the BARE non-matching selector. The descendant
+   form must behave identically and CONTINUE.
+3. Audit the same pass for every other early-return that can consume following siblings.
+   The bare case being harmless while the descendant case is fatal means the two paths
+   diverged; unify them.
+
+** Gates (RED first)
+- tests/parser/gh23_poison_rule_test.rs: a non-matching descendant rule emits E0602-class
+  diagnostic AND both `@on` handlers survive to IR.
+- tests/repro/gh-23-poison-descendant/gh23.test.st promoted: clicking the second button
+  sets `$frame == 2` (headless, logic rung — state only).
+- Regression sweep: `cargo test --lib && cargo test --test integration_tests`.
+
+** Acceptance
+The minimal repro emits 2 `delegateSelector` handlers and one diagnostic. A rule that
+cannot be scoped is reported and skipped; no rule can remove a sibling from the build.
+
+* W2 — I2: make `check` honest   [#26, #27, #34, + #23's secondary]
+
+** The shared defect
+Three issues, one shape: the diagnostic EXISTS and does not reach the author.
+- #26: E0408 (signal used but not defined) is implemented in src/analysis/signals.rs and
+  exposed as `CompileAnalysis::analyze_signals_from_ast`. Verified 2026-08-06: the symbol
+  is referenced ONLY inside src/analysis/ and the codes table. `check_file` never calls it.
+  Repro emits `ST.resolve(__node, 'definitelyMissing')` with zero diagnostics.
+- #27: E0923 fires falsely on canonical `@data inline $x : [];` ("resolves to data-derive
+  and data-inline, both score 13") because the ambiguity lint re-scores from captures and
+  ignores `FormMatch.matched_macro`, which literal-aware parsing already decided. Range
+  anchors are also wrong (second diagnostic points past the end of the previous line).
+  541f625f fixed the @form union-literal family and its message documents this @data
+  bare-literal family as residual — confirmed still live.
+- #34: warning rendering is gated by `verbose || errors` (src/main.rs), and zero errors
+  always prints "All files passed". A warning-only file reports success with no text.
+
+** Scope
+1. `check_file` invokes every implemented analysis. Enumerate `src/analysis/` and assert,
+   in a test, that each analysis entry point has a production caller — this is the class
+   fix, not just E0408's instance. (#25's root cause was the same genus: a correct
+   diagnostic with no consumer.)
+2. Ambiguity lint reads `matched_macro` and only re-scores when the matcher genuinely did
+   not decide. Fix the span anchors while in there.
+3. Warning UX per the reporter's own proposal: render by default; `--quiet` suppresses;
+   `--deny-warnings` for CI; warning-only exit stays 0 unless deny mode.
+4. Signal-use counting: a `$sig <- value` write and a `var(--st-sig)` CSS read both count
+   as uses (W0.3's second finding). Must land WITH the visibility change or every project
+   gets a wall of false warnings the day warnings become visible.
+
+** Gates (RED first)
+- E0408 fires for the #26 repro; does NOT fire for a signal defined in an imported module
+  or published by a template (test both — a false positive here is worse than the silence).
+- No E0923 for `@data inline $events : [];` + `@data inline $filterCategory : "all";`.
+- Plain `check` on a warning-only file prints the warning text and exits 0;
+  `--deny-warnings` exits non-zero; `--quiet` prints nothing.
+- An analysis-coverage test: every `pub fn analyze_*` in src/analysis has a caller reachable
+  from `check_file`.
+
+** Acceptance
+The #26/#27/#34 repros invert. A fresh project's `check` output is trustworthy enough that
+`--deny-warnings` can go into CI without a triage backlog.
+
+* W3 — I3: a bounded region must be fully consumed   [#37, #35, #36, #14]
+
+** The shared defect
+Four issues, one rule missing. A capture or repetition matches PART of its input, the
+remainder is discarded unexamined, and the match is accepted as success — so defaults fill
+the holes and the author gets a plausible wrong program.
+
+- #37: `@data signal $cursor(x number, y number)` — `param_list` is "zero or more of
+  `$binding type`"; it legally matches ZERO items while `x number, y number` remains.
+  Verified: emits `callParams = [] || []` (canonical `$add($text string)` emits a populated
+  array), zero diagnostics. At runtime `$x`/`$y` cannot bind, the body throws, the throw is
+  caught, and raw arguments are sent — the wire payload silently changes shape.
+- #35: `$user object: { name: "Ada" };` — the expression capture stops before the object
+  literal. Verified: parse captures only the scalar `$flag`; "Ada" appears 0 times in the
+  build; the consumer still emits `ST.resolve(__node, 'user')`.
+- #36: `@wait_until` — WORSE than filed. Verified: NO form works (full, bare, trivial,
+  parenthesized) — 0 occurrences of `__timeout`/`pollInterval` in emit; `@wait_until false
+  timeout: 500ms` does not time out, it falls through to the next assertion. The shipped
+  `stdlib/testing/meta/wait-timing.test.st` fails 9/15 headless. Root: "has a default" was
+  conflated with "may be absent", and greedy expr/selector captures let a shorter sibling
+  form swallow the longer form's keyword.
+- #14: documented `@object torusknot(size: 1.2)` and the nested-body form both match no
+  `%form` and fall to defaults — verified `geomFor("icosahedron")` and `switch("standard")`
+  emitted from source that says otherwise.
+
+** Scope
+1. The invariant, in the matcher: a bounded region (paren group, statement to its
+   terminator, a custom capture's declared extent) must be fully consumed. Leftover
+   non-trivial tokens => MatchDiagnostic naming the expected shape.
+   The delivery channel already exists — `match_diagnostics_to_errors` (0d437e5b) + E0946
+   (proven by #25). This wave extends COVERAGE to: custom captures (#37), value-position
+   expression captures (#35), and defaulted trailing clauses (#36).
+2. Do NOT broaden grammars to accept the bad spellings. #37's diagnostic shows `$x number`.
+   Runtime fallbacks stay defensive but stop being load-bearing.
+3. `@wait_until` needs its own fix on top of the invariant: it is currently dead, not just
+   strict. Decide the optional-literal mechanism in the %form grammar (a genuinely optional
+   clause needs a grammar spelling that says so) rather than per-macro sibling forms.
+4. #14's second half is documentation: stdlib doc examples must compile. Move `@object`'s
+   examples into a literate `.st.md` or `@doc(src:)`-referenced file so a drifted example
+   fails the build. Doc examples that were never compiled are how #14 existed at all.
+
+** Gates (RED first)
+- `@data signal $cursor(x number, y number)` fails with a diagnostic showing `$x number`;
+  the canonical spelling still emits populated `callParams`; a --cdp or v8 gate asserts the
+  wire payload shape for the canonical form.
+- `$user object: { name: "Ada" }` either emits into SpacetimeLocal and reads back through a
+  reactive consumer, or is diagnosed. Test nested objects/arrays, quoted and unquoted keys,
+  file and template scope.
+- `stdlib/testing/meta/wait-timing.test.st` goes 15/15. `@wait_until false timeout: 500ms`
+  actually times out with a "Timeout after" error.
+- `@object torusknot(...)` is diagnosed; every doc example in stdlib/3d compiles as part of
+  the suite.
+
+** Acceptance
+The four repros invert. Grep for other repetitions that can match empty
+(`stdlib/capture-types/*.st`) and confirm each is covered by the same rule — the point of
+the wave is that #37's spelling cannot recur in a different macro.
+
+* W4 — I4: every capture has a consumer; every shape binds or is diagnosed   [#18, #8]
+
+** #18 — a capture with no consumer
+`@reveal(...) { & { opacity: 0 -> 1 } }` is the macro's OWN documented example.
+`%form` captures `$body:keyframes`; `%binds` never passes it to reveal-engine. Verified:
+compiles clean, 0 diagnostics, the body's property appears 0 times in emitted JS.
+
+Fix instance: wire `$body` through `%binds` to the primitive.
+Fix CLASS (this is the wave's point): a registry-level check that every `%form` capture is
+either consumed in `%binds`/`%emit` or explicitly declared ignorable. The information is
+already in the registry; this is a lint over data, not new machinery. It retires an entire
+genus of half-implemented macros.
+
+** #8 — a shape that cannot bind must be diagnosed
+`<div class="x"> @scroll s(...) { ... } </div>` at file scope: verified 0 primitives / 0 js
+/ 0 css, `check` silent, and inside `@fixture` the directive SOURCE leaks into the DOM as
+visible text (repro asserts the leaked string).
+
+Design ruling stands: directives bind through selectors, never through nesting, because a
+directive must attach to elements that do not exist yet (an `@each` row, a spliced
+fragment). So the fix is diagnostics-only — an E0900-class error naming the shape and
+showing the selector-scope rewrite. Making nested directives bind is explicitly OUT of scope.
+
+Second half: markup that contains directive source must not be embedded verbatim into
+innerHTML. Even after the error exists, `@fixture` should not paint compiler input onto the
+page.
+
+** Gates (RED first)
+- A `%form` capture with no consumer fails the stdlib load with a named diagnostic; the
+  fixed `@reveal` keyframes body reaches the engine (assert the emitted property AND a
+  --cdp behavior gate that the filter/opacity actually animates).
+- The #8 shape produces E0900 with the rewrite hint; the `@fixture` variant no longer leaks
+  source text (assert the DOM text is empty).
+
+** Acceptance
+Both repros invert, and the capture-consumer lint runs over ALL of stdlib with zero
+outstanding violations (fix or annotate whatever it finds — that list is the wave's real
+deliverable).
+
+* W5 — I5: honest rungs and idempotent transforms   [#17, #24, #6 follow-up]
+
+** #17 — the stub that lies
+Verified: `getComputedStyle` at the logic rung is still `(el) => el.style || {}`, so a
+stylesheet-derived read dies with `Cannot read properties of undefined (reading 'trim')` —
+no rung named, no `--cdp` hint.
+
+This breaks the fidelity ladder's core promise (docs/testing/FIDELITY_LADDER.md): a backend
+that cannot provide a rung REFUSES rather than fakes. The pattern to copy already shipped
+in BUG-253 (08ff2f76): a test declares `needs timing` and the logic backend refuses by name.
+Extend it to CSSOM: stylesheet-derived reads declare their rung, the stub refuses with the
+rung name and the `--cdp` escape hatch, and the refusal is distinguishable from a failure in
+the runner output.
+
+Audit every other stub in the headless world for the same lie — a stub that returns a
+plausible empty value instead of refusing is a false-green generator.
+
+** #24 — the transform that eats its own output
+Verified: `splitText` re-snapshots `Array.from(el.childNodes)` on EVERY call, and the
+ResizeObserver calls it again; the second split nests the generated tree inside a new one.
+Also verified: there is NO ResizeObserver at the logic rung, so this path is not exercisable
+headless at all — recorded in the repro as `typeof ResizeObserver === 'undefined'`.
+
+Fix: the transform reads from an immutable snapshot of AUTHOR content taken once (or is
+made idempotent by detecting its own generated markers). Observer ordering
+(ResizeObserver's initial callback beating IntersectionObserver) must not change the result
+— that is what idempotence buys.
+
+Gate: --cdp only. Mount a reveal with split:"lines", resize the element, assert the reveal
+unit count is unchanged and textContent is not multiplied. Per BUG-252 this gate must exist
+before the fix.
+
+** #6 follow-up (issue closes now, caveat tracked here)
+One-shot hold verified FIXED at the logic rung (end keyframe retained after @clock advance).
+NOT verified: a driver that re-fires from p=0 (element leaves and re-enters the viewport).
+Add a --cdp gate for re-entry; if it reverts, that is a NEW issue about re-entry policy,
+not fill mode.
+
+** Acceptance
+#17 and #24 repros invert; the CSSOM refusal names its rung and `--cdp`; a stub audit lists
+every remaining headless stub with its refusal status.
+
+* W6 — I6: constraints are declared data   [#12]
+
+** Ruling (user, 2026-08-06)
+`@stage` gets an element constraint via `%scope`.
+
+** Why this fits (verified 2026-08-06)
+`%scope` is ALREADY kinds-as-data: `file | selector | property-value | within(<construct>)`
+(src/parser/meta_ast.rs). Adding `element(<tag>)` is a registry variant, not a subsystem.
+Against the AGENTS.md elegance bar:
+1. small extension of existing grammar/registry — yes;
+2. variants are DATA, not a Rust arm per case — yes;
+3. deletes an existing special case — yes: three-stage's try/catch-plus-console.warn and the
+   sibling primitives' warns stop being the only signal;
+4. testable by the same machinery it generalizes — yes: a RED `%scope` matching test.
+
+** Scope
+1. `%scope element(canvas)` on `stdlib/3d/macros/stage.st`; the compiler resolves the bound
+   selector's implied element and errors when it cannot be a canvas.
+2. Decide and document the honest answer for selectors whose element is UNKNOWABLE
+   (`.hero` with no markup evidence, a runtime-inserted node). Options: warn-not-error, or
+   require evidence from the project's markup. Do not let "unknowable" silently pass as
+   "fine" — that is how #23 happened in the neighbouring pass.
+3. Apply to the sibling 3D macros that share the assumption where it holds.
+
+** Gates (RED first)
+- `@stage` on a `div.hero` is a compile error naming the required element;
+- `@stage` on `canvas.hero` compiles and still emits;
+- the unknowable case behaves as documented, with a test pinning the choice.
+
+* W7 — feature gaps   [#20, #21, #11]
+
+** #20 — raw @font-face becomes supported (user ruling)
+Verified: the block vanishes — no CSS, no IR, no diagnostic.
+RULING: support what people reach for first. `@font-face` is what every CSS author types;
+recognizing it and then discarding it on a naming technicality spends the author's goodwill
+defending an internal preference. Raw `@font-face` becomes supported syntax handled through
+the same machinery as `@font(...)`.
+Interim (ships first, in W1's parser pass if cheap): a diagnostic. Silence is never the
+answer while the feature is pending.
+Design rule to record in docs/language: when a construct exists in the host language (CSS,
+HTML) and Spacetime has its own spelling, the host spelling must either work or explain
+itself.
+
+** #21 — page head / SEO  =>  PLAN-035
+There is no item literally named "@seo"; PLAN-035 (".st-only page shell cannot set
+lang/title/meta/fonts") IS the plan — retitle it to include "SEO" so the next search finds
+it. Its acceptance criteria stand:
+- a .st entry sets `<title>` and `<html lang>`;
+- a .st entry registers remote fonts with no authored HTML;
+- backdesk-hospitality builds and serves with NO authored index.html and identical head output.
+ADD from #21: an authored index.html currently wins over index.st's own body markup,
+VERBATIM and EXCLUSIVELY. That override must become explicit or diagnosed — an escape hatch
+that silently beats the primary path turns a missing feature into data loss.
+
+** #11 — SSG filter parity
+Static lists render twice: once at build time (real HTML in view-source) and once at
+runtime. Filters are stdlib-defined Spacetime; the runtime can apply them, the build-time
+unroller cannot, because it has a parallel interpolation path.
+Constraint (AGENTS.md): Rust must NOT re-implement stdlib constructs. So the fix is to teach
+the build-time path to evaluate stdlib filters, not to port them.
+This is the wave's biggest unknown — scope it with a spike before committing, and if the
+evaluation seam is not ready, say so in the issue rather than shipping a Rust shortcut.
+
+* W8 — delete the LSP's parallel registry   [#28 root; #29, #30, #31, #32, #33]
+
+** The duplication
+The compiler builds its registry by loading stdlib + the project overlay. The LSP maintains
+a hand-written `include_str!` list, silently skips files that fail to parse, and serves
+completion/hover/diagnostics/definition from that snapshot. Its workspace manager has a
+project-aware registry that is created with no roots, whose `add_root` does not mutate
+roots, whose `scan_workspace` is never called, and whose registry no handler uses.
+Reporter's measurement: compiler 97 leading form tokens vs the LSP's advertised set.
+
+** Order matters — #28 first
+1. #28: the LSP consumes the compiler's live registry, project roots included. Delete the
+   static list. Every other item shrinks after this.
+2. #29: generate completion snippets FROM the form grammar (positional captures, sigils,
+   literal words, typed body) instead of the flat `name: ${n}` shape. Note the loop this
+   closes: the editor was generating exactly the malformed shapes that used to compile
+   silently; #25 made them E0946, so today the editor's own output is a build error.
+3. #30 + #31 together: store canonical absolute path + exact capture span at definition-
+   registration time; give `register_definition` a production caller; stop `UsageVisitor`
+   double-walking `file.matches` and scoped matches; use the capture span, not
+   `FormMatch.span`, for `@each`.
+4. #32: publish the COMPILER's diagnostics rather than an approximation. Target state is one
+   diagnostic engine, two front-ends. (The `~preset` false-positive half is already fixed by
+   SIP-001c: 783fc242, e111f172.)
+5. #33: drive colors and semantic tokens from lexer/CST context — colors only in CSS value
+   positions, comments excluded; split multi-line comment tokens per line as LSP requires.
+
+** Acceptance
+A project-defined macro appears in completion, hover, and go-to-definition. LSP diagnostics
+for the W2 cases (unknown signal, false ambiguity) match `check` exactly. No `include_str!`
+registry remains.
+
+* Sequencing and rationale
+
+W0 -> W1 -> W2 -> W3 -> W4 -> {W5, W6, W7} -> W8
+
+- W1 first: highest blast radius, actively destroying a production stylesheet.
+- W2 second: cheapest, and it makes every later wave's failures VISIBLE. Doing it after W3
+  would mean fixing the matcher while `check` still cannot show you what it found.
+- W3 before W4: W4's capture-consumer lint assumes matches are trustworthy; W3 makes them so.
+- W5/W6/W7 are independent of each other and can run in parallel once W4 lands.
+- W8 last by dependency, not by importance: the LSP should serve the compiler's registry and
+  diagnostics AFTER W2/W3 have made those diagnostics correct — otherwise the editor faithfully
+  reproduces the wrong answers.
+
+Cross-cutting rule for every wave (AGENTS.md, BUG-252): assert the CONTRACT in Rust and the
+BEHAVIOR on --cdp. Write the gate RED, watch it fail, then fix. A source-string assertion
+proves a string was written, not that anything ran.
+
+* Issue disposition table
+
+| # | verdict (2026-08-06) | disposition |
+|---|---|---|
+| 6 | FIXED-WORKS | CLOSE; re-entry caveat -> W5 |
+| 8 | STILL-SILENT | W4 |
+| 9 | FIXED (6de67b4e) | CLOSE |
+| 10 | FIXED-WORKS | CLOSE |
+| 11 | open by policy | W7 |
+| 12 | open, design settled | W6 |
+| 13 | FIXED-LOUD (E0956) | CLOSE |
+| 14 | STILL-SILENT | W3 |
+| 15 | FIXED-WORKS | CLOSE |
+| 16 | FIXED-WORKS | CLOSE |
+| 17 | STILL-BROKEN | W5 |
+| 18 | STILL-SILENT | W4 |
+| 19 | FIXED-WORKS | CLOSE |
+| 20 | STILL-SILENT | W7 (becomes a feature) + interim diagnostic in W1 |
+| 21 | open | W7 / PLAN-035 |
+| 22 | FIXED-WORKS | CLOSE |
+| 23 | STILL-SILENT | W1 |
+| 24 | STILL-SILENT | W5 |
+| 25 | FIXED-LOUD (E0946) | CLOSE |
+| 26 | STILL-SILENT | W2 |
+| 27 | STILL-BROKEN | W2 |
+| 28-33 | untouched (32 partial) | W8 |
+| 34 | STILL-SILENT | W2 |
+| 35 | STILL-SILENT | W3 |
+| 36 | STILL-SILENT (worse) | W3 |
+| 37 | STILL-SILENT | W3 |
+
+Nine closes are drafted with evidence in
+!tasks/plans/plan-artifacts/PLAN-135-issue-response/gh-comments.md (all 30 comments).
+
+* Note on the reporter
+
+These thirty issues are unusually good: minimal repros, correct root causes down to file
+and line (#16's newline guard, #25's dropped `_diags`, #31's double-walk), and impact
+framing that separates "wrong" from "invisible". Four of them (#15, #16, #22, #25) were
+diagnosed accurately enough that the fixes landed straight from the write-ups.
+
+The comment set is written to teach, not just to resolve: each reply gives the verdict, then
+the model that explains WHY the language behaves that way, so the reporter accumulates a
+mental model of Spacetime rather than a list of resolved tickets.
+
+* W0.2 status — DONE 2026-08-06: gates banked and independently verified
+
+Every repro folder now carries a RUNNABLE gate. Inventory: 17 headless `.test.st`,
+4 `.cdp.test.st` (unrunnable here — no Chromium), 6 `check-contract.sh`.
+20 of 21 folders gated; gh-15 is the exception (FIXED; 3D values are IR-only observable,
+evidence retained instead of a gate that would assert nothing).
+
+** Gate-type selection rule (applied, and worth keeping)
+The contract decides the artifact, not a preference for .test.st:
+- page/state behavior observable at the logic rung  -> `.test.st` (headless)
+- behavior needing layout/timing/paint/CSSOM/WebGL/ResizeObserver -> `.cdp.test.st`, left
+  UNRUN and marked, per FIDELITY_LADDER. Never downgraded into a headless assertion.
+- contract living in compiler stdout or an emitted artifact (warnings, diagnostics, bundle
+  contents) -> `check-contract.sh`. A .test.st cannot read compiler stdout; forcing one
+  would produce a test that asserts nothing.
+
+** Verified polarity (re-run by the orchestrator, not taken from agent reports)
+RED today (bug live, failure line names the missing behavior):
+  #23 `$frame == "2" (got 0)` · #8 leaked directive source · #17 generic TypeError
+  #37 1 passed / 1 failed — bare form RED, canonical typed form GREEN as control
+  #35 1 passed / 1 failed — object RED, scalar control GREEN
+  #26 0 passed / 1 failed — undefined signal renders empty
+  #34 exit 1 · #27 exit 1  (shell contracts)
+GREEN today (fixed; now regression gates):
+  #6 · #10 · #19 (headless) · #13 · #16 · #22 · #25 (shell contracts, exit 0)
+Rung-documented (headless asserts only the gap; real claim in the unrun cdp sibling):
+  #14 · #18 · #20 · #24
+
+The GREEN control beside each RED gate is deliberate: it proves the harness itself works,
+so a failure is evidence about the compiler rather than about the test.
+
+* Amendment to W0.2 — pull BUG-309 forward, it protects every other gate
+
+Writing the #37 gate surfaced BUG-309: `@then <expr> on document should equal (...)`
+matches no `%form`, is silently dropped, and the test PASSES having asserted nothing.
+`tests/integration/signal-body-template.test.st` reports `3 passed, 0 failed` with all
+three of its wire-payload assertions dead. A second vacuous idiom, `@then <sel> { text ==
+"…" }`, fails E0946 and is likewise dropped. Seven files use the first idiom.
+
+This is the same genus as GitHub #25/#8 (unmatched shape dropped instead of diagnosed), but
+it outranks the rest of this plan in ORDER, because every wave here is gated by tests, and
+a test framework that can silently assert nothing invalidates the evidence those waves
+depend on. The structural fix — **a `@test` that produced zero executable assertions must
+FAIL** — is one rule that makes the entire vacuity class self-detecting.
+
+ACTION: BUG-309 items 2 and 3 (the zero-assertion rule + the 7-file audit) move into W0.2,
+ahead of W1. Item 1 (the diagnostic for a non-selector `on` target) stays in W3 with the
+rest of the consume-or-refuse invariant.
+
+NOTE [2026-08-07]: W3 (I3 consume-or-refuse) progress 2026-08-06. LANDED: #37 bare @data signal params diagnosed (param_list consume-zero guard + ranking fix); BUG-313 wait_for_signal silent-drop fixed (reportable>LiteralMismatch ranking) + on-sig-change files genuinely gate (semantics 3/3, mutation 5/5, head 2/2 — @on $sig.change confirmed working); #36 @wait_until live via NEW inline optional groups in %form (wait-timing 15/15, `@wait_until false timeout: 500ms` times out); #35 object local-state diagnosed + scalar control green. RE-FILED (not landed): #14 @object torusknot bareword diagnosis was reverted — the 2b pre-arglist extension also diagnosed @value-change count(...), a DELIBERATE `%drops ( _ )` legacy in the 2026-07-26-on-cutover rewrite; needs a %drops-respecting mechanism (BUG-319 docs-half + consume-or-refuse half). Filed: BUG-317 (:time scalar renders "1500ms" string in emit JS → setTimeout NaN; fixed via ST.parseMs in runtime), BUG-318 (ST.watch doesn't see async debounced file-scope writes). cargo test --lib: 3112 passed / 3 known-pre-existing (BUG-314). Commits 739d4f3d..fa224b35.
+
+NOTE [2026-08-07]: W8 LANDED 2026-08-07 (commit fae361ac). Deleted the LSP's parallel include_str! registry; LSP now serves the compiler's live registry (cached stdlib + _prelude.st overlay). #28 project macro in completion+hover+definition tested. #29 snippets built from real %form grammar + compile gate. #30/31 canonical absolute paths + exact capture spans + no duplicate references (fixed @data Binding-name sigil so definitions link to @each usages). #32 shared diagnostics engine (analysis::diagnostics::collect_document_diagnostics) — editor shows exactly what check reports. #33 colors skip comments/strings; multi-line block comments split per line. lsp_tests 173 pass/0 fail, lib lsp 121 pass/0 fail. 3 remaining --lib failures are documented pre-existing BUG-314 stale tests.
+
+* EXECUTION COMPLETE — 2026-08-06
+
+All eight waves landed. Commits, in order:
+- fcb70f9e  W0.2  a test that asserts nothing FAILS (BUG-309)
+- 6fb20c2f  W1    element+pseudo selector no longer swallows siblings (GH-23)
+- 040d0411  W2    E0408 wired · ambiguity lint honors matched_macro · warnings visible (GH-26/27/34)
+- 739d4f3d, dd6bec42, 29ea4298, c09dd6c5, fa224b35  W3  consume-or-refuse (GH-37/36/35; GH-14 reverted+refiled)
+- 16f098d3  W5    rung refusals + idempotent reveal (GH-17/24)
+- b54608ea  W6    %scope element(<tag>) (GH-12)
+- 1255fed9  W4    capture-consumer lint at ZERO + directive-in-markup E0900 (GH-18/8)
+- c76c9da7  W7    raw @font-face · .st sets lang/title · index.html override diagnosed (GH-20/21/11)
+- fae361ac  W8    LSP serves the compiler's live registry (GH-28..33)
+- c4aa254a        gates resolve the BUILT binary, not PATH
+- 7a1dd707        gh-36 gate re-polarized + triage filed
+
+** Invariants now enforced by machinery (not by vigilance)
+I1 a failed rule skips with a diagnostic, never aborts or absorbs siblings
+I2 every implemented analysis runs on `check`, and warnings are visible without a flag
+I3 a bounded region is fully consumed or the match fails (E0946)
+I4 every %form capture has a consumer (E0964, lint at ZERO across stdlib); every shape binds or is diagnosed (E0900)
+I5 a backend that cannot provide a rung REFUSES by name; DOM transforms read an immutable snapshot
+I6 a compile-time-knowable constraint is declared DATA on the macro (%scope element(<tag>) → E0963/W0963)
+Plus the meta-invariant that protects them all: a @test executing zero assertions FAILS.
+
+** Final suite state
+cargo test --lib          3134 passed / 3 failed  (pre-existing BUG-314, unchanged by this arc)
+cargo test lsp_tests       173 passed / 0 failed
+cargo test integration     199 passed / 8 failed  (BUG-321 — retired/registry-less fixtures)
+cargo test v8_runtime      458 passed / 1 failed  (BUG-321)
+Repro gates: 13 contracts GREEN · 17 headless .test.st GREEN · 5 .cdp.test.st written, UNRUN (no Chromium here)
+
+** What the work surfaced beyond the filed issues
+BUG-309 vacuous assertions · BUG-313 three defects the vacuity rule unmasked (incl. @wait_for_signal
+asserting nothing across ~8 files) · BUG-314 four stale --lib tests · BUG-315 one-shot reveal reverts on
+re-entry · BUG-316 headless stub audit · BUG-317 :time scalar → NaN setTimeout · BUG-318 @wait_for_signal
+vs async writes · BUG-319 GH-14 docs half · BUG-320 thirty macros dropping a declared capture ·
+BUG-321 post-wave suite triage.
+
+The through-line: every one of these was ALREADY broken and silently green. The arc's real output is
+not eleven commits — it is that this class of failure now announces itself.
+
+** Honest gaps
+- No Chromium in this environment: 5 .cdp.test.st gates are written and UNRUN. CI must run them before
+  W5/W6 are called fully done.
+- GH-14 remains open by choice: the diagnosis broke @value-change's deliberate %drops compat, so it was
+  reverted and refiled (BUG-319) rather than shipping a regression.
+- GH-11 (SSG filter parity) is filed, not fixed: the build-time path needs a real stdlib evaluation seam
+  and porting filters to Rust is forbidden by project policy.
+- BUG-321's 9 fixtures are diagnosed, not silenced — fixing them is a decision, not a sweep.

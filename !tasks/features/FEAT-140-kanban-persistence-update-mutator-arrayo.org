@@ -1,0 +1,105 @@
+#+TITLE: Kanban persistence (.update mutator + ArrayOp::Update) + working scrub-history time-travel
+#+STATE: DONE
+#+SESSION_ID: 15119c48cafc615e
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-21T08-11-12-555Z_15119c48cafc615e.jsonl]]
+#+CUSTOM_ID: FEAT-140-kanban-persistence-update-mutator-arrayo
+
+* Initial Message
+
+the recent %animates on the liveview-kanban demo still does not work. Here's what I get in the browser:
+
+
+[derived-signal viewedCards] TypeError: can't access property "length", SpacetimeLocal.history is undefined
+    anonymous http://localhost:3333/__spacetime/runtime.js?entry=index.st line 8275 > Function:3
+    recompute http://localhost:3333/__spacetime/runtime.js?entry=index.st:8275
+    afterData http://localhost:3333/__spacetime/runtime.js?entry=index.st:2337
+runtime.js:8278:19
+    recompute http://localhost:3333/__spacetime/runtime.js?entry=index.st:8278
+    afterData http://localhost:3333/__spacetime/runtime.js?entry=index.st:2337
+[derived-signal viewedCards] TypeError: can't access property "length", SpacetimeLocal.history is undefined
+    anonymous http://localhost:3333/__spacetime/runtime.js?entry=index.st line 8275 > Function:3
+    recompute http://localhost:3333/__spacetime/runtime.js?entry=index.st:8275
+    set http://localhost:3333/__spacetime/runtime.js?entry=index.st:8118
+    load http://localhost:3333/__spacetime/runtime.js?entry=index.st:6269
+runtime.js:8278:19
+Template not found: card 2 runtime.js:10106:19
+Template not found: card 2 runtime.js:10391:19
+Template not found: card 2 runtime.js:10676:19
+[derived-signal viewedCards] TypeError: can't access property "length", SpacetimeLocal.history is undefined
+    anonymous http://localhost:3333/__spacetime/runtime.js?entry=index.st line 8275 > Function:3
+    recompute http://localhost:3333/__spacetime/runtime.js?entry=index.st:8275
+    <anonymous> http://localhost:3333/__spacetime/runtime.js?entry=index.st:8154
+    <anonymous> http://localhost:3333/__spacetime/runtime.js?entry=index.st:8155
+runtime.js:8278:19
+[derived-signal viewedCards] TypeError: can't access property "length", SpacetimeLocal.history is undefined
+    anonymous http://localhost:3333/__spacetime/runtime.js?entry=index.st line 8275 > Function:3
+    recompute http://localhost:3333/__spacetime/runtime.js?entry=index.st:8275
+    afterData http://localhost:3333/__spacetime/runtime.js?entry=index.st:2337
+
+* Context
+User on demos/liveview-kanban: (1) scrub-history slider did nothing; (2) moves
+did not persist to disk. Both were half-built. Also fixed a collection/derive
+data-plane desync and a drop-target overlay-shadowing bug found en route.
+
+* 1. Persistence rail — collection .update mutator + EditJsonArray Update op
+The board declared =@data collection $cards via dev-ws= (the auto-persisting rail)
+but MOVED cards through a custom =$move= signal (=send emit "move"=) the dev
+server has no handler for -> nothing written. The collection mutators were
+=.insert/.delete/.reorder= only; there was no in-place field update.
+
+- src/sync/protocol.rs: new =ArrayOp::Update { index, patch }= (merge a partial
+  patch into the object at index).
+- src/sync/handlers.rs: apply arm (HTML-sanitised like Insert; bounds-checked;
+  merges patch keys, preserves others; writes board.json + broadcasts DataUpdate).
+  Tests: =test_edit_json_array_update_merges_patch=,
+  =..._update_index_out_of_bounds_rejects=.
+- stdlib/primitives/data/collection.st: new =.update(idOrPredicate, patch)=
+  mutator. Finds by predicate or id-equality, snapshots ONLY the overwritten
+  keys for a precise inverse (undefined => key delete on revert), optimistic
+  merge, persists Update over dev-ws, reverts the failed op independently.
+
+* 2. Collection<->derive DUAL-CHANNEL desync (the silent killer)
+The collection's =publish()= only called =ST.setData= (data registry); it never
+wrote =SpacetimeLocal[name]= / dispatched =local:<name>:updated=. So a derive or
+query sourced from the collection (=@data query from $cards=, =@data derive
+$viewedCards=) NEVER re-ran on a collection mutation -- the two data planes were
+desynced. Fixed by making =publish()= use the SAME dual channel as
+data-source/reactive-source (registry + signal store + deferred event), and
+=read()= prefer the signal store. This is the fix that made =.update= actually
+move a card on screen.
+
+* 3. Scrub-history time-travel (was entirely unwired)
+Three gaps: nothing appended to =$history=; columns rendered live =$cards= (never
+=$viewedCards=); slider =max= hardcoded 0. Wired in demos/liveview-kanban:
+- queries now project from =$viewedCards= (HEAD === $cards live; a past frame
+  while scrubbing -> the whole board replays for free).
+- @handle optimistic records the pre-move board onto =$history= and pins =$scrub=
+  to HEAD, then persists via =$cards.update($card, {col:$to})=.
+- =.tt__range { max <- $history.length; value <- $scrub; @on input{...} }=.
+Verified live: frame 0 = original, frame 1 = after first move, HEAD = all moves.
+
+* 4. dropTarget overlay shadowing (found via --debug)
+Persistence needs =--debug= (creates window.__stDevWs). But the dev panel
+(=#__spacetime-dev-panel=, fixed, z 99998) overlaps the right column, so
+=elementFromPoint= at the release point hit the PANEL -> =.closest('.col')= null
+-> drop fell back to the card's home column. Hardened =ST.dropTarget= to walk the
+WHOLE =elementsFromPoint= stack (front-to-back), returning the first entry whose
+=closest(selector)= matches -- seeing through any overlay (dev panel, presence
+cursor, toast). Tests: drop-target.test.st "sees through an overlay …" + the
+existing 4 updated to mock both hit-test APIs.
+
+* How FEAT-136/137 persist (answer to the user's Q2)
+Two rails: (A) =@data collection via dev-ws= -> EditJsonArray ops -> dev server
+writes the data file (dev persistence, THIS work). (B) Phoenix host
+(FEAT-136/137): state in LiveView assigns, =send emit= -> handle_event mutates
+-> DB/ETS; same .st, only =@host= swaps =ws("/ws")= -> =live("KanbanLive")=.
+
+* Verification
+- cargo test --lib test_edit_json_array (12) green; v8 realtime (19) green.
+- drag-on-drop (5), signal-dispatch (8), drop-target (5) headless green.
+- Live (puppeteer, --debug): drag persists to board.json, survives reload; scrub
+  replays frames; 0 console errors.
+
+* Follow-up filed
+- BUG-135: a comment inside a =@handle { }= body drops all its clauses (had to
+  keep the demo's @handle comment-free).

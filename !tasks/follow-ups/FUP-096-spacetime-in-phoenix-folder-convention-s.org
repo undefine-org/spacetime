@@ -1,0 +1,85 @@
+#+TITLE: Spacetime-in-Phoenix folder convention — source dir + output routing (retire colocated dist/)
+#+STATE: ITEM
+#+SESSION_ID: 15119b0b1f99f303
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-21T08-05-47-262Z_15119b0b1f99f303.jsonl]]
+#+CUSTOM_ID: FUP-096-spacetime-in-phoenix-folder-convention-s
+
+* Initial Message
+
+how do i run the elixir/kanban demo and what is next for that thread of work
+
+* Parent / context
+Surfaced designing the Phoenix⇄Spacetime architecture (FEAT-136/137/138/139,
+@research/spacetime-phoenix-liveview-bridge.org). The current Wave-C layout is
+weird and must be fixed BEFORE the board vertical scales past one page.
+
+* The problem (today, elixir/spacetime_lv/)
+- Source `.st` lives in `priv/spacetime/<page>/index.st`.
+- Build output `dist/` is COLOCATED with the source (`priv/spacetime/<page>/dist/`)
+  — build artifacts mixed into the source tree.
+- Served copy is a THIRD location `priv/static/spacetime/<page>.{js,css}`, reached
+  by a manual `cp` (documented in the README "Run it" step).
+∴ three locations for one page; source and output interleaved; `priv/` (an
+Elixir-ism for "private app files") is an unintuitive home for the VIEW layer.
+
+* Decision needed: one obvious SOURCE dir + clean output routing
+Source must live in ONE legible place; build output must be a SEPARATE tree the
+host serves; `dist/` must never sit next to `.st` source. Options (pick one):
+
+** Option A — assets/spacetime/ (Phoenix-native; RECOMMENDED)
+   Source: `assets/spacetime/<page>/index.st`
+   Output: `priv/static/spacetime/<page>.{js,css}`  (served by Plug.Static at `/`)
+   Reuses Phoenix's EXISTING source→output split (assets/ → priv/static/, the
+   esbuild/tailwind model). The `:spacetime` mix compiler (FEAT-138) slots beside
+   esbuild. Frontend authors already look in assets/. No new top-level dir.
+
+** Option B — top-level spacetime/ (cleanest concept; peer of lib/)
+   Source: `spacetime/<page>/index.st`   (sibling to lib/, assets/, priv/)
+   Output: `priv/static/spacetime/<page>.{js,css}`
+   Signals "view layer = peer of the server (lib/)" — most legible "the page is
+   the program". Cost: a non-standard top-level dir some Phoenix tooling ignores.
+
+** Option C — priv/spacetime/ source, output straight to priv/static (min diff)
+   Source: `priv/spacetime/<page>/index.st`  (drop the colocated dist/)
+   Output: `priv/static/spacetime/<page>.{js,css}`  (compiler writes directly)
+   Smallest change from today; keeps the priv/ Elixir-ism, just removes dist/.
+
+* Output routing by host mode (the public/ question)
+Two deploy modes share ONE source tree:
+1. LiveView-hosted: served root = `priv/static/` (Phoenix Plug.Static). Compiler
+   output → `priv/static/spacetime/`. There is NO separate public/ — priv/static
+   IS Phoenix's public dir.
+2. Standalone SSG (`spacetime build`, no Phoenix): served root = `public/` (or
+   `dist/`) at project root — the full static export (bundles + SSG-unrolled HTML
+   shells + assets). This is the only mode where a top-level public/ exists.
+∴ the convention must let the SAME `.st` source compile to either target,
+selected by the build driver (mix :spacetime → priv/static; spacetime build →
+public/), never by editing the page.
+
+* contract.json placement (ties to FEAT-139)
+End state: NO `<page>.contract.json` file at all — the contract is a module
+FUNCTION (`__spacetime_contract__/0`) read at macro-time via the FEAT-138 NIF
+introspect(). The `.contract.json` sidecar is Wave-B bootstrap scaffolding;
+FEAT-139 + FEAT-138 dissolve it. If a file IS still needed transitionally, it is
+a BUILD artifact under priv/ (e.g. `priv/spacetime/<page>.contract.json`), never
+colocated with source, never in the served static tree.
+
+* gitignore implications
+- Source dir (assets/spacetime or spacetime/): TRACKED.
+- Output (priv/static/spacetime/ or public/): GITIGNORED (build artifact), exactly
+  like priv/static/assets/ already is in a stock Phoenix app.
+
+* Acceptance
+- A documented convention: where `.st` source lives, where output goes per host
+  mode, where (if anywhere) the contract sidecar lives.
+- elixir/spacetime_lv migrated to it: no `dist/` beside any `.st`; no manual cp.
+- `mix compile` (FEAT-138) emits to the served tree directly.
+- The same page compiles under `spacetime build` to public/ unchanged.
+
+* DECISION (2026-06-21): Option A — assets/spacetime/
+Source `.st` lives in `assets/spacetime/<page>/index.st`; output → `priv/static/spacetime/<page>.{js,css}`
+(gitignored, served by Plug.Static at /). Reuses Phoenix's existing assets/→priv/static/ rail; the
+`:spacetime` mix compiler (FEAT-138) slots beside esbuild. Standalone SSG (`spacetime build`) routes
+to project-root `public/` instead. No separate public/ in the LiveView mode — priv/static IS the web root.
+Rationale: zero new concepts, reuses the source→output split Phoenix devs already run. Options B/C rejected
+(B fights tooling, C keeps the priv/ source home we're trying to move away from).

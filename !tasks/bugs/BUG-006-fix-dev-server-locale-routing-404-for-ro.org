@@ -1,0 +1,45 @@
+#+TITLE: Fix dev server locale routing 404 for root index
+#+STATE: DONE
+#+SESSION_ID: 14a74f44d1a10ea9
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-03-30T18-35-43-814Z_14a74f44d1a10ea9.jsonl]]
+#+CUSTOM_ID: BUG-006-fix-dev-server-locale-routing-404-for-ro
+#+EFFORT: 2h
+#+PRIORITY: #A
+#+LAYER: engine
+
+NOTE [2026-03-30]: Fixed by adding fallback inline serve path in try_serve_locale when build_scripts is empty, and by fixing CSS errors that caused compile_from_site to fail.
+
+* Initial Message
+
+cargo run -- serve ora-ventures.com/ --debug
+
+doesn't work the website is shit. Why?
+
+The dev server's =index_handler= redirects =/= to =/{default_locale}/= when locale JSON files exist in the site's =locales/= directory. But =try_serve_locale= returns =None= when =compiled.build_scripts= is empty (which it always is for =@locale=-only sites), causing a 404.
+
+* Problem Trace
+1. =index_handler= (=src/server.rs:1111-1117=): detects locales via =detect_locale_prefixes=, redirects =/= → =/en/=
+2. =/en/= request hits =try_serve_locale= (=src/server.rs:558=)
+3. =try_serve_locale= compiles =index.st=, checks =compiled.build_scripts= (line 615)
+4. =build_scripts= is empty → returns =None=
+5. Fallback file handler looks for physical =en/index.html= → 404
+
+The landing page at =/landing/= works because it doesn't go through =index_handler= (root-only). It compiles inline with runtime locale switching.
+
+* Fix
+In =try_serve_locale= (=src/server.rs:615-617=): when =build_scripts= is empty, fall back to serving the compiled page directly — inject the Spacetime runtime into the base HTML, set =<html lang="{locale}">=, and serve. Essentially replicate the non-locale page-serving logic but with the locale set.
+
+Alternatively, in =index_handler=: when build scripts would be empty (no =build_js_stmts= in compiled output), skip the redirect and serve the page inline with the default locale.
+
+* Key Files
+- =src/server.rs= — =index_handler=, =try_serve_locale=, =detect_locale_prefixes=
+- =src/pipeline/expand.rs:222= — build_scripts population
+- =src/emit/metasystem_codegen.rs:498-502= — =EmitLang::BuildJs= path
+
+* Verification
+- =cargo run -- serve ora-ventures.com/ --port 5555= → navigate to =http://127.0.0.1:5555/= → page renders (not 404)
+- =cargo run -- serve ora-ventures.com/ --port 5555= → navigate to =http://127.0.0.1:5555/en/= → page renders
+- =cargo run -- serve ora-ventures.com/ --port 5555= → navigate to =http://127.0.0.1:5555/fr/= → page renders in French
+- Landing page at =/landing/= still works
+- =cargo test --lib= passes
+- =cargo test --test integration_tests= passes

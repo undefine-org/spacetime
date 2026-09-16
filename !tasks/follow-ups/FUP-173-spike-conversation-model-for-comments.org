@@ -1,0 +1,139 @@
+#+TITLE: FUP-173 — SPIKE: what a comment conversation should be (design undecided)
+#+CATEGORY: follow-ups
+
+* ITEM FUP-173 — research spike: the conversation model
+:PROPERTIES:
+:CUSTOM_ID: FUP-173-spike-conversation-model-for-comments
+:PARENT:   PLAN-123
+:TYPE:     spike
+:END:
+
+** This is a SPIKE, not an implementation task
+
+The design is NOT decided. Do not implement from this file. The output of this
+item is a DECISION (written back here, or into a PLAN), justified against the
+findings below and against the agency tier.
+
+Anyone picking this up should expect to spend most of the time on §"The
+questions", not on code.
+
+** First, correct the record: replies are NOT missing
+
+A previous status report said "replies aren't built". THAT WAS WRONG, and the
+error mattered — it would have sent someone to build a second reply mechanism
+beside the one that already works. Verified on disk:
+
+- =Reply { author, text, at }= — =src/comments.rs:346=.
+- =CommentRecord.thread: Vec<Reply>= — =src/comments.rs:394=, with
+  =skip_serializing_if = "Vec::is_empty"= so legacy sidecars do not churn.
+- The HTTP update handler PUSHES replies — =src/server.rs:3227=.
+- Persistence is covered — =src/server.rs:9205= asserts a reply survives a
+  round-trip to disk.
+- Orphaned records carry their thread through re-anchoring — the pill renders
+  "N replies … its header is gone from source, status and thread survive"
+  (=pill.st:272-273=).
+
+So a flat, authored, timestamped, persisted thread EXISTS end to end for the
+human surface. What follows are the REAL gaps.
+
+** Gap 1: RETRACTED — agents CAN already reply
+
+The first draft of this file claimed "MCP has no reply verb, so an agent cannot
+answer a question asked of it". FALSE. It reasoned from the TOOL NAMES (there
+is no =st_comments_reply=) instead of reading the schemas.
+
+Verified in =src/mcp/tools.rs=:
+- =st_comments_update= declares =reply= ("Optional reply text to append as the
+  agent") and =agent_name= ("Optional author name for the reply"), line ~183;
+- its =anyOf= accepts =status= OR =reply=, so a reply-only call is valid;
+- the handler at ~748 pushes the reply onto =record.thread= and errors with
+  "provide `status`, `reply`, or both" when neither is given;
+- the tool description says so outright: "Update the workflow state or append an
+  agent reply after work progresses."
+
+So BOTH surfaces — HTTP (=CommentsUpdateRequest.reply=, =server.rs:3154=) and
+MCP — can append an authored reply. The human/agent asymmetry does not exist.
+
+TWICE NOW a status report has claimed a reply feature was missing by reasoning
+from names rather than reading the code. That is the actual recurring defect
+here, and it is worth more than the spike: the conversation model is FURTHER
+ALONG than its trackers say, so the risk is someone building a duplicate rail,
+not someone finding a hole.
+
+RESIDUAL, genuinely open and small: there is no test asserting an agent reply
+round-trips through MCP (grep for reply assertions in =mcp/tools.rs= tests
+finds none), whereas the HTTP path has one at =server.rs:9205=. An untested
+write path on a shared record is worth closing regardless of what the spike
+decides.
+
+** Gap 2 (THE spike): flat list vs. threaded vs. events
+
+=thread: Vec<Reply>= is a flat, append-only list. That is a real choice, not a
+placeholder, and the question is whether it is the right one BEFORE the agency
+tier makes it expensive to change.
+
+*** The questions
+
+1. NESTING. Is a reply ever a reply TO a reply? Flat forces one conversation
+   per anchor. Review tools split here: GitHub PR comments are flat per thread;
+   Google Docs is flat per anchor; Slack is one level. Nobody sane does
+   unbounded nesting. Is one level worth it, or does flat + quoting suffice?
+
+2. EDIT / DELETE. A =Reply= today has no id, so it cannot be addressed, so it
+   cannot be edited or retracted. Is that a feature (an append-only record is
+   accountable, and retraction becomes a new reply saying so) or a defect (a
+   typo is forever, a leaked secret cannot be removed)? THIS IS THE DECISION
+   THAT DRIVES THE SHAPE — ids are cheap to add now and near-impossible to
+   retrofit onto records already written.
+
+3. RESOLUTION SEMANTICS. Status lives on the RECORD; replies do not carry one.
+   Can one thread hold two disagreeing conclusions? Does a reply ever
+   *propose* a status change, distinct from making one? Note =history:
+   Vec<StatusChange>= and =thread: Vec<Reply>= are two parallel append-only
+   logs over the same conversation, ordered independently. A reader wanting
+   "what happened, in order" must merge them and cannot, reliably, because
+   only one carries a monotonic guarantee.
+
+   THAT PARALLELISM IS THE STRONGEST ARGUMENT FOR AN EVENT LOG: one ordered
+   sequence of =Created | Replied | StatusChanged | ReAnchored=, with the
+   current status a FOLD over it. It would delete a field rather than add one
+   (the D-rule: a mechanism earns its place by reducing net complexity).
+   Cost: every reader changes, and =status= stops being directly readable.
+   This is the tradeoff to actually think about.
+
+4. MENTIONS / ROUTING. Does a reply address someone? PLAN-123 D8 says agent
+   hints travel BESIDE the record, never inside it. A mention inside reply text
+   would violate that; a mention as a field would extend it. Which?
+
+5. READ STATE. "Unread replies" is what makes a review surface usable and is
+   per-VIEWER, so it cannot live in a shared record at all. Is it in scope, or
+   explicitly the agency tier's problem? Deciding "not now" is a valid output —
+   deciding it silently is not.
+
+** Gap 3: concurrent replies are last-writer-wins
+
+Already accepted for the current single-process dev server, and recorded as
+such. For the agency tier, two people replying at once must not lose one of the
+replies. An append-only log per record is the usual answer and connects
+directly to question 3 — which is why the spike should settle 3 before anyone
+builds multi-writer.
+
+** What a good output looks like
+
+- An answer to each of the five questions, with the reason.
+- An explicit statement of what is DEFERRED to the agency tier vs. what must be
+  right now because it is on-disk schema.
+- If the answer is "flat is correct, add ids and an MCP reply verb" — say so
+  and close the spike. A spike that concludes "no change" is a success; the
+  waste is a spike that concludes nothing.
+
+** Constraints inherited from PLAN-123
+
+- Schema changes bump =SCHEMA_VERSION= and keep back-compatible READS; absent
+  fields mean UNKNOWN, never a fabricated default (see the =history= comment at
+  =src/comments.rs:395=).
+- Any shape must travel identically through pill, MCP, and =check= — one model,
+  three projections, no surface-specific field.
+- Agent hints travel BESIDE the record (D8).
+- The agency tier is a TRANSPORT swap (D10). A model that only works with a
+  single local writer fails that test.

@@ -1,0 +1,111 @@
+#+TITLE: Driver args, form composition, and a catalog you can actually browse (BUG-322, BUG-327, schools-as-roles)
+#+STATE: DONE
+#+SESSION_ID: 1534a2eae1903af0
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-18T13-07-01-638Z_1534a2eae1903af0.jsonl]]
+#+CUSTOM_ID: PLAN-139-driver-args-form-composition-and-a-catal
+
+* Initial Message
+
+so how do I use it? i launched it and little seems to actually work or be interactive. use the browser tool and see if there are errors in the code and stuff. please be thorough and make sure all expectred storiees work. work autonomously and complete as you go
+
+* Why
+
+Driving `demos/brand-catalog` in a real browser turned up two silent-drop
+defects that between them explain the largest failure bucket in the suite AND
+block the "switch schools easily" story:
+
+- BUG-322 — an unnamed driver arg binds BY INDEX into the primitive signature,
+  so `@on &.visible(800ms)` sets `threshold: 800`. Root cause of 8 of the 27
+  headless failures ("Timeline <name> not registered").
+- BUG-327 — a `@form style` whose body splices another form emits NOTHING,
+  silently, and `check` says ✓. Blocks role-indirection, which is the clean
+  way to make design schools swappable.
+
+Measured baseline at clean HEAD `06e0bfa5`: 636 passed / 27 failed / 73 skipped.
+
+* Waves
+
+** W1 — BUG-322: an unnamed driver arg must reach the param the author meant
+
+Registry-declared positional slot (option B in BUG-322): each
+`%registers driver(...)` entry names the param an unnamed arg fills, as DATA,
+the same shape as `param_map` / `progress_export`. No Rust match-arm per
+driver.
+
+TDD: `.test.st` behavior gate FIRST, seen RED under `--cdp`.
+Acceptance: `@on &.time(300ms)` animates over 300ms; `@on &.visible(300ms)`
+does not set a nonsense threshold; the 8 "Timeline not registered" failures
+recover; the 3 tests my BUG-323 guard moved from silent-wrong to loud-fail go
+green.
+
+** W2 — BUG-327 + schools as ROLES
+
+Fix nested form splice (a form body may splice a form), then express the
+showcase schools as role bindings so a pattern never names a school:
+
+#+begin_src spacetime
+.hero__title { --role-title; }                  // pattern splices a ROLE
+@form style --role-title { --sc-min-title; }    // school binds it
+#+end_src
+
+Switching school becomes one block of rebindings instead of editing every
+splice in every pattern.
+
+TDD: RED gate for the nested splice (repro in BUG-327), plus a cycle gate
+(`--a { --b; }` / `--b { --a; }` must be a loud diagnostic, never a hang or a
+silent empty rule).
+
+** W3 — a catalog you can browse
+
+`demos/spacetime-docs/reference.st` already proves live search + kind filter
+with `@each-filtered` on live signals and zero JS; the catalog does not use it.
+Needs richer rows too: `@data forms` emits `{name, kind, params, body, doc,
+source}` — no `school`, no `used_by`, no origin tier (stdlib / overlay / page).
+
+** W4 — the showcase gallery
+
+A school switcher driving all 10 patterns live, once W2 makes that one
+binding.
+
+* Ground rules
+
+- Behavior gates under `--cdp`, RED-checked before the fix (AGENTS: a gate
+  never seen to fail is not yet a gate; a skipped gate reads exactly like a
+  passing one).
+- The main tree currently carries another lane's uncommitted
+  `public/runtime/data-binding.js` deletion, which breaks EVERY `--cdp`
+  compile (`E0956 unknown primitive: type`). Work happens in a clean worktree
+  so RED/GREEN evidence is trustworthy.
+
+** NOTE COMPLETE — all four waves shipped
+
+W1 (19c50b4a) BUG-322/BUG-323/BUG-315. An unnamed driver arg bound BY INDEX
+into the primitive signature, so `@on &.time(300ms)` published progress under
+the signal name "300" while the animation watched __drive_time_N. Fixed with
+registry-declared positional slots (positional_params, as DATA like param_map).
+`.visible` was also bound to a SENSOR (intersection, publishing the ratio AS
+progress) — repointed to load-driver, the contract the retired macro and the
+cutover rewrite both already described. Recovered the whole "Timeline not
+registered" bucket: on-hover.test.st 4 failed -> 0.
+
+W2 (38b95fd1) BUG-327. A form body that spliced a form emitted NOTHING —
+silently, with check reporting success. Fixed across grammar, reifier and
+expansion, with E0966 for cycles. Then schools became ROLES, and `check`
+learned the assembled-page seam `build` already ran (every showcase pattern had
+been reporting four bogus E0947s).
+
+W3 (680b42ea) The catalog browses: one list narrowed by search + kind rail +
+origin rail, zero JS. New `origin` row field, derived from the declaration's
+source rather than push order.
+
+W4 (ed38361a) demos/school-gallery — one markup tree, five design languages,
+switched live. Caught a regression in W2's own grammar on the way (a custom
+property is spelled like a splice plus a colon).
+
+Also found and fixed en route: BUG-340 (1b24e320) — every OPT-IN stdlib module
+(md, text, 3d) was unreachable, so every literate .st.md page in the repo was
+dead. Filed: BUG-330 (fixture markup never torn down), BUG-331 (unknown driver
+param accepted and ignored).
+
+Suite: 636 passed / 27 failed -> 644 / 25 across the arc, with the new failures
+attributable to the parallel lane (verified in isolated worktrees).

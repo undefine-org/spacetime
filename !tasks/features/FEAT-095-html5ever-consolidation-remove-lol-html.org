@@ -1,0 +1,62 @@
+#+TITLE: html5ever consolidation — read-only extraction sites (lol_html part 1)
+#+STATE: DONE
+#+SESSION_ID: 1503ca05d05c0c62
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-10T14-32-18-497Z_1503ca05d05c0c62.jsonl]]
+#+CUSTOM_ID: FEAT-095-html5ever-consolidation-remove-lol-html
+#+COMPLETION_HASH: cf2f4e8dfeda2f98
+
+Parent: [[id:PLAN-031-editable-structured-rich-text-input-mult]] — Wave 0.
+
+RESCOPED 2026-06-10 (user decision): SPLIT. This FEAT ports only the READ-ONLY
+EXTRACTION sites to html5ever (parse → inspect, never reserialize). The
+rewrite-and-write-to-disk sites moved to FEAT-102 (byte-surgical rewriter) because
+html5ever's full parse→serialize normalizes the whole document (reorders attrs,
+drops comments, re-encodes entities) = data-loss on user .html files. lol_html
+STAYS until FEAT-102 lands.
+
+* Target (read-only sites)
+- src/html/parser.rs: parse_html(html) → DocumentModel (ids/classes/tags/custom/
+  slots). Currently lol_html element!("*") walk.
+- src/html/template.rs: extract_classes_from_html(html) → HashSet<String>;
+  parse_templates(html) → TemplateRegistry (slot/class extraction).
+- src/syntax/form_match.rs: any READ-ONLY class scan (NOT inject_template_provenance
+  — that's a rewrite → FEAT-102).
+
+* Change
+- Reuse src/html/treesink.rs Sink/Node tree (already html5ever). Add a public
+  `parse_document(html) -> Handle`/walk helper OR a visitor that yields
+  (tag, attrs, depth, parent) so parser.rs/template.rs build their models from the
+  html5ever tree instead of lol_html streaming. Extraction is order+depth aware
+  (parent_index, depth, custom-element slot nesting) — the Node tree has parent
+  links + children order, so a pre-order DFS reproduces lol_html's document order.
+- Keep DocumentModel/TemplateRegistry/ElementInfo shapes identical.
+
+* Acceptance
+- src/html/parser.rs tests green (test_parse_simple_html, custom_elements,
+  selector_exists_* — all unchanged).
+- src/html/template.rs tests green.
+- cargo test --lib green; cargo test --test integration_tests green.
+- lol_html still present (FEAT-102 removes it) — but parser.rs/template.rs no
+  longer import it.
+
+* Note
+Extraction via the existing Node tree is the natural unification — these sites
+were always "parse to inspect", which is exactly what treesink already does.
+
+NOTE [2026-06-10]: DONE 2026-06-10 (part 1 = read-only extraction).
+- Added src/html/treesink.rs::visit_elements (public html5ever pre-order DFS →
+  Vec<VisitedElement{tag,attrs,depth,parent_index}> + .attr() helper). Reuses the
+  existing Sink/Node tree that already powers skeleton→HtmlExpr.
+- Ported src/html/parser.rs::parse_html (DocumentModel: ids/classes/tags/custom/
+  slot_usage) and src/html/template.rs::{extract_classes_from_html, parse_templates,
+  extract_slots} off lol_html onto visit_elements.
+- Slot-usage now resolves via parent-CHAIN walk to nearest custom-element ancestor
+  (tree-true) vs lol_html's flat stack — strictly more correct (new test:
+  slot_usage_resolves_through_nested_non_custom_wrappers).
+- Tests: parser 10 pass (incl new document-order/depth/parent + nested-slot),
+  template 10 pass. cargo test --lib 2181 pass; integration 170 pass.
+- lol_html NOT yet dropped from Cargo.toml — the rewrite-and-write-to-disk sites
+  (server/handlers/export/form_match inject_template_provenance) need byte-fidelity
+  and moved to FEAT-102 (byte-surgical rewriter). lol_html removed from parser.rs +
+  template.rs imports.
+NOT committed standalone yet — committing with this note.

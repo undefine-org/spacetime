@@ -1,0 +1,153 @@
+#+TITLE: FUP-172 — a method call on a non-`$` expression fails to parse
+#+CATEGORY: follow-ups
+
+* ITEM FUP-172 — `Array.from(...).join(...)` does not parse in a `@data derive`
+:PROPERTIES:
+:CUSTOM_ID: FUP-172-method-call-on-non-signal-expression-fails-to-parse
+:END:
+
+** Symptom
+
+A `@data derive` whose expression calls a METHOD on anything other than a
+`$signal` fails to parse:
+
+#+begin_src spacetime
+@data derive $b string : Array.from(new Set($a)).join(", ");
+//                                                   ^ expected '{' after selector
+#+end_src
+
+The parser appears to stop treating the line as a declaration and starts
+reading it as a CSS selector, so the reported error names `{` — a diagnostic
+that points nowhere near the real cause and costs a reader real time.
+
+** Isolation (measured, not inferred)
+
+Each line below is a complete two-line `.st` file checked with
+`cargo run -- check`:
+
+| expression                                | errors |
+|-------------------------------------------+--------|
+| =$a.join(", ")=                           |      0 |
+| =$a.join(",")=                            |      0 |
+| =Array.from($a).join(", ")=               |      4 |
+| =Array.from(new Set($a)).join(", ")=      |      4 |
+| =Array.from(new Set($a)).length=          |      4 |
+| =new Set($a).size=                        |      4 |
+
+So it is NOT about `join`, NOT about the string argument, and NOT about the
+comma inside it. The rule is: a member access whose RECEIVER is not a `$`
+signal fails. `$a.join(…)` works; `Array.from(…).join(…)` does not.
+
+** Blast radius
+
+=stdlib/comments/__dev__/pill.st:26= has carried this since PLAN-123 W2:
+
+#+begin_src spacetime
+@data derive $comPruneFiles string : Array.from(new Set($comPrune.map(($comSpan) => $comSpan.file))).join(", ");
+#+end_src
+
+The pill therefore does NOT compile through `Compiler::from_file`, which is
+the path `compile_comments_widget_raw` uses to serve it. This went unnoticed
+because every pill test asserts against the SOURCE TEXT (`PILL.contains(…)`),
+never against a compiled artifact — a whole test module that cannot fail on a
+file that does not compile. That gap is the more important finding: it is the
+same class of defect as gate 2's "HEAD doesn't build while local tests pass".
+
+Worked around in the pill (FUP-171 W-d) by deriving the deduped file list
+without a method call on a constructed value. The workaround is local; the
+parser gap is general and will bite the next author who reaches for a JS
+builtin.
+
+** ROOT CAUSE (verified by differential test, not inferred)
+
+The trigger is NOT `join`, NOT the string argument, and NOT the receiver being
+"non-`$`". It is a **one-shot flag consumed by the wrong token**.
+
+*** The mechanism, in `parse_directive` (src/syntax/cst/parser.rs)
+
+1. The inline-arg loop (~line 747) walks a WHITELIST of token kinds. `L_PAREN`
+   is deliberately NOT in that whitelist, so the loop always BREAKS at a `(`.
+2. While looping it maintains =last_was_value_colon=, set by
+   =let is_colon = self.at(COLON)= on EACH iteration. It means "the token I
+   just consumed was the value-introducing `:`".
+3. After the loop, line 841 decides who owns the paren:
+   #+begin_src rust
+   if last_was_value_colon && self.at(L_PAREN) { self.parse_inline_expression(); }
+   …
+   if self.at(L_PAREN) { self.parse_arg_list(); }   // line 861
+   #+end_src
+   `parse_inline_expression` consumes a BALANCED expression through to `;`,
+   keeping trailing `.member` access. `parse_arg_list` consumes ONLY the
+   parenthesized group and stops.
+
+*** Why the receiver decides the outcome
+
+- =: ($a).join(", ")= — the `:` is the last consumed token when the loop hits
+  `(`, so =last_was_value_colon= is TRUE → `parse_inline_expression` → the
+  whole value including `.join(…)` is consumed. PARSES.
+- =: Array.from($a).join(", ")= — the loop consumes `:`, then `Array`, `.`,
+  `from` as inline args. Each iteration REASSIGNS the flag, so by the time the
+  loop breaks at `(`, =last_was_value_colon= is FALSE (the last consumed token
+  was the ident `from`, not the colon). The paren falls through to
+  `parse_arg_list`, which consumes ONLY `($a)` and returns.
+- The parser is now positioned at `.join`, at DIRECTIVE level, with a newline
+  guard that treats a `.`-led token as a new statement → `parse_scope_block` →
+  =expected '{' after selector=.
+
+*** The differential that proves it
+
+| expression                       | errors | why                                  |
+|----------------------------------+--------+--------------------------------------|
+| =$a.join(", ")=                  |      0 | `$`-led; DOLLAR is in the whitelist  |
+| =($a).join(", ")=                |      0 | `(` immediately after `:` → flag TRUE |
+| =(Array.from($a)).join(", ")=    |      0 | same — parenthesizing restores it    |
+| =Array.from($a)=                 |      0 | no trailing `.member` to strand      |
+| =Array.from($a).join(", ")=      |      4 | flag consumed by `from` → arg-list   |
+
+So the rule is: **an ident-led call in directive value position loses the
+value-expression route, and any trailing `.member` after it is re-read as a CSS
+selector.** `Array.from($a)` alone "works" only because nothing follows it.
+
+*** Why the diagnostic is so unhelpful
+
+By the time the error fires, the parser has already left directive context. It
+reports what IT sees — a selector with no `{` — rather than what the author
+wrote. The reported column points at `.join`'s argument, several tokens past
+the actual decision point at line 841. Any fix should also make this error name
+the real problem.
+
+** FIXED (2026-07-31, commit 7b7feac2) — STATE: DONE
+
+NOTE ON THE ID: filed as FUP-167, renumbered to FUP-172 on 2026-08-03 on a
+FALSE PREMISE (see FUP-169: there was no id collision; a full CUSTOM_ID is
+=FUP-<n>-<slug>=, so sharing a numeric prefix is not a clash). The rename was
+unnecessary and is NOT being undone — the new id is already cited from
+=parser.rs= and from commit messages, and a second rename would add a third set
+of stale references. Commits =7b7feac2= and =63bafe9a= say "FUP-167" meaning
+this file.
+
+The fix was NOT "make member access independent of a `$` receiver" as guessed
+above — that framing was a symptom description. The real discriminator is a
+trailing `.member` AFTER a parenthesised group; see ROOT CAUSE above.
+
+Shipped:
+- =in_value_position= flag (replacing the per-iteration =last_was_value_colon=
+  reassignment that made the flag one-shot);
+- new pure-lookahead helper =paren_group_is_followed_by_member()= in
+  =src/syntax/cst/parser.rs=, depth-counted, returning false on EOF /
+  =L_BRACE= / =SEMICOLON= so a malformed directive is not rerouted;
+- regression tests =a_value_position_call_with_a_trailing_member_is_one_expression=
+  and =a_value_position_call_without_a_trailing_member_stays_an_arg_list=.
+
+THE NAIVE FIX WAS WRONG AND THE SUITE CAUGHT IT. Making the flag merely sticky
+broke =test_parse_easing_preset_cubic_bezier= and =test_parse_easing_preset_spring=:
+=@preset easing ~x: cubic-bezier(0.4,0,0.2,1)= is ALSO a value-colon call, but
+its paren genuinely IS an arg list. Colon distance is not the discriminator;
+the trailing member is.
+
+The pill workaround (=$comPruneFileList= / =$comPruneFiles=) is REVERTED — the
+original =Array.from(new Set(...)).join(", ")= expression compiles.
+
+The compile gate asked for above ALSO shipped, earlier, as
+=server::comments_pill_contract_tests::the_pill_compiles_and_emits_its_picker=
+(commit 66217b7e). Mutation-verified.

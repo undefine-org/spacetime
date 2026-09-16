@@ -1,0 +1,85 @@
+#+TITLE: A dashed signal name transpiles to subtraction, so the hole renders empty
+#+STATE: TODO
+#+CUSTOM_ID: BUG-379-a-dashed-signal-name-transpiles-to-su
+
+* Symptom
+
+A signal whose name contains a dash renders as nothing. No error reaches the
+page, the log, or the build — the hole is simply empty forever.
+
+#+begin_src spacetime
+.state__count { `$vars-count` }
+#+end_src
+
+Emitted JS, read out of the served bundle
+(=curl 'http://127.0.0.1:4444/__spacetime/runtime.js?entry=index.edn'=):
+
+#+begin_src js
+let __v; try { __v = (ST.resolve(__node, 'vars')-count); } catch (e) { __v = ''; }
+#+end_src
+
+=count= is not defined, so the expression throws, the =catch= swallows it, and
+=__v= becomes =''=. The =try/catch= is what makes this silent: a broken NAME is
+indistinguishable from a signal that is genuinely empty.
+
+* Why
+
+Three copies of the same scan loop read the identifier after =$= and accept
+only =[A-Za-z0-9_]=:
+
+| site                      | what it scans          |
+|---------------------------+------------------------|
+| =src/syntax/form_match.rs:1295= | member/base scan  |
+| =src/syntax/form_match.rs:1354= | base + path scan  |
+| =src/syntax/form_match.rs:1490= | plain name scan   |
+
+#+begin_src rust
+if ch.is_ascii_alphanumeric() || ch == '_' { j += 1; } else { break; }
+#+end_src
+
+The dash terminates the name, and everything after it is handed to the JS
+expression grammar, where =-= is the subtraction operator.
+
+The asymmetry is what makes this a trap rather than a plain restriction: the
+DECLARE and SUBSCRIBE paths accept dashes happily. Measured in the browser on
+the same page, =window.__stLiveSubscriptions= held a registered =vars-count=
+entry with a working setter while every hole reading it rendered empty. So the
+name is legal to define, legal to push a diff to, and silently unreadable in a
+template — three subsystems disagreeing about one lexical rule.
+
+* The fix is a language decision, not a one-character patch
+
+Adding =-= to the three loops is ambiguous, and the ambiguity is real:
+
+| source     | dash-in-name reading | current reading      |
+|------------+----------------------+----------------------|
+| =$a-b=     | signal =a-b=         | =$a - b=             |
+| =$a-$b=    | (unchanged)          | =$a - $b=            |
+| =$a - b=   | =$a - b=             | =$a - b=             |
+
+Pick one and write it down:
+
+1. *Dash is an identifier constituent; subtraction needs spaces.* Matches
+   Lisp/CSS naming, and =$total-1= silently changing meaning is the cost.
+2. *Dash never joins an identifier; reject it at declare time.* Cheapest and
+   consistent, but breaks any producer that mints names from a Lisp-ish source.
+3. *Dash joins only when no space follows and the resulting name is a declared
+   signal* — resolves =$vars-count= and keeps =$total-1=, at the price of a
+   lexer that must know the signal table.
+
+Whatever is chosen, two things should hold: the emitted-JS =catch= should not
+be the only report — an unresolvable NAME should be a build-time diagnostic,
+not an empty string at runtime — and the three scan loops should become one
+function so they cannot drift apart.
+
+* How it was found
+
+beam-lisp's live-state panel exposed a =vars-count= assign. The list beside it
+(=vars=, dashless) rendered 454 rows; the count beside it stayed blank through
+every refresh. Everything server-side was correct — the assign was declared,
+pushed, and present in the client registry — so the defect only became visible
+by grepping the compiled bundle for the hole.
+
+Worked around downstream by renaming the assign to =vars_count=
+(beam-lisp =spell/src/spell/live-state.bl=). The workaround is fine there and
+does not depend on this bug being fixed.

@@ -1,0 +1,64 @@
+#+TITLE: Selector-scope reactive `:` props mis-lower to setAttribute (no class-toggle / custom-prop branch)
+#+STATE: DONE
+#+SESSION_ID: 14fc108ed3772fa8
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-04T14-32-37-965Z_14fc108ed3772fa8.jsonl]]
+#+CUSTOM_ID: BUG-068-selector-scope-reactive-props-mis-lower
+#+COMPLETION_HASH: 8538d62577f98507
+
+* Initial Message
+
+ok dude! the original reason why we did all of this is to support Spacetime's Framer/Squarespace killer features, can you come back to them and show me how you'll implement the Spacetime-y version of them? I think the plan was already written
+
+* Parent
+[[id:PLAN-030-spacetime-app-platform-declarative-schem]] — Wave 2 / FEAT-072 blocker.
+[[id:FEAT-072-reactive-properties-lt-as-sole-surface-h]] — the `:` surface MUST be
+correct at BOTH template-body AND selector scope; this is the selector-scope gap.
+
+* Symptom (emitted-JS verified, 2026-06-06)
+At SELECTOR scope (file-level `.box { ... }`), reactive `:` declarations mis-lower:
+| author (selector scope)        | emits NOW                         | should emit                         |
+|--------------------------------+-----------------------------------+-------------------------------------|
+| `.active: $open;`              | `setAttribute("active", …)`       | `classList.toggle("active", !!v)`   |
+| `.ora-faq__item--open: $x;`    | `setAttribute("ora-faq__…", …)`   | `classList.toggle("ora-faq__…", !!v)`|
+| `--accent: $c;`                | `setAttribute("--accent", …)`     | `style.setProperty("--accent", v)`  |
+| `text <- $v;`                  | textContent ✓ (separate `<-` path)| (ok)                                |
+Template-BODY scope is correct (the `cb_toggle`/`cb_self_prop` grammar in
+component-body.st → ClassToggle). Selector scope uses a DIFFERENT path
+(CST css_property → CssDeclaration → emit_reactive_binding_js) that is a STUB:
+it only branches text/content→textContent vs *→setAttribute. No class-toggle,
+no custom-property branch. `setAttribute("--accent")` / `setAttribute("a--b")`
+are also invalid DOM.
+
+* Root cause (two chained defects)
+1. PARSER (src/syntax/events/grammar/directives.rs `body_item` DOT arm): `.x: $v;`
+   (no `{`) fails `is_scope_block` → "stray dot — consume", dropping the leading
+   `.`. The CSS_PROPERTY name becomes bare `x`, losing the class-toggle marker.
+2. EMIT (src/compiler.rs `emit_reactive_binding_js`): even with the name, the
+   emitter has only text-vs-setAttribute; no `.`/`--` routing.
+
+* Fix (FEAT-072-aligned, the `:` surface completed at selector scope)
+- Parser: in the DOT arm, when NOT a scope block, parse `.<ident>: <value>;` as a
+  CSS_PROPERTY whose name PRESERVES the leading `.` (class-toggle marker). Keeps the
+  disambiguator the spec defines (leading `.` = reactive class; `--` already a token
+  run in the value-less property name; bare ident = CSS passthrough/attr).
+- Emit: `emit_reactive_binding_js` routes by property-name shape:
+  * `.class`  → `classList.toggle('class', !!__v)` (strip dot; supports `!`/expr cond)
+  * `--prop`  → `style.setProperty('--prop', __v)`
+  * `text|content` → textContent (unchanged)
+  * other attr → setAttribute (unchanged)
+- Mirror the same routing in src/emit/html_hydrate.rs `emit_binding` (FEAT-078 hydrate
+  path mirrors this fn) so SSG + hydration agree.
+
+* Repro (RED corpus before fix)
+tests/integration/reactive_properties.rs: add selector-scope cases asserting
+`classList.toggle` for `.active: $open;` and `style.setProperty` for `--accent: $c;`.
+V8: a selector-scope `.on: $open;` toggles the class on signal change.
+
+* Acceptance
+- [ ] selector-scope `.x: $v;` emits classList.toggle (emitted-JS asserted)
+- [ ] selector-scope `--v: $c;` emits style.setProperty
+- [ ] template-body parity preserved (no regression in cb_toggle path)
+- [ ] hydrate path (html_hydrate) mirrors the routing
+- [ ] full suite green; this UNBLOCKS the @bind→`:`/`<-` cutover (FEAT-072)
+
+NOTE [2026-06-09]: Fixed b1dc4b0c. Parser (cst/parser.rs is_class_property/parse_class_property keeps leading dot in CSS_PROPERTY; ast.rs name_text reconstructs .x) + emit (compiler.rs emit_reactive_binding_js routes .class→classList.toggle, --prop→setProperty, text→textContent, else setAttribute). Mirrored events grammar for meta-body parity. Hydrate emit_binding only sees HTML attr names (no mirror needed). RED-first: 3 integration + 1 V8 reactive toggle. Gates: lib 2148/0, integration 165/0, v8 315/12 (pre-existing). UNBLOCKS FEAT-072.

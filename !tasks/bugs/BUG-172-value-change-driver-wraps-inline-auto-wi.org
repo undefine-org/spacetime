@@ -1,0 +1,142 @@
+#+TITLE: value-change-driver wraps inline auto-width flap text to false 2-line height
+#+STATE: DONE
+#+SESSION_ID: 152939d2e5b25e66
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-09T16-24-34-454Z_152939d2e5b25e66.jsonl]]
+#+CUSTOM_ID: BUG-172-value-change-driver-wraps-inline-auto-wi
+#+COMPLETION_HASH: 7dd6bd3ca5f2423c
+
+* Initial Message
+
+it still looks weird
+
+* Symptom
+
+`@value-change` (`stdlib/macros/timeline.st::value-change-timeline`, backed by
+`stdlib/primitives/animation/drivers.st::value-change-driver`) applied to an
+inline-level, auto-width element (e.g. `display: inline-block` word-cycle
+"flap" with no explicit `width`) produces a visible "ghost text" double-line
+artifact on every text-change transition when the incoming text is wider than
+the outgoing text.
+
+First observed on =projects/ora-ventures.com='s hero =.ora-hero__flap=
+(=@cycle= + =@value-change= word rotation): "stalls" transitioning to "dies in
+decks." rendered with both words overlapping across two visual lines instead
+of a clean single-line crossfade.
+
+** Live reproduction (dev server, not test harness)
+
+Sampled =.ora-hero__flap='s =getBoundingClientRect().height= every 100ms
+across one text-change cycle:
+
+#+begin_example
+0ms:100px  100ms:101px  ...  1400ms:76px(*)  1500ms:76.8px(*)  1600ms:37px settle
+#+end_example
+
+(*the ora-ventures probe used a shorter flap; a synthetic isolated probe with
+=font-size:32px= measured 37px steady-state -> 76.8px peak -> 37px settle,
+i.e. peak = 2.08x steady-state height — a false 2-line wrap.)
+
+* Root cause
+
+=stdlib/primitives/animation/drivers.st::value-change-driver=, in the
+=animateChange= inner function (around L807 pre-fix):
+
+#+begin_src js
+var containerWidth = %&el.offsetWidth;
+#+end_src
+
+This value is fed into pretext's line-breaker
+(=ST.text.layout(prepared, containerWidth, lineHeight)=) as the wrap
+constraint for laying out the INCOMING text.
+
+For a BLOCK-level element, =offsetWidth= is a real, meaningful line-box width
+— the element stretches to its container regardless of content, so
+measuring it before vs after the text change gives the same number and the
+wrap decision is correct.
+
+For an INLINE-level, AUTO-WIDTH element (=display: inline-block=/=inline=
+with no explicit =width=), =offsetWidth= is the SHRINK-TO-FIT width of the
+CURRENT (old) text — not a real line-box constraint. By CSS auto-width
+semantics, such an element never force-wraps its own content on its own; it
+only wraps if an ANCESTOR constrains it, which =offsetWidth= (a property of
+the element ITSELF) cannot express.
+
+When the incoming text is wider than the outgoing text's shrink-to-fit width,
+pretext's line-breaker (correctly, given the wrong input) wraps the new text
+to 2 lines. The driver then:
+1. Animates the element's =height= via WAAPI from =currentHeight= (1-line) to
+   =targetHeight= (the falsely-computed 2-line height) — a real, visible
+   height doubling.
+2. The absolutely-positioned EXIT layer (still showing the OLD text, per-word
+   spans) stays pinned at its own 1-line position while the IN-FLOW enter
+   layer wraps to 2 lines beneath/around it — producing the visual overlap
+   ("ghost text").
+3. On cleanup (=animateChange='s =setTimeout= -> =heightAnimDone.then=), the
+   driver resets =%&el.style.height = targetHeight + 'px'= then immediately
+   sets =%&el.textContent = newText= and clears the height/overflow/clip-path
+   overrides — the element SELF-HEALS back to single-line height because the
+   plain textContent, unconstrained, naturally renders on one line again. This
+   is why the bug is only visible DURING the transition, not after it settles
+   — a naive "measure before, measure after" test misses it entirely; only a
+   mid-transition sample catches it.
+
+* Fix (applied)
+
+Only trust =offsetWidth= as a wrap constraint when the element's computed
+=display= is genuinely block-level (stretches to container width regardless
+of content): =block=, =flex=, =grid=, =list-item=, =table=, =flow-root=.
+Otherwise (inline, inline-block, inline-flex, etc. with auto width), pass
+=Infinity= — matching the element's real CSS layout behavior (single line,
+no self-imposed wrap).
+
+#+begin_src js
+var elDisplay = cs.display;
+var elIsBlockLevel = elDisplay === 'block' || elDisplay === 'flex' ||
+  elDisplay === 'grid' || elDisplay === 'list-item' ||
+  elDisplay === 'table' || elDisplay === 'flow-root';
+var containerWidth = elIsBlockLevel ? %&el.offsetWidth : Infinity;
+#+end_src
+
+File: =stdlib/primitives/animation/drivers.st=, inside
+=%primitive value-change-driver='s =%emit js= block, =animateChange= function,
+"Phase 1 — Measurement" comment.
+
+** Verified
+
+- Live dev-server reproduction (before fix): 37px -> 76.8px (2.08x) peak ->
+  37px settle, sampled at 100ms increments across the full transition.
+- Live dev-server reproduction (after fix): steady ~100px throughout (ora-
+  ventures hero flap, multiple full cycles sampled at 300ms increments, no
+  deviation beyond +/-0.3px rounding).
+- Full regression: =cargo test --lib= (2591 passed) and
+  =cargo test --test integration_tests= (189 passed), 0 failures.
+- New Rust unit test:
+  =pipeline::integration_tests::tests::test_value_change_driver_guards_container_width_by_display_level=
+  in =src/pipeline/integration_tests.rs= — asserts the compiled driver source
+  contains the block-level guard. Verified RED (reverting the fix fails the
+  test with the exact expected message) -> GREEN (fix restored, test passes).
+- New CDP smoke fixture:
+  =tests/fixtures/native-template/value-change-inline-width-wrap.test.st= —
+  mounts =@value-change= on an inline-block auto-width element and drives a
+  text change without throwing. NOTE: could NOT reliably assert the actual
+  pixel height-peak in the CDP test harness — see BUG-173 and BUG-174 below,
+  filed as blockers to a true end-to-end pixel-level regression test for this
+  fix. The Rust unit test above is the durable regression guard until those
+  are fixed.
+
+* Acceptance
+- [X] Root cause identified and documented (offsetWidth on auto-width inline
+  element is not a real wrap constraint).
+- [X] Fix applied, scoped to block-level display values only (no behavior
+  change for the common block-level =@value-change= usage, e.g. counters).
+- [X] Live reproduction before/after via served page (not just test harness).
+- [X] Rust unit test added, RED->GREEN verified.
+- [X] Full regression suite green (lib + integration).
+- [ ] FOLLOW-UP: once BUG-173/BUG-174 (CDP harness bugs) are fixed, upgrade
+  the CDP fixture from a smoke test to a real pixel-peak assertion (the exact
+  assertion logic is preserved in this bug's "Live reproduction" section for
+  when that's unblocked).
+
+NOTE [2026-07-10]: Fixed, verified live (before/after DOM sampling on served ora-ventures.com hero + isolated probe), Rust unit test added and RED/GREEN-verified, full regression suite green (2591 lib + 189 integration, 0 failures). CDP fixture downgraded to smoke test pending BUG-173/BUG-174 (separate harness bugs discovered and filed during this work, not blocking this fix).
+
+NOTE [2026-07-10]: Follow-up (same session, user-reported): the height-only fix left WIDTH unanimated — an inline auto-width flap's outer box snapped instantly to the new text's natural width at DOM-swap time (519.78px->624.03px in one 100ms sample tick, confirmed live) while height eased smoothly, producing a visible "everything nearby jumps" artifact distinct from the false-wrap bug. Fixed by: (1) exposing ST.text.measureNaturalWidth (reusing the existing measureWord's prepareWithSegments+layoutWithLines(Infinity) technique — the embedded pretext build predates pretext.bundle.js's own measureNaturalWidth export), (2) pinning width to its current value + white-space:nowrap at transition start (prevents the pinned narrower width from forcing a real DOM wrap), (3) animating width+height in ONE WAAPI animate() call so they stay in lockstep. Verified live: width now eases 520px->542.6px->519.78px smoothly across the transition instead of snapping. New Rust unit test test_value_change_driver_animates_width_alongside_height_for_inline_auto_width added. Full suite green: 2592 lib + 189 integration, 0 failures.

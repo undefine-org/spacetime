@@ -1,0 +1,45 @@
+#+TITLE: Bare-ident @data signal params silently compile to an empty callParams table (body template falls back to raw args on the wire)
+#+STATE: ITEM
+#+SESSION_ID: 1539989eb44441ea
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-22T09-34-26-513Z_1539989eb44441ea.jsonl]]
+#+CUSTOM_ID: BUG-210-bare-ident-data-signal-params-silently-c
+
+* Initial Message
+
+explain the FUPs and show me your vision for the Spacetime <> LV connection and what would make it *wow*. Exlpain the impact of each bug that you saw
+
+* Surfaced by
+FEAT-162 e2e (elixir/spacetime_lv/frontend/board.st).
+
+* Symptom
+`@data signal $cursor(x number, y number) to $board { send emit "cursor" { x: $x, y: $y } … }`
+— params spelled BARE (`x number`, not `$x number`) — compiles CLEAN (cargo
+check green) but the emitted `callParams` table is `[]`. At runtime the
+buildBody template eval (`return ({x: $x, y: $y})`) throws ReferenceError ($x
+unbound), the catch silently falls back to RAW ARGS, and the wire receives
+`[arg1, arg2]` instead of the declared object — or `{}` when the args are
+undefined. move_card/add_card/lock_card on the board only worked BY ACCIDENT:
+their call sites pass a single object literal, which the bodyless-passthrough
+fallback returns untouched.
+
+The canonical spelling (`$x number`, per AGENTS.md one-sigil harmony: `$price
+number`, never `name: type`) compiles a correct table — stdlib/__host__'s
+$createProject($name string) is the working reference.
+
+* Expected
+Bare-ident params in a signal signature are a COMPILE ERROR (E-diagnostic
+naming the param and the `$`-prefixed spelling) — never a silent empty table.
+The silent-fallback class is exactly what the repo's diagnostics discipline
+forbids.
+
+* Reproduction
+1. Declare `@data signal $f(x number) to $h { send emit "e" { x: $x } receive … }`.
+2. cargo check → green (wrong). Build → `var callParams = [] || [];` (wrong).
+3. Fire → server receives raw args, not {x: …}.
+
+* Workaround (shipped in board.st)
+Spell params `$`-prefixed: `$cursor($x number, $y number)`.
+
+* Suspected layer
+param_list capture → signal-call %params marshalling: bare-ident entries are
+dropped instead of diagnosed.

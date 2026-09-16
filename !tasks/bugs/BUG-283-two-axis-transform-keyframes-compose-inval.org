@@ -1,0 +1,44 @@
+#+TITLE: BUG-283 two-axis transform keyframes compose invalid CSS
+#+TODO: TODO DOING | DONE CANCELLED
+#+STARTUP: overview
+
+* DONE [#A] two-axis transform keyframes compose into invalid CSS
+:PROPERTIES:
+:CUSTOM_ID: BUG-283
+:PRIORITY: #A
+:LAYER: stdlib
+:DISCOVERED: 2026-08-04
+:FIXED: 2026-08-04
+:END
+
+** Symptom
+Every two-value transform keyframe — `translate: 0px 0px -> -6px 2px`,
+`translate: 0% 0% -> -50% 0%`, `scale: 0 1 -> 1 1` — held its first frame
+forever, with a green build and correct-looking bundle. Score-launch never
+hit it (single-axis translate-x/translate-y only); the effect gallery's
+glitch, ticker, kicker and mask-reveal were all dead.
+
+** Root cause
+The runtime composes animated transform properties into `el.style.transform`
+as FUNCTIONS: `translate(-25% 0%)`. Transform functions take COMMA-separated
+args (`translate(10px, 20px)`); keyframe values arrive SPACE-separated (the
+individual-property spelling). The space-separated composition is invalid
+CSS, so the browser discards the assignment wholesale — no error, no motion.
+
+** Fix (stdlib, both composition sites — one rule, no drift)
+`fnArgs(v)`: split top-level spaces (paren-aware: calc()/var() keep their
+spaces) and join with ", ".
+- stdlib/primitives/animation/apply-animations.st (applyStyle, score path)
+- stdlib/primitives/animation/interpolate.st (legacy @animate path)
+
+** Gates
+- tests/gallery/effect-gallery.test.st::"the ticker travels left at constant
+  speed" — was RED (range <= 80px over 2.6s), GREEN after fix.
+- Verified live: glitch ghosts jitter, kicker rises, mask-reveal sweeps.
+- Score suite 28/28 on --cdp after the change (single-axis paths unaffected —
+  fnArgs is identity for spaceless values).
+
+** Note (semantics discovered while gating)
+`stagger: Nms` is WINDOW-RELATIVE: offset = position x N/1000 of normalized
+window progress (documented in docs/CREATIVE.md as `stagger: 0.08`). 45ms in
+a 3.6s window spreads 162ms — the gallery's pixelate now uses 300ms (~1.1s).

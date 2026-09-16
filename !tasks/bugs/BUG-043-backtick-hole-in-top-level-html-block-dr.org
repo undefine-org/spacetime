@@ -1,0 +1,54 @@
+#+TITLE: backtick hole in top-level HTML block drops subsequent scope @each match
+#+STATE: ITEM
+#+SESSION_ID: 14f48ced503111a7
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-05-29T18-28-09-664Z_14f48ced503111a7.jsonl]]
+#+CUSTOM_ID: BUG-043-backtick-hole-in-top-level-html-block-dr
+
+* Initial Message
+
+ok start with FEAT-046 Blocker 1 and then continue onto the W3->W6 cluster. Use the native testing tool whenever you can. I'm going for a date, so trust yourself and consider any decision approved. Be rigourous and choose the more structurally sound and long-term option, even if it means adding waves/leaves and surfacing/filing/fixing or implementing FEAT/BUG files. Write a summary in between each sub-wave and whatnot.
+
+* Symptom
+A top-level HTML element literal that contains a backtick hole (`` `$x` ``) causes a
+FormMatch in a LATER scope (e.g. an `@each`) to be DROPPED \u2014 the scope ends up with empty
+matches, so e.g. SSG-unroll/render does not fire.
+
+Repro (the @each is lost):
+#+begin_src
+@data inline $fruits : ["Apple"];
+<main><span>`$x`</span><ul class="basket"></ul></main>
+.basket {
+  @each($fruits as $fruit) { <li>`$fruit`</li> }
+}
+#+end_src
+Remove the hole (`<span>static</span>`) and `.basket` regains its `@each` match.
+
+* Root cause
+The EVENTS parser (src/syntax/events/grammar/mod.rs::root \u2014 the pass that produces
+FormMatches via parse_matches) has NO HTML handling: it `bump_any()`s unexpected tokens.
+For a top-level `<main>\u2026`$x`\u2026</main>`, the `$x` inside the backtick hole (and `$`-refs in
+HTML generally) are seen by the events grammar as DOLLAR -> variable_ref, consuming tokens
+and desyncing offsets. The net effect shifts/derails subsequent match spans so the later
+scope's `@each` FormMatch is mis-spanned and fails the span-containment assignment
+(src/parser/mod.rs:417: `scope.span.start <= fm.span.start && fm.span.end <= scope.span.end`).
+NB: backtick is NOT a lexer token (W0 strategy-B byte-scan), so the events parser cannot
+see hole boundaries at all \u2014 it must SKIP HTML regions like the CST parser does
+(src/syntax/cst/parser.rs::parse_html_element / scan_html_region).
+
+* Impact
+Blocks mixing first-class HTML holes with scope-level @each on the same page (the W6 SSG
+showcase hit this). W1/W4 interaction. The CST parse tree is fine; only the events
+match-production pass desyncs.
+
+* Fix direction
+Add an LT arm to events grammar `root` (and body where relevant) that, at a genuine HTML
+start, consumes the whole HTML element region as opaque (byte-scan to the matching close,
+mirroring the CST scan_html_region) WITHOUT emitting variable_ref matches for `$`-refs or
+hole inners. The HTML's own reactive holes are lowered separately (W1 treesink); the events
+pass should not produce FormMatches from inside HTML. Share the scan with the CST parser if
+practical.
+
+* Acceptance
+- The repro's `.basket` scope keeps its `@each` match; SSG-unroll fires.
+- No spurious FormMatches from `$`-refs inside top-level HTML.
+- Full gate + the W6 SSG showcase demo serves unrolled rows with a hole present.

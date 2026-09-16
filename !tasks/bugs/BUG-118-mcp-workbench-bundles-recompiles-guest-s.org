@@ -1,0 +1,33 @@
+#+TITLE: MCP workbench: /bundles recompiles guest source on every 1s poll (CPU wedge, HTTP stall)
+#+STATE: DONE
+#+SESSION_ID: 150f785b33edb744
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-19T16-17-16-496Z_150f785b33edb744.jsonl]]
+#+CUSTOM_ID: BUG-118-mcp-workbench-bundles-recompiles-guest-s
+#+COMPLETION_HASH: 69ef695bfc18eade
+
+* Initial Message
+
+Test drive the Spacetime MCP workbench and list all the actions and their expected vs. actual output. The workbench should end up feeling like a mix of Spacetime+Squarespace+Figma/Framer in the end, and it doesn't. This is a REVIEW+DESIGN+BRAINSTORM session. Compare against the previous round of this kind of comparison also (AFTER you've done your own comparison though)
+
+DISCOVERED during round-3 review verification (2026-06-19). The live MCP server wedged: process at 64-67% CPU sustained for 30+ min, HTTP fully unresponsive (health + all instance routes time out). Had to SIGKILL.
+
+ROOT CAUSE: the region bundle endpoint recompiles the guest's full source (parser + compiler) on EVERY poll, with no cache.
+- Poll cadence: stdlib/__mcp__/primitives/bundle.st `mcp-region-poll` → `Spacetime.pollBundles(instanceId, regionId, 'stageTpl', 1000)` — every 1000ms per region root. PLUS data.st `@mcp-input(refresh: 1000)` polls input.json every 1000ms (and the workbench input.json rebuilds workbench_snapshot each time).
+- Per-poll work: src/mcp/live.rs::instance_bundles (L1038) calls `compile_to_bundle(&function.source, &function.resolve_root)` UNCONDITIONALLY on each GET /bundles?region=. compile_to_bundle runs the whole pipeline (parse → resolve_imports → Compiler::compile → serialize templates).
+CodePath: src/mcp/live.rs::instance_bundles  (the `match compile_to_bundle(&function.source, ...)` arm)
+CodePath: stdlib/__mcp__/primitives/bundle.st::mcp-region-poll
+
+With N regions/instances each polling 1Hz and recompiling, CPU grows unboundedly; under load the single Mutex<Store> (lock held across compile? verify) + tokio worker starve → HTTP stalls.
+
+IMPACT: the workbench becomes unusable after sustained interaction; a wedged server needs a manual kill. This undercuts the entire "live" premise — the thing meant to feel alive instead pins a core.
+
+FIX DIRECTION (decide in PLAN):
+1. CACHE the compiled bundle per (function_id, revision) — recompile only when source/revision changes. A FunctionRecord already holds compiled html/css/js from put_function; extend it to cache the region Bundle (templates+css) too, keyed by revision. instance_bundles returns the cached bundle; the per-poll cost drops to a map lookup + region_input merge.
+2. Ensure compile is NOT done while holding the Store mutex (check current lock scope at L985-1038).
+3. Optionally make the region poll conditional (ETag / revision cursor) so an unchanged bundle is a 304.
+
+Acceptance: sustained 1Hz polling of a mounted workbench holds CPU near idle; HTTP stays responsive over a multi-minute session. Add a regression: instance_bundles for an unchanged function does not invoke the compiler twice.
+
+Evidence: observed PID 1258251 at 64-67% CPU, 34min CPU-time, HTTP dead; killed 2026-06-19. @research/mcp-workbench-review-2026-06-19-round3-corrections.org.
+
+NOTE [2026-06-19]: FIXED (PLAN-048 S2). Added LiveStore.bundle_cache keyed by (function_id, revision); region_bundle_stable() serves cached revision-stable JSON, compiles only on miss (without holding the store lock), evicts stale entries on update_source. Unit test region_bundle_stable_caches_per_revision (10 polls compile once; new revision recompiles once). Live-verified: 40 /bundles polls in 0.028s (was a 66% CPU sustained wedge that stalled HTTP). Commit pending.

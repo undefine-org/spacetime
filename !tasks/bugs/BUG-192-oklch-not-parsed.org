@@ -1,0 +1,39 @@
+#+TITLE: Animation color parsers never parse oklch() -- keyframes snap instead of blending
+#+STATE: DONE
+#+SESSION_ID: 153497c78a510229
+#+CUSTOM_ID: BUG-192-oklch-not-parsed
+#+COMPLETION_HASH: 01830e3da86531cc
+
+* Source
+GitHub issue #5 (undefine-org/spacetime). Sakazuki had to use opacity-layer
+hacks instead of color interpolation.
+
+* Symptom
+Color keyframes written in oklch (the project's own convention: all color in
+oklch via var(--*)) do NOT interpolate across an animation timeline -- the
+value SNAPS between keyframe endpoints instead of blending. `colorSpace:
+"oklch"` is a no-op.
+
+* Root cause (verified 2026-07-18)
+Two local color parsers handle only #hex and rgb()/rgba():
+- window.__stParseColor in stdlib/primitives/animation/interpolate.st L30-50
+- parseColor in stdlib/primitives/animation/apply-animations.st ~L118
+Neither delegates to the OKLCH-first ST.parseColor in
+public/runtime/color.js. `oklch` appears only in a doc comment.
+Empirically proved snap-not-blend via emitted values: progress 0.3 ->
+literal "oklch(30% 0.05 250)" (start), 0.5/0.99 -> literal "oklch(90% 0.02
+90)" (end); hex control at 0.5 -> blended "rgb(133, 129, 139)".
+
+* Test pin (RED)
+tests/bugs/BUG-192-oklch-color-interpolation-not-parsed.test.st
+- 1 green control (hex blends), 2 RED (oklch must blend, var(--*)-indirected
+  oklch must blend).
+Run: `cargo run --features headless -- test <file> --headless --format json`
+
+* Fix direction
+Delete the two local parsers (or make them delegate to ST.parseColor) so the
+animation engine uses the runtime's OKLCH-first parser -- one parser, one
+source of truth (harmony principle); honors the documented colorSpace
+option.
+
+NOTE [2026-07-19]: FIXED (PLAN-078): the two local hex/rgb-only parsers deleted (interpolate.st __stParseColor, apply-animations.st parseColor); color interpolation now delegates to the runtime OKLCH-first ST.parseColor + ST.interpolateColor/InterpolateColorRgb (one parser, one source of truth). apply-animations gained a documented colorSpace param (default rgb, oklch honored). Pin 3/3 green; 57 related animation/color tests green. Surfaced BUG-202 (animate-color calls nonexistent ST.lerpColor) — filed.

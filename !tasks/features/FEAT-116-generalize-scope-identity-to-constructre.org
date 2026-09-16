@@ -1,0 +1,97 @@
+#+TITLE: Generalize scope identity to ConstructRef (any construct body becomes a uniform scope)
+#+STATE: ITEM
+#+SESSION_ID: 1503ca05d05c0c62
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-10T14-32-18-497Z_1503ca05d05c0c62.jsonl]]
+#+CUSTOM_ID: FEAT-116-generalize-scope-identity-to-constructre
+
+* Initial Message
+
+ok do the full W3-clean. Don't stop until you're fully done. Thanks.
+
+* Goal
+Make scope identity a general `kind: ConstructRef` (a registry-key reference) so
+that ANY construct with a body — `@template`, `@each`, `@match`, `@timeline`,
+future block macros — becomes a uniform `ScopeBlock`/`NestedScope` walked by the
+same span-containment + emit machinery, with `%scope within(<construct>)` as the
+containment query. NO per-construct Rust.
+
+* Why
+PLAN-039 proved the pattern with `@template` (kind `Construct("template")`, S1d
+`baa8f32e`): a construct body is a scope; its nested constructs are scope
+children; `$`-refs resolve lexically (`ST.resolve`). The closed `MacroScope` enum
+was already retired to {File,Selector} (`28577d74`) precisely because richer
+containment must be DATA, not enum arms. `ScopeKind::Construct(String)` exists; the
+opportunity is to (a) let the PARSER tag any body-bearing construct's scope with
+its construct name (today only `@template` is special-cased in `cst_to_stfile`),
+and (b) wire `macro_within_matches` (built + tested at registry.rs:786,
+`#[allow(dead_code)]`) into match-time filtering so `%scope within(each)` etc.
+actually gate.
+
+* Design
+
+** Category clarification (construct vs capture_type vs macro)
+The metasystem has THREE meta-def kinds (`meta_ast.rs::MetaDef`), at different
+pipeline layers — they are NOT alternatives to be merged:
+- `%capture_type` = a GRAMMAR PRODUCTION (named PEG rule). Pure parse-layer: how to
+  parse a token shape into captured fields. e.g. `cb_state { $name:binding ... }`.
+- `%macro` = a REWRITE RULE (`%form`→`%binds`→`%registers`, carries `%scope`). The
+  rewrite/lower layer. e.g. `%macro local-state`, `%macro template`, `%macro each`.
+- `%primitive` = a runtime intrinsic (emit layer).
+A "construct" is NOT a fourth kind. It is informal for "a `%macro`/directive that
+owns a `{ }` body" — `@template`, `@each`, `@match` are all `%macro`s
+(stdlib/macros/{template,each}.st) whose form contains a body region. A construct
+USES capture_types to parse its parts; the two never need resolving against each
+other. (My original framing of "resolving construct vs capture_type" was a
+category error.)
+
+** The actual contradiction to fix
+`ScopeKind::Construct(String)` holds a BARE MAGIC STRING set by a hardcoded check
+(`src/parser/mod.rs:425`): `if directive.name_text() != Some("template") continue;
+... kind: Construct("template")`. Two problems: (1) only `@template` bodies become
+scopes — `@each`/`@match` bodies are still bespoke-parsed (the rot); (2) the string
+"template" is unmoored — nothing ties it to the `%macro template` registry entry.
+It is a magic constant masquerading as data.
+
+** Resolution: make Construct(String) a validated registry ConstructRef
+1. A body-bearing construct is identified by REGISTRY DATA, not a literal. The
+   parser loop generalizes `if name=="template"` → `if registry.is_body_bearing(
+   name)`. The macro declares body-bearing-ness via the already-parsed
+   `%scope within(<construct>)` path (`MacroDefAst.scope_within`).
+2. `ScopeKind::Construct(name)` becomes a genuine FOREIGN KEY into the macro
+   registry (a "ConstructRef"): a validation pass asserts the name resolves to a
+   registered construct. Not a free string.
+3. Wire `macro_within_matches` (built+tested, registry.rs:786, `#[allow(dead_code)]`)
+   into match-time filtering: a stdlib macro with `%scope within(each)` matches ONLY
+   inside an `@each` body. Scope stack (e.g. `["selector","template","each"]`) is
+   DATA; membership is a set query; NO per-construct Rust match-arm.
+
+** Falsification guard
+If construct names cannot be made to resolve to real registered macro names (e.g.
+a body-bearing directive that is not a `%macro`), FEAT-116 is ill-formed — STOP and
+re-confirm with the user rather than forcing a `ConstructRef` that doesn't validate.
+
+** References
+research/spacetime-scope-kind-is-a-capture-type.org, spacetime-hole-as-recursion-
+no-special-cases.org. Depends on FEAT-115 (lands the `@template` case first).
+* Opportunity unlocked
+- `@each`/`@match` bodies stop being bespoke partial parsers and become scopes —
+  removing per-construct nested-handling Rust (the same rot class as
+  reify_component_body).
+- A new block construct (e.g. `@portal`, `@island`, `@suspense`) is authored
+  entirely in stdlib (`%macro` + `%scope within`) with ZERO Rust — the metasystem
+  becomes truly self-describing for nested bodies. This is the headline
+  metasystem-power win.
+
+* Acceptance
+- The `@template` special-case loop in `cst_to_stfile` is replaced by a
+  registry-driven body-bearing-construct loop (data, not a name check).
+- `macro_within_matches` is wired + has an end-to-end test (a stdlib macro scoped
+  `%scope within(each)` matches only inside an `@each` body).
+- At least one construct besides `@template` (e.g. `@each` or a demo block macro)
+  uses the uniform scope path with no construct-specific Rust.
+- Zero new closed enums; no per-construct match-arm in the scope walker.
+
+* Provenance
+Blocked-by/related: FEAT-115 (factory-from-scope) lands the @template case first.
+PLAN-039 follow-on. Elegance bar (AGENTS.md): small grammar/registry extension,
+variants are DATA, deletes ≥1 special-case.

@@ -1,0 +1,112 @@
+#+TITLE: SSG @each unrolls an inline @template but silently skips a named &template reference
+#+STATE: DONE
+#+PRIORITY: A
+#+CUSTOM_ID: BUG-348-ssg-each-skips-named-template-refs
+
+* Symptom
+
+Same data, same `@each`, two spellings of the body — only one is server-rendered.
+
+** A — inline `@template` body: WORKS (2 rows in index.html)
+
+#+begin_src spacetime
+@import "stdlib"
+@data inline $items : ["ab","cd"] ;
+<ul class="l"></ul>
+.l { @each($items as $i) { @template { <li>`$i`</li> } } }
+#+end_src
+
+  index.html -> <li>ab</li> <li>cd</li>
+
+** B — named `&template` reference: SILENTLY EMPTY (0 rows)
+
+#+begin_src spacetime
+@import "stdlib"
+@data inline $items : ["ab","cd"] ;
+@template &row($i) { <li>`$i`</li> }
+<ul class="l"></ul>
+.l { @each($items as $i) { &row($i); } }
+#+end_src
+
+  index.html -> <ul class="l"></ul>
+
+No error, no warning. `spacetime build` exits 0.
+
+* Why it matters
+
+The named-template spelling is the one the language TEACHES for reuse — extracting a row into
+`@template &row(...)` is the obvious refactor from the inline form. Making that refactor silently
+removes your server-rendered content: the page still "works" in a browser (the runtime bundle
+DOES contain the data and the template — verified: `size-opt`, `sizes` and the literal `Small`
+all reach spacetime.js), so the loss shows up only as an empty first paint, no SSG content for
+crawlers, and a layout shift on hydrate.
+
+So this is an SSG-unroll gap, not a compile or runtime gap: everything needed is present in the
+bundle; the static unroller just does not follow a named template reference.
+
+* Where to look
+
+`src/html/ssg_unroll.rs` — the unroller handles the inline `@template { ... }` body. The named
+reference `&row($i);` inside an `@each` body is presumably not recognised as an expandable node,
+so the loop produces nothing. Compare against the inline path and the `fill_holes_with` /
+`apply_trailing_filters` helpers added for GH-11.
+
+Related and already fixed, same family: GH-11 (SSG unroll did not apply filter pipes) — that fix
+made the unroller evaluate the stdlib primitive's own `%emit js` body. This is the next drift in
+the same surface: SSG and runtime disagreeing about what an `@each` body may contain.
+
+* Found by
+
+`tests/repro/h2-reactive-state/reactive-state.test.st`, the PLAN-143 H2 gate — case
+"inline data source seeds the signal and @each renders every item" fails with
+`Expected .size-list to have text "Small", got ""`. 5 of its 6 cases pass.
+
+That test is CORRECT and should stay red until this is fixed. It is exactly the kind of defect
+the hollow-test work exists to surface: no string assertion over the emitted bundle could see
+this, because the bundle is fine — only a gate that BUILDS A PAGE and reads the HTML catches it.
+
+* Accept
+
+Case B renders the same 2 rows as case A, and the H2 gate goes 6/6. Add both spellings to the
+SSG gate so the two can never drift apart again.
+
+
+* RESOLVED (verified 2026-08-07)
+
+`@each` has two body grammars — `$body:html_block` (inline `@template { … }`) and
+`$invocations:template_invocation+` (named `&row($i);`). `each_body_html` only understood the
+first and returned None for the second, so `unroll_scope` hit `continue` and skipped the loop
+entirely: empty container, no error, exit 0.
+
+Fix: `each_invocations_html` in src/html/ssg_unroll.rs resolves the invocation list against the
+file's `@template` declarations (via the EXISTING `collect_static_templates`, collected once in
+`unroll_static_each` rather than per-scope), rebinds each template's parameter holes to the loop
+variable, and hands the result to the SAME `render_row_with` the inline form uses. So both
+spellings now travel one rendering path and cannot drift again.
+
+Conservative by construction, mirroring `render_static_template`: an unknown template, an
+element/slot param, an arg that is not the loop variable, or a missing required param all return
+None, which leaves the runtime authoritative. Degrading to the previous behavior is safe;
+inventing a build-time answer is not.
+
+** Gate
+
+`tests/repro/bug-348-ssg-named-template/check-contract.sh` — five legs: inline (positive
+control), named (the bug), PARITY between the two spellings, typed field holes
+(`$s.code`/`$s.label`), and a negative control (template declared but never invoked emits no
+rows).
+
+Polarity proven, not assumed: reverting the one-line `.or_else(...)` and rebuilding turns the
+gate RED with the exact BUG-348 message ("a named &template reference unrolled to NOTHING",
+showing the empty `<ul class="l"></ul>`); restoring returns it GREEN.
+
+`cargo test --lib` 3172 passed / 0 failed. All 20 repro contract gates GREEN.
+
+** Two further defects found while fixing this — filed, not folded in
+
+- **BUG-349** — the RUNTIME half of the same construct: `each-with-templates` creates the `<li>`
+  but never fills its holes, so `have_length 1` passes while `have_text "Small"` fails. SSG now
+  renders `Small`; the runtime renders an empty row. Opposite failure, different code path.
+- **BUG-350** — the caller's cwd decides which stdlib loads; the gate's fixtures failed to build
+  from the fixture directory and succeeded from the repo root, with an unrelated `derive-match`
+  diagnostic.

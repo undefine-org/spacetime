@@ -1,0 +1,89 @@
+#+TITLE: @state_machine block emits no event listeners — @transition never wires (dead construct)
+#+STATE: ITEM
+#+SESSION_ID: 150f475256d7192f
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-19T12-43-02-363Z_150f475256d7192f.jsonl]]
+#+CUSTOM_ID: BUG-117-state-machine-block-emits-no-event-liste
+
+* Initial Message
+
+Verification: lib 2363 passed/0 failed · integration 172 · FUP-069 acceptance green · headless 456→513
+ passed.
+
+ Filed BUG-112 for the residual @try $error lowering bug ($error signal-lowers to ST.get(el,"error") =
+ __e) — out of FUP-072 scope, accounts for the remaining state/binding @try failures.
+
+ Notes (honesty):
+ - 9 v8_runtime failures (@media→JS, getSelection/DOMParser/IntersectionObserver, async initElement) are
+ pre-existing — st.js is byte-identical to HEAD, and @media("print") (no colon, real selector) fails
+ identically, ruling out all my changes.
+ - 4 non-test snapshots + part of test_and_fixture drift from the other session's concurrent
+ public/runtime/templates.js edit (FEAT-124/126 bundle code), embedded in compiled-JS snapshots — not my
+ logic. Left the test_and_fixture snapshot unstaged since it's entangled with their unstaged bundle.
+
+
+
+please review this owrk and what it was trying to achieve, and tell me what it did right and what the next steps are
+
+* Symptom
+`@state_machine(initial:"off") { @transition(from:"off", to:"on", on: click) }`
+on a selector (or in `@given` in a test) initializes state + a `setState`
+closure but the transition NEVER fires: clicking the element does not change
+data-st-state / the state signal. ~37 headless failures (state-machine.test.st
++ much of state.test.st) and broken in PRODUCTION (jallete cart/configurator,
+jeton wizard, playground tabs all dead).
+
+* Reproduction
+/tmp/sm_site.st:
+```
+<div class="toggle-click" data-st-state="off">Toggle</div>
+.toggle-click {
+  @state_machine(initial: "off") {
+    @transition(from: "off", to: "on", on: click)
+  }
+}
+```
+`cargo run --features headless -- inspect /tmp/sm_site.st --layer emit`:
+- EMITS: `const setState = (newState) => {...}`, state bookkeeping
+  (__stStateHistory etc.), `ST.set(el,'setState',setState)`.
+- DOES NOT EMIT: any `addEventListener`, any `setState(` INVOCATION, any
+  `__stSetState(` call. Grep the emit: 0 occurrences. The transition is a
+  no-op.
+
+* Root cause (verified)
+The primitive IS correct: stdlib/primitives/state.st:123 `%primitive
+state-transition(&el, from, to, on, run?)` emits
+`%&el.addEventListener(%on, handler)` + a shared document listener, and handler
+calls `%&el.__stSetState(%to)`. So the listener exists IN THE PRIMITIVE.
+
+The defect is the macro→primitive expansion. stdlib/macros/state-machine.st:
+- `state-machine-block` (%form captures `$transitions:transitions*` inline) has
+  a `%binds` with `%for $t in $transitions { ... state-transition(&self, ...) }`
+  dispatcher (lines ~74-110) that routes each transition to the right primitive
+  by inspecting $t.after / $t.on / $t.debounce.
+- That %for loop's `%binds state-transition(&self, ...)` is NOT expanding into
+  the output. Tracing `inspect --layer expand` shows NOTHING for the
+  transitions; `--layer ir` shows only the Cleanup statements, no transition
+  primitive. So the `transitions*` capture is either empty at bind time, or the
+  %for-over-captured-registrations does not emit the %binds.
+
+Open question for the fix (if fixing instead of deleting): is the bug in (a)
+the `transitions*` capture not populating, (b) %for not iterating a
+`%registers`-collected list, or (c) the %binds inside %for not reaching
+codegen? Likely related to the `%registers transition { ... }` →
+`$transitions` collection wiring. NB the separate-directive form (jallete:
+`@state_machine(...); @transition(...);` as sibling selector directives, not
+nested) likely fails for a DIFFERENT reason (the @transition is a sibling, not
+captured by the block) — confirm both forms.
+
+* Resolution path
+Per PLAN-047 (user decision): this construct is being DELETED, not fixed —
+replaced by the $-signal idiom. This bug documents WHY (so the deletion is
+justified by a real, root-caused defect, not a guess). If a future need for a
+declarative state machine arises, this analysis is the starting point: the fix
+is in the block dispatcher's transition-collection→%binds expansion, the
+primitive itself is sound.
+
+* Provenance
+Root-caused 2026-06-19 during the headless 91-failure triage. See PLAN-047 for
+the migration+deletion plan, BUG-114 for the reactive-class blocker that must
+land first.

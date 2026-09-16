@@ -1,0 +1,89 @@
+#+TITLE: Harden PLAN-009 fixes with dedup fix and test coverage
+#+STATE: INIT
+#+SESSION_ID: 14a77002fa8c180b
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-03-30T20-58-47-146Z_14a77002fa8c180b.jsonl]]
+#+CUSTOM_ID: PLAN-010-harden-plan-009-fixes-with-dedup-fix-and
+#+EFFORT: S
+#+PRIORITY: #B
+
+* Initial Message
+
+Implement these audit recommendations from org://AUD-003-audit-implementation:
+
+Here are my findings:
+
+---
+
+## Audit Findings
+
+### 1. Latent duplicate-token bug in catch-all `_ =>` arm
+- **What**: The `_ =>` catch-all in `extract_body_captures` still uses `collect_descendant_tokens` which produces duplicate tokens. Any future `$var:fields`, `$var:params`, or `$var:states` body capture would silently fail the same way `Properties` did.
+- **Where**: `src/syntax/events/form_compiler.rs:1054-1111` (the `_ =>` arm)
+- **Why**: Silent extraction failure — the capture returns `None`, the field is silently absent, and the downstream consumer gets empty data. Latent today (no stdlib captures hit this), but a trap for the next person who adds a body capture using a complex extractor type.
+- **Effort**: `medium` (would need the same re-lex approach or fix `collect_descendant_tokens` to deduplicate)
+
+### 2. No unit tests for BUG-009 fix (el_init condition)
+- **What**: The plan's BUG-009 item specified 3 unit test scenarios (exports → Body, cleanup → Body, neither → None) but none were added. The fix is only covered by the snapshot test `data_directive_js`.
+- **Where**: `src/pipeline/expand.rs` — no `#[test]` module exists
+- **Why**: The snapshot test validates one case (data-source with exports). The critical distinction — a selectorless global with neither exports nor cleanup staying `None` — has no coverage. A future refactor could regress this without test failure.
+- **Effort**: `small`
+
+### 3. No unit test for BUG-010 fix (Properties re-lex path)
+- **What**: The plan's BUG-010 item specified unit tests (parse `@type Foo { name: string; }` → TypeRegistry with fields), but none were added. Verification was done via server endpoint only.
+- **Where**: `src/syntax/events/form_compiler.rs` — no test for the `CaptureType::Properties` arm
+- **Why**: The re-lex + pointer-arithmetic offset calculation is subtle. A regression (e.g., someone refactoring `inner` derivation to use `String` instead of `&str` slice) would silently break the offset math with no test failure.
+- **Effort**: `small`
+
+### 4. Pointer arithmetic assumes `inner` is a subslice of `source`
+- **What**: `inner.as_ptr() as usize - source.as_ptr() as usize` is safe today because `inner` is derived via `&source[body_start..body_end].trim().trim_start_matches('{')...`. But there's no `debug_assert!` guarding this invariant.
+- **Where**: `src/syntax/events/form_compiler.rs:1025`
+- **Why**: If a future refactor changes `inner` to be heap-allocated (e.g., `.to_string()` or `.replace(...)` earlier in the chain), the pointer arithmetic would produce garbage offsets silently. A `debug_assert!(inner.as_ptr() >= source.as_ptr() && ...)` would catch this in debug builds.
+- **Effort**: `trivial`
+
+* Context
+
+PLAN-009 fixed two bugs (BUG-009: dev panel el binding, BUG-010: type schema extraction). An audit (AUD-003) identified four findings:
+
+1. *Latent duplicate-token bug* — ~collect_descendant_tokens~ in the catch-all ~_ =>~ arm produces duplicate tokens (parent + child share tokens). PLAN-009 worked around this with a dedicated ~CaptureType::Properties~ re-lex arm, but the bug remains for any future ~$var:fields~, ~$var:params~, or ~$var:states~ body capture.
+2. *No unit tests for BUG-009* — The el_init condition (exports/cleanup → ElInit::Body) lacks direct coverage.
+3. *No integration test for BUG-010* — The Properties re-lex path and pointer arithmetic are untested.
+4. *No debug_assert! on pointer arithmetic* — ~inner.as_ptr() - source.as_ptr()~ is safe today but unguarded against future refactors.
+
+** Approach
+- Fix the root cause (finding #1): deduplicate tokens in ~collect_descendant_tokens~, then remove the Properties re-lex workaround
+- Add targeted tests for both BUG-009 and BUG-010 (findings #2-3)
+- Finding #4 becomes moot if the Properties re-lex arm is removed (which it will be after BUG-011)
+
+** Key Decisions
+- Dedup via ~sort + dedup_by_key~ on ~(text_range.0, text_range.1)~ — simplest, preserves semantics
+- After dedup fix, Properties falls through to the catch-all like all other extractor-based types — no special arm needed
+- If BUG-011 lands first, FUP-006 skips the debug_assert (pointer arithmetic code is gone) but still adds the integration test
+
+* Verification
+
+** Automated
+- ~cargo test --lib~ — 1977+ tests pass, zero failures
+- New tests:
+  - ~cargo test --lib test_global_selectorless~ — 3 tests (BUG-009 coverage)
+  - ~cargo test --lib test_type_body_produces_properties~ — 1 test (BUG-010 coverage)
+  - ~cargo test --lib~ for collect_descendant_tokens dedup test
+
+** Manual
+- ~cargo run -- serve site/dataiku --debug~ then ~curl http://127.0.0.1:3333/__spacetime/dev/types.json~ → types have non-empty properties (confirms catch-all path works for Properties after removing the dedicated arm)
+
+* Execution Manifest
+
+** Phase 1: Root cause fix (BUG-011)
+- [[id:BUG-011-fix-collect-descendant-tokens-duplicate]] — Fix duplicate tokens, remove Properties re-lex workaround (S, #B)
+
+** Phase 2: Test coverage (parallel, both depend on BUG-011)
+- [[id:FUP-005-add-unit-tests-for-bug-009-el-init-condi]] — 3 unit tests for el_init condition (S, #B)
+- [[id:FUP-006-add-unit-tests-for-bug-010-properties-re]] — Integration test for Properties extraction + conditional debug_assert (S, #B, blocked by BUG-011)
+
+** Effort Summary
+| Item    | Effort | Layer    |
+|---------+--------+----------|
+| BUG-011 | S      | parser   |
+| FUP-005 | S      | pipeline |
+| FUP-006 | S      | parser   |
+| Total   | S      |          |

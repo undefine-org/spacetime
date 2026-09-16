@@ -1,0 +1,52 @@
+#+TITLE: [attr=&quot;v&quot;] &lt;- injection mis-parsed as Attr with bracket-literal name
+#+STATE: REVIEW
+#+SESSION_ID: 14fc108ed3772fa8
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-04T14-32-37-965Z_14fc108ed3772fa8.jsonl]]
+#+CUSTOM_ID: BUG-061-attrquotvquot-lt-injection-mis-parsed-as
+
+* Initial Message
+
+hey what would it look like if the admin app were done multi-file? what reactive primitives and modular programming principles (and other missing constructs that you find) do you need to make this an amazing DX for developing this kind of app?
+
+* Parent
+[[id:PLAN-030-spacetime-app-platform-declarative-schem]] / FEAT-077. Found mid-flight while
+writing the comprehensive end-to-end test.
+
+* Problem
+=parse_injection= (src/syntax/events/form_compiler.rs:2628) classifies an injection TARGET as
+Text (`text`), Slot (`[slot="x"]`), else Attr. A general attribute-selector target like
+`[class="v"] <- $n` falls into the `else` and becomes
+=InjectionTarget::Attr { name: "[class=\"v\"]" }= \u2014 the runtime then does
+`element.setAttribute("[class=\"v\"]", value)`, setting a NONSENSE attribute literally named
+`[class="v"]` instead of targeting the descendant matching `[class=v]`. Verified: the emitted
+payload carries `target: { type: "Attr", name: "[class=\"v\"]" }`.
+
+Root cause: the target grammar conflates "the element's own attribute" (bare ident: `src`,
+`href`) with "a descendant matched by an attribute selector" (`[attr="v"]`). Only the
+specific `[slot=]` case was special-cased; every other `[...]` selector is garbage.
+
+* Structural fix
+Add an `InjectionTarget::Selector { selector }` variant for general `[...]` attribute-selector
+targets (the descendant's textContent), parallel to Slot (which is the `[slot=]` ergonomic
+special case). Parser: `[...]` containing `slot=` -> Slot; any other `[...]` -> Selector; bare
+ident -> Attr. Runtime: Selector -> `element.querySelector(sel).textContent` (reactive via
+ST.watch, same as Slot). This is the clean general model; Slot becomes sugar for
+`Selector{"[slot=name]"}` semantically but kept for its ergonomic name resolution.
+
+* Acceptance
+- [ ] `[class="v"] <- $n` targets the descendant matching `[class=v]`, sets its textContent.
+- [ ] no `setAttribute("[...]", ...)` garbage; bare-ident attr injection (`src <- $x`) unchanged.
+- [ ] `[slot="x"]` unchanged. Reactive (ST.watch). Unit + V8 tests.
+- [ ] NB: Phase B grammar rewrite will express this in the stdlib component-body grammar; this
+      fix keeps the current Rust path correct in the meantime (and the runtime variant carries
+      over).
+
+* RESOLUTION (2026-06-08)
+Added InjectionTarget::Selector { selector } variant. parse_injection: `[...]` with `slot=`
+-> Slot; any other `[...]` -> Selector (descendant by attribute selector, textContent); bare
+ident -> Attr (own attribute). Runtime (template.st): Selector -> resolveScoped(sel).textContent
+via ST.watch. `[class="v"] <- $n` now targets the descendant; no bogus setAttribute.
+Tests: unit (Selector vs Slot vs Attr), V8 (bug061 descendant targeting + no bracket attr),
+comprehensive e2e uses the [class="v"] form that found it. lib 2152/0, v8 310/12 (pre-existing),
+integration 162/0, unkn builds. 3 template snapshots regenerated (Selector branch; audited).
+Carries over to Phase B (grammar will express the same target model).

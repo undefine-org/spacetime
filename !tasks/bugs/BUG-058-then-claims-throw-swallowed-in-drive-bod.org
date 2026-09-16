@@ -1,0 +1,70 @@
+#+TITLE: @then-claims throw swallowed in @drive body (works with @assert; re-injection edge)
+#+STATE: ITEM
+#+SESSION_ID: 14f94e45c6c3f247
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-02T11-06-49-499Z_14f94e45c6c3f247.jsonl]]
+#+CUSTOM_ID: BUG-058-then-claims-throw-swallowed-in-drive-bod
+#+LAYER: testing
+
+* Initial Message
+
+actually, Land the PLAN-026 core now (done/committed); file the testing-macro cluster (@assert swap, @then/@eval nested-match) as a new BUG/PLAN with the diagnosis captured, and STOP — .test.st gating remains blocked
+ on that follow-up. Don't register text tests yet.
+
+Put text tests as FEAT within the plan. Be comprehensive
+
+* Symptom
+Inside a =@drive "url" { … }= body, a failing =@then <sel> { <claim> }= does NOT
+fail the drive test (the throw is swallowed), while =@assert (false)= in the SAME
+drive body DOES gate correctly. =@then= gates normally in =@mount= / non-drive
+tests (no regression).
+
+* Confirmed working (W7 core)
+- @drive navigates the live page (CDP page.goto + re-inject runtime).
+- Live DOM is accessible: =@assert (document.querySelector('h1').textContent ===
+  "Actual")= passes; =@assert (false)= FAILS the drive test.
+- @observe / @then with truthy claims pass.
+
+* The gap
+- =@then h1 { text ~= "ZZZNOPE" }= against =<h1>Actual</h1>= should throw (Actual
+  !~= ZZZNOPE) but the drive test passes. An =@eval= probe confirms
+  =String(textContent).includes('ZZZNOPE') === false=, so the claim SHOULD throw.
+- A marker after the @then suggests the throw is swallowed (test passes).
+
+* Suspected cause
+The CDP drive path re-injects the page scripts via =page.evaluate(scripts)= after
+navigation (src/cdp.rs run_one_page drive branch). The =@then-claims= emit is a
+bare ={ … for(__claim of __claims){ … throw } }= block; something in the
+re-injection / harness re-registration context catches or skips its throw (while
+=@assert='s throw propagates). Possibly double-registration of __st_tests on
+re-inject, or the block-scope throw not bubbling through the re-evaluated harness.
+
+* Repro
+#+BEGIN_SRC sh
+printf '@import "stdlib/testing/test"
+@drive "data:text/html,<h1>Actual</h1>" {
+  @then h1 { text ~= "ZZZNOPE"; }
+}
+' > /tmp/d.test.st
+cargo run --features cdp -- test /tmp/d.test.st --cdp   # passes (BUG; should fail)
+#+END_SRC
+
+* Fix direction
+- Ensure the drive re-injection registers tests EXACTLY once (clear __st_tests
+  before re-eval, or inject runtime via evaluate_on_new_document before goto so the
+  original page never registers).
+- Verify @then-claims throw propagates through the re-evaluated harness run-loop.
+
+* Parent
+[[id:PLAN-027-spacetime-testautomation-infra-fidelity]]
+* Related
+[[id:FEAT-063-w7-automation-drive-via-localkernel-obse]]
+
+* BROADER than @then: ALL bare-block directives swallow in drive re-injection
+Update: @observe and @capture (also bare `{ }`-block macros) ALSO do not execute
+in a @drive body \u2014 window.__stHandles / __stCaptures stay unset. Only @assert
+(and the test fn's top-level statements) run. So the re-injection issue is: bare
+block-scope directives compiled into the test body do NOT execute when the harness
+is re-evaluated into the navigated page, while @assert (and @eval) DO. Likely the
+asyncify/block-scope wrapping interacts badly with the post-navigation
+page.evaluate(scripts) re-registration. Fix unblocks @observe/@then/@capture/
+@wait-for inside @drive.

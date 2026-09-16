@@ -1,0 +1,76 @@
+#+TITLE: A %rewrite capsule does not resolve inside a nested responsive directive
+#+STATE: ITEM
+#+SESSION_ID: 153f5ed0617636c7
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-26T21-12-46-213Z_153f5ed0617636c7.jsonl]]
+#+CUSTOM_ID: BUG-285-a-rewrite-capsule-does-not-resolve-insid
+
+* Initial Message
+
+please show all the waves and all the work there is to do, write it in the todo, and act atuonomously to implement it until the end
+
+* Symptom
+
+`@on visible reveal(800ms)` nested inside `@print` (or `@reduced-motion`) fails
+with:
+
+#+begin_example
+E0956: unknown primitive: on-cutover#on-visible
+  hint: The primitive was neither a registered `%primitive` nor a macro with an
+        `%emit` block. Check the `%binds`/driver that names it.
+#+end_example
+
+Failing tests:
+- tests/integration/responsive_nested_directives.rs::print_with_nested_on_visible_emits_guarded_js
+- tests/integration/responsive_nested_directives.rs::reduced_motion_with_nested_on_visible_emits_guarded_js
+
+* NOT a PLAN-122 defect (measured, not assumed)
+
+Found while landing PLAN-122 W1.2/W3 (the CSS value-type cutover), so the
+attribution was checked directly by flipping ONLY `Lexer::new`'s tier and
+re-running the same suite:
+
+| tier                  | integration failures |
+|-----------------------+----------------------|
+| Domain (pre-cutover)  |                   13 |
+| Kernel (post-cutover) |                   15 |
+
+Set difference: ELEVEN `on-cutover#...` failures (`#mouse`, `#scroll`, `#loop`,
+`#hover`) occur at BOTH tiers — they are pre-existing and belong to the
+SIP-001c retirement work (`caceec89`), not to the value-type wave. Only these
+two `on-visible` cases are tier-sensitive.
+
+And they are not a value-grammar failure either. The same directive compiles
+CLEANLY on its own:
+
+#+begin_example
+@version 2026-07-25;
+.content { @on visible reveal(800ms) { opacity: 0 -> 1; } }
+$ cargo run -- check   => All 1 file(s) passed
+#+end_example
+
+So the `%rewrite on-visible` capsule matches `$duration:time` correctly at
+Kernel tier; `800ms` as NUMBER + IDENT is captured fine. The failure needs the
+NESTING. Therefore the bug is in how a retired-directive rewrite resolves when
+it sits inside a responsive wrapper (`@print`, `@reduced-motion`) — the
+rewritten primitive name `on-cutover#on-visible` escapes to the pipeline
+instead of being resolved to the `load` driver the capsule maps it to.
+
+The value-type cutover did not introduce this path; it made more of it
+REACHABLE, which is why the two cases moved from silently-not-reached to
+reported.
+
+* Where to look
+
+- =stdlib/migrations/entries/2026-07-26-on-cutover.st:627= — `%rewrite on-visible`,
+  whose `%into` maps to `@on &.load(...)`. Note the sibling comment at :675
+  recording that the dispatcher's `%if` ladder never had a `load` arm, so
+  `@on load x(...)` sites were "silently DEAD even before retirement". These two
+  failures may be the same missing arm surfacing through the rewrite.
+- The nested-directive path added in `2b90a1b8` ("allow nested directives inside
+  @breakpoint and responsive macros").
+
+* Suggested fix owner
+
+The SIP-001c / `@on` cutover work, alongside the eleven sibling
+`on-cutover#...` failures — they look like one root cause, and fixing them
+separately would likely mean fixing it twice.

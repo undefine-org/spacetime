@@ -1,0 +1,118 @@
+#+TITLE: template-inline unlinked-ref form `&name(params) { body }` never builds its World-A template scope (E0806 internal invariant break)
+#+STATE: ITEM
+#+SESSION_ID: 152939d2e5b25e66
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-09T16-24-34-454Z_152939d2e5b25e66.jsonl]]
+#+CUSTOM_ID: BUG-168-template-inline-unlinked-ref-form-namepa
+
+* Initial Message
+
+can dom-refs (`&my-template(..., ...) { ... }`) contain all of ST? As in, html, CSS, ST syntax through macros, etc. and then it gets its scope solved to be within the template? Or does it have some special case?
+
+The goal is to empower the 'element-ref as function' way of creating Spacetime affordances the most blessed way to build encapsulation and whatnot. I would like to do that for Ora Ventures, whose website we want to rewrite completely to be attractive to Chief AI Officers at big groups in emerging markets, as well as capital-rich SMBs that want to be more dynamic and competitve. That website should be sober, have crisp but minimal copy, and showcase Spacetime features in a way that is unique and helps us convert more (so think of advanced interactions and motions in terms of high-convertion)
+
+Come back with your plan, sources, inspirations, for the copy
+Come back with your analysis for the &... thing
+
+* Found via
+PLAN-070 W5 (doc+fixture convergence) — verifying every =@example= in
+=stdlib/macros/template.st= compiles. The =%macro template-inline= doc example
+(the "Unlinked ref" form, documented as "Same as @template but without the
+directive prefix") is itself a RED fixture.
+
+* Repro (RED, confirmed 2026-07-09 on main)
+#+begin_src spacetime
+&greeting($name) {
+  <p>Hello, `$name`!</p>
+}
+<main class="page"></main>
+.page { &greeting("World"); }
+#+end_src
+
+=cargo run -- check= →
+: error[E0806]: internal: template body scope '@template:greeting' was not built (primitive 'register-template')
+: hint: This is a compiler invariant break, not an author error: every
+: body-bearing construct (@template, &name(){}, @editable-*) is named and its
+: World-A scope is built during parsing. Please file a bug with the source
+: that triggered it.
+
+The hint EXPLICITLY names =&name(){}= as a construct that should have this
+invariant hold — it doesn't, for this exact shape.
+
+* Root cause (traced)
+=stdlib/macros/template.st::%macro template-inline= declares:
+#+begin_src
+%form {
+  &$name:ident($params:param_list) {
+    $body:component_body
+  }
+}
+#+end_src
+This is an =ElementRefStmt= CST node (an =&name(...) { }= ref with a body), NOT
+an =@=-prefixed =Directive= node. But the template-scope-construction loop in
+=src/parser/mod.rs= (~L590, the one that builds each =@template:<name>=
+=ScopeBlock=) iterates ONLY =root_node.directives()=
+(=src/syntax/cst/ast.rs::Root.directives= → =self.syntax.children().filter_map(Directive::cast)=),
+which structurally cannot match an =ElementRefStmt=. =is_body_bearing_construct=
+(the registry check gating which directives get a scope built) is ALSO only
+ever called with a =Directive='s name — so even though
+=registry.is_body_bearing("greeting")= would correctly return =true= (the
+=%form='s =$body:component_body= capture IS registered), the calling loop never
+reaches an =ElementRefStmt= to ask the question in the first place.
+
+∴ =template-inline='s registered form (=%registers template($name){...}=,
+identical to =@template='s) NEVER gets a =@template:<name>= World-A scope built,
+so ANY invocation of a =&name(){ }=-declared template hits the E0806 fail-loud
+guard (correctly firing — the invariant IS broken, just not by the invoking
+code).
+
+* Structural fix (chosen)
+Extend the template-scope-construction loop to ALSO walk top-level
+=ElementRefStmt= nodes with a body (mirroring the existing top-level ENTITY
+scope harvest at =src/parser/mod.rs= ~L481, which already walks
+=root_node.element_ref_stmts()= for the =&name { @directive }= entity-scope
+shape — same node kind, different disambiguation: an entity scope has NO
+=arg_list= and NO =selector_text=; the template-inline form HAS an =arg_list=
+(=($params:param_list)=) and a body). Concretely:
+
+1. In the loop that currently does =for directive in root_node.directives()=
+   building =@template:<name>= scopes, ALSO iterate
+   =root_node.element_ref_stmts()=, filtering to ones with =ers.arg_list().is_some()=
+   AND =ers.body().is_some()= (the same disambiguation already used to SKIP
+   entity scopes at ~L487: =if ers.arg_list().is_some() { continue; }= for
+   entities — invert that same check here to SELECT the template-inline shape
+   instead).
+2. Confirm via the registry that this name IS body-bearing
+   (=registry.is_body_bearing(name)= — the check already exists, just needs a
+   second call site for this node kind) before building the scope, so a
+   non-template =&name(args) { body }= shape (if any other macro ever reuses
+   this exact CST shape) doesn't get mis-adopted.
+3. Reuse the IDENTICAL scope-construction body already written for the
+   =Directive= case (tmpl_name extraction, =body_html= reconstruction via
+   =reconstruct_template_body_html=, =nested_scopes= harvest, =@media= harvest
+   from BUG-167, states/exports/refs back-fill) \u2014 factor it into a shared
+   helper taking (name, body, body_range) so the two call sites (Directive-based
+   =@template=, ElementRefStmt-based =template-inline=) converge on one
+   implementation rather than duplicating the ~150-line scope-building block.
+
+* Acceptance
+1. RED fixture above compiles clean; =&greeting("World");= renders
+   =<p>Hello, World!</p>=.
+2. Add the fixture verbatim under =tests/fixtures/native-template/= (doc
+   convergence \u2014 this is exactly the class of gap PLAN-070 W5 exists to close).
+3. All existing =@template= (Directive-form) behavior unchanged \u2014 the shared
+   helper refactor must be behavior-preserving for the existing path
+   (regression: full =cargo test --lib= / =--test integration_tests= /
+   headless / CDP suites green).
+4. Optional element param (=&footer?=), animation-only =@on=, and =@media=
+   (BUG-165/166/167) all work identically inside a =template-inline= body as
+   they do inside a =@template= body \u2014 same shared scope-construction path,
+   so this should be true "for free" once the fix lands; add one fixture
+   proving it (belt-and-suspenders against the two forms silently diverging
+   again later).
+
+* Related
+- PLAN-070 (discovered during W5; filed as a SEPARATE bug since it's a
+  different construct-recognition gap, not a body-CONTENT gap like BUG-165/
+  166/167).
+- src/parser/mod.rs (~L481 entity-scope harvest, ~L590 template Directive
+  scope-construction loop \u2014 the two existing precedents this fix unifies).

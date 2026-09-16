@@ -1,0 +1,113 @@
+#+TITLE: BUG: a planned: driver yields a silently driverless score
+#+STATE: ITEM
+#+SESSION_ID: 1534a2eae1903af0
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-18T13-07-01-638Z_1534a2eae1903af0.jsonl]]
+#+CUSTOM_ID: BUG-260-bug-a-planned-driver-yields-a-silently-d
+
+* Initial Message
+
+ok please explain everything that is next and that got carried forward. What would be your plan for achieving it all?
+
+#+STATE: ITEM
+
+* Reproduced
+
+#+begin_src spacetime
+.stage { @score &.playback { &title at 2s for 3s; } }
+// ✓ All 1 file(s) passed
+#+end_src
+
+`.playback` carries `primitive: planned:media-driver`. Emitted site code:
+
+: _swName   = "__clip_title"
+: _swOffset = 2000
+: _swSpan   = 3000
+: _swTotal  = 1        <- WRONG, and no publisher for the parent at all
+
+Two failures in one page:
+
+1. *No publisher.* The window watches a parent progress signal that nothing
+   emits, because `planned:` produces no primitive. The clip is frozen and the
+   build is green.
+2. *`_swTotal = 1`.* The score is `domain: inherited` with no declared
+   duration, so the total falls back to 1 while the offsets are in ms. The
+   window's arithmetic is nonsense independent of the missing publisher.
+
+* Why the orphan gate missed it
+
+`every_watched_score_signal_has_a_publisher` (tests/clip_driver_test.rs) is
+the right gate and fires on the right principle — it caught exactly this class
+during t5. But its fixture drives with `&.time(12s)` and `&.clip`. It never
+instantiates a `planned:` driver, so the case it was built to catch walks past
+it.
+
+A gate that checks an invariant on ONE driver is a test. The same gate run over
+EVERY driver row is the invariant. `driver_row_identity_test` already
+establishes that pattern for a different property — this should follow it and
+iterate the registry.
+
+* Relationship to E0948
+
+`planned:` on a `primitive:` field is supposed to be an honest-dead marker that
+errors at compile (E0948). It does — for `@on`. The `@score` path never
+consults it, so the same marker is loud on one surface and silent on the other.
+
+That is the actual defect: not that `.playback` is unimplemented (it honestly
+is), but that ONE registry marker has two behaviors depending on which
+directive reads it.
+
+* Fix
+
+1. `@score` must consult `primitive:` the same way `@on` does. A `planned:`
+   driver under `@score` is E0948, with the same wording.
+2. Distinguish it from `primitive: none` (`.clip`), which is a POSITIVE
+   declaration — no clock, wired by the parent — and must stay legal. The two
+   look similar and mean opposite things; the drivers.st header already
+   documents the distinction, so the check has something to point at.
+3. Generalize the orphan gate to iterate every driver row rather than
+   hardcoding two.
+4. Separately: `domain: inherited` with no parent score should be an error
+   rather than `_swTotal = 1`. A clip with no enclosing timeline has no scale,
+   and inventing 1 is the silent-default class.
+
+* Resolution (2026-08-03)
+
+`@score` now reads the same `primitive: planned:<name>` registry marker that
+`@on` reads and rejects it as E0948 before lowering windows. `primitive: none`
+remains the explicit positive inherited-progress declaration, so `.clip` stays
+legal. The score lowering also uses a fixed-export driver's declared
+`progress_export` as each window's parent signal; a fixed-export primitive
+cannot publish the synthetic score name, so watching that name was another
+orphan exposed by the generalized gate.
+
+`every_watched_score_signal_has_a_publisher` now parses every driver row that
+declares `domain:` from `stdlib/macros/drivers.st`. Fixtures and expected
+outcomes come from `domain:` and `primitive:` data: planned rows must fail
+E0948; successful rows must have a publisher for every score-window watch.
+No driver-name allowlist remains.
+
+**Observed discrimination.** Temporarily changing score's planned-marker read
+to `unreachable:` made the registry gate fail on `.steps`:
+
+: driver .steps is primitive:planned:steps-driver and must be rejected as E0948, not silently compiled or rejected for an incidental reason.
+: Output:
+: ✓ All 1 file(s) passed
+
+Restored `planned:` then passed:
+
+: cargo test --test clip_driver_test
+: 4 passed; 0 failed
+: cargo test --test score_domain_test
+: 9 passed; 0 failed
+: cargo run -q --features cdp -- test tests/score/ --cdp
+: 4 passed; 0 failed; 0 skipped
+
+**Deferred `_swTotal = 1` for root inherited scores.** This is a separate
+semantic diagnostic decision. `primitive: none` is intentionally legal under
+`@score`, and the accepted `.clip`/consumer contract currently permits a clip
+score to compile before structural parenthood is established. Rejecting it
+here would conflate the valid inherited-driver declaration with an unproven
+selector-tree relationship and break that feature. The planned playback case
+that demonstrated the bad scale is now rejected before emission; a future
+rule must establish a parent score (or an explicit inherited extent) before
+rejecting root `.clip` scores, with a dedicated diagnostic and value gate.

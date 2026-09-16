@@ -1,0 +1,198 @@
+#+TITLE: Object-literal signal decl fails E0946: $u object: { … } does not parse
+#+STATE: DONE
+#+SESSION_ID: 153497be379ff5cc
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-18T12-18-12-318Z_153497be379ff5cc.jsonl]]
+#+CUSTOM_ID: BUG-342-object-literal-signal-decl-fails-e0946-u
+#+COMPLETION_HASH: 02f364118442dcb1
+
+* Initial Message
+
+can you list all the migratins, and what needs to be done, and what root causes they share, and what your plan is? then keep going autonomously until the end (use the todo tool to record everything)
+
+* Summary
+
+A file-scope signal declared with an OBJECT literal does not parse:
+
+#+begin_src spacetime
+$u object: { name: "Ada" };
+#+end_src
+
+#+begin_example
+error[E0946]: directive does not match its declared grammar:
+             Expected capture `$value:Expr` but no tokens remaining
+#+end_example
+
+The sibling collection type parses fine, which is what makes this a bug and
+not an unimplemented feature:
+
+| decl                        | result |
+|-----------------------------+--------|
+| ~$n number: 3;~             | ✓      |
+| ~$a array: [1, 2];~         | ✓      |
+| ~$u object: { name: "A" };~ | E0946  |
+| ~$u object: {name:"A"};~    | E0946  |
+
+So the `expr` capture consumes a bracketed `[...]` run but stops at the
+opening `{` of a brace run, leaving "no tokens remaining" for `$value`.
+
+* Why it looked like a migration bug
+
+Found while clearing the `reactive-surface` migration failures. Two tests in
+`tests/migrations_test.rs` fail with this E0946:
+
+- ~bind_text_compiles_through_shim_to_identical_js~
+- ~version_at_wave_with_clean_source_compiles_quietly~
+
+Both are written as `$user object: { name: "Ada" };` + `.card { text <- $user.name; }`,
+so the failure reads as "the reactive-surface bind is broken". It is not.
+Bisected by substitution:
+
+- `text <- $u;` with `$u string: "A";`      → compiles
+- `text <- $u;` with `$u object: {...};`    → E0946
+- the object decl ALONE, no `.card` at all  → E0946
+
+The reactive statement is irrelevant; the declaration on the line above is
+the whole failure. The E0946 span pointing at the `.card` body is what
+misdirects.
+
+* Provenance
+
+PRE-EXISTING, not introduced by the migration work. Verified by swapping
+`src/pipeline/mod.rs` back to HEAD and re-running the probe: E0946 present
+either way (1 occurrence both times).
+
+* Suspected location
+
+`$value:expr` capture. `stdlib/syntax/local-state.st:92` declares
+~%form { $name:ident $type:typeref : $value:expr ; }~. Note
+`stdlib/capture-types/component-body.st:15` already carries the authoring
+rule this violates:
+
+#+begin_quote
+use BOUNDED leaf types before a literal (binding/ident/string, not greedy
+`expr`) ... `balanced(c)` captures a depth-aware run stopping at `c`
+#+end_quote
+
+and `cb_state` uses ~$value:balanced(';')~ for exactly this shape. The
+file-scope declaration grammar likely wants the same `balanced(';')`
+treatment rather than `expr` — which would fix `{...}` and any other
+delimiter run in one change, as data, with no Rust arm.
+
+NOT YET VERIFIED: that swapping `expr` → `balanced(';')` at local-state.st:92
+is sufficient and does not regress the `number`/`array` cases. Do that before
+claiming the fix.
+
+* Acceptance
+
+- ~$u object: { name: "Ada" };~ compiles clean
+- nested objects and an object inside an array both parse
+- the two `migrations_test` tests above pass WITHOUT being rewritten
+- a `.test.st` gate covering object/array/nested decls
+
+NOTE [2026-08-07]: CAUSE NARROWED — it is NOT the type name, and NOT the `%form`'s `$value:expr` capture.
+
+Bisected by substitution:
+
+| decl                    | result |
+|-------------------------+--------|
+| ~$u object: 5;~         | OK     |
+| ~$u object: "s";~       | OK     |
+| ~$u thing: { a: 1 };~   | E0946  |
+| ~$u object: { a: 1 };~  | E0946  |
+
+So `object` as a type name is FINE. The failure is the BRACE-DELIMITED VALUE, for any type name. Any `{ … }` on the right of `:` in a file-scope declaration fails.
+
+TESTED AND REJECTED: changing `stdlib/syntax/local-state.st:92` from `$value:expr` to `$value:balanced(';')` (with `stdlib/.cache/registry.bin` removed and a full rebuild, so the embedded stdlib actually picked it up). NO EFFECT — same E0946. The suspected fix in the original report is wrong; reverted, working tree clean.
+
+∴ the `{` never reaches the form matcher. `inspect --layer parse` on `$u thing: { a: 1 };` reports ALL ZEROES — imports 0, data 0, computed 0, scopes 0 — i.e. the declaration produces no AST node whatsoever. The brace run is being consumed at CST level (almost certainly claimed as a scope block) before form matching runs, which is also why the E0946 span covers the whole line and why the error says "no tokens remaining".
+
+∴ this is a CST/parser fix (how a `{` after `:` in a declaration position is tokenised into the tree), not a stdlib grammar fix. Bigger than a capture-type swap.
+
+RELATED, likely same root: AUD-010 item #1, `tests/parser/syntax/scopes.st:202` — `$list string[]: ["a", "b", "c"];` reports "expected '{' after selector". NB that one does NOT reproduce standalone (`$a array: [1,2];` parses fine), so it is context-dependent within that file — check it again after this is fixed.
+
+NOTE [2026-08-08]: NARROWED PRECISELY (PLAN-142 final pass). It is the TYPE + BRACE combination,
+not the brace and not the type name.
+
+Truth table, `spacetime check` on a one-line file:
+
+| source                          | result |
+|---------------------------------+--------|
+| `$u object: { name: "Ada" };`   | E0946  |
+| `$u Foo: { name: "Ada" };`      | E0946  |
+| `$u: { name: "Ada" };`          | OK     |
+| `$u object: [1,2];`             | OK     |
+| `$u object: 3;`                 | OK     |
+| `$l string[]: ["a"];`           | OK     |
+| `.x { $u object: {…}; }`        | E0946  |
+
+So: a brace value is fine WITHOUT a declared type; a declared type is fine with
+EVERY other value shape. Only the two together fail, and identically at file and
+selector scope.
+
+** Where it is NOT
+
+Ruled out by reading the code, so the next person does not re-walk these:
+
+- NOT `ExprExtractor` (=src/syntax/events/extractors/simple.rs:486=). It tracks
+  `L_BRACE`/`R_BRACE` depth correctly and only breaks on a boundary token at
+  depth 0. Given the tokens it would handle `{ name: "Ada" }` fine.
+- NOT the `%form` in =stdlib/syntax/local-state.st:92=. The earlier suspicion
+  that `$value:expr` should be `$value:balanced(';')` was TESTED with a full
+  rebuild and had NO effect \u2014 recorded previously, restated here because the
+  original report still reads as if it were the lead.
+- NOT the type NAME. `object` and a user type `Foo` fail identically, so no
+  keyword/registry lookup is involved.
+
+** Where it IS
+
+=src/syntax/cst/parser.rs::parse_variable_decl= (:2274). It bumps an optional
+type by taking a SECOND bare `IDENT`:
+
+: // Name
+: if self.at(SyntaxKind::IDENT) { self.bump(); }
+: // Optional type
+: if self.at(SyntaxKind::IDENT) { self.bump(); }
+: // : value
+: if self.at(SyntaxKind::COLON) { self.bump(); self.parse_arg_value(); }
+
+`parse_arg_value` DOES dispatch `L_BRACE` to `parse_object_or_body` (:1615), so
+the object path exists. The failure is therefore in how the typed variant hands
+its value span onward \u2014 the form matcher then reports
+"Expected capture `$value:Expr` but no tokens remaining", i.e. it received an
+empty token run for the value.
+
+`inspect --layer parse` shows ZERO ast nodes for the failing file, so the whole
+declaration is being discarded before form matching, not mis-captured after it.
+
+Next step: instrument `parse_object_or_body` for the typed case \u2014 it likely
+treats the `{` as a BODY (a scope block) rather than an object literal when a
+type was consumed, since that is the one branch the untyped case never takes.
+
+** Impact
+
+Blocks the last 2 failing tests in the repo (`migrations_test`:
+`bind_text_compiles_through_shim_to_identical_js`,
+`version_at_wave_with_clean_source_compiles_quietly`). Everything else is green:
+lib 3172/0, integration 217/0, rail 12/0.
+
+NOTE [2026-08-11]: FIXED and now VERIFIED END-TO-END. The parse fix shipped in a0e3aa0d; this note records the verification that was still missing, and corrects two artifacts that had been left describing the superseded state.
+
+FIX. `variable_ref` (src/syntax/events/grammar/directives.rs) now applies the same `starts_object_literal` guard `directive()` already had, so a `{` in VALUE position is an object literal, not a body. The guard discriminates by POSITION — an object value follows the `:` that introduces it; a body follows a directive head.
+
+Why that shape of fix: `$u object: { … }` failed while `$u object: [1,2]` worked. Adding a TYPE removed a value shape that already worked, and one code path carried the guard while its twin did not. Reusing the single guard rather than introducing a second notion of "is this an object" is the point — two notions are exactly how the paths came to disagree.
+
+VERIFIED BEHAVIOR (not just source). `$user object: { name: "Ada" }` + `.card { text <- $user.name; }` now RENDERS "Ada" under --headless. Both spellings agree: bare-key `{ name: … }` and quoted-key `{ "name": … }`.
+
+CANARY — the gates are known to detect. Disabling ONLY the variable_ref guard (`if false && …`, leaving directive()'s intact) and rebuilding fails exactly the 2 object tests while the scalar control and the css-body companion stay green. So the instrument discriminates the object shape specifically rather than the harness. Restored → 4 passed.
+
+OVER-WIDENING COMPANION. `.scoped { color: red; padding: 4px; }` still parses as a BODY. That shape is far more common than an object value, so the guard turning every `{ ident: value; … }` into a value would have been catastrophic and silent; it is now pinned.
+
+TWO ARTIFACTS CORRECTED — both were describing era 2 after era 3 had shipped:
+
+1. check-contract.sh asserted `>=1 E0946`. That was the CORRECT contract while the shape was refused, and became FALSE when the fix landed — the script was FAILING AGAINST CORRECT CODE. This is what a refusal-gate always does once the feature ships: it pins the workaround, not the contract. Rewritten to assert the real contract (clean compile, no E0946/E0408), which is false in the silent-elision era AND the refusal era, true only now.
+
+2. The .test.st header and evidence.txt both taught the refusal as the outcome, and the test's only real assertion was the scalar CONTROL — the object shape itself was ungated behaviorally. Rewritten as 4 behavioral tests. Both documents now carry the full three-era history, because the polarity flipped twice and a future reader needs to know which era a red gate means.
+
+3. index.st had NO markup, so the page exported nothing ("Export produced no pages") and no build could show whether the value survived. Added the two elements plus a note saying why they are not decoration.
+
+RELATED, INVESTIGATED, NOT A DEFECT. The UNTYPED spelling `$o: { name: "Bea" };` does not declare a signal (E0408, hinting "Define the signal with a `$name type: value;` declaration"). Measured across shapes: `$s: "hi"`, `$n: 42`, `$b: true`, `$a: [1,2]` all behave identically — the type is required uniformly for every value type. The object is not a special case; nothing to fix. Worth recording because a0e3aa0d's message asserted the untyped form "compiled", which is not true and would have sent the next reader looking for a bug that does not exist.

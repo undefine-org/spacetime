@@ -1,0 +1,64 @@
+#+TITLE: EDN encodes html as [:st/raw "…"], discarding the skeleton/holes structure the parser already built
+#+STATE: ITEM
+#+CUSTOM_ID: BUG-369-edn-html-is-opaque-raw-losing-the-skeleton
+
+* Summary
+
+`EdnDocument.html` is `Vec<String>` and `to_document` sets it to `Vec::new()`.
+The SPEC (§9) encodes markup as `[:st/raw "<main class=\"kit\">…</main>"]`.
+
+But the parser ALREADY produces structure. `StFile.html_blocks` is
+`Vec<HtmlBlockAst>`:
+
+: pub struct HtmlBlockAst {
+:     pub skeleton: String,   // holes replaced by \u{E000}<idx>\u{E001} sentinels
+:     pub holes: Vec<String>, // ordered hole expression sources
+:     pub span: SourceSpan,
+: }
+
+Serde-derived, so it already serializes. `src/html/model.rs` additionally carries
+a full `DocumentModel`/`ElementInfo` tree (tag, id, classes, attributes,
+parent_index, depth) via `parse_html`.
+
+∴ Spacetime represents markup structurally, INCLUDING holes. The EDN codec
+flattens it back to a string on the way out.
+
+* Why it matters (not cosmetic)
+
+The EDN document is the addressable form — the surface a program reads, patches,
+and writes back. Markup carried as `[:st/raw "…"]` is the ONE plane a structural
+tool cannot reach:
+
+- optics (`beam-lisp/priv/optics.bl`) can compose a path into forms and scopes,
+  but a string is a leaf — patching markup means regex-on-HTML, the exact thing
+  optics exists to avoid.
+- a hole is a BINDING (`` `$c.id` ``). Opaque markup means the document cannot
+  answer "which signals does this template read?", though the parser knew.
+- it is asymmetric with every other plane: forms are `(macro :k v)`, scopes are
+  `{:selector … :decls …}`, markup alone is a blob.
+
+* Root cause (mine, W4)
+
+W4 shipped the document codec and treated markup as a transport payload rather
+than as a plane. `scope_body_text` carries `scope.html` verbatim, which is
+correct for ROUND-TRIP fidelity and was validated by the corpus gate — a string
+in, the same string out, so no test could see the loss. Fidelity was preserved;
+addressability was not, and only the latter is what the loop needs.
+
+* Fix sketch
+
+Encode `html_blocks` structurally, holes as first-class:
+
+: :st/html [{:skeleton [:div {:class "card"} [:span {:class "tag"} [:st/hole 0]]]
+:            :holes    [[:st/expr "$c.tag"]]}]
+
+Reuse `HtmlBlockAst`'s existing skeleton/holes split rather than inventing a
+markup dialect; `src/html/parser.rs::parse_html` already yields the tree.
+`[:st/raw …]` stays as the escape for markup that does not round-trip
+structurally, so the fallback is explicit rather than the default.
+
+* Acceptance
+
+- `:st/html` carries a tree; holes are `[:st/hole N]` referencing an ordered list
+- corpus round-trip gate stays green (403 files, 1491/1491 forms)
+- a hole's binding is recoverable from the document without re-parsing HTML

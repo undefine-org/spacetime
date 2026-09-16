@@ -1,0 +1,64 @@
+#+TITLE: Fix text duplication in dev-editable inline editing
+#+STATE: DONE
+#+SESSION_ID: 14a73642d64c17d5
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-03-30T14-30-47-693Z_14a71735234c17b2/17-CreateBug1.jsonl]]
+#+CUSTOM_ID: BUG-002-fix-text-duplication-in-dev-editable-inl
+#+EFFORT: S
+#+PRIORITY: #A
+#+LAYER: stdlib
+
+NOTE [2026-03-30]: Fixed text duplication by: (1) Adding data-st-editing guard to i18n.st, each.st slot binding, and data-binding.js bindSlot to prevent reactive text updates during active edit; (2) Fixing MutationObserver to use innerHTML/textContent based on edit type and removing stale oldValue fallback; (3) Fixing blur handler to not auto-finish edit when MutationObserver has recovered session to replacement element.
+
+* Scope
+
+** In scope
+- Root-cause and fix the text duplication bug in dev-editable contenteditable editing
+- The bug: editing certain locale-bound text elements produces duplicated content (e.g., "You can makeYou can mak")
+- Affects ~stdlib/__dev__/primitives/dev-editable.st~ lines 327-345 (MutationObserver recovery path)
+- When reactive re-render replaces the DOM element during an active contenteditable session, the observer copies text from the old element to the new one, causing duplication
+
+** Out of scope
+- Rich text formatting toolbar (separate item)
+- Structural editing changes to dev-save.st
+
+** Boundary rationale
+This is a foundation bug: every editing feature built on top of dev-editable inherits this defect. Must be fixed before any WYSIWYG expansion.
+* Tests
+
+** Existing tests
+- ~tests/dev-editable-text-duplication.test.st~ (655 lines) covers the symptom but doesn't catch the race condition
+
+** Required new tests
+- Headless .test.st: create locale-bound element, simulate rapid edit (click, type, blur), verify no duplication in el.textContent
+- Playwright E2E (~tests/playwright_st/dev_editable_duplication.spec.ts~): real browser test on test site with locale elements, verify text edit round-trip produces exact expected content
+- Unit test: if fix involves data-binding.js guard, test the guard prevents re-render during active contenteditable
+* Implementation
+
+** Root cause investigation
+1. Read ~stdlib/__dev__/primitives/dev-editable.st~ lines 105-142 (startEdit/finishEdit) and lines 327-345 (MutationObserver recovery)
+2. Reproduce: serve ora-ventures.com in debug mode, click edit on locale text, type replacement text
+3. Trace whether ST.setData() or locale-dict re-render fires during contenteditable session
+4. Check if MutationObserver on dev-editable re-triggers startEdit or concatenates old+new content
+
+** Fix approach
+- Add guard flag (e.g., ~__stEditActive~) on the element during contenteditable session
+- Suppress reactive text updates (data-binding.js bind-text, i18n re-render) when guard is active
+- Clear guard on finishEdit/cancelEdit
+- Ensure MutationObserver recovery path checks guard before copying text content
+
+** Files
+- ~stdlib/__dev__/primitives/dev-editable.st~ — primary fix location
+- ~public/runtime/data-binding.js~ — may need guard check in bind-text updates
+- ~stdlib/primitives/i18n.st~ — may need guard check in locale re-render
+* Edge Cases
+- Rapid click-edit-blur-click-edit cycles
+- Editing text that contains HTML entities
+- Editing while WebSocket reconnection triggers full data refresh
+- Browser-native undo (Ctrl+Z) during contenteditable session
+- Multiple elements with same locale key edited in sequence
+* Acceptance Criteria
+- BUG-dev-editable-text-duplication can be marked DONE
+- Editing locale-bound text on ora-ventures.com produces exact expected text, no duplication
+- Editing data-bound text in @each loops produces exact expected text
+- All existing dev-editable tests pass (~cargo run --features headless -- test tests/ --headless~ filter dev-editable)
+- New duplication-specific tests pass

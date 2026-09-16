@@ -1,0 +1,79 @@
+#+TITLE: E0408 false positive: `@on(...) as $name` does not register as a signal definition
+#+STATE: DONE
+#+SESSION_ID: 153497be379ff5cc
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-18T12-18-12-318Z_153497be379ff5cc.jsonl]]
+#+CUSTOM_ID: BUG-345-e0408-false-positive-on-as-name-does-not
+#+COMPLETION_HASH: 94b212c5108f2948
+
+* Initial Message
+
+can you list all the migratins, and what needs to be done, and what root causes they share, and what your plan is? then keep going autonomously until the end (use the todo tool to record everything)
+
+* Summary
+
+The `as` binding on a driver DEFINES a signal, but the E0408 analysis does not
+know that — so correct, current syntax is reported as an undefined signal.
+
+Minimal repro (pure current syntax, no retired directives):
+
+#+begin_src spacetime
+.a { @on &.visible(600ms) as $reveal { opacity: 0 -> 1; } }
+.b { opacity: var(--st-reveal, 0); }
+#+end_src
+
+#+begin_example
+error[E0408]: Signal 'reveal' is used but not defined
+1 error(s), 0 warning(s)
+#+end_example
+
+The signal IS defined — by the `as $reveal` clause, which is the documented
+way to name a driver's progress signal and is exactly what the retired
+positional-name form migrates INTO.
+
+* Impact
+
+This is a hard error on the recommended surface, so it blocks the very syntax
+the on-cutover migration steers people toward. Hit in `demos/starter-pack/`
+(the tutorial that IS the program it teaches) the moment its retired
+`@on visible demo-reveal(650ms)` was migrated to
+`@on &.visible(650ms) as $demo-reveal` — the E0911 cleared and two E0408s
+took its place.
+
+31 sites across 10 files use the `(...) as $binding` shape, so the exposure is
+wide.
+
+* Provenance
+
+E0408 was IMPLEMENTED long ago but only WIRED to the author in `040d0411`
+("fix(check): E0408 wired…", 2026-08-06) — the day before this was found. So
+the false positive is as old as the check but only became visible when the
+diagnostic started being reported. It is NOT caused by the hard cutover
+(`bfc6e7da`); the cutover merely migrated a demo onto the shape that trips it.
+
+* Fix direction (NOT YET VERIFIED)
+
+`src/analysis/signals.rs` collects signal DEFINITIONS. It evidently walks
+declarations and `%registers binding(...)` outputs but not the `as` alias
+capture. Greping for `alias` / `as_binding` in that file returns nothing,
+which is consistent.
+
+The alias is already structural elsewhere — `form_compiler.rs:686` has a
+dedicated `alias_capture` path that consumes the `as` keyword and binds the
+following name, and BUG-344 just taught `IdentExtractor` that `as` is
+structure rather than a name. The definition collector needs the same
+awareness: an alias capture is a signal definition site.
+
+Check whether `@each($items as $item)` and `@presence(...) as $name` have the
+same gap — they use the same alias mechanism, so if E0408 covers them there is
+an existing pattern to copy; if it does not, they are silently affected too.
+
+* Acceptance
+
+- the repro above compiles clean
+- `demos/starter-pack/` compiles with 0 errors
+- a gate asserting an `as`-bound driver signal is READABLE via `var(--st-<name>)`
+  without E0408
+- check the sibling alias surfaces (`@each`, `@presence`, `@drop-zone`) for the
+  same gap and cover them in the same fix if present
+
+NOTE [2026-08-08]: FIXED and VERIFIED at HEAD (6c9dd8f0). Gate `an_as_bound_driver_signal_is_a_definition` (tests/migrations_test.rs:587) passes. Fix: `collect_form_match_signals` (src/analysis/signals.rs ~:373) now reads `fm.captures.get("as")` as `CapturedValue::Named(fields)`, extracts the `name` field, strips `$`, and calls track_definition + mark_exported. Re-verified: repro compiles clean, demos/starter-pack at 0 errors.

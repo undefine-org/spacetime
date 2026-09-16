@@ -1,0 +1,60 @@
+#+TITLE: Named macro args silently dropped when passed out of declaration order
+#+STATE: ITEM
+#+SESSION_ID: 151314b62976ac5e
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-22T11-35-50-693Z_151314b62976ac5e.jsonl]]
+#+CUSTOM_ID: BUG-143-named-macro-args-silently-dropped-when-p
+
+* Initial Message
+
+[Image #1] bro the results are shoddy af. Can't you make this look super high-res? Also the river doesn't work and the only text I ever see is the EverSwap title, and the ripples don't work, and the flow animation is fucked up
+
+* Symptom
+Passing a macro's named arguments in an order different from the %form
+declaration order causes SOME named args to be silently dropped (fall back to
+their defaults) instead of being bound. No error is raised.
+
+* Repro (projects/everswap-clone)
+The @terrain macro (lib/terrain.st) declares params in this order:
+  ... tile, posX, posY, posZ, rotX, flat, lit
+
+index.st called it as:
+  @terrain(... tile: 1, rotX: -1.5708, posY: -10, posZ: -55, flat: false, lit: true)
+            (rotX placed BEFORE posY/posZ — out of declaration order)
+
+Result in emitted runtime.js: mesh.position.set(0, 0, 0)  -- posY/posZ DROPPED
+(rotX bound fine; the two named args that appeared after the out-of-order rotX
+were lost). Other args declared before the reorder point (width/depth/segments/
+height) bound correctly.
+
+Reordering the call to match declaration order:
+  @terrain(... tile: 1, posX: 0, posY: -10, posZ: -55, rotX: -1.5708, flat:..., lit:...)
+-> emitted mesh.position.set(0, -10, -55)  -- correct.
+
+* Expectation
+Named args (`name: value`) are by definition order-independent. A caller should
+be able to list them in any order and have each bind to its declared parameter.
+Either bind by name regardless of position, or raise a hard error on an unknown/
+misplaced name — never silently substitute the default.
+
+* Impact
+Insidious: the page compiles and runs, the primitive just renders at the wrong
+position/rotation/etc. Cost a real debugging session here (terrain appeared at
+the wrong height, burying the river).
+
+* Fix direction
+Inspect the macro %form -> %binds argument matching: it appears to match named
+args positionally once an out-of-order name appears (a positional fallback after
+a name mismatch). Make name binding fully keyed by parameter name. Add a test: a
+macro invoked with all named args shuffled binds identically to in-order.
+
+* Source
+projects/everswap-clone/index.st @terrain call; lib/terrain.st; commit 8a05558.
+
+NOTE [2026-06-22]: CONFIRMED PERVASIVE in everswap-clone spatial-syntax rework (commit ea1b25d). The out-of-declaration-order named-arg drop bit FOUR directives in one session, each silently (compiles fine, wrong render):
+- @stage: near/far passed after camX -> fell back to defaults 0.1/100, clipping the whole terrain (looked like an all-sky blank page; cost a long debug).
+- @viewpoint: height/look passed after sideZ -> dropped to defaults, camera aimed at valley-ahead instead of the summit.
+- @worldtext: size before font, when/ripple after -> when (scroll fade) silently dropped, wordmark never faded.
+- @terrain (earlier): posY/posZ after rotX -> dropped, terrain at wrong height.
+Pattern: a param listed BEFORE its declaration position causes every later named arg to be dropped/mis-bound. Workaround that works: order every call in %form declaration order. This makes an otherwise-elegant named-arg surface very fragile — strong priority to fix. Likely in src/pipeline/resolve.rs expand path or src/syntax/form_scoring.rs capture binding (positional fallback after a name mismatch).
+
+NOTE [2026-07-04]: New live repro (FEAT-144 work, 2026-07-04): projects/spatial-showcase/index.st's `@orbit(damping: 0.08, enableZoom: true, minDistance: 4, maxDistance: 14, autoRotate: true, autoRotateSpeed: 0.35)` call — `autoRotate` is declared 2nd in @orbit's %form (stdlib/3d/macros/orbit.st) but passed 5th (out of order) with a stray unknown `autoRotateSpeed` arg (not a real param; the macro's actual speed param IS `autoRotate: number`). Silent effect: `autoRotate` resolved to its default 0 → camera frozen (`controls.autoRotate=true` but `autoRotateSpeed=0*10=0`), matching this bug's exact symptom (visually indistinguishable from "the feature is broken" — no diagnostic). Fixed locally by reordering to `@orbit(damping: 0.08, autoRotate: 0.35, enableZoom: true, minDistance: 4, maxDistance: 14)` (declaration order) and dropping the fictitious `autoRotateSpeed` arg — verified live (camera x: 0.00 → -1.22 → -2.80 across 5s). This is now the THIRD confirmed real-world hit (see other notes on this item) — reinforces this should be prioritized: a named-arg call that silently no-ops with zero diagnostic is a systemic authoring trap, not a one-off.

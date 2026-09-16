@@ -1,0 +1,106 @@
+#+TITLE: BUG: pipeline-synthesized bind reaches resolve but never emits (score-window)
+#+STATE: DONE
+#+SESSION_ID: 1534a2eae1903af0
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-18T13-07-01-638Z_1534a2eae1903af0.jsonl]]
+#+CUSTOM_ID: BUG-256-bug-pipeline-synthesized-bind-reaches-re
+
+* Initial Message
+
+let's have the score conversation. Please start by reminding yourself of what we were trying to do and what our design goals were. this is like a "Previously on Spacetime" feature where we get to understand what our design intentions were and where we stopped our investigations
+
+#+STATE: DONE
+
+* Symptom
+
+`src/pipeline/score.rs::expand_score_binds` rewrites a `score(...)` bind into
+one `score-window(...)` bind per clip. The rewrite demonstrably happens, and
+the resulting primitive never appears in the emitted bundle.
+
+* What was RULED OUT (each checked directly, not assumed)
+
+| checked | how | result |
+|---------+-----+--------|
+| primitive registered | =registry.get_primitive("score-window")= | =true= |
+| primitive has a body | =body.emit_blocks= | 1 block, =lang=Js=, 1449 bytes |
+| macro registered | =registry.get_macro("score-block")= | =true= |
+| bind rewritten | traced =bind_decls= before/after the pass | =["score"]= → =["score-window"]= |
+| domain resolved | traced =domain_of("time")= | =Some(Declared)= |
+| window resolved | traced the resolved windows | =Window { subject: "title", offset: 2000, span: 3000 }=, =total: 60000= |
+| =body_was_evaluated= | traced on the EvaluatedMatch | =true= (so =resolve_evaluated= takes the bind path, not the fallback) |
+
+So the loss is downstream of `resolve_via_binds_with_decls` being entered with
+a correct bind list, and upstream of the emitted "// Site Code" section — which
+contains only `// Primitive not found: version`.
+
+* Hypotheses not yet tested
+
+1. `find_macro_for_match` succeeds but the returned `MacroDefAst` is used to
+   validate the bind's params against the MACRO's declared `%binds`, and a
+   synthesized primitive name that appears in no `%binds` clause is dropped.
+   This is the strongest hypothesis: the `drive` expansion (which works)
+   rewrites into primitives that DO appear in `%binds` clauses elsewhere in
+   stdlib, while `score-window` appears in none.
+2. The `%exports { $progress: number }` block on the primitive interacts badly
+   with a bind whose `outputs` names `progress` with no alias.
+3. A phase/scope mismatch: the bind carries `BindArg::Element{name:"self"}` so
+   `macro_phase` should be `Selector`, but the score's selector context may not
+   survive into the resolved primitive.
+
+* Why #A
+
+It blocks PLAN-128 t4, and therefore the W4 thesis test (the same score body
+under two projections). It is also a SILENT loss: no diagnostic, no warning —
+the primitive simply is not there, which is the failure class this project
+treats as banned.
+
+* How to reproduce
+
+#+begin_src spacetime
+@version 2026-07-26;
+
+.stage {
+  @score &.time(60s) {
+    &title at 2s for 3s;
+  }
+}
+#+end_src
+
+with a sibling `index.html` containing `<div class="stage"><div class="title">T</div></div>`,
+then `cargo run -q -- build <dir>/` and grep the bundle for `_swMap`. Expected:
+present. Actual: absent.
+
+`tests/score_window_map_test.rs` is the standing gate (3 tests, RED).
+
+* Notes — two methodology traps that cost real time here
+
+- A `.st` file with only CSS rules and NO markup is not a page. `build` reports
+  `Pages: 0`, emits nothing, and `check` still prints `✓ All 1 file(s) passed`.
+  Any A/B on such a fixture is vacuous.
+- `dist/spacetime.js` is ~291KB of shared runtime. A size comparison drowns the
+  site code entirely — compare the `// Site Code` section instead.
+
+* RESOLVED 2026-08-02 (commit 248ae4de)
+
+None of the three hypotheses was right. The cause was a JS PARSE ERROR inside
+the primitive's own `%emit js` block: `%yield` takes a BARE IDENTIFIER, and I
+wrote `%yield _swMap(ST.resolve(...)) -> $%name` — an expression. The expand
+stage recorded `E0800 JS emit parse error: ExpectedSemiForExprStmt` as a
+diagnostic on the generated IR and then DROPPED it. Zero statements emitted,
+no error surfaced, `check` green.
+
+The lesson is about where I looked. Every layer I instrumented reported
+success — primitive registered, macro registered, bind synthesized with right
+args, domain resolved, window arithmetic correct, `resolve` emitting
+["score-window"]. The failure lived at the ONE boundary I had not instrumented
+(the IR the expand stage generates), and it was visible there the instant I
+printed `ir.js_stmts.len()` alongside `ir.diagnostics.len()`. When every layer
+says OK and the output is still missing, instrument the layer that TRANSFORMS
+rather than the ones that PASS THROUGH.
+
+Fix: compute into a variable first, then yield it — which is what every
+working driver primitive already does (`progress = ...; %yield progress ->
+$%name;`). The pattern was in front of me in drivers.st.
+
+FILED SEPARATELY: the swallowed diagnostic is the real defect and it is
+general — any primitive whose emit block fails to parse silently emits
+nothing. See FUP for "a primitive emit-block parse error must fail the build".

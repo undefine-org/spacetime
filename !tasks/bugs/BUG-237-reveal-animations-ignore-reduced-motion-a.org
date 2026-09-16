@@ -1,0 +1,130 @@
+#+TITLE: Reveal animations ignore prefers-reduced-motion and hide content without JS
+#+STATE: ITEM
+#+CUSTOM_ID: BUG-237-reveal-animations-ignore-reduced-motion-a
+
+* Summary
+
+Two related accessibility defects in the reveal-animation path (`@on visible`,
+`@load`, and anything routed through `apply-animations`):
+
+1. *`prefers-reduced-motion: reduce` is ignored.* `apply-animations` contains no
+   reduced-motion check and writes `opacity` as an *inline style*. An author's
+   `@media (prefers-reduced-motion: reduce) { .x { opacity: 1 } }` guard is a
+   stylesheet rule and therefore LOSES to the inline write. The documented,
+   intuitive author fix silently does nothing.
+
+2. *Content is invisible with JS disabled.* The compiler emits initial-state CSS
+   (`opacity: 0`) wrapped in `@media (prefers-reduced-motion: no-preference)`,
+   and the reveal to `opacity: 1` only ever happens in JS. No JS → the content
+   never appears. This is not a flash-of-unstyled-content; it is a stable state.
+
+Found 2026-07-25 running the dynamic pass (`method/11-DYNAMIC`, gate D3) against
+`projects/backdesk-new`.
+
+* Reproduction
+
+Any element with a visible-triggered reveal:
+
+#+begin_src spacetime
+.bd-moment {
+    opacity: var(--st-bd-mo, 0);
+    @on visible bd-mo(600ms) { opacity: 0 -> 1; }
+}
+#+end_src
+
+** 1 · Reduced motion — animation still runs, and the author guard is dead
+
+#+begin_src sh
+google-chrome-stable --headless --disable-gpu --no-sandbox \
+  --force-prefers-reduced-motion --virtual-time-budget=25000 \
+  --dump-dom http://localhost:3513/
+#+end_src
+
+Result after 25s of virtual time, reduced-motion FORCED:
+
+: <li class="bd-moment" style="--st-bd-mo: 0; --st-bd-mo-opacity: 0; opacity: 0;">
+: <div class="bd-bubble" style="--st-bd-bub: 0; --st-bd-bub-opacity: 0; opacity: 0;">
+
+Sampling the hero mid-animation shows interpolation actively running under
+forced reduced motion (`opacity: 0.1377…`, then `0.0930…` at a later sample) —
+i.e. the preference is not consulted at all.
+
+The page under test *does* declare the intuitive guard, and it has no effect:
+
+#+begin_src spacetime
+@media (prefers-reduced-motion: reduce) {
+    .bd-bubble, .bd-bubble--empty { opacity: 1; transform: none; }
+}
+#+end_src
+
+It loses to `el.style.setProperty('opacity', …)` from `apply-animations`.
+
+** 2 · No JS — the argument of the page is invisible
+
+Strip `<script>` from a built page and serve it:
+
+| element            | opacity without JS |
+|--------------------+--------------------|
+| =.bd-hero__line=     | 0                  |
+| =.bd-moment= (×4)    | 0                  |
+| =.bd-bubble= (×2)    | 0                  |
+| =.bd-station=        | 1                  |
+| =.bd-routecard=      | 1                  |
+
+The hero headline and the entire narrative sequence are gone; only sections with
+no reveal survive. The HTML is fully present — it is styled invisible.
+
+* Analysis
+
+- =stdlib/primitives/animation/apply-animations.st:252= — `el.style.setProperty(property, value)`.
+  No `matchMedia('(prefers-reduced-motion: reduce)')` guard anywhere in the file.
+- =stdlib/primitives/animation/drivers.st:934= — a reduced-motion check DOES exist,
+  but only in the *value-change* driver's `animateChange`. The `visible` / `load` /
+  `scroll` drivers have none. So the capability is understood in the codebase; it
+  is simply not applied on the reveal path.
+- =src/pipeline/expand.rs::generate_initial_state_css= — wraps generated initial
+  state in `@media (prefers-reduced-motion: no-preference)`, which correctly
+  prevents the *generated* `opacity: 0` from applying under reduce. But an author
+  who also writes `opacity: var(--st-…, 0)` by hand (the documented pattern for
+  participating in the animation) is unguarded, and that hand-written declaration
+  is what the no-JS case falls back to.
+
+The two defects share a root: *the initial hidden state is expressed in CSS, but
+the transition out of it exists only in JS, and only under conditions the JS
+never re-checks.*
+
+* Suggested fix
+
+1. *Reduced motion, in `apply-animations`:* consult the media query once at
+   bind time and, when `reduce` matches, apply the FINAL keyframe value
+   immediately instead of interpolating — mirroring what `drivers.st:935`
+   already does for value-change. This makes the whole reveal family
+   accessible in one place rather than per-author.
+
+2. *No-JS:* the honest fallback for a reveal is *visible*. Either
+   - emit the author-facing pattern as `opacity: var(--st-NAME, 1)` — so the
+     driver animating from 0 still works, but its absence means visible; or
+   - pair the generated initial state with an `html:not(.st-ready)` /
+     `<noscript>` reset so that content is only hidden once JS has committed to
+     revealing it.
+
+Option 1 for reduced motion is clearly correct. For no-JS, the second variant is
+more faithful (it preserves the intended entrance for the common case) but the
+first is far simpler and fails safe.
+
+* Impact
+
+- Users who set reduced motion — a population that includes people for whom
+  motion causes nausea or migraine — get the full animation.
+- Users without JS get a page whose headline and narrative are blank while the
+  surrounding chrome renders normally, which reads as a broken site rather than
+  a degraded one.
+- Authors cannot fix either case from their own stylesheet; the inline write
+  always wins. This is the part that makes it a toolchain bug rather than a
+  site bug.
+
+* Files
+
+- =stdlib/primitives/animation/apply-animations.st= (~L252, the inline write)
+- =stdlib/primitives/animation/drivers.st= (~L934, the existing correct pattern)
+- =src/pipeline/expand.rs::generate_initial_state_css=

@@ -1,0 +1,57 @@
+#+TITLE: A nested `~ .b { }` silently compiles to `.a .b` (descendant, not sibling)
+#+STATE: ITEM
+#+CUSTOM_ID: BUG-243-nested-sibling-combinator-becomes-descendant
+
+* Symptom
+
+#+begin_src spacetime
+.a {
+  color: red;
+  ~ .b { color: blue; }
+}
+#+end_src
+
+emits
+
+#+begin_src css
+.a { color: red; }
+.a .b { color: blue; }   /* DESCENDANT — wrong. Expected `.a ~ .b` */
+#+end_src
+
+No diagnostic. The rule silently targets a different set of elements.
+
+* Cause (verified)
+
+=src/syntax/cst/parser.rs= =parse_body_item= recognizes only =GT= and =PLUS= as
+combinator-led nested scopes (~L2565). =TILDE= in body position instead routes to
+=parse_preset_ref()= (~L2579) — the PREFIX preset sigil — so the =~= is consumed
+as a (meaningless) preset reference and =.b= is left to parse as an ordinary
+nested scope, which lowers to a descendant selector.
+
+Top-level =.a ~ .b { }= is unaffected: =parse_selector= handles the infix TILDE
+beside GT/PLUS correctly. Only the NESTED form is wrong.
+
+* Why it matters
+
+- =>= and =+= nest correctly, so an author reasonably expects =~= to. The
+  inconsistency is invisible: the page just styles the wrong elements.
+- It is a genuine wrong-output bug, not a parse error, so no amount of `check`
+  discipline surfaces it.
+
+* Relationship to the `~` retirement (FUP-152)
+
+This is the strongest argument yet that the PREFIX preset sigil and the INFIX
+combinator should not share a token dispatch. Retiring the prefix form (FUP-152)
+would let =parse_body_item= treat TILDE exactly like GT and PLUS, deleting the
+ambiguity rather than working around it.
+
+Until then the fix is to try the combinator interpretation FIRST in body
+position (a =~= followed by a selector part is a combinator; =~= followed by a
+bare ident used as a value is a preset ref).
+
+* Acceptance
+
+- =.a { ~ .b { } }= emits =.a ~ .b=.
+- =.a { > .b { } }= and =.a { + .b { } }= keep working.
+- A nested-scope case joins =tests/css_combinators_test.rs= (which currently
+  only covers top level — this bug is exactly what that gap hid).

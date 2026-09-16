@@ -1,0 +1,114 @@
+#+TITLE: BUG: score rate is wrong outside 0..1 — silent clamp, sign flip, dead ramps
+#+STATE: ITEM
+#+SESSION_ID: 1534a2eae1903af0
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-18T13-07-01-638Z_1534a2eae1903af0.jsonl]]
+#+CUSTOM_ID: BUG-259-bug-score-rate-is-wrong-outside-0-1-sile
+
+* Initial Message
+
+ok please explain everything that is next and that got carried forward. What would be your plan for achieving it all?
+
+#+STATE: ITEM
+
+* Reproduced
+
+The rate map in `stdlib/primitives/animation/score-window.st` is the integral
+of the rate ramp:
+
+: area = rateFrom*t + (rateTo - rateFrom)*t*t/2
+: if (area < 0) area = 1 + area
+: clamp to 0..1
+
+Evaluated over t = 0, .25, .5, .75, 1:
+
+| rate         | 0 | .25   | .5    | .75   | 1     | verdict |
+|--------------+---+-------+-------+-------+-------+---------|
+| 1 (identity) | 0 | 0.250 | 0.500 | 0.750 | 1.000 | ✓ |
+| 1 -> 2       | 0 | 0.281 | 0.625 | 1.000 | 1.000 | ✓ finishes early |
+| 2            | 0 | 0.500 | 1.000 | 1.000 | 1.000 | ✓ |
+| 0.5          | 0 | 0.125 | 0.250 | 0.375 | 0.500 | ✓ never finishes |
+| 0 (freeze)   | 0 | 0.000 | 0.000 | 0.000 | 0.000 | ✓ |
+| -1 (reverse) | 0 | 0.750 | 0.500 | 0.250 | 0.000 | ✓ |
+| *-2*         | 0 | *0.500* | *0.000* | *0.000* | *0.000* | ✗ |
+| *2 -> 0.5*   | 0 | 0.453 | 0.813 | *1.000* | *1.000* | ✗ |
+| *1 -> -1*    | 0 | 0.188 | *0.250* | 0.188 | 0.000 | ✗ |
+| *10*         | 0 | *1.000* | 1.000 | 1.000 | 1.000 | ✗ |
+
+* The three distinct defects
+
+** 1. `if (area < 0) area = 1 + area` is a REVERSE HACK, not arithmetic
+
+It exists to make `rate -1` produce 1 -> 0. It works only when the total area
+is exactly -1. At `rate -2` the area reaches -0.5 at t=.25 (rendered 0.5,
+accidentally right) and -1 at t=.5 (rendered 0.0) — the clip plays backwards at
+double speed, hits the start halfway through, and sits dead for the rest of its
+window with no indication.
+
+The correct formulation: a NEGATIVE rate means the playhead starts at the END
+of the clip and walks back. That is `1 + area` applied as an ORIGIN, not as a
+correction fired when a value happens to go negative. The origin is a property
+of the rate's sign at t=0, decided once, not per-sample.
+
+** 2. A ramp CROSSING ZERO is meaningless under the current form
+
+`rate 1 -> -1` gives 0, .188, .25, .188, 0 — the clip advances to a quarter and
+retreats. That may even be desirable (an ease-out-and-return), but nothing says
+so and the `1 + area` branch never fires because the integral stays positive.
+So a sign-crossing ramp silently means something entirely different from either
+endpoint's steady meaning. Either specify it or refuse it.
+
+** 3. Clamping hides a MIS-SPECIFIED score
+
+`rate 10` reaches 1.0 at t=.1 and holds for 90% of its window. `rate 2 -> 0.5`
+finishes at t≈.7. Neither is wrong ARITHMETICALLY — a fast clip finishing early
+is exactly what `rate 2` means. But there is no way to distinguish "I meant
+that" from "I got my numbers wrong", and the clamp makes both look identical
+and intentional.
+
+Proposal: rate values are a DOMAIN question like R1's. A rate whose integral
+does not reach 1.0 by the window's end (`0.5`) or reaches it before (`10`)
+should at minimum be a warning naming the fraction of the window that is dead,
+because that is the number the author actually wants to know.
+
+* Why the existing gates pass
+
+`ramp_freeze_and_reverse_are_three_distinct_maps` compares EMITTED CONSTANTS —
+`_swRateFrom = -1` differs from `= 2`, so it is green regardless of what the
+map computes. `the_rate_map_evaluates_correctly_over_its_window` evaluates the
+map but only over the values in the table's top half, which are all correct.
+
+The lesson from W4 repeats exactly: a gate that asserts something was PRODUCED
+cannot see wrong arithmetic. Only sampling the map catches it.
+
+* Fix sketch
+
+1. Decide the sign rule: negative rate = reversed origin, decided at t=0.
+2. Decide sign-crossing ramps: specify or refuse (refusing is defensible —
+   `rate 1 -> -1` has no obvious single meaning).
+3. Rebuild the map from that decision rather than patching the branch.
+4. Gate by SAMPLING, with the full table above as the fixture, negatives
+   included. The drift guard (`the_transcribed_rate_map_matches_the_primitive`)
+   already exists and should be extended, not replaced.
+
+* Fixed
+
+Implemented BUG-259 as one window-map rule: a negative initial rate selects
+origin 1 once, then the same rate integral runs backward. The old per-sample
+`1 + area` correction is gone, so `rate -2` samples as `1, .5, 0, 0, 0`.
+
+`rate 1 -> -1` is now refused as E0954 with a two-clips hint; it cannot emit an
+arbitrary map. W0718 warns when a nonzero same-signed integral finishes early
+or never reaches the endpoint. The warning reports the unused fraction and an
+adjusted `for` duration; `rate 10` in `for 2s` suggests `for 200ms`. `rate 0`
+remains an intentional freeze and `rate 1` remains quiet.
+
+* Verification
+
+`cargo test --test score_window_map_test` passed: 12 passed, 0 failed.
+The map gate executes emitted `_swMap` in Node at `0, .25, .5, .75, 1`, not
+emitted constants. Its discrimination proof temporarily set reverse origin to
+0: the gate failed for emitted `rate -1`, actual `[0, 0, 0, 0, 0]`, expected
+`[1, .75, .5, .25, 0]`; restoring the origin made the suite green.
+
+Not changed: rate ramps touching zero without crossing it, and `hold(until:)`
+transport semantics.

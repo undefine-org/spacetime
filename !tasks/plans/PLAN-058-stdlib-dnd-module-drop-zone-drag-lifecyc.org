@@ -1,0 +1,255 @@
+#+TITLE: stdlib/dnd module — @drop-zone + @drag lifecycle, runtime via prelude-js
+#+STATE: DONE
+#+SESSION_ID: 1511c4913cace6c5
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-21T11-07-12-498Z_1511c4913cace6c5.jsonl]]
+#+CUSTOM_ID: PLAN-058-stdlib-dnd-module-drop-zone-drag-lifecyc
+#+COMPLETION_HASH: ebc30c28f5175c99
+
+* Initial Message
+
+read the '@research/drag-drop-declarative-design-2026-06-21.org' document, get your own understanding of it, then propose an implementation plan, alongside examples of the resulting Spacetime code, and what that would enable, both for the liveview-kanban demo and overall
+
+* Initial Message
+
+From @research/drag-drop-declarative-design-2026-06-21.org. User direction:
+1. Use `%emit prelude-js` to ship the runtime registry INSIDE the module — NO
+   edits to public/runtime/st.js.
+2. Make this a proper SEMANTIC MODULE `stdlib/dnd/` (MODULE.st + index.st), not
+   scattered under macros/* and primitives/*. Not bound by past decisions.
+3. Keep the final syntax from the proposal (verified, approved).
+Commit as you go.
+
+* Why (the three weaknesses + bounds)
+
+@drag's drop path is imperative JS in the PAGE:
+  on-drop: $move({ card: $.dataset.id,
+                  to: (ST.dropTarget($, '.col') || $.closest('.col')).dataset.col })
+Raw ST.dropTarget / $.closest / $.dataset / magic selectors / magic field name.
+Violates the project rule "Spacetime sites rely ONLY on Spacetime, no custom JS".
+
+W1 drop detection is imperative JS in the page.
+W2 no drop ZONE as a first-class thing (no hover signal, no accept/reject).
+W3 @drag(bounds:&el) is INERT (PLAN-057): %derives lowers to a detached compute
+   closure with no element-resolution context, so &bounds inlines null.
+
+* Verified architecture (grounded in code, 2026-06-21)
+
+** prelude-js is the runtime seam (NO st.js edits)
+public/runtime/st.js stays untouched. The module ships its registry + hit-test
+as `%emit prelude-js` (idempotent `window.__stDnd = window.__stDnd || {...}`),
+deduplicated by primitive name, run once before element IIFEs. Confirmed pattern:
+stdlib/primitives/animation/drivers.st (scroll-driver) and primitives/signal.st.
+`%cleanup` is forbidden in prelude-js (register/unregister live in `%emit js`).
+
+** A self-contained module works via @import alone
+`@import "stdlib/dnd"` → ImportResolver finds stdlib/dnd/index.st →
+ResolvedImport::File → merge_ast carries its meta_defs (incl. %capture_type) →
+register_user_meta_defs registers them per page. NO edits to the global
+scan-dir lists in compiler.rs / incremental_cache.rs (those are only for the
+fixed top-level dirs; module dirs ride the import path — same as md/dispatch/text).
+Convention: MODULE.st (manifest/doc) + index.st (re-exports), like stdlib/md.
+
+** Capture-arms are already data; lifecycle arms reuse the @handle rail
+handle_arm (%capture_type) → %binds synthetic $arms → signal-handler primitive
+runs each arm via ST.runMutations(el, {js_statements}, locals). Lifecycle arms
+are the SAME shape: a new %capture_type drag_lifecycle_arm whose body lowers to
+js_statements, run via ST.runMutations with $zone/$payload bound as `locals`
+(the exact channel `Created(todo) =>` uses today). kinds-as-data: the clause
+name (on-enter/on-leave/on-drop/on-cancel) is a captured FIELD, not a Rust arm.
+
+** accepts: is a PREDICATE CLOSURE, not a zone signal (the one new lowering)
+`accepts: $card.tag != "locked"` cannot be a derived signal the zone evaluates
+once — the dragged card does not exist until a drag hovers. It lowers to a
+stored predicate acceptsFn(card)->bool in the registry entry, evaluated BY the
+gesture at hit-test with the live payload. This is the only genuinely new codegen
+path; flag it so it is not mis-built as a signal.
+
+** gesture primitive already yields the needed edges
+gesture.st exports $dropX/$dropY (release point, set before $active->false) and
+$dropped (false->true PULSE on genuine release, never cancel). ST.dropTarget is
+the overlay-resilient elementsFromPoint stack walk; it becomes an INTERNAL helper
+(promoted into the module's prelude as __stDnd.hitTest), no longer page-called.
+
+* The module shape (stdlib/dnd/)
+
+stdlib/dnd/
+  MODULE.st                       — manifest + doc (like stdlib/md/MODULE.st)
+  index.st                        — public re-exports
+  runtime.st                      — %primitive dnd-runtime: %emit prelude-js with
+                                     window.__stDnd = { zones:{}, register, unregister,
+                                     hitTest(x,y,group,ignoreEl) } (the overlay walk)
+  capture-types/lifecycle.st      — %capture_type drag_lifecycle_arm (kinds-as-data)
+  primitives/drop-zone.st         — %primitive drop-zone(&el, group, accepts) →
+                                     %emit js registers into __stDnd; yields
+                                     $hovering/$accepting; %cleanup unregisters
+  macros/drop-zone.st             — %macro drop-zone: @drop-zone(group) as $zone {
+                                     accepts? over/reject states }
+  macros/drag.st                  — @drag with group/payload + lifecycle arms +
+                                     bounds (the NEW dnd @drag; supersedes
+                                     stdlib/macros/drag.st's drag — see Migration)
+  tests/*.test.st                 — headless unit + lifecycle + bounds
+
+NB on @drag ownership: stdlib/macros/drag.st currently owns @drag/@swipe/@resize
+and is imported by stdlib/index.st + mobile swipe. Decision: the dnd module owns
+the ENHANCED @drag (group/payload/lifecycle/bounds). Two clean options — resolve
+in Wave 3 (see Open decisions): (a) move @drag into stdlib/dnd and leave
+@swipe/@resize in macros/drag.st; or (b) keep @drag in macros/drag.st and have
+dnd re-export+extend. Lean (a): @drag is the dnd surface; @swipe/@resize are
+distinct gestures that stay. The gesture PRIMITIVE stays in stdlib/primitives
+(shared by swipe/resize/mobile) — dnd consumes it, does not move it.
+
+* Final syntax (approved)
+
+[data-col="doing"] {
+  @drop-zone(group: "cards") as $zone {
+    over { background: rgba(255,255,255,0.04) }
+  }
+  > .col__cards { @each($doing as $c, key: $c.id) { &card($c); … } }
+}
+
+.card {
+  @drag(group: "cards", payload: $c) {
+    dragging { scale: 1.04; box-shadow: 0 18px 48px rgba(0,0,0,0.45); z-index: 50 }
+    on-drop $zone { $move({ card: $payload.id, to: $zone.col }); }
+  }
+}
+
+Accept/reject zone:
+[data-col="done"] {
+  @drop-zone(group: "cards") as $zone {
+    accepts: $card.subtasksOpen == 0;
+    over   { background: rgba(110,231,183,0.06) }
+    reject { outline: 1px solid var(--bad) }
+  }
+}
+
+Bounds (closes PLAN-057):
+.slider-handle { @drag(axis: "x", bounds: &slider-track) { dragging { scale: 1.1 } } }
+
+* Grammar
+
+%capture_type drag_lifecycle_arm {
+  $clause:("on-enter"|"on-leave"|"on-drop") $zone:ident? "{" $body:balanced('}') "}"
+  | "on-cancel" "{" $body:balanced('}') "}"
+}
+
+@drop-zone(group: $group:string = "") as $zone:ident {
+  ($accepts:expr)?            // lowered to a predicate closure, NOT a signal
+  $states:states?            // over/reject merged via existing %states `when`
+}
+
+@drag(group: $group:string?, payload: $payload:expr?, axis…, bounds…, …) {
+  $customStates:states?
+  ( $lifecycle:drag_lifecycle_arm )*
+  on-drop: $onDrop:expr?      // KEEP: zero-zone short form (permanent)
+}
+
+* Waves (revised for the prelude-js strategy)
+
+** Wave 1 — module skeleton + runtime registry (prelude-js)
+- Create stdlib/dnd/{MODULE.st,index.st,runtime.st}.
+- runtime.st: %primitive dnd-runtime with %emit prelude-js installing
+  window.__stDnd = { zones: {}, register(e), unregister(e),
+  hitTest(x,y,group,ignoreEl) }. hitTest = the overlay-resilient
+  elementsFromPoint walk (ported from ST.dropTarget), matching against
+  registered zone elements in zones[group] (a Set), NOT a selector.
+- Acceptance: `@import "stdlib/dnd"` compiles; prelude emits once; a headless
+  test drives __stDnd.register + hitTest against a mocked elementsFromPoint and
+  selects the registered zone; accepts=false path returns the zone but flagged
+  non-accepting. COMMIT.
+
+** Wave 2 — @drop-zone primitive + macro + over/reject + $zone proxy
+- primitives/drop-zone.st: %primitive drop-zone(&el, group, accepts). %emit js
+  registers { el, group, dataset, acceptsFn } into __stDnd; yields $hovering,
+  $accepting; %cleanup unregisters. acceptsFn built from the captured accepts
+  expr as a closure over the payload (the new lowering).
+- macros/drop-zone.st: %macro drop-zone, %form `@drop-zone(group) as $zone { … }`,
+  %binds drop-zone(&self, group, accepts), %states { over when $hovering; reject
+  when $hovering && !$accepting; $states? }. $zone = dataset proxy ($zone.col →
+  data-col), mirroring presence's $peers proxy.
+- Acceptance: headless — over/reject classes toggle on hover/!accept; $zone.col
+  reads dataset; cleanup removes the registry entry. COMMIT.
+
+** Wave 3 — @drag lifecycle clauses (arms-as-data) + ownership resolution
+- capture-types/lifecycle.st: %capture_type drag_lifecycle_arm.
+- macros/drag.st (dnd): @drag with group/payload + ( $lifecycle )* + keep
+  on-drop: short form. gesture %on: during pointermove, __stDnd.hitTest →
+  $hoverZone; toggle hovered zone $hovering + eval acceptsFn → $accepting; fire
+  on-enter/on-leave on transitions. On $dropped→true: if hoverZone && accepting
+  run on-drop with locals {zone: dataset, payload}; else on-cancel.
+- Resolve @drag ownership (option a vs b above) — execute the cutover, no
+  parallel @drag impls (harmony). Update stdlib/index.st + mobile swipe import.
+- Acceptance: headless @drag lifecycle — down→move-over-zone→up runs on-drop with
+  $zone bound; release over nothing runs on-cancel; accepts:false routes to
+  on-cancel; enter/leave fire on transitions. COMMIT.
+
+** Wave 4 — bounds fix (closes PLAN-057) via the same element-resolution seam
+- The bounds element is a degenerate zone: resolve &track through the same
+  element-resolution path, inject `const __bounds = …` into the %derives compute
+  closure (PLAN-057 fix-option 1) so $bounds!=none → (__bounds!=null) and
+  &$bounds.rect.W → ST.rectOf(__bounds).W read a real rect.
+- src/pipeline/mod.rs (generate_animate_fragments resolve+inject),
+  src/pipeline/evaluate.rs (translate_derive_expr element-ref arm). Remove the
+  bounds limitation note in the dnd @drag.
+- Acceptance: headless (mocked rects) — @drag(axis:"x", bounds:&track) clamps
+  translateX to [0, track.w - handle.w]. Closes PLAN-057. COMMIT.
+
+** Wave 5 — migrate demos/liveview-kanban + docs
+- Rewrite the kanban page to the final syntax: @drop-zone on each [data-col],
+  @drag(group,payload) with on-drop $zone. Zero ST.*, zero $.dataset, zero magic
+  selectors. Add over-state highlight.
+- Module README/doc; reference.org protocol note if applicable.
+- Acceptance: cargo run -- check on the demo passes; (live puppeteer verify if
+  dev server available). COMMIT.
+
+* Elegance-bar check (AGENTS)
+
+(1) extends existing grammar (%capture_type/%form/%states/%emit prelude-js), no
+new subsystem. (2) variants are DATA (capture-type + registry keys), not Rust
+arms. (3) DELETES special cases: ST.dropTarget/$.closest/$.dataset page calls AND
+the inert bounds branch. (4) tested by the SAME headless @drag/@mount machinery.
+All four hold AND the runtime now lives in the module (further reduces global
+surface). → fold in.
+
+* Open decisions (leans)
+
+1. group default "" (optional). LEAN: yes.
+2. $zone typed via `as $zone: Zone`? LEAN: optional typeref later, default
+   untyped data-* proxy (mirror presence).
+3. keep on-drop: <expr> short form permanently? LEAN: yes (zero-zone case).
+4. reorder-within-zone (@sortable)? LEAN: follow-up on the same registry.
+5. @drag ownership (move into dnd vs re-export+extend)? LEAN: move @drag to dnd,
+   leave @swipe/@resize in macros/drag.st, keep gesture primitive shared.
+
+* Test plan
+
+- Unit (headless): registry register/unregister on mount/cleanup; hitTest selects
+  registered zone (mock elementsFromPoint); accepts=false → on-cancel; on-enter/
+  on-leave on transitions; $zone.col reads dataset.
+- @drag lifecycle (headless): down→move→up over zone runs on-drop w/ $zone;
+  release over none runs on-cancel; bounds clamp (mocked rects) closes PLAN-057.
+- Live (puppeteer): kanban migrated — moves persist + over-state highlight.
+
+* Scope boundary
+
+In: stdlib/dnd module (runtime via prelude-js), @drop-zone, @drag lifecycle, zone
+registry + overlay hit-test, bounds fix (PLAN-057), kanban migration.
+Out: @sortable/reorder-within-list, touch long-press, multi-select drag — clean
+follow-ups on the same rail.
+
+* Files
+- NEW stdlib/dnd/{MODULE.st,index.st,runtime.st}
+- NEW stdlib/dnd/capture-types/lifecycle.st
+- NEW stdlib/dnd/primitives/drop-zone.st
+- NEW stdlib/dnd/macros/{drop-zone.st,drag.st}
+- NEW stdlib/dnd/tests/*.test.st
+- MOD src/pipeline/mod.rs, src/pipeline/evaluate.rs (Wave 4 bounds)
+- MOD stdlib/index.st, stdlib/mobile/macros/gestures/swipe.st (Wave 3 ownership)
+- MOD demos/liveview-kanban/index.st (Wave 5)
+- public/runtime/st.js: UNTOUCHED (the win)
+
+NOTE [2026-06-21]: All 5 waves shipped + live-verified. The stdlib/dnd module delivers declarative drag-and-drop: @drop-zone + @drag with a drop lifecycle (on-enter/leave/drop/cancel $zone), backed by an in-module __stDnd registry shipped via %emit prelude-js (ZERO edits to public/runtime/st.js for the registry). @drag cutover: dnd owns the sole @drag macro; @swipe/@resize stay in stdlib/macros/drag.st; the gesture primitive is shared/untouched. bounds: fixed (closes PLAN-057) via the __stRefs named-element registry + ST.ref. liveview-kanban migrated to zero-JS drops and verified end-to-end in a real browser (a card drags + drops + moves).
+
+Building surfaced + fixed several genuine pre-existing bugs: post-paren `as $name` alias never matched (IdentExtractor dollar-skip); macro %states custom-state bodies never reached CSS (resolve_state_variables + mixed property/non-property body capture); headless test harness never resolved @import (so a .test.st could not load a module); ST.bindState never applied state attrs (the $-sigil watch-key mismatch). Filed BUG-137 (pre-existing @media emits matchMedia JS, found via bisect, NOT from this work) and FUP-098 (over/reject hover highlight bindState-init nuance; core move unaffected).
+
+Tests: dnd 14 (registry/lifecycle/bounds/kanban-move) + drag 12 + lib 2495 + integration 181, all green. Commits: 0fa98ed (W1) bde7fcc (W2) 0d103f4 (W3) 79bd378 (W4) 0300337 (W5).

@@ -1,0 +1,123 @@
+#+TITLE: Promote @field / @field-error sugar from page-local fixture into stdlib
+#+STATE: ITEM
+#+CUSTOM_ID: FUP-151-promote-field-field-error-sugar-from-fix
+
+* Origin
+
+Filed 2026-07-26 from the Knowledger side (`~/code/ora/knowledger`, PLAN-001), which
+plans a four-screen Phoenix admin whose views are Spacetime bundles. Two of those four
+screens are forms. The blocker is not capability — it is *location*.
+
+FUP-142 SPIKE 4 (2026-07-24) built `@field` / `@field-error` and recorded the outcome as
+*GREEN, browser-proven*, with the concurrent fast-typing repro passing. The macros live at
+`elixir/spacetime_lv/frontend/field.st` and that file says so in its own header:
+
+#+begin_quote
+Local, page-scoped prototype (lives in the spike fixture, NOT stdlib yet — promote after
+the design settles).
+#+end_quote
+
+The design has now been exercised by a second, independent consumer that was not present
+when the spike was written. This is the promotion trigger.
+
+* Why this matters beyond one downstream project
+
+The first external consumer of a fixture is the moment a fixture becomes an API, whether or
+not anyone declares it. Knowledger has exactly two options today and both are bad:
+
+1. *Copy `field.st` into its own tree.* Two divergent copies of a primitive that encodes a
+   subtle correctness fix (Finding B below). When the stdlib version is fixed, the copy is
+   not. This is how a footgun outlives its patch.
+2. *Reach across into the verse checkout.* A build-path dependency on another repository's
+   fixture directory, which breaks the moment the fixture is renamed or the spike is
+   cleaned up.
+
+Neither is acceptable, and the choice between them should not be forced on a downstream
+project by an accident of file placement.
+
+* What is being promoted, and why it is not merely sugar
+
+`@field` is not a convenience wrapper. It encodes a correctness fix that a page author
+would otherwise have to rediscover — and the spike record shows it *was* rediscovered the
+hard way, twice.
+
+** Finding B — the reason this must be one shared primitive
+
+From the FUP-142 SPIKE 4 record:
+
+#+begin_quote
+Finding B — file-scoped signals live in `window.SpacetimeLocal`, NOT `ST.set`. The killer.
+A `@data inline $values` is a FILE-scoped signal → its shared store is the
+`window.SpacetimeLocal` Proxy. My first cut used ELEMENT-scoped `ST.set(node,'values',…)`
+— which gives EACH input its OWN private `values` copy. So email's field wrote {email} and
+password's field wrote {password}, each clobbering the other's key, and every validate sent
+a half-empty map → the stuck-email symptom REAPPEARED even WITH a local values signal.
+#+end_quote
+
+∴ every hand-written multi-field form is one plausible mistake away from a cross-field data
+loss bug that manifests only under concurrent typing — the hardest class to catch in review
+and one of the hardest to reproduce on demand. The spike's own framing is that the sugar
+makes the bug *impossible by construction*. That property belongs to every page, not to one
+fixture.
+
+** Finding A — the shadowing footgun, worth carrying along
+
+Also from SPIKE 4:
+
+#+begin_quote
+The selector-init wrapper binds the element as `el`, so a primitive body that writes
+`const el = %&el;` compiles to `const el = el;` — a self-referential dead binding. Symptom:
+the primitive's listeners never attach, *silently*.
+#+end_quote
+
+Promotion is the natural moment to add the lint the spike recommended
+(`W: primitive body binds \`el\`, shadows the selector-init param`), because a stdlib
+primitive is precisely what page authors will copy from.
+
+* Scope
+
+** In scope
+
+- Move `@field` / `@field-error` and their backing primitives from
+  `elixir/spacetime_lv/frontend/field.st` into `stdlib/macros/` (name to be settled —
+  `field.st` alongside the existing `data-kind.st` / `handle.st` / `each.st` reads
+  consistently).
+- Keep the store-identity fix intact and *documented at the point of definition*, so the
+  next primitive author reads why `window.SpacetimeLocal` is used rather than `ST.set`.
+- Update `signup_field.st` to import from stdlib rather than the local fixture, proving the
+  move by using it.
+- Decide whether the fixture file remains as a worked example or is deleted. Prefer
+  deletion: a fixture that duplicates a stdlib macro is a future divergence.
+- Add the Finding A lint, or a documented note in the `%primitive` authoring guide if the
+  lint is more than a small change.
+
+** Out of scope
+
+- *Tier B* (the `@template &field(...)` projection with computed keys). The spike probed it
+  and found it viable but gated on FUP-121 (compiler-emitted skeletons). This follow-up is
+  Tier A only — the shippable form.
+- The real Ecto swap.
+- BUG-228 (nested object seeds). Knowledger's plan already routes around it by keeping
+  subscribed assigns flat, so it does not block this promotion.
+- Compile-time field-name checking (FUP-150). Independent and complementary.
+
+* Acceptance
+
+- `@field` / `@field-error` are importable from stdlib by a project that has no knowledge
+  of `elixir/spacetime_lv/frontend/`.
+- `cargo run -- check elixir/spacetime_lv/frontend/` still passes on all fixture pages.
+- `mix test` in `elixir/spacetime_lv` still passes (16 at time of filing).
+- The concurrent fast-typing repro still behaves: type both fields in one tick,
+  invalid → valid, both errors clear, no stuck field.
+- The store-identity rationale is written where a primitive author will encounter it, not
+  only in this tracker item.
+
+* Notes
+
+Knowledger's PLAN-001 stage S1 (the "SAY" screen — one sentence becomes a standing rule) is
+the first consumer. It is a genuinely small form: one text input, one validation, a list of
+proposed checkboxes. If `@field` cannot carry that comfortably, it is better to learn it
+here than after four screens are written.
+
+No urgency is claimed. Knowledger's S0 is a non-form screen (a grant list) specifically so
+that this promotion is not on the critical path.

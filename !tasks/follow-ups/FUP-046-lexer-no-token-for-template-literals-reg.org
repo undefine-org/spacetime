@@ -1,0 +1,107 @@
+#+TITLE: Lexer: no token for template literals / regex — braces inside corrupt arrow-body balance
+#+STATE: DONE
+#+SESSION_ID: 1503ca05d05c0c62
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-10T14-32-18-497Z_1503ca05d05c0c62.jsonl]]
+#+CUSTOM_ID: FUP-046-lexer-no-token-for-template-literals-reg
+
+* Initial Message
+
+okkk! how does that translate to the actual admin? is the actual editing interface working, and how? let's DESIGN and BRAINSTORM how we'd do it properly
+
+* Problem
+The CST lexer (src/syntax/cst/lexer.rs) tokenizes `'`/`"` strings as single STRING
+tokens (so their contents, including braces, are opaque), but has NO token for:
+- TEMPLATE LITERALS (backtick `` `…` ``) — backtick lexes as an unrecognized/ERROR char,
+  and the template's contents (including `${…}` interpolation and any literal `{`/`}`)
+  lex as ordinary tokens.
+- REGEX literals (`/…/flags`) — `/` lexes as Slash; regex body lexes as ordinary tokens.
+
+∴ a literal brace inside a template or regex becomes a real L_BRACE/R_BRACE token. This
+corrupts any consumer that balances raw braces — notably parse_arrow_fn_balanced (the
+BUG-095 fix): an arrow @eval body like
+  @eval (() => { el.innerHTML = `<b>}</b>`; })
+  @eval (() => { s = s.replace(/}/g, ''); })
+mis-counts brace depth → the body terminates early (reviving the BUG-095 spill) or
+over-consumes to EOF.
+
+* Severity
+P2-latent. Reviewer (BUG-095 review, agent 16, conf 0.7) flagged it. NO current `.st`
+arrow payload uses a template/regex with an unbalanced-looking brace (the editable tests
+avoid them), and the BUG-095 fix strictly improves on the prior fully-broken behavior —
+so it's a bounded limitation, documented in parse_arrow_fn_balanced's doc-comment, not a
+release blocker.
+
+* Fix
+Teach the lexer a TEMPLATE_STRING token (backtick-delimited, callback-scanned like the
+quoted-string callbacks) so a template's braces are opaque. Template literals legitimately
+span NEWLINES and nest `${ … }` (balanced interpolation that itself contains real tokens) —
+so this is more than the single-line string callback (mind BUG-072: the single-line rule
+exists so a lone quote in HTML prose doesn't swallow the file; backtick is far rarer in
+prose, but the callback should still bound runaway). Regex is genuinely ambiguous (`/` =
+divide vs regex-start) and lower-value; can be deferred or handled with a heuristic
+(regex only after `(`,`,`,`=`,`return`,`=>` etc.).
+
+* Provenance
+Surfaced by the BUG-095 reviewer. The arrow-body brace balancer counts raw braces; the
+real fix is at the lexer (opaque template/regex spans), not the balancer.
+
+* RESOLVED 2026-08-11 — but NOT as specified. Read this before citing the item.
+
+The item prescribed a =TEMPLATE_STRING= token scanning backtick-to-backtick. That
+was built exactly as written. It passed all seven of its own gates and destroyed
+the corpus:
+
+  | lib      | 3100 passed / 3 failed | -> | 3061 / 130            |
+  | examples | 35                     | -> | 55                    |
+  | demos    | 36                     | -> | 82                    |
+  | fixtures | 6                      | -> | 31                    |
+  | headless | 744 passed             | -> | 0 passed, 0 failed    |
+
+In Spacetime the backtick is THE HOLE SIGIL (AGENTS.md: "=`= is THE hole form
+everywhere"). The corpus has *4,934* of them. A token consuming one backtick to
+the next swallows every hole in the language.
+
+** The structural fix (commit 71de8e55)
+
+The item mistook a SIGIL for a DELIMITER. Every other sigil in this lexer is
+one-or-two chars, =#[token]=, and NON-CONSUMING — =$= =&= =~= =@= =%= =#=, =->=
+=<-= =>=. None decides how far it reaches; the PARSER decides, from grammar. The
+only span-consuming tokens are strings and comments, and they are precisely
+where this lexer's scar tissue is (BUG-040, BUG-041, BUG-072, BUG-224 — every
+one an "it swallowed the rest of the file" bug). The item proposed a fifth.
+
+So: the backtick is now a one-char =BACKTICK= token, beside its siblings.
+
+** The actual leak, which the item did not name
+
+=raw_tokenize= had NO error category. An unrecognised byte was pushed as
+=RawToken::Minus /* placeholder */= — keeping its span, wearing another token's
+identity. =refine= then applied the vendor-prefix merge rule (MINUS + IDENT fuse
+for =-webkit-*=) to it:
+
+: "a `b` c"  ->  IDENT("a")  IDENT("`b")  MINUS("`")  IDENT("c")
+
+The hole sigil absorbed INTO an identifier, its partner a minus sign. *That* is
+how Spacetime syntax leaked onto the meta-transpiler — not a missing token, a
+token that lied and inherited arithmetic's merge rules.
+
+Unknown bytes now get =RawToken::Unknown=, refining to =ERROR=: visible, one byte
+wide, fusing with nothing. =parse_arrow_fn_balanced='s documented limitation was
+one symptom of this general fault.
+
+** What is NOT fixed, and where it went
+
+A JS template literal inside an =@eval= body still lexes its contents as ordinary
+tokens, so a literal ={=/=}= there still mis-counts in a brace-balancing consumer.
+That is the item's original motivating defect and it is REAL — but it needs a
+lexer MODE (lex JS rules only inside a foreign-code island: an =@eval= payload, an
+=%emit js= body), not a token, because the same character means something else and
+far more common in Spacetime source. Filed as FUP-193.
+
+** Gates
+
+- =tests/backtick_token_test.rs= 7/7, RED 4/7 first. Sharpest:
+  =a_backtick_never_fuses_into_an_identifier=.
+- =tests/template_literal_token_test.rs= 7 kept and =#[ignore]=d, carrying the
+  full account of the failed attempt.
+- lib 3209/0 (up from 3100/3), corpus flat.

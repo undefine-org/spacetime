@@ -1,0 +1,44 @@
+#+TITLE: BUG-353: @font src url() resolves against /__spacetime under serve, 404s
+#+CATEGORY: bugs
+#+STATE: ITEM
+#+PROPERTIES:
+#+CUSTOM_ID: BUG-353-font-face-relative-url-404s-under-serve
+#+PRIORITY: #B
+#+END:
+
+* Symptom
+
+A page declaring
+
+#+begin_src spacetime
+@font("Aspekta") { src: url("fonts/AspektaVF.woff2") format("woff2-variations"); font-weight: 50 1000; }
+#+end_src
+
+renders with the FALLBACK font under ~cargo run -- serve~ and the REAL font
+from the ~build~ output. Same page, two answers.
+
+* Cause
+
+Under =serve= the stylesheet is emitted at =/__spacetime/styles.css?entry=...=,
+so a relative =url("fonts/...")= inside it resolves against =/__spacetime/= ->
+404 -> CSSFontFaceRule status =error= (observed live: =document.fonts= reports
+=Aspekta / 50 1000 / error=; glyph metrics match the system fallback).
+
+In =dist/= the same rule sits in =spacetime.css= at the site root next to
+=fonts/=, so it resolves fine.
+
+* Evidence
+
+- =curl /__spacetime/fonts/AspektaVF.woff2= -> 404; =/fonts/AspektaVF.woff2= -> 200.
+- FontFace API with the identical declaration string loads OK -> the font file
+  and descriptors are fine; only the base URL differs.
+
+* Fix direction
+
+The compiler should rewrite relative =url()= in emitted CSS to be
+site-root-relative (or serve-mode should answer asset paths under
+=/__spacetime/=). An author cannot know which base the stylesheet will be
+served from. Workaround: author the src as =url("/fonts/...")= (absolute),
+which breaks only when the site is deployed under a subpath.
+
+Found while building demos/brand-launch (PLAN-146 W1).

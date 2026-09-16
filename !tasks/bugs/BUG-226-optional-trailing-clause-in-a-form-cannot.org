@@ -1,0 +1,135 @@
+#+TITLE: An "optional" trailing clause in a %form is not optional — the literal before it is required, so the bare spelling silently drops
+#+STATE: TODO
+#+CUSTOM_ID: BUG-226-optional-trailing-clause-in-a-form-cannot
+#+PRIORITY: #A
+
+* Summary
+
+A `%form` that ends with a LITERAL followed by an optional capture:
+
+: @wait_until $condition:expr timeout: $timeout:time = 5000
+: @wait_for   $selector:selector timeout: $timeout:time = 5000
+: @snapshot   $name:string of: $selector:selector? = ""
+
+reads as "the trailing clause is optional". It is not. A form matches its
+literals IN ORDER, so the literal (`timeout:`, `of:`) is REQUIRED. The bare
+spelling — `@wait_until cond`, `@snapshot "name"` — matches no form at all and is
+SILENTLY DROPPED.
+
+The default value (`= 5000`) is what makes this read as optional. It only applies
+when the form matches; it cannot make the preceding literal skippable.
+
+* Impact
+
+Silent. The directive vanishes from the emitted bundle with no diagnostic, so:
+
+- `@wait_until cond` compiled to nothing → the following assertion ran
+  IMMEDIATELY, before the awaited change could happen, and failed on a condition
+  that would have been true a moment later. Reads exactly like a race.
+- `@snapshot "name"` compiled to nothing → 13 self-tests asserted on state no one
+  had captured.
+
+Both spellings are DOCUMENTED in the macros' own doc comments, so the bare form is
+not a misuse — it is the advertised surface.
+
+* Fixed instances (PLAN-113 W2.1)
+
+`@snapshot` is fixed by SPLITTING it into two sibling macros — `snapshot-of`
+(`@snapshot $name of: $sel`) and `snapshot` (`@snapshot $name`). That works
+because `$name:string` is a bounded capture: it cannot swallow the `of:` literal.
+13 tests went green.
+
+* Why the same split FAILS for @wait_until / @wait_for
+
+Tried and reverted, with the observed failures:
+
+- `@wait_until $condition:expr` as a bare sibling — the greedy `:expr` swallows
+  `timeout: 500ms` into the condition. Emitted JS: `Uncaught SyntaxError:
+  Unexpected identifier 'timeout'`, and the whole file stopped compiling (0 tests
+  ran, worse than the 4 failures).
+- `@wait_for $selector:selector` as a bare sibling — the bare form then shadows
+  the `timeout:` form: `Expected name, found :`.
+
+So the sibling-macro trick only works when the capture BEFORE the optional literal
+is bounded. For a greedy `:expr` or `:selector` the capture must be told where to
+stop.
+
+* This is BUG-216's unfinished half
+
+`NextBoundary::ParenExprCapture` (`src/syntax/events/form_compiler.rs`, commit
+4655ee0e) exists for exactly this shape: it stops a greedy `:expr` at the token
+that begins the NEXT capture. It handles a following `(`; it does not handle a
+following LITERAL such as `timeout:`.
+
+`NextBoundary::Literal(s)` already exists and is selected when the next form
+element is a literal — so the machinery is present.
+
+*** `ParenExprCapture` is DEAD CODE today — decide when fixing this
+
+Measured during PLAN-113's close: replacing the `NextBoundary::ParenExprCapture`
+arm with `NextBoundary::None` changes NOTHING — 2828 lib and 659 headless both
+unchanged. No stdlib form exercises it.
+
+It fails `earn every line` as it stands. Do not delete it blindly, though: it is
+the boundary shape this bug needs (stop a greedy `:expr` at the token beginning the
+next capture), so the choice when fixing BUG-226 is either
+  (a) EXERCISE it — extend it to stop at a following LITERAL as well as a `(`,
+      which is exactly what `@wait_until … timeout:` requires, and add the stdlib
+      form that uses it; or
+  (b) DELETE it and implement the boundary afresh.
+Either is fine. Leaving it dead a third time is not. What is missing is that an
+OPTIONAL trailing group (`literal + capture`) does not register its literal as a
+boundary for the capture before it, because the group may be absent.
+
+* ATTEMPTED AND REVERTED — read before retrying
+
+Making the introducing literal skippable in `match_inline_element`
+(`src/syntax/events/form_compiler.rs`, the `FormInlineElement::Literal` arm):
+when `eat_text` fails AND the next element is a capture WITH a default AND that
+pair ends the inline elements, bind the default and return `Ok(())`.
+
+It fixed nothing and broke matching elsewhere: `stdlib/testing/meta` went from
+`98 passed / 5 failed` to `87 passed / 1 failed` — the TOTAL dropped from 103 to
+88, i.e. 15 tests stopped being discovered at all, because forms that legitimately
+require a trailing literal began matching too early and swallowed the following
+directives.
+
+Lesson: the literal cannot be made optional unilaterally at match time. The
+PRECEDING greedy capture must be bounded first (it currently consumes the literal),
+and only then can the literal's absence be distinguished from its consumption.
+Fix (1) below is therefore a prerequisite for, not an alternative to, skipping the
+literal.
+
+* Fix direction
+
+1. When a form's trailing elements are `Literal(L) + Capture(optional)`, compile a
+   boundary that stops the PRECEDING greedy capture at a top-level `L`. If `L` is
+   absent the capture runs to the end and the optional group is simply unmatched —
+   which is what the author meant by writing a default.
+2. That single change makes the ONE form correct, so no sibling split is needed
+   for `@wait_until` / `@wait_for` — and `@snapshot`'s split could then be
+   collapsed back to one form. Prefer that: one macro, one surface.
+3. Alternatively, reject an optional trailing clause at REGISTRATION with a
+   diagnostic naming the form, so the shape cannot be written and silently
+   mis-parse. Weaker, but strictly better than today's silence, and composes with
+   (1) as a guard for shapes that remain unsupported.
+
+* Remaining failures this blocks (stdlib/testing/meta)
+
+: @wait_until resolves when condition becomes true
+: @wait_for resolves when element appears
+: wait_until can check DOM state
+: @wait_until polls at appropriate interval
+
+All four are the SAME defect. They are left red rather than papered over — per
+PLAN-113, green is not restored by weakening an assertion, and these tests are
+correct: the framework is what is broken.
+
+* Tests to write
+
+- A form with an optional trailing clause matches BOTH spellings, and the bare one
+  reaches the emitted bundle. Sabotage: remove the boundary; the bare form must
+  vanish again.
+- `@wait_until cond` (no timeout) observes a change made by a `setTimeout`.
+- `@wait_for [sel]` (no timeout) resolves when an element appears late.
+- The `timeout:`-bearing spelling keeps working for both, with its value honoured.

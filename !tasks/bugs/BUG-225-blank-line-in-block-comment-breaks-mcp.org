@@ -1,0 +1,124 @@
+#+TITLE: BUG-224's blank-line rule breaks a real banner comment — 7 MCP workbench tests fail
+#+STATE: DONE
+#+CUSTOM_ID: BUG-225-blank-line-in-block-comment-breaks-mcp
+#+PRIORITY: #A
+
+* Summary
+
+The BUG-224 lexer change (block comments stop at a BLANK LINE, so an unterminated
+`/*` in prose cannot swallow the rest of a file) breaks a legitimate multi-line
+banner comment that DOES contain a blank line.
+
+`stdlib/__mcp__/workbench/styles.st` no longer parses. 7 tests fail:
+
+: mcp::live::workbench_redirect_tests::workbench_redirect_input_json_serves_live_snapshot
+: mcp::live::workbench_redirect_tests::workbench_redirect_mounts_then_reuses_the_same_instance
+: mcp::protocol::tests::server_actions_refresh_input_but_are_not_awaited_agent_actions_are
+: mcp::protocol::tests::signal_endpoint_dispatches_workbench_actions_immediately
+: mcp::protocol::tests::st_mount_host_composes_guest_into_stage_region
+: mcp::protocol::tests::st_workbench_mounts_env_browser
+: mcp::protocol::tests::st_workbench_reads_env_st_from_disk_overlay
+
+Symptom at the test layer: `st_workbench_mounts_env_browser` asserts the mounted
+function name and gets `Null` instead of `"mcp-workbench"` — the workbench never
+compiles, so nothing mounts.
+
+* Not mine — attribution
+
+Found while verifying PLAN-113 W1.1 (BUG-216). Confirmed NOT caused by either
+BUG-216 fix, by removing each independently and re-running:
+
+- paren-group branch removed  -> same 7 failures
+- emit throw reverted to the old silent bail -> same 7 failures
+
+The cause is the lexer's new `blank_line` rule in
+`src/syntax/cst/lexer.rs::block_comment` (the BUG-224 work).
+
+** Process note
+
+That lexer change was swept into commit `b956a25d` by a `git add -A` in my
+BUG-216 commit — it belongs to a concurrent agent's BUG-224 work, along with
+`src/toolchain.rs`, `src/export/*`, `src/mcp/mod.rs`, `src/lib.rs`, and the
+`method/*.st.md` files. The commit MESSAGE describes only BUG-216, so those
+changes are now mis-attributed in history. Nothing was lost and no rollback was
+attempted (destructive git ops are forbidden here), but the commit is not the
+atomic change its message claims. `git add -A` is the wrong instrument in a tree
+with a concurrent writer; stage explicit paths.
+
+* Reproduction
+
+#+begin_src rust
+  let s = std::fs::read_to_string("stdlib/__mcp__/workbench/styles.st").unwrap();
+  spacetime::parser::parse(&s).is_ok()   // => false
+#+end_src
+
+The offending comment starts at byte 14694 and contains a blank line:
+
+#+begin_src css
+  /* ── PLAN-064 B5: the ARTBOARD. ────────────────────────────────
+     A dark guest (e.g. a hero with a near-black background) was INVISIBLE on the
+     warm-dark stage — guest bg (26,20,16) vs stage (36,30,25) measured 1.1:1
+     contrast, so the design vanished with no visible bounds.
+
+     ...continues after a BLANK LINE...
+  */
+#+end_src
+
+* The tension to resolve
+
+BUG-224's premise is sound: an unterminated `/*` in prose silently deleting every
+following rule is a bad failure. But "a real block comment never crosses a blank
+line" is FALSE — a documentation banner routinely does, and this repo's own
+stdlib is the counterexample.
+
+Options, in rough order of preference:
+
+1. *Require the comment to be unterminated before applying the rule.* Scan for
+   `*/` first; only if there is NO terminator anywhere does the `/*` degrade to
+   punctuation. This keeps BUG-224's protection (an unterminated `/*` cannot eat
+   the file) without penalising a correctly-closed multi-paragraph comment. The
+   current code already computes `terminator`; the ordering of the two conditions
+   is what needs inverting.
+2. *Require the `/*` to look like prose punctuation* (preceded by a word
+   character or inside HTML text, e.g. `process/*.md`) rather than sitting at the
+   start of a line/statement.
+3. Keep the blank-line rule and reformat every offending stdlib comment. Rejected:
+   it makes a lexer quirk into a style rule the author must remember, and the
+   next well-formed banner comment breaks again.
+
+Option 1 makes the two goals independent instead of trading one for the other.
+
+* Regression tests required
+
+- The `styles.st` banner (a CLOSED multi-paragraph block comment) parses, and
+  `stdlib/__mcp__/workbench/styles.st` parses as a whole.
+- An UNTERMINATED `/*` in HTML prose still does not swallow following rules
+  (BUG-224's own case must keep passing).
+- The 7 MCP tests above pass.
+- Sabotage-verify: reintroduce the blank-line-wins ordering; the banner test must
+  fail.
+
+* RESOLVED (2026-07-25)
+
+Option 1 taken: the blank-line degrade now applies ONLY when the comment is
+UNTERMINATED. A closed `/* … */` is always a comment, however many blank lines it
+spans; only when there is no `*/` at all does a blank line mean "this was prose
+punctuation". The two goals are independent — the original ordering traded one for
+the other.
+
+All 7 MCP tests pass. 4 tests added in `src/syntax/cst/lexer.rs`
+(`block_comment_tests`), covering BOTH directions plus the real styles.st file,
+since BUG-224 shipped with no test of its own.
+
+** Test-quality note
+
+Two of these tests initially sabotage-PASSED and had to be rewritten:
+
+1. The BUG-224 test used `/*` inside HTML TEXT (`<p>see process/*.md</p>`), which
+   never reaches the block-comment callback — HTML text is lexed separately. It
+   proved nothing. Replaced with a bare `/*` at statement position.
+2. The first strengthening asserted only on scope COUNT, which to-EOF recovery
+   happened to reproduce. It now asserts the surviving scope is the REAL one.
+
+Same lesson as FUP-138: a test must be verified against the mechanism it claims to
+cover, not merely against a plausible-looking input.

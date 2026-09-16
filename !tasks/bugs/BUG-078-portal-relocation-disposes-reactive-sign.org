@@ -1,0 +1,54 @@
+#+TITLE: @portal relocation disposes reactive signals (MutationObserver move-vs-remove)
+#+STATE: ITEM
+#+SESSION_ID: 14fc108ed3772fa8
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-04T14-32-37-965Z_14fc108ed3772fa8.jsonl]]
+#+CUSTOM_ID: BUG-078-portal-relocation-disposes-reactive-sign
+
+* Initial Message
+
+what do you need from me to implement FEAT-076 fully and in a Spacetime-y way? I am going to sleep so you'll auto-accept the most ambitious and Spacetime-y choice every time (unlimited budget). Ask me questions one last time, if needed, before going off
+
+* BUG — @portal move triggers signal disposal on the relocated subtree
+
+** Parent
+[[id:FEAT-076-rebuild-the-cms-admin-multi-file-the-pro]] W2. Blocks the schema drawer's per-field value binding. GENERAL bug — affects every @portal-hosted reactive subtree, not just the admin.
+
+** Root cause (oracle-diagnosed, reproduced out-of-browser)
+@portal open() (stdlib/primitives/portal.st:64-65) relocates the target element to
+document.body via insertBefore(placeholder) + body.appendChild(node). The global
+MutationObserver in public/runtime/st.js (~1205-1226) loops removedNodes and
+unconditionally calls ST.dispose on every removed element + ALL its descendants —
+WITHOUT checking whether the node was merely RE-PARENTED (moved) vs truly removed.
+ST.dispose (st.js:656-670) does `this.signals.delete(el)`, erasing the element's
+WeakMap signal store. The element survives in the DOM (re-parented, isConnected=true)
+but its signals are gone → every reactive hole reads undefined → renders empty.
+
+** Symptom (FEAT-076 W2)
+The drawer (.ad-drawer { @portal(when:$drawerOpen) }) hosts the schema form (.ad-form
+@each → field templates). On open, the portal move disposes every freshly-seeded
+.ad-field's $f signal → all field labels/values render EMPTY. The list pane (.ad-list,
+NO @portal) is never moved, so its rows bind fine — that contrast is the tell.
+
+** Empirical proof (oracle)
+Drove the real public/runtime/st.js + linkedom under node: seed ST.set(field,'f',desc),
+replaceChildren into .ad-form, then portal-move .ad-drawer to body. Result: in-place f =
+descriptor; after move f = undefined, isConnected = true. The signal is wiped purely by
+the relocation, element still connected.
+
+** Fix (stdlib/runtime only — canonical move-vs-remove discriminator)
+In st.js MutationObserver removedNodes branch: guard dispose on !node.isConnected. A
+relocated node has isConnected===true after re-append (observer callback runs in a
+microtask, after portal's synchronous remove+append) → NOT disposed. A genuinely removed
+node has isConnected===false → disposed as before. Apply the same !child.isConnected
+predicate to the descendant sweep. Defence-in-depth: ST.dispose may early-return on
+el.isConnected too.
+
+** Test (RED → GREEN)
+V8/linkedom: (a) seed a signal on an element inside a subtree, relocate the subtree to
+body, flush microtasks, assert the signal SURVIVES; (b) seed a signal, truly remove the
+element, flush, assert the signal IS disposed. Both must pass.
+
+** Acceptance
+- [ ] @portal-hosted reactive subtrees keep their signals across the open/close move.
+- [ ] Genuine removals still dispose (no leak).
+- [ ] Drawer form fields render their $f.label/$f.value (W2 unblocked).

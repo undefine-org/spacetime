@@ -1,0 +1,89 @@
+#+TITLE: `@fixture` markup is never torn down — every test sees every earlier test's DOM
+#+STATE: ITEM
+#+SESSION_ID: 1534a2eae1903af0
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-18T13-07-01-638Z_1534a2eae1903af0.jsonl]]
+#+CUSTOM_ID: BUG-330-fixture-markup-is-never-torn-down-every
+
+* Initial Message
+
+so how do I use it? i launched it and little seems to actually work or be interactive. use the browser tool and see if there are errors in the code and stuff. please be thorough and make sure all expectred storiees work. work autonomously and complete as you go
+
+* Summary
+
+`@fixture` markup from one `@test` is still in the document when the NEXT test
+runs. `document.querySelector('.subject')` in test B therefore returns test A's
+element — already animated, already scrolled into view — instead of B's fresh
+one.
+
+Any test whose claim is "this element has NOT moved" is unreliable: it silently
+measures a previous test's finished element and fails, or (worse) passes for
+the wrong reason.
+
+* Reproduction (`--cdp`, `scratch/fixiso.test.st`)
+
+#+begin_src spacetime
+@import "stdlib/testing/test"
+.spacer { height: 1200px; }
+.subject { height: 200px; opacity: 0; @on &.visible(400ms) { opacity: 0 -> 1; } }
+
+@test "A: scroll it in" needs timing {
+  @fixture { <div class="spacer"></div><div class="subject">s</div> }
+  @eval (document.querySelector('.subject').scrollIntoView({block:'center'}))
+  @wait 900ms
+  @assert (window.__a > 0.97) "entrance completes"       // PASSES
+}
+
+@test "B: a FRESH fixture, never scrolled, must be untouched" needs timing {
+  @fixture { <div class="spacer"></div><div class="subject">s</div> }
+  @eval (window.scrollTo(0, 0))
+  @wait 900ms
+  @eval (window.__bCount = document.querySelectorAll('.subject').length)
+  @assert (window.__bCount === 1)                         // FAILS
+}
+#+end_src
+
+`__bCount` is greater than 1: A's fixture is still mounted.
+
+* Why it matters
+
+This is the reason a correct feature can look broken. While verifying
+BUG-323/BUG-322 (`@on &.visible` repointed to `load-driver`), the "off-screen
+element has not moved" negative failed under `--cdp` while the SAME page,
+driven manually in Chromium, behaved perfectly:
+
+| scroll state          | real page | fixture harness |
+|-----------------------+-----------+-----------------|
+| never on screen       | 0         | 1 (leaked)      |
+| scrolled into view    | 1         | 1               |
+| scrolled away after   | 1         | 1               |
+
+An hour of a fix's verification budget went into proving the harness wrong
+rather than the feature.
+
+It also makes NEGATIVE assertions — the load-bearing half of every
+behavior gate in this repo (see `tests/score/clip-consumer.test.st`, written
+negative-first on purpose) — untrustworthy in any multi-test file where an
+earlier test moves something.
+
+* Expected
+
+Each `@test`'s `@fixture` mounts into a container that is REMOVED (and its
+runtime cleanups run) when the test ends — the same lifecycle a fresh page
+would give. Scroll position should reset with it.
+
+* Acceptance
+
+1. The repro above passes: `document.querySelectorAll('.subject').length === 1`
+   in test B.
+2. A test that scrolls does not leave the next test scrolled.
+3. `ST.onCleanup` handlers registered by fixture-mounted elements run at
+   teardown (an observer from test A must not still be watching in test B).
+4. RED-first: assertion 1 must be seen to fail before the fix.
+
+* Related
+
+- BUG-325 (fixture elements not observed) is a NEIGHBOUR, not a duplicate:
+  that one says a fixture element's `@on &.visible` never runs at all. Verified
+  here that a fixture element IS observed and DOES animate — so BUG-325 should
+  be re-checked against current code; it may already be stale, or may describe
+  the `as $name` publication path specifically.

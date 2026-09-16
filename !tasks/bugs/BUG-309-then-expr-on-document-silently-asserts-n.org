@@ -1,0 +1,83 @@
+#+TITLE: @then <expr> on document silently asserts nothing — shipped tests are green and vacuous
+#+STATE: ITEM
+#+SESSION_ID: 154d0baaa942d918
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-08-06T12-08-13-733Z_154d0baaa942d918.jsonl]]
+#+CUSTOM_ID: BUG-309-then-expr-on-document-silently-asserts-n
+
+* Initial Message
+
+please look at all open issues in the github and compare to main. Cluster them by category, root-cause, impact, and ways to solve. See if any work that's been done on main in the past two weeks addresses them. Then give me practical next steps, and give me an instructional explanation of each issue that an intern would benefit from
+
+#+STATE: ITEM
+#+PRIORITY: A
+
+* Summary
+
+`@then $captured on document should equal (...)` compiles clean and asserts NOTHING.
+`document` is not a valid `$target:Selector`, so the form matches no `%form`, the macro
+body is silently dropped (BUG-216 family), and the test reports a pass having verified
+nothing at all.
+
+This is the exact failure mode AGENTS.md names: "a gate never seen to fail is not yet a
+gate". Here the gate cannot fail, by construction.
+
+* Evidence (2026-08-06, HEAD binary)
+
+`spacetime test tests/integration/signal-body-template.test.st --headless`
+→ `3 passed, 0 failed, 0 skipped`
+
+while the file's three assertions are:
+  L66  @then $__capturedBody on document should equal ('{"fieldName":"typed-value"}')
+  L87  @then $__capturedBody on document should equal ('{"fieldA":"value-A","fieldB":"value-B"}')
+  L108 @then $__capturedHadBody on document should equal "no-body"
+
+None of the three runs. The file's entire purpose — proving a signal's wire payload is a
+structured body — is unverified. It has presumably been green and vacuous since it landed.
+
+Discovered while writing a RED gate for GitHub #37 (bare `@data signal` params corrupt the
+wire payload): the natural idiom to assert a payload was copied from this file, and the new
+gate passed when it should have failed. Rewriting with `@eval` + `@assert` made it fail
+correctly.
+
+* Blast radius
+
+`grep -rln "on document" --include="*.test.st"` → 7 files:
+- tests/integration/signal-body-template.test.st        (3 vacuous assertions, confirmed)
+- tests/integration/handle-arm-comment-corruption.test.st
+- tests/integration/signal-pending-yield-propagation.test.st
+- tests/bugs/BUG-213-create-project-network-error-silent.test.st
+- tests/dev-editable-text-duplication.test.st
+- stdlib/md/tests/doc.test.st                            (2 real failures present, so partially live)
+- tests/repro/gh-37-data-signal-params/                  (ours; already rewritten off the idiom)
+
+Every one needs auditing: an assertion that does not run is worse than no assertion,
+because it buys false confidence in exactly the place someone thought coverage was needed.
+
+A second vacuous idiom surfaced in the same session: `@then <selector> { text == "…" }`
+fails with E0946 (`Expected capture $claims:body`) and is also dropped. Same audit applies.
+
+* Root cause
+
+Same genus as GitHub #25 / #8: a directive whose shape matches no `%form` is dropped
+instead of diagnosed. #25's fix (E0946 via match_diagnostics_to_errors) covers many shapes
+but evidently not this one — the `on <target>` clause with a non-selector target still
+slips through.
+
+* Fix direction
+
+1. `@then … on <target>` with a non-selector target must be a compile error naming the
+   valid target forms. This is W3's consume-or-refuse invariant (PLAN-137) applied to the
+   testing macros.
+2. STRUCTURAL, and the more important half: **a `@test` whose body produced zero executable
+   assertions must FAIL, not pass.** A test that asserts nothing is a defect regardless of
+   why the assertions vanished. This single rule makes the whole vacuity class self-detecting
+   and would have caught this the day it landed.
+3. Audit all 7 files; convert or fix each; add a suite-level gate asserting no test in the
+   repo has zero live assertions.
+
+* Relationship to PLAN-137
+
+Belongs in W3 (consume-or-refuse) for the diagnostic, but item 2 above deserves to run
+EARLIER — it is the meta-gate that protects every other wave's gates. Recommend pulling it
+into W0.2 (promote the repros into permanent gates), since every wave in that plan depends
+on gates that genuinely fail.

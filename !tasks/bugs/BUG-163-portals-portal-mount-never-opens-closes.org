@@ -1,0 +1,73 @@
+#+TITLE: @portal's portal-mount never opens/closes for a dotted-path controlling signal ($sig.field)
+#+STATE: ITEM
+#+SESSION_ID: 15251010f7982b56
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-06T10-48-12-510Z_15251010f7982b56.jsonl]]
+#+CUSTOM_ID: BUG-163-portals-portal-mount-never-opens-closes
+
+* Initial Message
+
+push the capabilities of the 3d module + the workbench mcp through a concrete idea of a user interface that talks directly to this very agent using the mcp tools. This is a pressure test against both the host apis and the 3d apis. Design the 3d mockups using generate_image and then implement whatever surfaces you need using the blender mcp. commit as you go
+
+* Found via
+Round-2 pressure test, same BUG-155-class audit as BUG-162. `@portal(when:
+$ui.modalOpen)` never opened the portal — a common REAL shape (a UI-state
+object with a modal-open flag as one field among several), not a contrived
+edge case.
+
+* Repro (isolated, RED confirmed on pre-fix code)
+#+begin_src
+@data inline $ui : { "modalOpen": false };
+.modal { @portal(when: $ui.modalOpen) }
+.toggle { @on click { $ui <- { "modalOpen": true }; } }
+#+end_src
+Clicking `.toggle` left the modal closed (`aria-modal` never set, never
+relocated to `document.body`).
+
+* Root cause
+`stdlib/primitives/portal.st::portal-mount`'s `readValue()` checked `sig in
+window.SpacetimeLocal` (a literal dotted string like `"ui.modalOpen"` is
+never a real top-level property) and `ST.get(node, sig)` (same issue). The
+reactive channels (`local:<sig>:updated`, `ST.watch`) were ALSO keyed by the
+literal string. Same root cause as BUG-155/160/161/162.
+
+Additionally (a wrinkle none of the OTHER fixes needed): `@portal`'s
+`setClose()` WRITES a value back (`false`, on Escape/close) — for a dotted
+`closeSignal`, a naive `window.SpacetimeLocal[closeSig] = false` can't work
+at all (no such literal key), and even `window.SpacetimeLocal[head].field =
+false` would NOT trigger the `SpacetimeLocal` Proxy's reactive dispatch
+(the Proxy only traps a top-level assignment `SpacetimeLocal[head] = ...`,
+not a nested property mutation on an object it already returned).
+
+* Fix
+- `readValue()`: derive `sigHead`/`sigTail`, resolve the head then walk the
+  tail as property access (mirrors BUG-155/160/161's read-side fix exactly).
+- `setClose()`: for a dotted `closeSignal`, read the CURRENT head object,
+  shallow-clone it (and every intermediate nested level along the tail
+  path), patch the final tail field to `false` on the clone, then reassign
+  the WHOLE head (`window.SpacetimeLocal[closeSigHead] = clone`) so the
+  Proxy's `set` trap fires and dispatches `local:<head>:updated` correctly —
+  the write is OBSERVED, not silently swallowed.
+- Both `local:<sig>:updated`/`ST.watch` registrations now key off `sigHead`.
+
+* Verification
+- RED confirmed on `git show HEAD:stdlib/primitives/portal.st` (reverted,
+  re-tested, restored).
+- Live browser, full round-trip: click -> `aria-modal="true"` + relocated to
+  `document.body` (open path, dotted read); Escape -> `aria-modal` removed
+  AND `$ui` correctly shows `{modalOpen: false}` (close path, dotted
+  write-back through the clone-and-reassign logic) — confirmed via direct
+  puppeteer DOM + signal inspection, not just "didn't throw."
+- Regression: `tests/unit/templates/portal-dotted-path.test.st` (2 tests:
+  dotted-path open, dotted-path Escape-close write-back).
+- Full suite green: `cargo test --lib` (2564), `cargo test --test
+  integration_tests` (181), `cargo run --features headless -- test tests/
+  --headless` (611, +4 new across this + BUG-162/@effect).
+
+* Audit closure note
+This closes the round-2 audit of the "dotted-signal read/write idiom" across
+`stdlib/primitives/`: `each-with-templates` (BUG-155), `each-inline`
+(BUG-160), `view-mount` (BUG-161), `effect-runner` (BUG-162), and now
+`portal-mount` all fixed. `match-render` and `computed-source` were
+confirmed ALREADY CORRECT by direct source read. No further
+`sig`/`sourceName`-literal-concatenation hits remain in `stdlib/primitives/`
+as of this commit (re-verified via grep after this fix).

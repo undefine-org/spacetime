@@ -1,0 +1,119 @@
+#+TITLE: Typeref-directed record capture — typed @data inline seeds with CSS-native literals (W2)
+#+STATE: ITEM
+#+SESSION_ID: 153f5ed0617636c7
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-26T21-12-46-213Z_153f5ed0617636c7.jsonl]]
+#+CUSTOM_ID: FEAT-166-typeref-directed-record-capture-typed-da
+
+* Initial Message
+
+@data inline $brand Brand : {
+  "ink":    "#e8eef7",
+  "bg":     "#0b0e14",
+  "panel":  "#121722",
+  "accent": "#5eead4",
+  "dim":    "#8b96a8",
+  "rule":   "#222b3a"
+};
+
+Could we have this be written like { ink: #e8eef7; ... } instead of that? Basically, if I define a field to be color, then I can use CSS, and basically if ther's a serialised data, it's the string (or it's the Js repr of it? let me know what the representations should look like). This is part of a wider effort to support all CSS value types more natively in Spacetime (tell me what that would mean that I didn't see yet)
+
+* Initial Message
+
+Wave 2 of PLAN-122 — the user-facing feature that started the arc: `@data inline $brand Brand : { ink: #e8eef7; radius: 8px; reveal: 600ms }`. Typeref-directed record capture: the seed's grammar is COMPUTED from the registry (Brand → fields → each field's type → that type's %capture_type from W1). Makes @type executable — a type declaration becomes the parser+validator for its own literals. BUG-228 dies by deletion on this surface.
+
+* Target
+
+- stdlib/macros/data-kind.st — data-inline %form gains the typed-seed arm: `$type:typeref` present ⇒ record-literal parse; absent ⇒ legacy $value:expr surface (unchanged).
+- stdlib/capture-types/properties.st — the record grammar; its `$value:balanced(';')` leaf is upgraded to per-field typed capture when driven by a typeref.
+- Form-match engine (src/syntax/form_match.rs + form_compiler.rs) — new capability: capture set computed from TypeRegistry at match time (record($type)). This is the one genuinely new metasystem mechanism; keep it generic (usable by any %form, not just @data).
+- src/type_system.rs — registry lookup feeds grammars; E0501/E0502/E0503 semantics adopted for record validation.
+
+* Change
+
+1. record($type) capture: typeref → fields → per-field %capture_type. Seed body shape = properties grammar: `{ name: value; ... }` — bare keys, `:` value separator, `;` terminators ("a typed record literal reads like a style block"). The quoted-key object discriminator (src/syntax/cst/parser.rs:952-975, events/grammar/directives.rs:117-133) is BYPASSED for typed seeds — BUG-228's bespoke seed-expr path is deleted for this surface, not patched.
+2. Value boundary (C4): typed record seeds accept LITERALS + bare $refs only. $refs type-checked against the field type via the registry (PLAN-117 /$ addressing helps). Anything expression-shaped (pipes, calls) stays on the untyped expr surface — the grammar must NOT grow an expression arm.
+3. Strict record semantics (C5): extra field → error + did-you-mean (typo safety: `accnet`); missing required → E0501; optional fields via existing optmark; defaults via new @type field syntax `radius: length = 8px;` (mirrors param_list `= default`, FUP-040 harmony).
+4. Arrays recurse with element-type context (C6): `palette: color[]` → `[#fff, #000]`; nested records likewise.
+5. Repr: leaves → strings; records → JS objects of strings (nested = objects of objects); emitted JS stays a direct expression (local-state.st), byte-identical to today's quoted-key output.
+
+* Edge
+
+- This makes validation-by-construction real: a seed that doesn't match its field's capture type DOESN'T PARSE → spanned parse error; the orphan E0501-3 validator stays unwired for inline (deleted later in W4 from the schema side; still serves fetch/file/subscribe).
+- url() values: quoted-only rule from PLAN-122 C3 applies (lint).
+- Dynamic-production captures (calc/var/gradients) in seeds: allowed, tagged dynamic, widget degrades.
+- Untyped @data inline seeds are OUT OF SCOPE here — PLAN-120 remains their fix path.
+
+* Accept (RED→GREEN)
+
+- cms-testbed: `@data inline $brand Brand : { scarlet: #FF0020; ink: #0a0a0a; surface: #ffffff; radius: 8px; reveal: 600ms };` compiles to BYTE-IDENTICAL JS vs today's quoted-key seed (demos/cms-testbed/index.st:55).
+- `radius: red` → parse error with span at the field value; `{ accnet: #fff; }` → unknown-field error naming `accent` candidates; missing required field → E0501-class error.
+- Nested record + `color[]` array seeds compile and emit correctly.
+- `accent: $brand.accent` (ref) type-checks; `accent: $x | alpha(0.5)` is refused onto the untyped surface with a clear diagnostic.
+- Full suites green.
+
+* Relation
+
+Parent: PLAN-122. Blocked by W1 (CSS scalar capture types). The demo-of-record for the whole arc (widget→EditAst→constant-fold→diagnostic loop). Supersedes PLAN-120 framing for typed seeds (note left on PLAN-120). Kills BUG-228 (typed surface) and the BUG-159 silent-non-binding class (mismatch = parse error).
+
+* SCOPED, NOT STARTED (session 153f5ed0) — what the spike found
+
+Attempted, measured, and deliberately backed out rather than shipping half a
+mechanism. The findings below are the useful output.
+
+** The current behaviour, measured
+
+#+begin_example
+@type Brand { ink: color; radius: length; reveal: duration; }
+
+// works today — emits `ink: "#e8eef7",` into the page
+@data inline $brand Brand : { "ink": "#e8eef7", "radius": "8px" };
+
+// the goal — parses, then SILENTLY EMITS NOTHING
+@data inline $brand Brand : { ink: #e8eef7, radius: 8px };
+#+end_example
+
+Note the failure mode: `cargo run -- check` reports ZERO errors for the second
+form. It is not rejected, it is dropped. Any gate asserting "it compiles" would
+pass while the feature does nothing.
+
+** Finding 1 — the brace gate, and why it is NOT the feature
+
+`starts_object_literal` (src/syntax/events/grammar/directives.rs) recognises an
+object-literal VALUE only as `{ STRING COLON` — a quoted key. A bare key needs
+recognising too, and the disambiguator is available and principled:
+
+  `value_colon` is already in scope at the call site. `{ ident: … }` is also the
+  shape of a directive BODY full of CSS declarations (`.x { color: red }`), and
+  what separates them is POSITION, not spelling: a VALUE follows the `:` that
+  introduces it, a BODY follows a directive head. Sigil harmony makes this
+  reliable, since `:` introduces a value everywhere in the language.
+
+I implemented exactly that, and it works at the parser level — and it changes
+NOTHING observable, because the captured record still has no route to codegen.
+Reverted, with the reasoning left in the fn's doc comment so the next
+implementer does not re-derive it. **A parser change that enables nothing is
+dead surface**; it lands WITH the grammar or not at all.
+
+** Finding 2 — what the wave actually needs
+
+1. The brace gate above (small, understood, ~5 lines).
+2. A typeref-directed RECORD grammar: given `Brand`, look up its fields in the
+   TypeRegistry and build a per-field capture using each field's scalar type.
+   The scalar grammars this needs now exist and are gated
+   (`stdlib/capture-types/css-values.st`, PLAN-122 W1.2), and
+   `stdlib/scalars/types.st` (FEAT-168 W4) supplies the field-type -> capture
+   name mapping via its `%capture` column. Both prerequisites landed this
+   session; before them this wave could not have been written.
+3. A reifier so the record reaches codegen as the same JS object the quoted form
+   produces today.
+
+** Acceptance when picked up
+
+- `demos/cms-testbed` (which has `@type Brand { scarlet: color; … }` + `@cms(Brand)`)
+  emits BYTE-IDENTICAL JS for the CSS-native seed and the quoted seed. Anything
+  else means the two forms are not the same feature.
+- A malformed field value is REFUSED with a span (`{ ink: #e8ee1 }`), inheriting
+  the scalar grammars' refusals rather than restating them.
+- An unknown field is REFUSED with a did-you-mean.
+- The NEGATIVE that this spike proves is needed: a CSS-native seed that emits
+  nothing must FAIL, not pass. Write that one first.

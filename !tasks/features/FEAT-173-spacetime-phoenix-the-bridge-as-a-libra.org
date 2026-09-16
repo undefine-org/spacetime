@@ -1,0 +1,119 @@
+#+TITLE: spacetime_phoenix — the bridge as a library, and the bundle as an artifact
+#+STATE: DONE
+#+CUSTOM_ID: FEAT-173-spacetime-phoenix-the-bridge-as-a-libra
+
+* Why
+
+The Spacetime⇄Phoenix bridge existed only INSIDE the =spacetime_lv= demo app:
+=lib/spacetime/live_view.ex= plus the =SpacetimeBridge= hook in
+=assets/js/app.js=. =spacetime_lv= is an application (=mod:=, esbuild, daisyui,
+=frontend/*.st= checked in), not a dependency — so a second consumer could not
+depend on it.
+
+beam-lisp became that second consumer and did the only thing available: it
+PORTED both files. Its own moduledoc says so — "Ported from verse's
+elixir/spacetime_lv/lib/spacetime/live_view.ex". Two copies of a protocol, in
+two repos, guaranteed to drift.
+
+Worse, the port stopped at the TRANSPORT and invented a parallel asset
+pipeline. Instead of =spacetime build= → =priv/static= → =Plug.Static=,
+beam-lisp fetched the bundle over HTTP from a running =spacetime serve= on a
+second origin, via a filesystem handshake (write =index.edn=, poll
+=build-status.json= for a matching =content_sha256=).
+
+Consequences, all observed:
+- TWO processes required to start an app, and no production path at all —
+  no serve, no page.
+- a second origin the browser can be pointed at by mistake. Opening it renders
+  Spacetime's own dev dock against a page with no LiveView behind it: every
+  derived signal throws =Cannot read properties of undefined=, plus 401s from
+  the host pill. Reported as a Reel bug; it was neither Reel's nor a bug.
+- =mix run --no-halt= alone silently produced a blank page.
+
+The compile is deterministic, so none of that was necessary. VERIFIED: for
+reel's own EDN entry, =spacetime build= output is BYTE-IDENTICAL to what serve
+hands out — =spacetime.js= 701071 B, =spacetime.css= 8516 B, sha256 equal on
+both. The bundle was always an artifact.
+
+* What
+
+** =elixir/spacetime_phoenix/= — the library (NEW)
+
+Depends on =phoenix=, =phoenix_live_view=, =phoenix_html=. Nothing else: every
+further dependency is one a consumer inherits without asking.
+
+- =lib/spacetime/live_view.ex= — the =__using__= macro, =render_host/1=, the
+  after-render assign reconciler, the =events=/=assigns=/=pushes= DSL, the
+  E0928 declared-event check and the contract sidecar.
+- =lib/mix/tasks/spacetime.build.ex= — wraps the =spacetime build= CLI.
+- =lib/mix/tasks/spacetime.contract.ex= — moved, de-hardcoded.
+- =lib/mix/tasks/spacetime.bridge.ex= — derives the classic-script hook.
+- =priv/static/js/spacetime_bridge.js= — ONE hook, served from the dep.
+
+** Four fixes folded in from the beam-lisp port
+
+1. =shell:= REQUIRED — deletes the =cond= in =render_host/1= carrying one
+   hard-coded DOM arm per page (=.board=, =.signup=, =.counter=). That code
+   commented on its own defect twice; see FUP-121. The caller passes the
+   skeleton; beam-lisp's generator lifts it from the view's own =&shell=.
+2. =Jason= → OTP =JSON= — a library must not force a JSON dependency.
+3. =stylesheet_url/1= — a naive =.js=→=.css= yields =runtime.css= against a
+   serve origin: a 404 that renders the page unstyled with no console error
+   worth the name. Two rules, one per URL shape.
+4. =public_assigns/1= also rejects =:flash= and =:live_action= — LiveView
+   bookkeeping the page has no signal for.
+
+** One hook, two packagings
+
+A bundler app imports =SpacetimeBridge=; an app without one loads a plain
+=<script>=, where the ESM keyword =export= is a syntax error that kills the
+file (presenting as a page that hydrates and then answers no signal). The
+classic build is therefore DERIVED by =mix spacetime.bridge=, and a test
+asserts the two are in step — a forgotten regeneration fails the suite instead
+of shipping a stale bridge.
+
+* Status
+
+- [X] library extracted, compiles clean
+- [X] =spacetime_lv= consumes the library
+- [X] beam-lisp drops both copies and depends on it
+- [X] endpoints serve the hook from the dep's priv
+
+** Verified
+
+| suite | result |
+|-------+--------|
+| =spacetime_phoenix= | 23 passed (21 + 2 =:cli= when =SPACETIME_BIN= is set) |
+| =spacetime_lv= | 16 passed (was 17 with the vendored copy; its 1 test moved to the library and gained a second case) |
+| =beam_lisp= | 1244 passed |
+| reel | 65 passed, =scripts/check.exs= 8/8 |
+
+In a browser, not merely compiled: the reel board renders 9 films / 12
+unrealised / 8 showable, =window.__stLiveBridge= is an object, the LiveSocket
+reports connected, and creating a task round-trips 5 → 6 tasks with the
+server's own notice returning to the page.
+
+** Caught while porting
+
+beam-lisp's copy had DROPPED the multi-host rebind in =destroyed()=: the
+original rebinds =window.__stLiveBridge= to a surviving bridge, the copy
+deleted it outright. With two LiveViews on one page that leaves every survivor
+unable to push — controls that quietly stop answering after a navigation. The
+library keeps the original's fallback. This is precisely the drift the
+extraction exists to prevent, found by doing it.
+
+The =E0928= test came along and gained the case nothing asserted: a DYNAMIC
+=handle_event/3= head warns rather than raises.
+
+* Notes
+
+FUP-121's accepted fix (compiler emits =skeleton.html= beside the bundle) has
+NOT landed — verified: a =spacetime build= writes only =spacetime.js=,
+=spacetime.css= and =build-status.json=. =shell:= is the live fix and gains a
+source, not a replacement, when FUP-121 lands.
+
+Follow-up worth its own item: put =.bl= contract sources in verse so the
+transport is tested against GENERATED pages, not only hand-written ones — that
+is the case that actually breaks. Naive wiring creates a cycle (verse tests →
+beam-lisp → spacetime_phoenix); avoid it by checking in the generated =.edn= as
+a fixture and having beam-lisp own a drift test that regenerates and compares.

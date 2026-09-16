@@ -1,0 +1,361 @@
+#+TITLE: Comments pill for spacetime serve (design + waves)
+#+STATE: DOING
+#+SESSION_ID: 15403668e2cde14b
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-27T12-54-43-339Z_15403668e2cde14b.jsonl]]
+#+CUSTOM_ID: PLAN-123-comments-pill-for-spacetime-serve-design
+
+* Context
+
+User request (2026-07-27): a "comment" pill in `spacetime serve` — comments humans
+and agents can add / pick up / update, with typed follow-up contracts, designed so
+the future agency tier (hosted team editing) reuses the same model and UX.
+
+Design doc (ground truth + decisions D1-D10 + full surface syntax):
+[[file:../../research/spacetime-comments-pill.org][research/spacetime-comments-pill.org]]
+
+Core decisions (all user-confirmed 2026-07-27):
+- D1 Hybrid storage: inline `//@type(meta): text` comments in .st source +
+  `<project>/.comments/<id>.json` sidecar (state for inline; full records for
+  non-.st/page anchors). Committed, NOT gitignored.
+- D2 Inline form is a literal comment with directive grammar — zero language
+  grammar change, valid anywhere `//` is valid.
+- D3 Identity: content-hash (file+text) for inline, ULID for sidecar.
+- D4 Anchors v1: inline(file:line) · page(route) · file(path, json_path?).
+  Element-pin (selector) deferred to W4.
+- D5 Types are DATA: `%comment_type` entries (stdlib defaults + project-scoped
+  in `_prelude.st`) — registry data via THE general PROJECT OVERLAY mechanism
+  (auto-loaded before any page compile, never routed); add a type, it joins
+  pill picker + MCP validation + `check` roster for free.
+- D6 ONE scanner (`src/comments.rs`) → three readers (pill route, check, MCP).
+- D7 Pill = `stdlib/comments/__dev__/pill.st`, leftmost dock widget, routes
+  `/__spacetime/comments/{status.json,types.json,add,update}`.
+- D8 MCP tools st_comments_{list,add,update,types}; agent_hint travels inline.
+- D9 Status: open | in-progress | resolved | wontfix + claimed_by +
+  author{kind: human|agent}.
+- D10 Agency-tier mapping: sidecar record = future Ash resource; route JSON =
+  hosted API contract; pure-.st pill = same UX, different base URL.
+
+NOTE [2026-07-27]: Decision points resolved via design review: sigil
+`//@type(meta): text`; sidecar `<project>/.comments/<id>.json`; dock order
+leftmost; v1 anchors inline+page+file (element-pin → W4).
+
+* Waves
+
+** ITEM W1 — Comment model + ONE scanner
+:PROPERTIES:
+:CUSTOM_ID: PLAN-123-comments-pill-for-spacetime-serve-design::w1-model-scanner
+:END:
+
+*** Target
+- =src/compiler.rs= — THE PROJECT OVERLAY: auto-load =<site_dir>/_prelude.st=
+  into the MetaRegistry before any page compile (one general mechanism;
+  =%comment_type= is its first citizen — future kinds ride free)
+- =src/comments.rs= (NEW) — the ONE scanner + model
+- =src/parser/comments.rs= — extend with =//@= payload parsing
+- =src/parser/meta_ast.rs=, =src/parser/mod.rs= — =CommentTypeDefAst= + parse
+  (mirror =parse_migration_def=, src/parser/mod.rs L3874-3988)
+- =stdlib/comments/entries/*.st= (NEW) — 6 default =%comment_type= entries:
+  note, todo, question, bug(severity string?), design,
+  agent-task(acceptance string, priority string?)
+- =src/metasystem/registry.rs= — add =stdlib/comments/entries= to STDLIB_DIRS
+  (=__dev__= pill dir NEVER listed — migrations carve-out precedent,
+  registry.rs L118-122)
+- =src/stdlib_embedded.rs= — embed =stdlib/comments/entries= too (registry
+  must work without the filesystem — migration-entry precedent, L525-551)
+
+*** Change
+1. Model (serde): CommentRecord {id, type, status, author{kind,name},
+   claimed_by?, created_at, updated_at,
+   anchor(Inline{file,line}|File{file,json_path?}|Page{route}), text, meta,
+   thread[]}; CommentTypeDef {id, label, docs, fields[{name,type,required}],
+   color?, agent_hint?}.
+2. Inline harvest: recognize =^//@= in extract_comments output, parse
+   =@type(meta): text= payload. Bare =//@:= = note. MULTILINE: body lines
+   carry the explicit =//@>= marker — unmarked =//= lines are NEVER absorbed;
+   bare =//@>= = paragraph break; a =//@>= with no live header above (blank
+   line / non-comment / another =//@= in between) is an orphan → validation
+   warning "continuation without header". Content-hash id = hash(file + type
+   + meta + FIRST text line) — body edits never orphan state.
+3. Sidecar IO: read =<project>/.comments/*.json= (ULID names), schema-validate;
+   state-only records join inline by content-hash id.
+4. Type roster = registry query on the merged registry (stdlib entries via
+   STDLIB_DIRS + the _prelude.st overlay). Convention enforcement: a
+   =%comment_type= in a PAGE file → compiler warning "project declarations
+   live in _prelude.st" (page compiles; type NOT in roster). Duplicate type
+   id across stdlib/project → load error (mirror migration id uniqueness).
+   Load-time roster validation (unique ids, field types ∈ {string, number,
+   bool, ident}, required-before-optional, label+docs present) — mirror
+   migration_chain_load_errors.
+5. Merge + validation: unknown type, meta shape mismatch (unknown key / missing
+   required / wrong scalar kind), orphan (sidecar id, no live anchor), stale
+   anchor (file gone).
+6. Overlay cache invalidation: =_prelude.st= mtime joins the compile-cache key
+   (mirror =hash_stdlib_mtimes=, compiler.rs L91) — editing a comment type
+   must recompile/re-roster without a server restart.
+
+*** Edge
+- Text after first =: = is literal (colons, =//= OK); quoted meta strings
+  escape =\"=.
+- Inline comment edited → new hash → old sidecar orphaned (by design; W4
+  re-anchor UX).
+- =//@= / =//@>= inside =/* */= NOT parsed in v1 (block form dropped —
+  marked continuation covers multiline, one form only).
+- Unmarked =//= lines are never absorbed — zero ambiguity; a =//@>= orphan
+  (no live header) is a validation warning, not silent loss.
+- PARSE GATE: a fixture page inline-=//@= comments compile with ZERO effect
+  (page output byte-identical with/without them) AT FILE AND CSS SCOPE;
+  _prelude.st itself is never routable/compilable as a page.
+- HTML MARKUP IS OUT OF SCOPE (measured W1): inside `<div>…` a =//= line is
+  LITERAL text that renders — pre-existing language behavior. The scanner
+  takes caller-supplied exclusion ranges (=scan_source_excluding=); an
+  excluded header must not open a continuation run. W2: the pill's add-form
+  must refuse an inline anchor inside markup and offer page/file instead.
+- Payload kv is a small documented TOOLING grammar inside comment text —
+  language grammar untouched; values limited to string/number/bool/ident.
+- EVOLUTION: scanner parses payload LENIENTLY (old+new forms) — it is the ONE
+  versioning point for =//@= syntax (no =%migration= waves for trivia);
+  sidecar records carry ="v": 1=, lenient read, upgrade-on-write. INVARIANT:
+  comment syntax is never compile-relevant (worst-case evolution = warning).
+- extract_comments is double-quote-string-aware only — document + fixture the
+  limits: =//@= inside single-quoted strings / JS template literals in
+  =%primitive= bodies must NOT harvest (false-positive risk).
+- Content-hash normalization: trim + collapse whitespace before hashing.
+- CONCURRENCY: cross-process read-modify-write (serve + MCP on one record) is
+  last-writer-wins — tmp+rename prevents corruption, not lost updates.
+  Accepted v1 (agency tier's DB is the real answer); noted in the record.
+
+*** Acceptance
+- =cargo test --lib comments= green: payload parse (all types, bare note, meta
+  kv, colon-in-text, =//@>= multiline + orphan-continuation detection),
+  overlay fixtures (_prelude.st type joins the roster; type-in-page →
+  convention warning; duplicate id → load error), inline =//@= parse gate
+  (zero compile effect), fixture-project scan, merge, orphan +
+  shape-validation diagnostics.
+- No server.rs / mcp / CLI changes in this wave.
+
+** ITEM W2 — Serve surfaces: routes + pill + dock wiring
+:PROPERTIES:
+:CUSTOM_ID: PLAN-123-comments-pill-for-spacetime-serve-design::w2-serve-surfaces
+:DEPENDS: PLAN-123-comments-pill-for-spacetime-serve-design::w1-model-scanner
+:END:
+
+*** Target
+- =src/server.rs= — =compile_comments_widget_raw= (mirror L2425/L2466), routes
+  in =create_router_raw= (L145-228), =host_widget_inject= wiring (L2928-2995),
+  =_*.st= routing exclusion (_prelude.st is never served as a page)
+- =stdlib/comments/__dev__/pill.st= (NEW) — mirror
+  =stdlib/migrations/__dev__/pill.st= anatomy
+
+*** Change
+1. Routes: =GET /__spacetime/comments/types.json= (roster from the merged
+   registry via scanner),
+   =GET …/status.json?route=&file=&status=&type== (merged records + orphans),
+   =POST …/add= {type,anchor,text,meta?,author} (validates against roster →
+   4xx on shape mismatch), =POST …/update= {id,status?,reply?,text?},
+   =…/runtime.js= + =…/styles.css=.
+2. Injection: comments widget LEFTMOST in =.st-dev-dock=; one CSS link + one
+   runtime script; update the dock marker comment (L2972 lists three pills).
+3. Pill .st: =st-comments-widget__pill/__panel= classes (exclusivity free per
+   DEV_DOCK_EXCLUSIVE_PANELS_JS), signals prefixed =$com=, =@data fetch=
+   status.json (refresh 2s), writes via =@host= + =@data signal= POST
+   (migrations-apply pattern — no WebSocket in v1). File-scope HTML root
+   (template-only pill injects empty HTML — inspector documents this).
+   Panel: type chips, status flow, claim, reply thread, add-form with type
+   picker driven by types.json, orphan section (read-only in v1).
+
+*** Edge
+- Shared global reactive scope → every signal =$com…= prefixed.
+- Pill label element uses =__pill-label=, never a class ending in =__pill=
+  (dock policy resolves pills by exact suffix — locked test, server.rs
+  L8095-8121).
+- add/update writes must be atomic per sidecar file (write tmp + rename) — the
+  dev server watches the project tree.
+- 4 widgets widen the dock — check narrow-viewport CSS.
+- Pill add: =author= defaults to {kind: "human", name: git config user.name}
+  (overridable in the add-form); explicit =author= in the POST body wins.
+
+*** Acceptance
+- Integration tests: route round-trips (add → visible in status.json → update
+  → resolved), validation 4xx on unknown type/bad meta, types.json contains
+  stdlib defaults + a project-scoped type.
+- Dock policy tests extended to 4 widgets; the "all pills disappeared"
+  regression test (server.rs L7986) now asserts 4.
+- =cargo test --test integration_tests= green; manual
+  =cargo run -- serve tests/fixtures/<name>/= smoke.
+
+** ITEM W3 — Agent surfaces: MCP tools + check section
+:PROPERTIES:
+:CUSTOM_ID: PLAN-123-comments-pill-for-spacetime-serve-design::w3-agent-surfaces
+:DEPENDS: PLAN-123-comments-pill-for-spacetime-serve-design::w1-model-scanner
+:END:
+
+*** Target
+- =src/mcp/tools.rs= — 4 descriptors in =list()= (L23-231), 4 dispatch arms in
+  =call()= (L233-258), handlers returning =Result<(String, Value), String>=
+- =check= command (src/main.rs / src/cli) — comments section + diagnostics
+
+*** Change
+1. Tools (state via =McpState= workspace root / open envs — no separate state):
+   - =st_comments_types= {env?} → roster
+   - =st_comments_list= {env?, file?, status?, type?} → records; each row
+     carries its type's =agent_hint= INLINE
+   - =st_comments_add= {env, type, anchor, text, meta?} — author.kind="agent",
+     name from client session
+   - =st_comments_update= {id, status?, reply?}
+2. =spacetime check= section: counts by status/type, one row per open comment
+   (id · type · anchor · text · hint), plus warnings: orphan, stale anchor,
+   unknown type, meta shape mismatch. Informational — never fails the build.
+
+*** Edge
+- MCP env may be a project dir OR a workspace subdir — resolve .comments/ at
+  the env root, error clearly if none.
+- Tools write the SAME sidecar files the pill writes → both ride
+  src/comments.rs IO (no second writer).
+- Agent name: accept an optional client-supplied =agent_name=, default "agent".
+- Roster source: the merged registry (stdlib + overlay) — build once per env,
+  cache keyed on =_prelude.st= mtime (NEVER a full stdlib load per tool call).
+
+*** Acceptance
+- MCP round-trip test: open env → add → list (row present with hint) → update
+  (status + reply persisted in sidecar file).
+- =check= output snapshot test on a fixture project (open comments + warnings).
+- tools/list contains the 4 new descriptors with strict JSON Schemas.
+
+** ITEM W4 — Hardening: orphans, resources, prune, element anchors, docs
+:PROPERTIES:
+:CUSTOM_ID: PLAN-123-comments-pill-for-spacetime-serve-design::w4-hardening
+:DEPENDS: PLAN-123-comments-pill-for-spacetime-serve-design::w2-serve-surfaces PLAN-123-comments-pill-for-spacetime-serve-design::w3-agent-surfaces
+:END:
+
+*** Scope (each its own commit, tests colocated)
+1. Orphan UX: pill re-anchor (pick new file/line) + dismiss; =check= hints.
+2. (DROPPED — superseded by =//@>= marked continuation in W1; one comment
+   form only.)
+3. MCP resource =comments://<env>= read-only snapshot + subscribe (resources.rs
+   L10-157 pattern).
+4. Prune-resolved: delete resolved inline =//@= lines (header + continuation
+   run) from source via the inspector's guarded EditAst WS rail (source_hash +
+   span_text expectations, inspect-write.st L36-82) — the ONLY source-writing
+   pill action.
+5. Element anchoring: reuse inspector pick mode + selector projection →
+   anchor Element{route, selector}.
+6. Docs: docs/language/comments.md (same shelf as docs/language/migrations.md
+   — syntax + surfaces + agency-tier contract), AGENTS.md command list, demo
+   project fixture.
+
+*** Acceptance
+- Each item: RED→GREEN test using the same machinery it extends (headless .st
+  tests where a page is involved — see docs/testing/README.md).
+- Full suite green: =cargo test --lib=, =--test integration_tests=,
+  =--features headless -- test tests/ --headless=.
+
+NOTE [2026-07-27]: Modularity generalized (user pushback): project-scoped declarations live in `<project>/_prelude.st` — THE project overlay, auto-loaded into the MetaRegistry before any page compile, never routed. %comment_type is the first citizen; future kinds (project capture-types, agency-tier %role) ride the same mechanism. Name chosen by user: _prelude.st (over _preamble.st). This replaces the earlier comments.st convention AND upgrades D5 mechanics: roster = registry query on the merged registry (no scanner substring-gate). Convention enforcement: %comment_type in a page file → compiler warning; duplicate id → load error. W1 now includes the compiler overlay hook (src/compiler.rs); W2 includes the `_*.st` routing exclusion. Also locked: multiline = `//@>` marked continuation (user-chosen; zero absorption, orphan-detecting).
+* W1 LANDED (2026-07-31)
+
+Commits: 4e6634ee (declarations + scanner) · 8d4de407 (project overlay) ·
+52d63955 (Gate-1 swarm fixes).
+Gate: =cargo test --lib comments= 81 ok · =cargo test --lib= 2991 ok, 0 failed.
+
+** Two design corrections the implementation forced
+
+1. =//= IN HTML MARKUP IS LITERAL (corrects D2's "valid anywhere // is
+   valid"). Measured with a real build: inside `<div>…` a `//` line renders
+   to the visitor. Pre-existing language behavior, consistent with a bare
+   `$x` being literal there. The scanner therefore takes caller-supplied
+   exclusion ranges (=scan_source_excluding=); harvesting in-markup markers
+   would file VISIBLE PAGE COPY as a private work item and let the pill offer
+   to "resolve" text the reader can see. Two tests pin both halves.
+   → W2 OBLIGATION: the add-form must refuse an inline anchor inside markup
+     and offer page/file instead.
+
+2. IDENTITY NEEDED A SPECIFIED HASH. The first cut used DefaultHasher, whose
+   algorithm Rust reserves the right to change between releases — and this
+   value is the sidecar FILENAME. A toolchain upgrade would have orphaned
+   every comment in every project at once. Now BLAKE3, length-prefixed, with
+   a test that fails if the algorithm ever drifts.
+
+** Gate 1: 3 reviewers, 11 defects, all fixed (52d63955)
+
+P1: DefaultHasher persistence · path traversal via =record.id= (`../victim`
+escaped `.comments/`) · =merge= orphaned records from files the scan never
+read (a filtered read presented every live comment elsewhere as an orphan
+awaiting dismissal).
+
+P2: duplicate headers in one file shared an id · a quoted `(` in metadata hid
+the header (comment vanished from the roster) · an unterminated quoted value
+was stored as written-plus-backslash · =extract_comments= did not count
+newlines in strings so every comment after a multiline string reported the
+wrong line · read_dir errors were all treated as "no comments" · duplicate
+sidecar ids collapsed silently · concurrent writers shared one temp path ·
+no load-time roster validation existed (=unknown_field_kinds= was written but
+never read) · W0717 warned about IMPORTED declarations · a page explicitly
+importing its own =_prelude.st= failed to compile.
+
+REJECTED with evidence: extending =extract_comments= to single-quoted and
+backtick strings. 185+ stdlib files write apostrophes in prose, the language
+has no single-quoted string form, and backticks are THE hole form — treating
+either as a delimiter would swallow every comment after any contraction.
+
+** Carried into W2/W3
+- =scan_source_excluding= needs HTML block spans from the caller's parse.
+- =merge= vs =merge_full_scan=: routes/MCP must pass real scan coverage.
+- =comment_type_load_errors= runs on every registry load AND after overlay.
+
+* W2-W4 LANDED (2026-07-31)
+
+Commits: 79487a34 (W2 serve) · 47c1df8f (W3 agents) · 4a5982ff (W2 acceptance) ·
+67cb870c (orphan recovery) · 89f00a50 (comments:// resource) · 897b1499 (prune) ·
+f7c0fd1c (element anchors) · 30db92fb (docs + demo) · plus eight fix commits
+from the three reviewer gates.
+
+** What shipped
+
+- 8 routes, a pure-Spacetime pill (leftmost in the dock), 4 MCP tools, a
+  =comments://= resource, and an informational =check= section.
+- Anchors: inline · file · page · element. Statuses: open · in-progress ·
+  resolved · wontfix.
+- Orphan recovery (re-anchor preserves id/status/author/thread; dismiss
+  deletes deliberately) and prune-resolved through the guarded write rail.
+- docs/language/comments.md + tests/fixtures/comments-demo/.
+
+** DEFERRED, deliberately
+- The pill has no ELEMENT PICKER. Reusing the inspector's pick mode would have
+  required a new runtime mechanism, i.e. custom JavaScript, which the repo
+  bans. The model, routes, and MCP schema support element anchors; only the
+  composer affordance waits. Documented as such, with a test that fails if the
+  pill grows one without the doc changing.
+- =comments://= SUBSCRIPTIONS are accepted but emit no change notifications
+  (the MCP layer has no notification producer). Documented as read-and-re-read.
+
+** The three gates found 25 real defects. The five that mattered most:
+
+1. THE DELETE RAIL AUTHORIZED NOTHING. =__delete_spans= is reachable from the
+   public dev websocket; its hash/text guards proved a span still meant what
+   the caller was shown, never that the caller was allowed to delete it. Any
+   connected client could delete any byte range of any project file by echoing
+   back its contents. Authorization now lives IN the rail
+   (=comments::deletable_spans_in=), recomputed from source + sidecar.
+2. HEAD DID NOT BUILD \u2014 twice. A needed =pub= and a =Serialize= derive sat
+   uncommitted while every local run passed. Lesson recorded: verification
+   must build from a stashed-clean tree, or =cargo test= tests the developer's
+   machine rather than the commit.
+3. THE PILL WAS UNUSABLE while every handler test passed \u2014 untagged anchor
+   (rejected before any handler ran), unfillable required metadata, invisible
+   fetch errors, a rendered field that does not exist. Handler tests cannot
+   prove a client works; pill CONTRACT tests now assert the payload it builds.
+4. IDENTITY WAS NOT PERSISTENCE-STABLE (DefaultHasher, whose algorithm Rust
+   may change between releases) while being used as the sidecar FILENAME. A
+   toolchain upgrade would have orphaned every comment in every project.
+5. ONE STORE ANSWERED TWO WAYS, repeatedly: =check= read the cwd instead of the
+   checked project; MCP forked CommentRecord by injecting agent_hint; orphan
+   rows had a different shape than record rows and ignored filters; literate
+   =.st.md= comments were visible to agents and invisible to the pill. Each
+   fixed at the shared point rather than per-caller.
+
+** Carried forward
+- FUP: element picker in the composer, once a reusable selector projection
+  exists that does not require new JavaScript.
+- FUP: =comments://= change notifications, when the MCP layer grows a
+  notification producer.
+- Cross-process concurrency remains last-writer-wins by design; the hosted
+  tier's transactions are the real answer (D10).

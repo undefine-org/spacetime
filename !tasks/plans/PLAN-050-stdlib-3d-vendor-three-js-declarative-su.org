@@ -1,0 +1,129 @@
+#+TITLE: stdlib/3d — vendor three.js + declarative surface + 4 showcases; retire hand-rolled WebGL/scene
+#+STATE: REVIEW
+#+SESSION_ID: 1510a264694da858
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-20T13-59-24-837Z_1510a264694da858.jsonl]]
+#+CUSTOM_ID: PLAN-050-stdlib-3d-vendor-three-js-declarative-su
+
+* Initial Message
+
+vendor threejs as stdlib/3d (or three if 3d doesn't work) and provide me with spectacular showcases of that ability in demos/3d/. Do your exploration+brainstorm, write your desired showcase in-chat, record your plan in a PLAN, then implement it end-to-end with spacetime tests to validate your assumption, and browser testing to go even further in the excellence
+
+* Goal
+
+Vendor three.js (r0.184.0) as `stdlib/3d/` behind our own `@`-surface (sigil harmony:
+authors write `@stage`/`@object`/`@light`, bind `$signals`, ref `&els`; `THREE` never
+leaks into site code). Replace the flaky hand-rolled WebGL engine entirely. Ship four
+award-grade showcases in `demos/3d/`, each validated by Spacetime `.test.st` (logic rung,
+gating) + real-Chromium `--cdp` browser testing (paint rung, visual/interaction).
+
+three.js is THE 3D engine (one need, one impl). No separate "raw webgl" module — three's
+RawShaderMaterial/EffectComposer cover the low-level escape hatch.
+
+* Empirically de-risked (W0, before any code)
+
+- bun resolves addons' bare `'three'` import via vendor/tsconfig.json `paths` alias
+  (three → build/three.module.js; three/addons/* → examples/jsm/*). 20 modules, 0.83MB IIFE.
+- bun discovers tsconfig by walking up from the ENTRY file — cwd-independent, so build.rs
+  (invoked from repo root) bundles correctly. VERIFIED from repo root.
+- Bundle exposes globalThis.THREE (r185) + THREE.addons.{OrbitControls,GLTFLoader,
+  DRACOLoader,EffectComposer,RenderPass,UnrealBloomPass,ShaderPass,OutputPass,
+  RGBShiftShader,RoomEnvironment}. Scene graph + glass MeshPhysicalMaterial + 2940-vert
+  IcosahedronGeometry construct headless in bun. VERIFIED.
+- three.js full tree 944M working copy, but only SHA + 0.83MB bundle land in our repo
+  (same model as pretext/snarkdown submodules). build/ (re-exports three.core.js) must be
+  whole; examples/jsm + examples/fonts needed for addons/DRACO.
+
+* Architecture
+
+stdlib/3d/: MODULE.st, index.st, vendor.st (%vendor three { entry: vendor/three-entry.ts,
+bundle: bun, exports {THREE}, out: vendor/three.bundle.js, license: MIT }),
+vendor/{three submodule, three-entry.ts, tsconfig.json, three.bundle.js, PROVENANCE.md},
+primitives/ (three-stage [renderer+scene+camera+rAF+resize+DPR+context-loss+tone-map — THE
+boundary], three-object, three-light, three-orbit, three-parallax, three-scroll, three-post,
+three-gltf, three-particles), macros/ (stage, object, light, orbit, parallax, scroll-3d,
+post, gltf, particles, env), tests/.
+
+Reuse proven rails: cross-scope via el._st* element props; pointer.st + scroll.st primitives
+(top-level, survive deletion); demand-driven %vendor emission (lean law).
+
+* Waves
+
+** W1 — vendor rail
+- git submodule add mrdoob/three.js → stdlib/3d/vendor/three (pin r0.184.0)
+- three-entry.ts, tsconfig.json, PROVENANCE.md, vendor.st, MODULE.st, index.st
+- cargo run -- vendor build 3d → three.bundle.js committed
+- build.rs: add three BundleSpec; src/stdlib_embedded.rs: include 3d module files
+- Accept: bundle builds, THREE global materializes, cargo build green
+
+** W2 — primitives + macros (the surface)
+- three-stage primitive first (the engine boundary), then object/light/orbit/parallax/
+  scroll/post/gltf/particles; macros wrap them 1:1
+- Accept: cargo check green; a minimal @stage{@object} page compiles + emits the bundle
+
+** W3 — delete old engine
+- rm stdlib/macros/scene/ + stdlib/primitives/webgl/ (whole dirs incl examples)
+- prune stdlib/index.st imports + src/stdlib_embedded.rs include_str entries
+- delete tests/webgl/, tests/webgl_tests.rs, tests/v8_runtime/webgl_scope_tests.rs +
+  integration refs; strip @scene ambient blocks from demos/spacetime-docs + delete old
+  scene demos (text-engine scene backdrop)
+- Accept: cargo build + cargo test --lib green (no scene/webgl symbols)
+
+** W4 — four showcases
+- demos/3d/{glass-hero, particle-morph, gltf-studio, scroll-tunnel}/ — each .st + page shell
+- Accept: each compiles + serves; bundle emitted only on these pages (lean law)
+
+** W5 — validation
+- .test.st per showcase (logic rung, gating): THREE present, scene built, counts, types
+- --cdp browser tests + puppeteer: non-blank WebGL pixels, FPS, orbit-drag, scroll-morph
+- Accept: logic tests gate green; CDP paint tests pass; manual browser screenshot review
+
+* Anti-goals
+- No npm/lockfile/node_modules/CDN. Submodule pin only.
+- No JS outside %emit js + the vendored bundle.
+- No Rust reimpl of three constructs.
+- No keeping the old WebGL engine alive (full delete, per user).
+
+* Outcome (2026-06-20)
+
+DELIVERED. stdlib/3d module live (three.js r0.184.0 vendored), old WebGL/scene engine
+deleted, 4 showcases in demos/3d/ rendering in real Chromium.
+
+** Shipped
+- Vendor rail: submodule @ 281815c, three-entry.ts (THREE + 9 addons; DRACO excluded —
+  uses import.meta.url which breaks the classic-script runtime), tsconfig paths, 0.82MB
+  bundle, PROVENANCE, build.rs BundleSpec, vendor.st/MODULE.st/index.st. `cargo build`
+  lazily rebundles + stamps; lean-law demand emission verified (unused import ships 0 bytes).
+- Surface: 10 primitives + 10 macros — @stage (engine boundary: renderer+scene+camera+rAF+
+  resize+DPR+context-loss+ACES tone-map), @object (8 shapes; standard/physical/glass/basic
+  materials; iridescence + flatShading added), @light (4 types), @env (RoomEnvironment IBL),
+  @orbit, @parallax, @scroll-3d (morph/dollyZ/spinY/camY), @post (bloom + rgb-shift),
+  @gltf (GLTFLoader), @particles (30k morphing Points field).
+- Deleted: stdlib/macros/scene/ + stdlib/primitives/webgl/ (whole dirs), 35 include_str
+  entries across stdlib_embedded.rs + lsp/form_registry.rs, tests/webgl*, 2 metasystem
+  fixture tests, stripped @scene backdrops from 3 demos. cargo build + cargo test --lib green.
+- Showcases: glass-hero (iridescent faceted gem), particle-morph (30k scroll-morph),
+  gltf-studio (DamagedHelmet PBR, studio-lit — the loader rail the old engine never had),
+  scroll-tunnel (scroll-driven dolly + chromatic aberration). README documents each.
+- Tests: 8 Rust emit tests (src/compiler.rs three_*) GATE green — engine injection, material/
+  geometry mapping, lights, particles, post, orbit, lean-law. .test.st paint-rung tests
+  written (stage/materials/particles) but await BUG-099 (CDP harness) + BUG-051 (fixture nesting).
+- Dev server: added .glb/.gltf/.bin/.ktx2/.hdr/.exr MIME handling (src/server.rs) so the
+  @gltf rail's assets serve.
+
+** Key findings (saved to memory + follow-ups)
+- three transmission = screen-space refraction; needs rich content BEHIND the object. On a
+  dark minimalist hero it collapses to opaque pearl (env reflection dominates). @post
+  (EffectComposer) also breaks transmission. ∴ pivoted glass-hero to thin-film iridescence
+  (surface-colour, angle-stable). Oracle-confirmed.
+- Iridescence needs a rich HDR env for vivid rainbow; RoomEnvironment (white/gray) yields
+  only a subtle pearl sheen. Reliable award-glass on dark bg is genuinely hard in vanilla three.
+
+** Follow-ups filed
+- FUP-078: leading directive-bearing rule emits empty runtime JS (no preceding plain rule).
+- FUP-079: bare identifier to a :string named macro arg emits empty JS (no diagnostic).
+- (existing) BUG-099 CDP harness, BUG-051 fixture nesting — block the .test.st paint gates.
+
+** Not done / deferred
+- DRACO-compressed GLB (import.meta.url vs classic-script runtime) — needs module-runtime emit.
+- Vivid transmissive glass on dark bg — needs an HDR env asset or a designed backplate.
+- Static-export (build) copying of .gltf/.bin model assets (serve works; export path untested).

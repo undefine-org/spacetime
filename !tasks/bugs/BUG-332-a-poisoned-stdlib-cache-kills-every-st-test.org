@@ -1,0 +1,199 @@
+#+TITLE: A poisoned stdlib cache kills every .st test file, and the run still exits 0
+#+STATE: DONE
+#+CUSTOM_ID: BUG-332-a-poisoned-stdlib-cache-kills-every-st-test
+#+PRIORITY: #A
+
+* Symptom
+
+Observed while working BUG-279. Every `.st` test file began failing with:
+
+#+begin_example
+E0956: unknown primitive: type
+#+end_example
+
+`@type` is a core primitive, so this reads as a catastrophic regression in the
+metasystem. It was not one. The cause was a CORRUPT INCREMENTAL CACHE:
+
+#+begin_example
+stdlib/.cache/registry.bin
+[CACHE] deserialize failed: string is not valid utf8
+#+end_example
+
+Deleting the file fixed it — the registry rebuilt and `@type` compiled fine.
+
+* CORRECTION [2026-08-07] — two of the three claimed defects were WRONG
+
+The original filing below inferred the cache defects from a single =[CACHE]
+deserialize failed= log line WITHOUT reading =src/metasystem/incremental_cache.rs=.
+On reading it, the cache layer already does everything I said it should:
+
+| claimed defect | reality |
+|----------------+---------|
+| "writes are not atomic" | =write_binary_cache= (L335) ALREADY writes to =.bin.tmp= then =rename=s |
+| "failed deserialize proceeds against a wrong registry" | =load_binary_cache= (L353) ALREADY returns =None= on any error → full rebuild |
+| "a poisoned registry gets persisted" | the write is ALREADY guarded by =all_errors.is_empty()= (L147), with a comment explaining exactly this hazard |
+
+It also already bounds file size to reject absurd blobs, and version+canary
+checks the struct layout.
+
+So the =E0956= burst was NOT a cache-integrity failure. The actual cause: a
+concurrent writer had stdlib SOURCE mid-edit, the registry genuinely failed to
+load, and — correctly — the poisoned result was refused for caching. The
+transient error was real; the cache did its job. Deleting =registry.bin= "fixed"
+it only because by then the sources were consistent again.
+
+This correction is the point of the item, not an embarrassment to hide: a fix
+built on defects 1-2 would have rewritten correct code and left the ONE real
+defect — below — untouched.
+
+* The one REAL defect: a vacant run exits 0 and prints GREEN
+
+=src/main.rs:5029= is the entire decision:
+
+#+begin_src rust
+if failed > 0 { std::process::exit(1); }
+#+end_src
+
+So a file that executed NOTHING (`0 passed, 0 failed, 4 skipped`) exits 0 AND
+prints in the green branch (L5019), because green is selected by =failed == 0=
+rather than by anything having actually run. MEASURED on this bug's own gate
+file under =--headless=, not inferred.
+
+Why that matters here: whenever stdlib load DOES break (as it transiently did),
+every affected =.st= file executes zero claims — and the suite reports success.
+The cache behaved correctly and CI would still have gone green over a corpus
+that compiled nothing.
+
+* Why it happened
+
+A concurrent writer in the same worktree (another agent, mid-edit on stdlib
+sources) invalidated/rewrote the cache while a compile was reading it. The cache
+is a single 1MB `registry.bin` blob with no integrity check and no versioning
+visible at the failure site.
+
+* Two defects, and the second is the serious one
+
+** 1. A failed deserialize degrades to a WRONG registry instead of a rebuild
+
+`[CACHE] deserialize failed` is logged, then compilation proceeds against an
+empty/partial registry. The user-visible consequence is a nonsense diagnostic
+pointing at their own source (`unknown primitive: type`) for a fault that is
+entirely internal. The correct behavior on a failed deserialize is to DISCARD
+and rebuild — a cache that cannot be read is a cache miss, never a fact.
+
+** 2. Under `--headless` this kills the whole suite and the run EXITS 0
+
+This is the one that matters. Stdlib load errors degrade to warnings under
+`--headless`, and a file whose claims cannot run is reported as SKIPPED:
+
+#+begin_example
+0 passed, 0 failed, 4 skipped   → exit 0
+#+end_example
+
+MEASURED, not inferred — that is a real run of
+`tests/bugs/BUG-279-reactive-background-shorthand-resets-longhands.test.st`
+under `--headless`. An entirely dead test file is INDISTINGUISHABLE from a
+passing one, in the exit code AND in the summary line. In CI, a poisoned cache
+turns the whole `.st` suite green-by-vacancy.
+
+This compounds the documented hazard in AGENTS.md ("a skipped gate reads exactly
+like a passing one") from a per-claim footgun into a whole-suite silent failure.
+
+* Fixes
+
+1. *Failed deserialize ⇒ rebuild.* Treat any cache read error as a miss. Add a
+   format version + checksum so a partial/foreign blob is rejected cheaply
+   rather than parsed into garbage.
+2. *Write atomically.* Serialize to a temp file and rename into place, so a
+   reader never observes a half-written registry. This removes the concurrent
+   writer race at the source.
+3. *A skipped-only run must not exit 0.* At minimum: if a file produced ZERO
+   executed claims, that is a FAILURE of the file, not a skip. Alternatively a
+   `--require-executed` / non-zero exit when `passed == 0 && skipped > 0`.
+   Whatever the spelling, `0 passed` must never be a green CI signal.
+4. *A stdlib load error must never present as an author-source diagnostic.*
+   `unknown primitive: type` sent me looking at `@type` in my own file. It
+   should say the registry failed to load, and name the cache path.
+
+* Gates
+
+- A test that writes a deliberately corrupt `stdlib/.cache/registry.bin`, then
+  compiles a trivial page, and asserts it compiles CLEAN (rebuild path) rather
+  than emitting E0956.
+- A test asserting a file whose every claim is skipped yields a NON-ZERO exit.
+  Watch it fail first: today it exits 0.
+
+* Relationship to BUG-326
+
+BUG-326 is the OTHER half of "the registry you get depends on where you stand"
+(cwd-relative stdlib resolution). This is not a duplicate: 326 is about WHICH
+stdlib is found, 332 is about a found stdlib being served CORRUPT and the
+failure being invisible. They share the consequence — a verdict you cannot
+trust — and should probably be read together.
+
+* Cost of not fixing
+
+I lost real time to a phantom regression, and the honest failure mode is worse
+than lost time: had I not noticed the `[CACHE]` line, the correct reading of the
+evidence was "the metasystem is broken" — and the suite would have agreed with
+me by exiting 0.
+
+* DONE [2026-08-07]
+
+Fixed the ONE real defect. Defects 1-2 were withdrawn (see CORRECTION) — the
+cache layer was already correct, and "fixing" it would have rewritten working
+code while leaving the actual hole open.
+
+*** The invariant
+
+The naive rule (=skipped > 0= ⇒ fail) would have been WRONG and destructive: a
+=needs layout= claim refusing a layout-less backend is the fidelity ladder
+working as designed, so that rule fails every legitimate =--headless= run of a
+file carrying layout claims. The honest invariant is narrower:
+
+#+begin_src rust
+pub fn is_vacant(&self) -> bool { self.total > 0 && self.executed() == 0 }
+pub fn is_success(&self) -> bool { self.all_passed() && !self.is_vacant() }
+#+end_src
+
+Tests EXISTED and none RAN ⇒ the run proved nothing ⇒ it must not claim success.
+An EMPTY selection is deliberately not vacant (nothing was claimed, so nothing
+is falsely claimed proven — =--filter= workflows that match nothing still pass).
+
+*** Wiring
+
+=src/test_runner.rs= gains =executed()= / =is_vacant()= / =is_success()=, and
+=src/main.rs= consults =vacant= at BOTH decision sites — the exit code
+(=failed > 0 || vacant=) and the summary colour. The colour mattered: green was
+selected by =failed == 0= alone, so a dead run printed GREEN as well as exiting
+0. A vacant run now prints yellow with a diagnostic naming both possible causes
+(a claim that needs =--cdp=, or a stdlib/page that failed to load).
+
+*** Gates — watched failing first
+
+4 unit tests in =src/test_runner.rs=, seen RED (=no method named is_vacant=)
+before the predicates existed:
+- =a_run_that_executed_nothing_is_vacant= — the defect.
+- =a_partially_skipped_run_is_not_vacant= — the guard against the over-fix.
+- =an_empty_selection_is_not_vacant= — no tests selected ≠ tests that did not run.
+- =a_failing_run_is_not_success_regardless_of_vacancy= — vacancy must not mask a
+  real failure.
+
+END-TO-END, on the exact command that exited 0 before:
+
+| run | result | exit |
+|-----+--------+------|
+| BUG-279 gate =--headless= (all skipped) | =0 passed, 0 failed, 4 skipped= + "Nothing ran." | *1* (was 0) |
+| BUG-279 gate =--cdp= (all execute) | =7 passed, 0 failed, 0 skipped= | 0 |
+| =tests/repro/gh-17-stylesheet-cssom/= =--headless= | =1 passed, 0 failed, 2 skipped= | *0* |
+
+The third row is the one that matters most: a PARTIALLY skipped run still exits
+0, so the fidelity ladder is intact and this fix cannot be accused of breaking
+every layout-carrying file.
+
+*** What this would have caught
+
+The transient stdlib breakage that opened this item made every =.st= file
+execute zero claims. With this fix, that state now exits 1 and says so, instead
+of reporting success over a corpus that compiled nothing.
+

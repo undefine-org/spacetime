@@ -1,0 +1,98 @@
+#+TITLE: Deduplicate form-directive macro lookup across pipeline
+#+STATE: DONE
+#+SESSION_ID: 14af06f548bc2a02
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-04-05T18-27-38-914Z_14af06f548bc2a02.jsonl]]
+#+CUSTOM_ID: PLAN-013-deduplicate-form-directive-macro-lookup
+
+NOTE [2026-04-05]: All work completed. 3 inline blocks deduplicated into find_macro_by_directive. 4 new tests, 1983 total pass.
+
+
+* Initial Message
+
+Implement these audit recommendations from org://AUD-005-audit-implementation:
+
+Three usages of the scoring pattern. The full "get_all_macros_by_form_directive + filter scope + score + max" block appears in 3 places:
+1. `evaluate_match` (evaluate.rs:122-134) — new
+2. `resolve_evaluated` (resolve.rs:57-70) — new
+3. `resolve_single` (resolve.rs:130-142) — pre-existing
+
+This is a DRY violation at 3 copies. Per the project rules: "DRY at 2. When you write the same pattern a second time, stop and extract a shared helper."
+
+Let me also check whether the test covers the negative case (no matching macro at all):
+
+The test only checks the happy path (directive-derived name finds the macro via fallback). There's no test for:
+1. When the fallback also finds nothing (both `get_macro` and form-directive return None)
+2. Multiple macros matching the same directive (scoring disambiguation)
+
+But the first case is already covered by the pre-existing behavior (returns empty `EvaluatedMatch` with `body_was_evaluated = false`), and the scoring tests exist in `form_scoring.rs`.
+
+Here are my findings:
+
+---
+
+## Findings
+
+### 1. DRY violation: form-directive lookup + scoring block is triplicated
+- **What**: The pattern `get_all_macros_by_form_directive → filter scope → score → max` is now copy-pasted in 3 locations across evaluate.rs and resolve.rs.
+- **Where**: `src/pipeline/evaluate.rs:122-134`, `src/pipeline/resolve.rs:57-70`, `src/pipeline/resolve.rs:130-142`
+- **Why**: Per project rules "DRY at 2", this should be a shared helper (e.g. `find_best_macro_for_form` on `MetaRegistry`). A fourth caller will copy-paste the pattern incorrectly. If the scoring logic changes (e.g. tiebreaker rules), all three must be updated in sync.
+- **Effort**: `small` — extract a method on `MetaRegistry` that takes `&str` name, `&HashMap<String, CapturedValue>` captures, and `&Option<String>` selector, returns `Option<&MacroDefAst>`. Wire it into all three call sites.
+
+### 2. No test for the resolve_evaluated fallback path
+- **What**: The fix in `resolve_evaluated` (resolve.rs:53-71) has no direct test. The unit test only covers `evaluate_match`. If the evaluate fix were reverted but the resolve fix remained, we'd have no test coverage proving `resolve_evaluated` can find form-directive macros.
+- **Where**: `src/pipeline/resolve.rs:53-71`
+- **Why**: Low risk — the full pipeline integration (cargo run inspect, visual test) does exercise this path end-to-end. But a targeted unit test would prevent silent regressions if someone refactors resolve_evaluated independently.
+- **Effort**: `small`
+
+### 3. Dead comment in resolve_evaluated: "shouldn't happen" is now misleading
+- **What**: Line 81 says `"No macro def but we have binds — shouldn't happen, fall through"`. After the fix, this path is even less reachable than before (both evaluate and resolve now have the same fallback). The comment is accurate but could benefit from clarification that both layers now use form-directive lookup.
+- **Where**: `src/pipeline/resolve.rs:81`
+- **Why**: Cosmetic; slightly misleading to a future reader who might think this is a common path.
+- **Effort**: `trivial`
+
+* Context
+
+** Problem
+PLAN-012 fixed the =@on visible= animation chain by adding form-directive lookup fallbacks in =evaluate_match= and =resolve_evaluated=. The fix works correctly but introduced a DRY violation: the pattern (get candidates → filter scope → score → pick best) is now copy-pasted in 3 locations across =evaluate.rs= and =resolve.rs=. Audit AUD-005 flagged this.
+
+** Approach
+Extract a =find_macro_by_directive= method on =MetaRegistry= that combines: direct name lookup → form-directive candidates → scope filter → scoring → best match. Replace all 3 inline blocks with calls to this helper. =resolve_single= retains its additional fallbacks (backward-compat paths) at the call site since they are resolve-specific behavior, not part of the common pattern.
+
+** Key Decisions
+1. Helper lives on =MetaRegistry= in =src/metasystem/registry.rs= — co-located with all other macro lookup methods.
+2. Signature: =pub fn find_macro_by_directive(&self, name: &str, captures: &HashMap<String, CapturedValue>, selector: &Option<String>) -> Option<&MacroDefAst>=.
+3. Semantics: =get_macro= first (direct name), then form-directive lookup with scope + scoring. Exactly matches the current inlined pattern.
+4. Three call sites updated: =evaluate_match=, =resolve_evaluated=, =resolve_single=. The =resolve_single= call site adds its own =.or_else()= chain for backward-compat fallbacks.
+5. Misleading comment on resolve.rs line 81 updated.
+6. Three new tests: registry unit test, resolve_evaluated fallback test, and a negative (nonexistent directive) case covered in the registry test.
+
+* Verification
+
+- =cargo check= — no new warnings
+- =cargo test --lib= — all tests pass (1979 existing + new tests)
+- =grep -c \"get_all_macros_by_form_directive\" src/pipeline/*.rs= returns 0 (all moved to helper)
+- =cargo run -- inspect --layer emit /tmp/test-visible.st= still produces IntersectionObserver JS (no regression)
+
+* Execution Manifest
+
+** Phase 1: Extract and deduplicate
+- [[id:BUG-015-extract-find-macro-by-directive-helper-t]] — Extract =find_macro_by_directive= helper, update all callers, add tests (S, #B, pipeline)
+
+** Completion [2026-04-05]
+
+*** Verification
+
+- =cargo check= — compiles with no new warnings (pre-existing snake_case warnings in unrelated emit.rs tests only)
+- =cargo test --lib= — 1983 tests pass (1979 existing + 4 new): =test_find_macro_by_directive_direct_name=, =test_find_macro_by_directive_form_fallback=, =test_find_macro_by_directive_nonexistent=, =test_resolve_evaluated_form_directive_fallback=
+- =grep -c \"get_all_macros_by_form_directive\" src/pipeline/*.rs= — 0 matches (all moved to helper)
+- =grep -c \"find_macro_by_directive\" src/pipeline/*.rs= — 3 call sites (evaluate.rs:117, resolve.rs:52, resolve.rs:114)
+
+*** Artifacts
+
+- =src/metasystem/registry.rs= — new =find_macro_by_directive= method on =MetaRegistry= (lines 337-362), 3 new unit tests
+- =src/pipeline/evaluate.rs= — replaced inline block with single call, removed unused imports (=macro_scope_matches=, =CaptureMapInput=, =score_macro_form=)
+- =src/pipeline/resolve.rs= — replaced two inline blocks, fixed misleading comment (line 67), removed unused import (=CaptureMapInput=, =score_macro_form=), added =test_resolve_evaluated_form_directive_fallback=
+
+*** Deviations
+
+None.

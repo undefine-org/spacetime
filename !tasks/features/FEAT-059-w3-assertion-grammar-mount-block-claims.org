@@ -1,0 +1,113 @@
+#+TITLE: W3 assertion grammar + @mount: block claims via %capture_type, delete @fixture
+#+STATE: ITEM
+#+SESSION_ID: 14f94e45c6c3f247
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-02T11-06-49-499Z_14f94e45c6c3f247.jsonl]]
+#+CUSTOM_ID: FEAT-059-w3-assertion-grammar-mount-block-claims
+#+LAYER: compiler
+
+* Initial Message
+
+actually, Land the PLAN-026 core now (done/committed); file the testing-macro cluster (@assert swap, @then/@eval nested-match) as a new BUG/PLAN with the diagnosis captured, and STOP — .test.st gating remains blocked
+ on that follow-up. Don't register text tests yet.
+
+Put text tests as FEAT within the plan. Be comprehensive
+
+Wave 3 of [[id:PLAN-027-spacetime-testautomation-infra-fidelity]]. Rewrite the test
+surface from scratch: one block-claim =@then= grammar authored in =%capture_type=
+(replacing ~90 then-* macros), and =@mount= that compiles REAL Spacetime
+(replacing the simulate-with-eval pattern). HARD CUTOVER — leave nothing behind.
+
+* @then block-claim grammar (authored in %capture_type, not Rust)
+#+BEGIN_SRC
+%capture_type claim {
+    ( "not" $negated:claim )
+  | ( $prop:claim_prop $op:claim_op $value:expr )
+  | ( $prop:claim_prop )                       // bare = truthy/exists
+}
+%capture_type claim_prop {
+    ( "computed" "(" $css:ident ")" )          // forces layout rung (W1 inference)
+  | ( "$" $signal:ident )
+  | ( $name:ident )                            // state|text|value|count|attr|…
+}
+%capture_type claim_op { "==" | "!=" | ">=" | "<=" | "<" | ">" | "~>" | "~=" | "matches" }
+%capture_type claim_block { ( $claim:claim ";"? )* }
+
+%macro then { %form { @then $subject:selector { $claims:claim_block } }
+              %emit js { /* each claim → throwing check; computed() ⇒ rung=layout */ } }
+#+END_SRC
+- =~>= sequence-match, =~== contains, =matches= regex. Numeric/string ops as usual.
+- Tolerance =~= v ± e= for timing/float (shared with W5).
+
+* @mount — compiles ANY real .st (replaces @fixture)
+- =@mount { …real .st scopes… }= — inline; compiles nested primitives/directives
+  (relies on W0 block-body emit). NOT fake HTML.
+- =@mount "path.st"= — reference another module (reuses @import resolution).
+- =@mount @self= / =@mount @self <selector>= — mount THIS file's own non-test
+  scopes (co-located component+test). =@self= is the light, isolated reference
+  attempt; general namespacing tracked in [[id:FUP-024-namespace-module-reference-system-supers]].
+  (K1: whatever spelling actually works wins; record final spelling here.)
+- Multiple @mount compose into one world. Reusable fixtures = ordinary .st modules
+  mounted by reference (no separate fixture concept).
+
+* @setup — declarative arrange (shrinks @eval)
+- =@setup { … }= for arranging real DOM/signal state declaratively, so most of the
+  782 @eval / 361 eval(eval()) become data/directives, not raw JS. @eval survives
+  as the sanctioned hatch (twin of %primitive %emit js), now block-form (W0) — no
+  double-eval. Add =cargo run -- test --audit= eval-density report (friction visible).
+
+* HARD CUTOVER (K3 — leave NOTHING)
+- DELETE =@fixture= macro and all then-* assertion macros (~90) once @then{claims}
+  is strictly more expressive. Capability-preserving by construction: enumerate every
+  then-* capability and ensure a claim form covers it BEFORE deletion.
+- If any then-* capability cannot be expressed by the new grammar: file a BUG
+  (blocking) — worst case an FUP — and do NOT leave the old macro as a fallback.
+- The .test.st corpus rewrite is W8 (mechanical subagents); this wave delivers the
+  grammar + @mount + @setup and rewrites a SEED set (the meta-tests in
+  stdlib/testing/meta/ + one unit dir) to prove the cutover end-to-end.
+
+* Tests
+- Each claim op has a positive + negative (mutation) test.
+- =@mount @self .x= mounts a real primitive and an assertion observes its REAL
+  behavior (not simulated) — e.g. a real @state machine drives, history asserted.
+- Deleting a then-* macro does not reduce coverage (the seed rewrite proves parity).
+
+* Depends on
+- [[id:FEAT-056-w0-grammar-bedrock-fix-capture-type-for]] (block bodies emit)
+- [[id:FEAT-057-w1-fidelity-ladder-rung-enum-needs-decla]] (computed() ⇒ rung inference)
+
+* Parent
+[[id:PLAN-027-spacetime-testautomation-infra-fidelity]]
+
+* STATUS (partial — scope core DONE, grammar deferred)
+SHIPPED (commit 61b500f5): BUG-054 scope fix — test-body directives share ONE
+lexical scope (flatten_body_scopes in src/emit/js.rs). @eval mutations compound
+across directives; @try/$error persist. lib 2098 green.
+
+DEFERRED to [[id:FEAT-065-w3-continuation-implement-for-emit-then]]: the @then{claims}
+block grammar + @mount + hard cutover. ROOT BLOCKER discovered: the `%for`
+construct in `%emit js` is unimplemented (emit_tokenizer.rs:35 "placeholder for
+future") — so the claim grammar (which parses correctly) cannot EMIT its
+per-claim checks. @behavior has the same gap. Implementing `%for` emit is a
+metasystem feature in its own right; tracked in FEAT-065 with the proven grammar
+design + the `;`-terminator requirement captured. Shipping a non-emitting macro
+would violate the hard-cutover discipline, so nothing partial was left in stdlib.
+
+@mount/@setup + the 43-then-* parity deletion also move to FEAT-065 (they layer on
+the claim grammar). @fixture remains until then (still functional, not a fallback
+for a shipped-but-broken feature).
+
+* CLAIM GRAMMAR NOW SHIPPED (commit d143f86e) — blocker solved
+The %for blocker was SIDESTEPPED: instead of compile-time %for over a structured
+array (which fails — arrays serialize to JS-object-literals, not JSON), the claims
+array is interpolated WHOLE as a JS literal via %$claims and iterated at RUNTIME.
+%$claims yields clean [{op:"==",prop:"state",value:"done"},{prop:"exist"}].
+
+@then{claims} works end-to-end: stdlib/capture-types/claims.st + %macro then-claims
+(runtime __claimProp resolver + __claimCmp op dispatcher + JS for-loop). All ops
+gate (== != >= <= < > ~= ~> matches + bare-exist). be_visible/be_hidden call
+ST._rung.require('layout'). Proven cross-backend (V8 refuses layout, CDP runs).
+Test: w3_claim_grammar_gates.
+
+REMAINING for W3 (still open): @mount/@setup + the hard cutover (retire 43 then-*
++ @fixture). Tracked: w3-mount/w3-parity/w3-cutover were deferred to FEAT-065 but
+the claim grammar itself is now done. @mount + cutover can proceed.

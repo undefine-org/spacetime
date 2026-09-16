@@ -1,0 +1,48 @@
+#+TITLE: Capture-type name table is duplicated, and the divergence FAILS SILENTLY
+#+STATE: ITEM
+#+CUSTOM_ID: FUP-151-capture-type-name-table-is-duplicated
+
+* The trap
+
+A capture-type NAME must be registered in TWO independent tables:
+
+1. =src/syntax/events/form_compiler.rs= =parse_capture_type_name()=
+2. =src/parser/mod.rs:6748= (the =%form= parser's own mapping)
+
+Registering only (1) does not error. The name resolves to
+=CaptureType::Custom("dashed_ident")=, and the Custom path falls back to the
+**Expr extractor** for unregistered names (form_compiler.rs ~L660, "keep their
+prior lenient behavior"). Expr accepts everything.
+
+∴ the capture type appears to work: the positive cases pass. Only a NEGATIVE
+case reveals it, because nothing is ever rejected.
+
+Encountered live while implementing =dashed_ident= (PLAN-121 W1.3): the accept
+tests passed and the reject tests silently did not discriminate. Without a
+negative in the spike, this would have shipped as "verified".
+
+* Why it matters beyond this one case
+
+Every future capture type has the same trap, and the failure mode is the worst
+kind: a validation that quietly validates nothing. This is the same family as
+BUG-229 (silent acceptance) and as the =main.rs= arm-per-code table hazard
+(FUP-148, where a missing arm silently RELABELS a diagnostic).
+
+Three tables now, all with the same shape: add an entry or lose behavior
+silently. The pattern, not the instances, is the defect.
+
+* Fix directions
+
+1. ONE table. Have the =%form= parser call =parse_capture_type_name()= rather
+   than keeping its own copy. Check whether the two tables genuinely differ
+   (they may, for meta-vs-runtime reasons) before merging.
+2. If they must stay separate, add a test that asserts they agree: iterate every
+   name in one and assert the other resolves it non-Custom. A divergence then
+   fails at build time instead of at runtime, silently.
+
+(2) is cheap and catches the class immediately; (1) is the real fix.
+
+* Acceptance
+
+- Adding a capture type in one place either works everywhere or FAILS LOUDLY.
+- A test proves the tables agree.

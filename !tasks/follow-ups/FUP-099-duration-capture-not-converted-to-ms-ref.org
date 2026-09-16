@@ -1,0 +1,83 @@
+#+TITLE: :duration capture not converted to ms (refresh/cache emit raw token)
+#+STATE: DONE
+#+SESSION_ID: 15126501035a16d5
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-21T22-48-09-997Z_15126501035a16d5.jsonl]]
+#+CUSTOM_ID: FUP-099-duration-capture-not-converted-to-ms-ref
+
+* Initial Message
+
+explain BUG-137 and FUP-098
+
+* Problem
+
+The `:duration` (and `:time`) capture type stores the raw source token as
+`CapturedValue::Expr("5m")` instead of converting it to milliseconds. See
+src/syntax/events/form_compiler.rs ~1694:
+
+    CaptureType::Time | CaptureType::Duration => {
+        // Parse time/duration: "5m", "300ms", etc.   <-- comment lies; no parse
+        CapturedValue::Expr(clean.to_string())
+    }
+
+Consequence: `@data fetch $x T : "/u" { refresh: 5m }` compiles to
+`const refreshInterval = "5m";` and the data-source primitive's guard
+`if (refreshInterval > 0) setInterval(load, refreshInterval)` no-ops (a string
+"5m" is NaN > 0 -> false; setInterval with "5m" is invalid). So a non-zero refresh
+duration on @data fetch silently never fires.
+
+* Why it surfaced now (not a regression)
+
+Pre-existing. MASKED because the bodyless `data-fetch-kind` overload always won
+form-matching (it ignored the `{ refresh: ... }` body and hardcoded `refresh: 0`).
+BUG-137's body-shape overload resolution (src/syntax/events/match_sink.rs) now
+routes a `{ refresh: ... }` options body to the body-consuming `data-fetch-opts`
+overload, which threads the captured `$refresh` to the data-source primitive --
+exposing that the captured value is an unconverted string.
+
+* Scope to investigate
+
+- Where SHOULD ms-conversion happen: at capture->value conversion (form_compiler.rs,
+  making Time/Duration emit a number of ms), OR at the data-source binding/emit, OR a
+  `:duration` extractor. Capture-time conversion is most general but MUST NOT break
+  consumers that expect the literal token (`@on hover(300ms)`, timeline drivers that
+  may parse durations in JS, CSS timing values). Audit every `:duration`/`:time`
+  consumer before changing capture-time behavior.
+- A duration parser already exists for some paths (grep parse_duration /
+  NUMBER_WITH_UNIT); reuse it.
+
+* Acceptance
+
+- `@data fetch $x T : "/u" { refresh: 5m }` emits `refreshInterval = 300000` (ms) and
+  the auto-refresh fires (v8/headless test asserting the number).
+- `@data fetch ... { refresh: 0 }` still emits 0.
+- No regression to `@on hover(300ms)`, timeline durations, CSS timing values.
+- Restore src/compiler.rs::snapshot_data_directive to `refresh: 5m` + assert ms.
+
+* Files (likely)
+- src/syntax/events/form_compiler.rs (~1694 Time|Duration conversion)
+- stdlib/primitives/data/source.st, stdlib/macros/data-kind.st
+- tests: v8/headless ms test; src/compiler.rs snapshot restore
+
+* Origin
+Surfaced by BUG-137, 2026-06-21.
+
+* RESOLVED (2026-06-22) — split into BUG-138 + BUG-139, both implemented
+
+Investigation verified the root cause and refined the scope, then filed and fixed:
+
+- BUG-138 (:duration/:time brace-body capture not converted to ms): the actual
+  bug. form_compiler.rs `convert_property_value` Time|Duration arm now converts
+  literals to `Time(ms)` via the existing `parse_duration_with_unit`, with an
+  Expr fallback for non-literals. `@data fetch { refresh: 5m }` → 300000.
+  Tests + restored snapshot. DONE.
+
+- BUG-139 (dead `cache:` capture): surfaced during the audit. `cache:` was parsed
+  but never bound (data-source has no cache param) — silently discarded. Dropped
+  the dead capture. DONE.
+
+Key refinement over the original FUP scope: the regression audit proved there are
+THREE capture paths for :time/:duration and only the brace-body one was broken;
+ALL animation/timing macros use the paren/token path (already ms) and were never
+at risk — so capture-time conversion of the brace arm was strictly safe, no
+consumer audit fallout. The FUP's feared `@on hover(300ms)`/timeline/CSS regressions
+were never on this code path.

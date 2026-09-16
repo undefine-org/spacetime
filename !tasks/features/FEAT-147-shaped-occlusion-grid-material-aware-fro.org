@@ -1,0 +1,121 @@
+#+TITLE: Shaped occlusion grid + material-aware frost for @anchor (FEAT-145 continuation)
+#+STATE: DONE
+#+SESSION_ID: 152262b47a31ca42
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-04T08-53-49-160Z_152262b47a31ca42.jsonl]]
+#+CUSTOM_ID: FEAT-147-shaped-occlusion-grid-material-aware-fro
+#+PARENT: FEAT-145-real-object-occlusion-inert-accessibilit
+
+* Initial Message
+
+look up the recent work on Spacetime ECS system and tell me how you would make the text feel even more stuf to the 3d, by enabling the perspective calculations opened up by the 3d module's facet system available to bind to the Spacetime text
+
+* Initial Message
+
+User, after FEAT-145 shipped: "yes but now 1. it's all or nothing in terms of visibility
+2. the glass thing doesn't show the underlying html element". Then, before implementing:
+"let's brainstorm and design and settle on the design choices before we go willy nilly and
+implement". A full design discussion followed (documented below) before any code was
+written, per the user's explicit request.
+
+* Root cause (both complaints trace to ONE gap)
+FEAT-145's occlusion test was a SINGLE ray at the anchor point, reduced to a BOOLEAN
+($occluded). Two symptoms of that one gap:
+1. "All or nothing" — one point answers for the WHOLE rectangular label; a label 90%
+   clear of a mesh and 10% clipped by a corner still vanished completely.
+2. "Glass shows nothing" — `intersectObjects` tests geometry only, never material; a
+   transmissive (glass) hit occluded identically to opaque steel, even though the eye can
+   clearly see through glass in the actual render.
+
+* Design process (before implementation, per user request)
+Explored and REJECTED a depth-buffer-readback design (shared low-res depth prepass in
+three-stage.st + CPU readback + canvas-painted mask) — heavier, GPU→CPU sync cost, would
+have expanded blast radius into the shared stage primitive. Verified empirically (a live
+test page, screenshot-confirmed) that CSS `mask-image` accepts MULTIPLE gradient layers,
+each independently positioned via `mask-position`/`mask-size` and reading its alpha from a
+CSS custom property via `var()` — i.e. a "paint a mask with numbers" idiom using ONLY
+static author-declared CSS, with the browser's own compositor doing the rendering + edge
+smoothing for free. This became the actual design: no canvas, no readback, no new subsystem.
+
+Settled via `ask` before writing code:
+- Multi-hit aggregation: MAX solidity (dominant occluder wins) — simplest, comment left for
+  multiplicative compounding as a documented future option, not built.
+- Boolean cutover threshold (inert/pointer-events): 0.75 solidity, using AVERAGE (not max)
+  of the N² grid cells — a corner-clip alone shouldn't kill interactivity.
+- Footprint sampling: N×N grid over the label's OWN `getBoundingClientRect()` (adapts to
+  CSS changes automatically), default 4×4 (16 rays/label/frame), 8×8 documented as a denser
+  opt-in comment.
+- No browser-support fallback for mask-image (Baseline since Dec 2023) — comment only,
+  degrade path is `occlusionGrid:1` (scalar, FEAT-145's original path).
+- All 3 spatial-showcase object tags (helmet/flux/prism) upgraded to occlusionGrid:4 for
+  consistency (not just glass/prism).
+
+* Mechanism (built)
+`three-anchor.st`: new `occlusionGrid:number=1` param. `1` = FEAT-145 exact behavior
+(single ray, scalar opacity dims/hides the WHOLE card — zero call-site change, zero cost
+delta). `N>1` = an N×N grid of `raycaster.setFromCamera` rays sampling the label's live
+screen rect; each cell's material-aware visibility (`1 - (1-transmission)*opacity` of the
+MAX-solidity hit) is written as `--occ-<row>-<col>` (0..1). `--anchor-occlusion` (average of
+the N² cells) is still published for aggregate consumers. `inert`/pointer-events gate on
+whether that average is < 0.25 (i.e. average solidity > 0.75, per the agreed threshold).
+
+`index.st` (spatial-showcase): a STATIC (author-declared once) 4×4 `mask-image` grid on
+`.tag` — 16 `linear-gradient` layers, each positioned into one 25%×25% cell via
+`mask-position`/`mask-size`, each reading `var(--occ-<r>-<c>, 1)`. Only the 16 numbers
+change per frame (same "write a number to a custom prop, let CSS render it" idiom as
+`--anchor-depth`, FEAT-144) — zero canvas, zero JS-side compositing.
+
+* FEAT-147 addendum (frost) — same investigation, filed together
+User, after the shaped-grid fix: "it doesn't go through the 3d shader shit that the glass
+surface does tho" — correctly identifying that flat translucency ((1-transmission)*opacity)
+is the CORRECT alpha but the WRONG texture: three.js's real `MeshPhysicalMaterial`
+transmission renders a genuine GPU pass (samples the scene-behind into a render target, then
+blurs by `roughness` and BENDS by `ior`/refraction). Investigated + presented the honest
+split: the BLUR half is cheap or free to approximate (roughness is already sitting on the
+same hit object the occlusion code inspects); the REFRACTION half is NOT achievable with
+CSS filters on real DOM (no per-pixel UV displacement mechanism; reproducing it would mean
+rendering the label onto a canvas-texture mesh, forfeiting real/selectable/accessible DOM —
+the entire premise of this spatial-ECS mechanism). User approved building the frost half and
+flagging refraction as a future research spike rather than solving it now.
+
+Built: `hitInfo`/`visibilityAt` now also surface `transmission`/`roughness` of the dominant
+hit (zero extra raycasts — same hit object already being inspected for solidity).
+`--anchor-frost` (0=clear glass..1=fully frosted) = `transmission × roughness` of the
+dominant hit, averaged across the grid same as occlusion. `.tag`'s `backdrop-filter: blur()`
+rewired from occlusion-tied (wrong signal — blurred MORE as a label became MORE hidden,
+duplicating what opacity/mask already carry) to frost-tied (correct signal — answers "how
+textured is what I'm seen through").
+
+* Verification (live, not just visual)
+- cargo check: both projects green (21 + 7 files) after every edit round.
+- cargo run --features cdp -- test (both anchor.cdp.test.st, showcase.cdp.test.st) --cdp:
+  green throughout (everswap unchanged 1/1; showcase 8 sections, all green after 3 rounds
+  of test extension).
+- everswap-clone dist/spacetime.js: OCCLUDE_ON=false + GRID_N=1 confirmed at all 5 call
+  sites (zero visual/behavioral change, zero added cost).
+- Live puppeteer verification with DIRECT DOM/property inspection (not just screenshots):
+  - Shaped cutout: reproduced a partial-overlap camera angle, read --occ-1-0=1.000 (left,
+    clear) vs --occ-1-3=0.000 (right, occluded) on the SAME label — proves per-region
+    shaping, not whole-card binary. Screenshot: scratch/feat146-shaped-cutout-confirmed.png.
+  - Material-aware passthrough: positioned camera on the flux→helmet line beyond flux
+    (confirmed via direct Raycaster probe: flux hit at transmission:0.92 dominant), read
+    all 16 cells = 0.920 (matches 1-transmission exactly) — helmet's label stayed ~92%
+    visible THROUGH the glass. Screenshot: scratch/feat146-glass-passthrough-confirmed.png.
+  - Frost: same glass-passthrough camera state, flux's actual roughness:0.05 → frost=0.046,
+    blur stayed near base (9.46px) — text reads crisply through CLEAR glass (screenshot:
+    scratch/feat147-frost-clear-glass.png). Then temporarily forced flux's material
+    roughness to 0.9 in the live page → frost jumped to 0.828, blur to 17.28px — confirmed
+    the tracking responds correctly at the OTHER extreme too (screenshot:
+    scratch/feat147-frost-frosted-glass.png), then restored the original roughness.
+
+* Commits
+- everswap-clone: occlusionGrid + frost capability added, unused (occlusionGrid stays 1,
+  occlude stays false at all 5 call sites) — zero visual/behavioral regression.
+- spatial-showcase: occlusionGrid:4 on all 3 object tags + static mask-image grid CSS +
+  frost-tied backdrop-filter + extended CDP test (sections 5-8, 8 assertions across shaped
+  cutout / material-passthrough / frost) — fixes both complaints from the user's screenshot
+  AND the shader-fidelity follow-up, with an honest documented ceiling on refraction.
+
+* Follow-up filed
+FUP: research spike — is a cheap CSS-only approximation of IOR-driven refraction/bending
+(e.g. a skew/perspective distortion keyed to the dominant hit's `ior`) visually close enough
+to be worth the complexity, for a future wave. Not scoped into this item.

@@ -1,0 +1,50 @@
+#+TITLE: Drop the try/catch guard for typed+seeded dotted reads (emit-size optimization)
+#+STATE: ITEM
+#+SESSION_ID: 153c9c68ea93c166
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-24T17-46-26-602Z_153c9c68ea93c166.jsonl]]
+#+CUSTOM_ID: FUP-152-drop-the-try-catch-guard-for-typedseeded
+
+* Initial Message
+
+please exlain all you deferred and file with root causes and impacts and fix steps and opportunities
+
+Deferred from PLAN-119 W3b (2026-07-24). The VALUE win (W3a/FUP-149) shipped;
+this is the pure-optimization remainder.
+
+* What
+A dotted read off a signal lowers to a null-safe guard:
+  `let __v; try { __v = (ST.resolve(node,'form').errors.email); } catch { __v = ''; }`
+For a read whose binding is BOTH typed (FUP-150: the path is valid) AND seeded
+non-null (FUP-149: the value is a well-shaped zero object from mount), the guard
+can NEVER throw — the intermediate is never null. So it could emit the direct
+access `__v = ST.resolve(node,'form').errors.email;` and save the try/catch.
+
+* Why deferred (elegance bar: a change must REDUCE net complexity)
+- ZERO behavioral benefit: with W3a the seed is non-null, so the guard already
+  always takes the success path. The read WORKS today. This only trims a few
+  bytes of emitted JS per typed+seeded read.
+- HIGH cost: the guard is emitted by the string-based `Builder` in
+  src/emit/html_reactive.rs (emit_text_hole / emit_attr_hole), which has NO
+  access to the TypeRegistry or per-binding seed info. Threading type+seed
+  context through the whole Builder (constructed per element, scope-only today)
+  is an invasive change to the emit core for a micro-optimization.
+- The guard is also CORRECT and necessary for untyped/unseeded reads (a genuinely
+  nullable dotted path), so it can't just be removed globally.
+∴ cost >> benefit → defer, don't force.
+
+* Fix direction (if/when it earns its place)
+Thread a `typed_seeded: &HashSet<String>` (binding names that are both typed and
+non-null-seeded) into the Builder; in emit_text_hole/emit_attr_hole, when the
+read's base is in that set, skip the try/catch wrapper and emit the direct
+access. Gate strictly (base must be in the set; a mixed expression with any
+untyped/nullable term keeps the guard).
+
+* Acceptance
+- A typed+seeded read (`$form.errors.email` off `@data subscribe $form Env`)
+  emits WITHOUT try/catch; an untyped/unseeded dotted read still emits the guard.
+- Byte-for-byte identical behavior (the guarded path never threw for the typed
+  case anyway); a headless test proves the read still renders.
+
+* Relation
+PLAN-119 W3b (the deferred half). Depends on FUP-149 (seed) + FUP-150 (type) \u2014
+both shipped. Sibling to the emit-core work; independent of BUG-228/PLAN-120.

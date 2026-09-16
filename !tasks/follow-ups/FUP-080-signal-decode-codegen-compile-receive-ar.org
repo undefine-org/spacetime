@@ -1,0 +1,46 @@
+#+TITLE: Signal decode codegen — compile receive arms into runtime variant-dispatch
+#+STATE: DONE
+#+SESSION_ID: 1507711255a45786
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-13T10-37-35-958Z_1507711255a45786.jsonl]]
+#+CUSTOM_ID: FUP-080-signal-decode-codegen-compile-receive-ar
+#+COMPLETION_HASH: d9840d69e5e78130
+
+* Initial Message
+
+receive AddResult { }             │ sum named (current — unchanged) 
+
+This is confusing because maybe we're actually saying `receive Response` without the `AddResult`? Either remove that or make `receive Response` the thing... what's your take on this?
+
+* Parent
+[[id:FEAT-110-signal-core-reactive-output-post-emit-th]] — PLAN-038 W1 follow-up.
+
+* Context
+W1 shipped @data signal/stream + receive matcher + @handle. The receive ARMS are
+CAPTURED + registered (recv_arm: pat => variant(expr)) but NOT yet compiled into a
+runtime decode table. signal-call (stdlib/primitives/signal.st) publishes the RAW
+envelope { status, ok, body, statusText } + fires `signal:<name>:reply`;
+signal-handler subscribes but does not dispatch per-variant.
+
+* The work
+1. Compile signal-def `receive` arms -> decode table: status/type pattern -> variant
+   ctor + carried expr (`$.body as Todo`). signal-call selects the matching arm by
+   discriminator (http status / ws type), constructs `{ variant, value }`.
+2. Compile @handle `receive` arms -> dispatch: match decoded variant tag, bind the
+   carried payload (`(todo)`), run the arm's effect stmts. Handle binding type =
+   decode carried `as` type (decl<->use, S1).
+3. Wire signal-handler element binding so its JS actually EMITS (currently @handle
+   binds signal-handler but emit doesn't lower it — needs the selector-context
+   element thread, like @on).
+4. optimistic clause runs at FIRE time (needs a fire hook signal-call -> handler).
+
+* Acceptance
+A signal+handle program emits JS where firing $add(text) runs optimistic, awaits,
+decodes 200->Created(todo), and the @handle `Created(todo) => {...}` arm runs with
+`todo` bound. Headless @mount/@when/@then test proving decode->dispatch round-trip.
+
+* Files
+stdlib/primitives/signal.st (decode emit), signal-handler.st (dispatch + element
+wiring), src/emit or src/pipeline for arm->JS lowering. Arms already in FormMatch
+captures (arms/sum).
+
+NOTE [2026-06-20]: DONE [2026-06-20]: signal decode codegen + @handle dispatch fully shipped. (1) signal-call decodes the reply envelope through the receive arms into a tagged variant {variant,value,final,sum} via decodeReply/armMatches/evalPayload (status/class/ok/ws-type/wildcard patterns; $. -> envelope; 'as Type' stripped at runtime). (2) @handle onReply dispatches the decoded variant to the matching arm (ctor===variant or _), binds the carried payload to the arm's name, runs the body via ST.runMutations (extended with a locals map). (3) signal-handler element wiring emits (was already emitting; the W1 gap was the dispatch, now done). (4) optimistic runs at fire time (signal:<name>:fire -> onFire); final runs on reply.final. Also fixed a latent W1 capture-collision bug: handle_optimistic/handle_final both used $body and collided on lift -> renamed to $optimistic/$final. Commits: host-reg+decode (3053ca5e), dispatch+optimistic/final (a1c702c9/26db1db2), emit tests (9f78702c). Tests: 5 headless decode->dispatch round-trip (tests/integration/signal-dispatch.test.st) + 5 compiler emit tests. lib 2427/0, integration 172/0.

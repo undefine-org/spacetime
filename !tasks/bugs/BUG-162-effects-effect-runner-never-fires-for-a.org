@@ -1,0 +1,55 @@
+#+TITLE: @effect's effect-runner never fires for a dotted-path watched signal ($sig.field)
+#+STATE: ITEM
+#+SESSION_ID: 15251010f7982b56
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-06T10-48-12-510Z_15251010f7982b56.jsonl]]
+#+CUSTOM_ID: BUG-162-effects-effect-runner-never-fires-for-a
+
+* Initial Message
+
+push the capabilities of the 3d module + the workbench mcp through a concrete idea of a user interface that talks directly to this very agent using the mcp tools. This is a pressure test against both the host apis and the 3d apis. Design the 3d mockups using generate_image and then implement whatever surfaces you need using the blender mcp. commit as you go
+
+* Found via
+Round-2 pressure test, continuing the BUG-155/160/161 audit into every
+stdlib primitive resolving a `$signal.field`-shaped param. `@effect(on:
+$wrap.count) { ... }` never fired its mutation body at all.
+
+* Repro (isolated, RED confirmed on pre-fix code)
+#+begin_src
+@data inline $wrap : { "count": 0 };
+@data inline $log : 0;
+.host {
+  @effect(on: $wrap.count) {
+    $log <- $log + 1;
+  }
+}
+#+end_src
+Reassigning `$wrap.count` (via a real body-scope write,
+`ST.set(document.body, 'wrap', {count:1})`) left `$log` at 0 — the effect
+never ran.
+
+* Root cause
+`stdlib/primitives/effect.st::effect-runner` keyed BOTH its reactive channels
+by the literal `sig` string: `document.addEventListener('local:' + sig +
+':updated', ...)` and `ST.watch(host, sig, ...)`. With `sig = "wrap.count"`,
+neither channel is ever dispatched (no signal is ever literally named
+"wrap.count") — same root cause as BUG-155/160/161.
+
+* Fix
+Derive `sigHead = sig.split('.')[0]`; key both the `local:<sig>:updated`
+listener and `ST.watch` off `sigHead` instead. Unlike @each/@view/@portal,
+`@effect` never needs to RESOLVE a value here at all — the mutation body
+re-reads whatever it needs via `ST.runMutations`'s own `$name` substitution,
+so watching the head signal (which fires whenever ANY of its fields change,
+a superset) is sufficient and correct; no value-walk logic was needed.
+
+* Verification
+- RED confirmed on `git show HEAD:stdlib/primitives/effect.st` (reverted,
+  re-tested, restored).
+- Live browser verification: `$log` incremented from 0 -> 1 after
+  reassigning `$wrap.count` via the real `ST.set` write path.
+- Regression: `tests/unit/templates/effect-dotted-path.test.st` (2 tests:
+  fires once on first head reassignment, fires again on a SECOND
+  reassignment — guards against a "only fires once ever" latent bug too).
+- Full suite green: `cargo test --lib` (2564), `cargo test --test
+  integration_tests` (181), `cargo run --features headless -- test tests/
+  --headless` (611, +4 new across this + BUG-163/@portal).

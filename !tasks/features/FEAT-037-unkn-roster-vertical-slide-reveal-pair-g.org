@@ -1,0 +1,210 @@
+#+TITLE: UNKN roster — vertical slide-reveal pair grid + name unmask
+#+STATE: DONE
+#+SESSION_ID: 14cedfd0e21b5609
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-04-30T12-08-01-672Z_14cedfd0e21b5609.jsonl]]
+#+CUSTOM_ID: FEAT-037-unkn-roster-vertical-slide-reveal-pair-g
+#+DEPENDS: FEAT-034-unkn-home-foundation-reset-tokens-assets
+#+EFFORT: 3h
+#+LAYER: frontend
+#+PRIORITY: #A
+
+* Initial Message
+
+can you tell me how you use the spacetime design skill?
+
+* Intention & Purpose
+
+Implement signature motion #3: each talent in the roster is a vertical pair =[image-square on top, name-square below]=. Hovering the image: it slides smoothly downward into the name slot, revealing the talent's name in the now-empty top square. Cursor moving onto the name keeps the image slid; only leaving the entire pair returns the image to its top position.
+
+* Context & Narrative
+
+The current =modules/_roster.st= renders a 4-column decorative checkerboard of fake CSS tiles (=--ink= gradient noise, =--rule= single-line, =--cream=, =--script=). No real photography. No talent names. No hover behavior. This violates the manifesto's third signature motion *and* fails the brand-spec requirement that real photography drives the roster section.
+
+This item rewrites =_roster.st= to use the new =$talents= dataset (FEAT-034) and adds the slide-reveal pair as a CSS-only interaction. Spacetime macro-driven animation isn't necessary here — pure CSS =:hover= with =transition= and =transform: translateY()= handles slide + reveal cleanly, with naturally-correct =prefers-reduced-motion= degradation.
+
+The "horizontal" alternative was considered (image slides right into adjacent name slot) but the user-confirmed direction is *vertical* (image slides down). This produces taller, more cinematic cards and aligns with the editorial feel of the rest of the page.
+
+* Scope
+
+In-scope:
+- Rewrite =projects/unkn/modules/_roster.st= section template + CSS.
+- New =@template &unkn-talent-pair($t)= that renders the =[image][name]= vertical pair.
+- Root-level =@each($talents as $t)= to populate the pair list.
+- 9 pairs in a responsive grid: 1 col (mobile) → 2 col (tablet) → 3 col (desktop ≥1101).
+- Slide animation: image translates from =translateY(0)= to =translateY(100%)= on hover; uses =transition: transform var(--unkn-dur-reveal) var(--unkn-ease-out-expo)=.
+- Name reveal: name sits at =top: 0= in the top slot at =opacity: 0=; on hover, fades in via =transition: opacity= delayed by 50% of slide duration so it appears mid-slide.
+- Hover-zone semantics: parent =.unkn-talent-pair { contain: layout; }= so siblings don't shift. Hover triggered by parent =:hover= so cursor over the name (in revealed state) keeps the image slid.
+- Closing line ("Our talents don't follow trends. they set them.") below the grid, matching reference (display + script).
+- Reduced-motion: =@media (prefers-reduced-motion: reduce)= ⇒ no slide; image and name both visible (image upper, name below) with permanent opacity 1.
+- =modules/_mission.st= cleanup: ensure no orphaned roster references survive.
+
+Out-of-scope:
+- Click-to-talent-detail navigation (Just View All Talent CTA links to =/talent=).
+- Multi-image-per-talent slideshow.
+- Auto-reveal animation as cards enter viewport (separate concern handled in =patterns/_reveals.st= as a simple stagger).
+
+* Existing Patterns
+
+- Section structure: existing =&unkn-section-roster()= in =index.st= and CSS in =_roster.st= — refactor in place, preserve =.unkn-roster__shell= grid for the prose-left + grid-right layout.
+- Talent dataset: =$talents= from =data/talent.json= (FEAT-034). 9 entries, each with =name=, =image=, =headline=.
+- Reduced-motion pattern: =patterns/_reduced-motion.st= existing.
+- =@each= root-level pattern: =index.st= already uses for stats/services/reasons — match.
+- Easing: =--unkn-ease-out-expo= already declared in theme. Use for the slide.
+
+* Tests
+
+Compile-time:
+- T1: =cargo run -- check projects/unkn/= passes.
+- T2: =Spacetime.review()= dim "a11y" reports zero "missing alt on talent images" findings.
+
+Visual + interaction:
+- M1: Load =/= and scroll to roster section. Grid renders 9 pairs, 3 columns at 1440px desktop.
+- M2: Hover any pair → image translates downward over 820ms; name fades in starting at ~410ms; cursor still over the *pair* (image or name) keeps it slid.
+- M3: Move cursor onto the now-revealed name area (which is the top slot) → image stays slid (because parent =:hover= still active).
+- M4: Move cursor outside the pair entirely → image slides back; name fades out.
+- M5: Click image (no link assigned in this iteration) → no navigation; no error.
+- M6: At 720px viewport, grid collapses to 1 column; pairs stack vertically; same hover behavior on touch via =:active= pseudo-state.
+- M7: Reduced motion: image and name both visible, no animation.
+
+Layout:
+- M8: Each pair maintains =aspect-ratio: 4 / 5= (taller than square) on the image cell; name cell same dimensions; pair total height = 2x image height.
+- M9: Grid =gap: var(--unkn-space-md)= (32px) between pairs.
+
+Accessibility:
+- M10: Each =<img>= has descriptive =alt= ("Carolina Mendes — talent portrait").
+- M11: Each =.unkn-talent-pair= is a =<a href="/talent#$t.slug">= so keyboard users can tab to it; =:focus-visible= triggers the same reveal as =:hover=.
+- M12: Name is rendered in DOM as a regular =<h3>= (or =<p>=) so screen readers announce it regardless of visual hover state.
+
+* Implementation
+
+** ITEM Rewrite modules/_roster.st template
+:PROPERTIES:
+:CUSTOM_ID: FEAT-037-unkn-roster-vertical-slide-reveal-pair-g::rewrite-roster-template
+:END:
+
+- File: =projects/unkn/modules/_roster.st=
+- Replace =@template &unkn-section-roster()= with:
+  =@template &unkn-talent-pair($t) {=
+  =  <a class="unkn-talent-pair" href="/talent#$t.slug" aria-label="$t.name — view profile">=
+  =    <span class="unkn-talent-pair__name-slot">=
+  =      <span class="unkn-talent-pair__name">$t.name</span>=
+  =      <span class="unkn-talent-pair__headline">$t.headline</span>=
+  =    </span>=
+  =    <span class="unkn-talent-pair__image-slot">=
+  =      <img class="unkn-talent-pair__image" src="$t.image" alt="$t.name — talent portrait" loading="lazy">=
+  =    </span>=
+  =  </a>=
+  =}=
+- Note structural choice: name-slot is the *first* DOM child (top), image-slot is the *second* (will be visually overlaid via =z-index: 2= and =position: absolute= on top of name-slot). On hover, image translates down by =100%= revealing name underneath. This keeps DOM order semantic (name before decorative portrait for screen readers).
+- =@template &unkn-section-roster()=:
+  =<section class="unkn-roster" id="talent">=
+  =  <div class="unkn-roster__shell">=
+  =    <div class="unkn-roster__head">=
+  =      <p class="unkn-eyebrow">Our Roster</p>=
+  =      <h3 class="unkn-roster__title-line">The (Un)Known Talent</h3>=
+  =      <p class="unkn-roster__title-script">The (Un)Known Talent.</p>=
+  =      <p class="unkn-roster__copy">We are a bridge between culture and commerce, empowering authentic, intuitive talent to create meaningful emotional impact. We specialise in crafting impactful partnerships across fashion, beauty, lifestyle, sport, art, and entertainment — each one designed to spark genuine connection, shift perceptions, and inspire action.</p>=
+  =      <a class="unkn-cta unkn-cta--solid" href="/talent">View All Talent</a>=
+  =    </div>=
+  =    <div class="unkn-roster__grid"></div>=
+  =    <p class="unkn-roster__line">Our talents don&rsquo;t follow trends. <span class="unkn-roster__line-script">they set them.</span></p>=
+  =  </div>=
+  =</section>=
+- The =.unkn-roster__grid= is populated by root-level =@each= in =index.st=.
+
+** ITEM Author CSS for slide-reveal pair
+:PROPERTIES:
+:CUSTOM_ID: FEAT-037-unkn-roster-vertical-slide-reveal-pair-g::author-pair-css
+:DEPENDS: FEAT-037-unkn-roster-vertical-slide-reveal-pair-g::rewrite-roster-template
+:END:
+
+- File: =projects/unkn/modules/_roster.st= (continue).
+- CSS:
+  - =.unkn-roster { width: 100%; background: var(--unkn-paper); padding-block: var(--unkn-space-2xl); }=
+  - =.unkn-roster__shell { width: 100%; max-width: var(--unkn-content-max); margin-inline: auto; padding-inline: var(--unkn-gutter); display: grid; grid-template-columns: 1fr 1.6fr; column-gap: var(--unkn-space-2xl); row-gap: var(--unkn-space-lg); align-items: start; }=
+  - =.unkn-roster__head { display: grid; gap: var(--unkn-space-md); }=
+  - =.unkn-roster__title-line { font-family: var(--unkn-font-display); font-size: var(--unkn-text-h2); line-height: 1.05; }=
+  - =.unkn-roster__title-script { font-family: var(--unkn-font-script); color: var(--unkn-accent); font-size: var(--unkn-text-script-md); line-height: 0.95; margin-top: -0.05em; }=
+  - =.unkn-roster__copy { color: var(--unkn-ink-muted); font-size: var(--unkn-text-md); line-height: 1.6; max-width: 50ch; }=
+  - =.unkn-roster__grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: var(--unkn-space-md); }=
+  - =.unkn-talent-pair { position: relative; display: block; aspect-ratio: 4 / 5; overflow: hidden; background: var(--unkn-bg-dark); color: var(--unkn-paper-on-dark); contain: layout paint; }=
+  - =.unkn-talent-pair__name-slot { position: absolute; inset: 0 0 50% 0; display: grid; place-items: center; padding: var(--unkn-space-md); text-align: center; gap: 0.4em; opacity: 0; transition: opacity calc(var(--unkn-dur-reveal) * 0.55) var(--unkn-ease) calc(var(--unkn-dur-reveal) * 0.45); }=
+  - =.unkn-talent-pair__name { font-family: var(--unkn-font-display); font-size: clamp(1.4rem, 2.4vw, 1.9rem); line-height: 1.1; }=
+  - =.unkn-talent-pair__headline { font-family: var(--unkn-font-script); color: var(--unkn-accent); font-size: clamp(1rem, 1.8vw, 1.4rem); line-height: 1.05; }=
+  - =.unkn-talent-pair__image-slot { position: absolute; inset: 0 0 50% 0; z-index: 2; transform: translateY(0); transition: transform var(--unkn-dur-reveal) var(--unkn-ease-out-expo); will-change: transform; }=
+  - =.unkn-talent-pair__image { width: 100%; height: 200%; object-fit: cover; object-position: center 30%; }= (height 200% so when slot translates down 100% of slot height, image continues to fill the new visible area; alternative: place a second image instance in the bottom slot — simpler but doubles network)
+  - *Decision*: simpler approach — image-slot sized =inset: 0 0 50% 0= (top half), image fills it normally; bottom half =inset: 50% 0 0 0= is the name-slot. On hover, image-slot translates =translateY(100%)= = exactly the height of the slot = lands in the bottom half. Name-slot is sized =inset: 0= (full pair) but content is centered at top half; image overlay covers it until hover. Refined CSS:
+    - =.unkn-talent-pair__name-slot { position: absolute; inset: 0; display: grid; grid-template-rows: 1fr 1fr; align-items: center; justify-items: center; padding: var(--unkn-space-md); text-align: center; }=
+    - =.unkn-talent-pair__name-slot > .unkn-talent-pair__name { grid-row: 1; align-self: center; opacity: 0; transition: opacity ... }=
+    - =.unkn-talent-pair__name-slot > .unkn-talent-pair__headline { grid-row: 2; align-self: start; opacity: 0; transition: opacity ... }=
+    - =.unkn-talent-pair__image-slot { position: absolute; left: 0; right: 0; top: 0; height: 50%; z-index: 2; transform: translateY(0); transition: transform var(--unkn-dur-reveal) var(--unkn-ease-out-expo); }=
+    - =.unkn-talent-pair__image { width: 100%; height: 100%; object-fit: cover; }=
+  - Hover behavior:
+    - =.unkn-talent-pair:hover .unkn-talent-pair__image-slot, .unkn-talent-pair:focus-visible .unkn-talent-pair__image-slot { transform: translateY(100%); }=
+    - =.unkn-talent-pair:hover .unkn-talent-pair__name, .unkn-talent-pair:focus-visible .unkn-talent-pair__name, .unkn-talent-pair:hover .unkn-talent-pair__headline, .unkn-talent-pair:focus-visible .unkn-talent-pair__headline { opacity: 1; }=
+- Closing line:
+  - =.unkn-roster__line { grid-column: 1 / -1; margin-top: var(--unkn-space-xl); text-align: center; font-family: var(--unkn-font-display); font-size: clamp(1.6rem, 3vw, 2.2rem); line-height: 1.15; color: var(--unkn-ink); }=
+  - =.unkn-roster__line-script { display: block; font-family: var(--unkn-font-script); color: var(--unkn-accent); font-size: var(--unkn-text-script-md); line-height: 0.95; margin-top: var(--unkn-space-xs); }=
+- Mobile breakpoints:
+  - =@media("max-width: 1100px") { .unkn-roster__shell { grid-template-columns: 1fr; } .unkn-roster__grid { grid-template-columns: repeat(2, 1fr); } }=
+  - =@media("max-width: 720px") { .unkn-roster__grid { grid-template-columns: 1fr; } .unkn-talent-pair { aspect-ratio: 5 / 6; } }=
+- Reduced motion:
+  - =@media (prefers-reduced-motion: reduce) { .unkn-talent-pair__image-slot { transform: none !important; } .unkn-talent-pair__name, .unkn-talent-pair__headline { opacity: 1; } .unkn-talent-pair__image-slot { height: 60%; } .unkn-talent-pair__name-slot { background: linear-gradient(180deg, transparent 60%, var(--unkn-bg-dark) 60%); } }=
+- DELETE all existing roster checkerboard CSS: =.unkn-roster__cell=, =.unkn-roster__cell--text=, =.unkn-roster__cell--script=, =.unkn-roster__cell--ink=, =.unkn-roster__cell--rule=, =.unkn-eyebrow= (move to =_globals.st= if shared elsewhere — verify with grep first).
+
+** ITEM Wire @each over $talents in index.st
+:PROPERTIES:
+:CUSTOM_ID: FEAT-037-unkn-roster-vertical-slide-reveal-pair-g::wire-each
+:DEPENDS: FEAT-037-unkn-roster-vertical-slide-reveal-pair-g::author-pair-css
+:END:
+
+- File: =projects/unkn/index.st=
+- After existing root-level =@each= blocks, add:
+  =.unkn-roster__grid {=
+  =  @each($talents as $t, key: $t.id) {=
+  =    &unkn-talent-pair($t);=
+  =  }=
+  =}=
+- Verify: page renders 9 pairs.
+
+** ITEM Cleanup orphaned roster CSS in _mission.st
+:PROPERTIES:
+:CUSTOM_ID: FEAT-037-unkn-roster-vertical-slide-reveal-pair-g::cleanup-mission
+:DEPENDS: FEAT-037-unkn-roster-vertical-slide-reveal-pair-g::wire-each
+:END:
+
+- File: =projects/unkn/modules/_mission.st=
+- Grep for any =unkn-roster=, =roster-cell=, =roster-grid= references — should be none after FEAT-035's =unkn-talent-grid= deletion. Verify clean.
+- Grep =projects/unkn/= for any sub-route still referencing old roster CSS class names. Update if found.
+
+** ITEM Manual verify
+:PROPERTIES:
+:CUSTOM_ID: FEAT-037-unkn-roster-vertical-slide-reveal-pair-g::manual-verify
+:DEPENDS: FEAT-037-unkn-roster-vertical-slide-reveal-pair-g::cleanup-mission
+:END:
+
+- =cargo run -- doctor projects/unkn/ --format pretty=. =/= scores ≥ 6 across 7 dims.
+- Manual scenarios M1-M12. Capture =screenshots/roster-pair-static.png=, =screenshots/roster-pair-hover.png=, =screenshots/roster-reduced-motion.png=, =screenshots/roster-mobile.png=.
+
+* Edge Cases
+
+- *Image aspect ratio mismatch*: portraits in =Home_Images/= range from 3:4 to 9:16. =object-fit: cover= with =object-position: center 30%= centers on the upper third (faces). Verify each talent visually; tune =object-position= per talent if necessary via =data-pos= attribute + CSS attribute selectors.
+- *Hover during slide-back*: rapid mouse-in/mouse-out should not cause stutter. CSS transitions handle this — the transform interpolates from current value to target value smoothly.
+- *Touch device "sticky hover"*: on touch, =:hover= persists after tap until next tap elsewhere. This is acceptable — tap reveals the name; tap elsewhere hides it. Document in brand-spec.
+- *Dark mode preference*: roster uses cream paper background with dark talent cards. =prefers-color-scheme: dark= isn't honored by UNKN brand (always cream paper). Don't add a dark-mode override.
+- *Large image network cost*: 9 talent images at original size could be 1MB+ each. =loading="lazy"= helps below-fold. Future optimization (FUP): generate WebP variants + =<picture>= responsive. Not in this item.
+- *Focus trap in keyboard nav*: each pair is an =<a>= so Tab/Shift+Tab moves naturally. Ensure no =tabindex= overrides break order.
+- *Empty talent name*: =$t.name= must always be present (validated in =@type Talent=). If somehow blank, reveal shows just headline. Acceptable.
+
+* Acceptance Criteria
+
+- =cargo run -- check projects/unkn/= exits 0.
+- =cargo run -- doctor projects/unkn/ --format json= for =/= scores ≥ 6 across 7 dims.
+- Roster section renders 9 pairs in 3-col grid at desktop, 2-col at 721-1100px, 1-col at ≤720px.
+- Hover any pair: image slides down over ~820ms with =--unkn-ease-out-expo=; name fades in mid-slide.
+- Cursor over revealed name keeps image slid; leaving the pair entirely returns image.
+- Keyboard tab focus triggers identical reveal via =:focus-visible=.
+- Reduced motion: image and name both visible, no animation.
+- Each =<img>= has descriptive =alt=.
+- Closing line "Our talents don't follow trends. they set them." renders below grid with display + script typography.
+- Screenshots attached.

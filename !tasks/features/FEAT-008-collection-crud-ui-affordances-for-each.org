@@ -1,0 +1,97 @@
+#+TITLE: Collection CRUD UI affordances for each containers
+#+STATE: DONE
+#+SESSION_ID: 14a73642da4c17df
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-03-30T14-30-47-693Z_14a71735234c17b2/23-CreateFeat7.jsonl]]
+#+CUSTOM_ID: FEAT-008-collection-crud-ui-affordances-for-each
+#+EFFORT: M
+#+PRIORITY: #B
+#+LAYER: stdlib
+#+BLOCKER: FEAT-005-collection-crud-sync-protocol-for-json-a
+
+NOTE [2026-03-30]: Implemented dev-collection-crud primitive: detects [data-st-source] containers, injects +/✕/↑/↓ affordances using __stDevSave API, re-scans on DataUpdate. Dev-mode only.
+
+* Scope
+
+** In scope
+- Inline add/remove affordances on @each-rendered collections (dev mode only)
+- Add button: "+" after last item, creates new item with @type defaults
+- Remove button: small "x" overlay on each item
+- Button-based reorder: up/down arrows on each item
+- All operations wired to Collection CRUD protocol (EditJsonArray)
+- @each :entering/:exiting animations used for smooth transitions
+
+** Out of scope
+- Drag-and-drop reordering (FUP — significantly more complex)
+- Editing individual fields within items (covered by inline editing + admin panel)
+- Schema validation UI (admin panel handles this)
+
+** Boundary rationale
+Button-based reorder is achievable at M effort. Drag-and-drop involves native DnD API handling, visual feedback, scroll-during-drag, and is properly sized as L. Defer to FUP.
+* Tests
+
+** Headless .test.st
+- ~tests/dev-tools/collection-crud-ui.test.st~: verify add button visible on @each container in dev mode, click add -> new item appears, verify JSON array length increased
+- ~tests/dev-tools/collection-crud-remove.test.st~: click remove on item -> item removed with exit animation, verify JSON array length decreased
+- ~tests/dev-tools/collection-crud-reorder.test.st~: click move-up on second item -> items swap positions, verify JSON array order changed
+
+** Playwright E2E
+- ~tests/playwright_st/collection_crud.spec.ts~: visual test on @each list: add item, verify DOM updated, remove item, verify DOM updated, reorder, verify order change
+* Implementation
+
+** Step 1: Collection CRUD primitive (~stdlib/__dev__/primitives/dev-collection-crud.st~)
+- New %primitive that detects @each containers via ~data-st-source~ attribute
+- For each @each container:
+  - Inject "+" add button after last child (or as empty-state prompt if no items)
+  - Inject overlay on each item with "x" remove button and up/down arrows
+  - Overlays visible only on hover (dev-mode CSS)
+
+** Step 2: Add item logic
+- Click "+" -> construct default item from @type schema (fetch from /__spacetime/dev/types.json)
+- For each required field: use type-appropriate default (string: "", number: 0, bool: false, url: "")
+- Send ~EditJsonArray { op: Insert { item, index: None } }~ via dev-ws
+- On Ack: @each re-renders with new item (via DataUpdate -> ST.setData)
+- :entering animation plays on new item
+
+** Step 3: Remove item logic
+- Click "x" -> determine item index from ~data-st-index~ attribute
+- Send ~EditJsonArray { op: Delete { index } }~
+- On Ack: :exiting animation plays, then item removed from DOM
+
+** Step 4: Reorder logic
+- Click up arrow -> swap with previous item (from_index = current, to_index = current - 1)
+- Click down arrow -> swap with next item (from_index = current, to_index = current + 1)
+- Send ~EditJsonArray { op: Reorder { from_index, to_index } }~
+- On Ack: @each re-renders in new order (via DataUpdate)
+- :move animation plays if defined
+
+** Step 5: CSS and affordance styling
+- All affordance elements use dev-mode-only CSS classes
+- Overlay appears on hover with slight opacity
+- Buttons use consistent dev-tools styling (matches existing dev-panel aesthetic)
+- Affordances injected as absolute-positioned overlays, not modifying DOM structure
+
+** Step 6: Import and wire up (~stdlib/__dev__/index.st~)
+- Import dev-collection-crud primitive
+- Apply after dev-editable so both systems coexist
+
+** Key files
+- ~stdlib/__dev__/primitives/dev-collection-crud.st~ (new)
+- ~stdlib/__dev__/index.st~ (extend with import)
+- ~stdlib/primitives/data/each.st~ (verify data-st-source/data-st-index attributes are set)
+* Edge Cases
+- Empty collection: show "+" button as empty-state prompt
+- Single item collection: disable up arrow, disable down arrow; show "x" with confirmation
+- @each without @type: add button disabled (no schema for default item)
+- @each with nested @each: only outer level gets CRUD affordances (avoid confusion)
+- Rapid clicks: debounce add/remove to prevent duplicate operations
+- Reorder at boundaries: first item up = no-op, last item down = no-op
+- Animation during CRUD: ensure :entering/:exiting don't conflict with dev affordance injection
+* Acceptance Criteria
+- @each containers show "+" add button after last item (dev mode only)
+- Each item shows remove ("x") and reorder (up/down) affordances on hover
+- Add creates new item with type-appropriate defaults, JSON file updated
+- Remove deletes item, JSON file updated, exit animation plays
+- Reorder swaps items, JSON file updated, @each re-renders in correct order
+- Affordances not visible in production build
+- All tests pass (headless + Playwright)
+- Screenshot: @each list with visible CRUD affordances

@@ -1,0 +1,70 @@
+#+TITLE: #11 SSG filter parity: build-time @each cannot evaluate stdlib filters — no eval seam
+#+STATE: ITEM
+#+SESSION_ID: 154dcc7a8ac2d946
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-08-06T12-08-13-733Z_154d0baaa942d918/17-W7Features.jsonl]]
+#+CUSTOM_ID: FUP-183-11-ssg-filter-parity-build-time-each-can
+
+* State of the spike (PLAN-137 W7 #11) — filed 2026-08-07
+
+Static lists render twice: once at build time (real HTML in view-source via
+`@each` SSG-unroll) and once at runtime. Filters are stdlib-defined Spacetime
+(`@fn` page filters + the query-helper vocabulary), applied by the RUNTIME via
+`ST.filters.<name>(…)`; the build-time unroller has its own interpolation path
+that does not apply them. Project policy forbids porting filters into Rust.
+
+** Verified gap (src/html/ssg_unroll.rs) **
+
+`resolve_token` (L420) — the build-time hole resolver for `@each` rows — handles
+exactly:
+- `$index`
+- `$item` (whole row)
+- `$.field` / `$item.field` (a plain dot-path `cur.get(part)` walk)
+
+It has NO pipe handling. `fill_bare` (L377) scans tokens with `[alnum_.]` only,
+so `$item.name | upper` resolves `$item.name` and leaves ` | upper` as LITERAL
+text in the served HTML. The runtime `each-inline` (stdlib) would apply the
+filter. ∴ unroll ≠ hydrate for filtered rows — a build-time/SSG parity gap.
+
+** Why the seam is NOT ready (no Rust shortcut taken) **
+
+To evaluate a stdlib filter at build time, the compiler must run the filter's
+own JS (or an interpreter of it). There is no build-time JS evaluation seam in
+`ssg_unroll`: it is pure Rust string/path interpolation over `serde_json::Value`.
+The headless runtime uses rustyscript, but that engine is not wired into the SSG
+pass, and page filters are page-local `@fn`s compiled into the emitted bundle —
+evaluating them at build time would require (a) compiling the filter JS for the
+page, (b) running it against each row in a V8 context during `compile`, and
+(c) resolving the ordering/dependency question of filters that reference runtime
+globals or other signals. That is new machinery, not a port — but it is more
+than this wave could hold, and an honest write-up beats a Rust reimplementation
+of filter semantics (which AGENTS.md forbids outright).
+
+** What is missing, precisely **
+
+1. A build-time evaluation seam that runs the page's compiled filter JS (via the
+   rustyscript engine already in the headless build) against a row `Value`, so
+   `resolve_token` can lower `` `$.field | filter` `` / `$item.field | filter` to
+   the same value the runtime produces.
+2. An ordering decision: build-time filter evaluation must run AFTER the page's
+   `@fn` filters are compiled but the SSG pass currently runs inside
+   `compiler.rs` before emit — the seam needs the filter functions available.
+3. A parity gate: a filtered `@each` row must render identically in served HTML
+   (build time) and hydrated DOM (runtime). Per BUG-252, the gate must assert the
+   filtered VALUE, and it needs a real backend for the runtime half.
+
+** Non-goal (stated loudly) **
+
+Do NOT port stdlib filters into Rust. `upper`, `lower`, `titleize`, `basename`,
+`includes`, etc. are stdlib JS; a Rust mirror is exactly the forbidden
+reimplementation. The fix is the evaluation seam above, or a documented "build
+time does not apply filters — runtime does" contract with a diagnostic when a
+row hole carries a pipe into SSG.
+
+** Acceptance when revisited **
+
+- `@each($list as $item) { <p>`$.name | upper`</p> }` ships uppercase in served
+  HTML AND in the hydrated DOM (identical), for both a stdlib query-helper
+  (`upper`) and a page-defined `@fn` filter.
+- A filtered hole whose filter cannot be evaluated at build time is DIAGNOSED
+  (never silently left as literal `| filter` text in the page).
+- Gates assert the VALUE, not the string that happened to be written.

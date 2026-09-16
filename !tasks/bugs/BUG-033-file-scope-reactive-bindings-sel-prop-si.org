@@ -1,0 +1,57 @@
+#+TITLE: File-scope reactive bindings (.sel { prop: $sig }) not wired
+#+STATE: DONE
+#+SESSION_ID: 14f48ced503111a7
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-05-29T18-28-09-664Z_14f48ced503111a7.jsonl]]
+#+CUSTOM_ID: BUG-033-file-scope-reactive-bindings-sel-prop-si
+#+EFFORT: 1d
+#+LAYER: coding-agent
+#+COMPLETION_HASH: 37d42c997c9687a1
+
+* Initial Message
+
+my friend, I want you to do two things that are quite related to each other:
+1. look at projects/unkn for the way it structures its files and tell me how you would have structured it
+2. look up reactive bindings and how they are done in Spacetime (the $ sigil), as well as full-spacetime work (as in, not using index.html, only index.st and generating the html from it by putting the html inline).
+
+The goal is to build a project that showcases reactive bindings, so that websites can start dealing with userland values instead of just animation-specific values (although one of the strengths of Spacetime is its ability to bring reactive bindings to the animation sphere).
+
+The goal of this is both to make a showcase demo (in demos/) and to use that to find all the BUGs and FEATs and REFACTORs that we need to implement. Do NOT use the 'emacs' way of managing tasks; only the Spell-native way. Think a bit about the type of demo that would make sense to showcase reactive bindings; get inspiration by choosing from awwwards.com too
+
+* Source
+Found completing the reactive cart showcase. Inside @template bodies, `.sel { text: $sig; }` wires correctly (BUG-026). At FILE/TOP-LEVEL scope it compiles clean but emits NO DOM binding.
+
+* Evidence (verified)
+- `.tot { text: $cartTotal; }` at file scope -> emitted JS contains the @computed source wiring but `.tot` selector never appears; no ST.watch binds it. Same for `.sel { @bind { text: $sig } }` (and @bind is deprecated, W0707).
+- cart-demo: @each over $cart renders items reactively, add-to-cart appends items, but `.total-amount` / `.cart-count` stay at initial because their file-scope bindings don't wire.
+
+* Root cause
+Reactive-property extraction (ContentBinding) runs only for @template ComponentBody (src/pipeline/scope.rs ~L168). File-scope selector declarations (src/compiler.rs compile_scope_block ~L412) always emit Declaration::Property as CSS; values that reference a signal ($) are never routed to a content binding.
+
+* Fix (consistent $-sigil syntax, no @bind block)
+Make file-scope `.sel { prop: $expr; }` emit the SAME ContentBinding runtime path templates use:
+- In compile_scope_block, detect declarations whose value references $ (reuse collect_signal_deps + transpile_signal_expr from src/syntax/form_match.rs).
+- Emit a runtime binding: for each dep, ST.watch(dep, () => document.querySelectorAll(sel).forEach(el => el[prop]=apply())); run once initially.
+- text/content -> textContent; other names -> attribute/property; same mapping as make_content_binding.
+- Non-$ values stay CSS. One mental model: any `prop: $expr` is reactive, at file scope or in a template.
+
+* Acceptance
+- `.tot { text: $cartTotal; }` at file scope updates .tot.textContent when $cart mutates.
+- cart-demo total + count update live on add/remove.
+- Templates' existing reactive props unchanged (BUG-026 tests green).
+- A test asserts a file-scope text:$computed binding emits an ST.watch wired to the selector.
+
+* Note
+This is the keystone for userland reactive showcases — file-scope is where page-level summaries/totals live. Higher priority than the demo (FEAT-041) which depends on it.
+
+* Integration point (confirmed via inspect --layer parse)
+- `.tot { text: $cartTotal; }` at file scope parses as a ScopeBlock with css_declarations=[{property:"text", value:"$cartTotal"}] (NOT a reactive binding); inside @template the same line becomes a ContentBinding directive. So file-scope and template-scope take different code paths.
+- Live emit path: src/pipeline/mod.rs::run_pipeline (L213) consumes ast.scopes. (NOTE: src/compiler.rs::emit_scope_css is DEAD/legacy — defined, never called.)
+- Where to branch: wherever run_pipeline turns ScopeBlock.css_declarations into CSS, detect declarations whose value contains '$' and instead emit a reactive ContentBinding into the JS output, reusing collect_signal_deps + transpile_signal_expr (src/syntax/form_match.rs) and the same runtime shape templates use (ST.watch(dep) -> document.querySelectorAll(sel).forEach(el => el[prop]=apply(el))). Map text/content -> textContent; other idents -> attribute. Keep non-$ declarations as CSS.
+
+* Tracing note
+run_pipeline scope->css conversion not fully traced due to tooling output degradation at session end; start there. parser populates css_declarations in src/parser/mod.rs:1696 / :1782.
+
+* Status
+Root cause + fix direction confirmed; implementation deferred to a fresh session (1d, emit-pipeline, multi-file; warrants careful work, not a rushed tail-of-session change).
+
+NOTE [2026-05-29]: Fixed in 39f1c2a4 (+ cart-demo 6a3f0d2e). Added SignalScope::Global + transpile_signal_expr_with (src/syntax/form_match.rs); emit_scope_css (src/compiler.rs) now splits $-valued declarations out of CSS into runtime reactive bindings that subscribe to local:<sig>:updated, re-evaluate the transpiled expression (reading SpacetimeLocal), and apply to every matching element (text/content->textContent, else attribute). Consistent $-sigil form at file + template scope. Verified live: file-scope .tot/.cnt update to 30/3 after mutations; cart-demo total->448 count->2 after add Rug+Lantern. Tests: file-scope binding emits runtime-not-CSS, plain CSS preserved, global transpile; 11 reactive + 114 form_compiler + 32 compiler green.

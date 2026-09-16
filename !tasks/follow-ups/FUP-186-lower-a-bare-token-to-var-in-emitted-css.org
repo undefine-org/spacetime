@@ -1,0 +1,362 @@
+#+TITLE: Lower a bare --token to var() in emitted CSS
+#+STATE: ITEM
+#+SESSION_ID: 153f5ed0617636c7
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-26T21-12-46-213Z_153f5ed0617636c7.jsonl]]
+#+CUSTOM_ID: FUP-186-lower-a-bare-token-to-var-in-emitted-css
+
+* Initial Message
+
+ok so is there any point in keeping the worktree now? verify
+
+* What is done
+
+`color: --ink` is now ACCEPTED by the validator. It was refused with
+
+#+begin_src text
+error[E0958]: `--ink` is not a valid color for `color`
+#+end_src
+
+which was a false refusal of the spelling Spacetime PREFERS — `var()` is a CSS
+construct the language does not need, since `--name` already names a value
+unambiguously. PLAN-136 W2 settled the rule ("a token reference is a value in
+EVERY value position") but it had two enforcement sites and only one guard:
+`directive_property_diagnostics` (E0967) checked `is_token_reference_value`
+first; `validate_declaration_value` (E0958) did not.
+
+Gate: `tests/bare_token_value_test.rs`, 4 passing, seen RED first.
+
+* What is NOT done — the lowering
+
+A browser does not understand `color: --ink`. It only resolves `var(--ink)`. So
+accepting the bare spelling without lowering it produces a CLEAN BUILD THAT
+EMITS DEAD CSS — worse than the original false refusal, and exactly the failure
+mode this arc keeps finding.
+
+`lower_token_value()` is implemented in `src/emit/css.rs` and wired into BOTH
+declaration emitters (`emit_decl`, `emit_decl_to_writer` — the source-map path
+must not emit a different stylesheet from the plain one). It is correct for the
+paths that use them, and it deliberately leaves a custom property's OWN
+declaration alone (`--ink: #222` keeps its literal text; there `--ink` is the
+property, not a reference, and wrapping it would give `--ink: var(#222)`).
+
+**But a page's plain CSS never reaches those emitters.** It flows through
+`CssExpr::Raw` as opaque text — 21 construction sites across the pipeline — so
+`.c { color: --ink }` is emitted verbatim.
+
+* Acceptance
+
+- `tests/bare_token_value_test.rs::a_bare_token_lowers_to_var_in_the_emitted_css`
+  (currently `#[ignore]`d with this FUP id) passes: the emitted stylesheet
+  contains `color: var(--ink)` and still contains `--ink: #222`.
+- Remove the `#[ignore]`.
+- A bare token inside a compound value lowers too — `border: 1px solid --ink`,
+  `margin: --space-2 --space-4`. The current helper only handles a value that is
+  ENTIRELY one reference, which is the easy case; this is the one that decides
+  whether lowering belongs in the emitter or in the value parser.
+- `var(--ink)` keeps working unchanged (gated).
+- Corpus flat: examples 35, demos 36, fixtures 6.
+
+* The design question this raises
+
+Lowering at the emitter is a string rewrite over opaque text — it cannot see
+compound values without re-parsing. The alternative is to lower where the value
+is still STRUCTURED (the CSS value parser, where a token reference could be a
+node), which is more work but handles compounds for free and puts the knowledge
+in one place.
+
+Do NOT ship the string-rewrite version for compounds. A regex over CSS values is
+how you turn `content: "--not-a-token"` into garbage.
+
+* Context
+
+Raised while prototyping the `%states` replacement (PLAN-147): the sketch used
+`font-size: var(--st-text-3xl)`, and the observation that Spacetime would rather
+write `--st-text-3xl` directly is what surfaced the false refusal.
+
+NOTE [2026-08-13]: CRATE RESEARCH — verdict: adopt NONE. Build the tagged node on what we already have.
+
+A librarian pass read the sources (not READMEs) of the candidate ecosystem.
+Ranked outcome:
+
+| crate | verdict | why |
+|-------+---------+-----|
+| rowan + logos (ALREADY PINNED) | ADOPT | we already parse with these; add node kinds at the existing grammar boundary. Lowest cost, no new subsystem. |
+| lightningcss (ALREADY PINNED) | KEEP, as the CSS oracle for the `Css` branch only — never as the language's value AST |
+| `ena` 0.14.4 (rustc's union-find) | CONDITIONAL, later | only if compound/range compatibility ever needs backtracking. Its merge policy is Rust code, so making it the main engine would violate types-as-data |
+| Salsa 0.28.2 | LATER, different problem | incremental invalidation, not typing. Also requires Rust 1.85 |
+| ascent / crepe (Datalog) | NO | relations and rules are Rust-authored at compile time; a logic subsystem for a sequential token-run matcher |
+| polytype (HM) | BAD FIT | models type variables, substitutions, polymorphism, arrows, schemes. We have none of those — non-polymorphic literals and compounds |
+| `unify` 0.0.3 | REJECT | type-level equality in Rust traits, not runtime unification of loaded rows |
+| chalk | REJECT | Rust trait solver, and SUNSET upstream |
+
+* The finding that matters: lightningcss already solved our problem, the same way
+
+Verified in OUR pinned `=1.0.0-alpha.67` (not just upstream docs):
+
+  src/properties/mod.rs:693   Property::Unparsed(UnparsedProperty)
+  src/properties/mod.rs:695   Property::Custom(CustomProperty)
+  src/properties/custom.rs:140
+    pub struct UnparsedProperty<'i> {
+      pub property_id: PropertyId<'i>,
+      pub value: TokenList<'i>,   // raw tokens, deliberately unresolved
+    }
+
+lightningcss hits EXACTLY our situation — a value it cannot fully parse because
+it contains `var()`, whose resolution is unknowable at build time. Its answer is
+not an escape list of characters to look for. It is a TAGGED VARIANT carrying
+the raw token list, so "I could not resolve this, and that is fine" is
+representable in the type rather than inferred from the string.
+
+That is independent confirmation of the ValueNode proposal, from the parser we
+already vendor. Our `Css(String)` variant is their typed property; our
+`TokenRef`/`Binding`/`Hole` are their `TokenList` — except ours are tagged by
+KIND, which is the extra we need and they do not (they have one unknown; we have
+five distinct Spacetime shapes).
+
+Also note `SyntaxString` / `ParsedComponent` (src/values/syntax.rs): a RUNTIME
+grammar matcher for registered custom properties, driven by a syntax string.
+Precedent for data-described value grammars — but its component vocabulary
+(`SyntaxComponentKind`) is a CLOSED CSS enum, which is precisely why it cannot
+replace our open stdlib registry. Same idea, wrong vocabulary.
+
+* Consequence for the design
+
+No dependency is added. The work is:
+  1. add node kinds at the rowan/logos boundary we already own
+  2. keep the stdlib `%capture_type` matcher as the shape authority, running over
+     tagged nodes instead of strings
+  3. keep `%scalar_type` as the meaning authority
+  4. call lightningcss only on the `Css` branch
+  5. represent Unknown/Deferred EXPLICITLY — the librarian's one hard caveat is
+     that no crate models gradual/deferred typing for a small DSL, so do not
+     encode it as `Option` and do not require resolution
+
+This satisfies the elegance bar: no new subsystem, types stay data, and it
+deletes the escape lists rather than adding a layer above them.
+
+NOTE [2026-08-13]: THE MODEL, AND THE ANSWER TO YOUR MARGIN NOTE.
+
+* Your annotation (p4, at the `enum ValueNode`): "Could this be fully defined with a capture type?"
+
+YES — and it already is, in this repo, for colour. The enum I sketched was a
+parallel implementation of a pattern that ships:
+
+    %capture_type color {
+        ( $core:color_core ) | ( $wide:css_wide ) | ( $ref:binding )
+    }
+
+Named arms, tagged variants, alternation, composition by reference — a sum type
+as DATA. `stdlib/capture-types/css-values.st` states the doctrine in its header:
+"EVERY scalar below ends with a `( $ref:binding )` arm", because "a value
+position in Spacetime is reactive", and the arm is listed LAST so a literal
+always wins the alternation. The same file also records the cost of the closed
+enum it replaced: "a closed `CaptureType` enum with a hand-written extractor per
+arm. Adding one scalar cost ~14 Rust edit sites, measured twice."
+
+So `ValueNode` as a Rust enum would have re-introduced exactly what PLAN-122
+W1.2 deleted. The variants belong in the grammar.
+
+ONE HONEST LIMIT (from the research, and it is real): the grammar can define the
+variant VOCABULARY and shape, but the runtime still needs a GENERIC sum
+representation to hold the result (`{tag, payload}` — we already have
+`CapturedValue` and named-record forms) and generic dispatch on the tag. It
+also cannot eliminate the lexer/CST token categories that distinguish the
+sigils in the first place. The enum is not needed; a generic carrier is.
+
+* The mathematical model: gradual typing's CONSISTENCY relation (Siek & Taha)
+
+Not Hindley-Milner. Two relations, deliberately distinct:
+
+  ≤  PRECISION / subtyping — DATA-defined, transitive.
+     `length ≤ length_percentage`; `number ≤ time` only under a declared unit
+     policy. Transitive closure over registry rows.
+
+  ~  CONSISTENCY — the admission predicate. Accept iff `observed ~ expected`.
+     Unknown ~ T and T ~ Unknown, for every T. T ~ T. Compounds are consistent
+     recursively when their known components are.
+
+THE KEY PROPERTY: `~` is INTENTIONALLY NON-TRANSITIVE. `Unknown ~ length` and
+`Unknown ~ color` do NOT license `length ~ color`. That is precisely
+"admit, do not claim" — the semantics we have been hand-rolling with escape
+lists. Accept on `~`; propagate a CLAIM only on `≤` or a concrete grammar arm.
+
+Unknown is therefore NOT lattice top and NOT bottom. Top-like acceptance lives
+in `~`; precision stays in `≤`. This is why the naive "make unknown the top
+element" instinct is wrong: top would claim everything, and we need something
+that refuses to claim while refusing to refuse.
+
+WHY A FALSE REFUSAL BECOMES IMPOSSIBLE: an unresolved reference enters as
+Unknown, and the admission predicate has an unconditional Unknown rule. Later
+resolution may REFINE the claim without invalidating the earlier acceptance.
+A concrete literal that definitively fails its DATA grammar or the lightningcss
+branch is still rejectable — the two cases are separated by construction rather
+than by a list of characters.
+
+lightningcss's `Unparsed`/deferred maps to Unknown, never to Error.
+
+* Crates: none. Measured, not asserted.
+
+| candidate | verdict |
+| ascent 0.8.0 | best Datalog + only real lattice support, ACTIVE — but rules are proc-macro compile-time Rust. Cannot consume `.st` rules loaded at runtime. Not now. |
+| crepe 0.2.0 | same compile-time limitation, no lattices, weaker maintenance. No. |
+| salsa 0.28.2 | DIFFERENT AXIS — incremental recomputation, not inference. Speculative until profiling shows repeated work dominates AND we have stable query boundaries. Trigger recorded. |
+| ena | only if genuine union-find constraints appear. Does not supply consistency semantics. |
+| polytype / HM | no type variables, no functions, no let-generalisation, no substitutions, no occurs check, no principal schemes. Nothing to infer. |
+
+HAND-WRITTEN CORE ESTIMATE: 30-60 LOC for the relation + table lookup, 50-120
+LOC for recursive compound projection and diagnostics, plus tests. That is
+smaller than any integration, and it deletes the escape lists.
+
+* Datalog's one genuine advantage, and why it still loses
+
+A Datalog relation expresses the transitive closure of coercions more
+declaratively than a growing matcher:
+
+    subtype(a, c) <-- direct_subtype(a, b), subtype(b, c);
+    accepts(expected, actual) <-- subtype(actual, expected);
+
+That IS nicer than hand-rolled closure. But it only helps with a RUNTIME
+interpreter whose rules are data — and ascent/crepe are both compile-time. A
+hand-written transitive closure over the 14 scalar rows is smaller today than a
+rule compiler that translates `.st` into generated Rust.
+
+Keep the relational MODEL. Skip the engine.
+
+NOTE [2026-08-13]: IS THE SIGIL CHECK STILL NEEDED? MEASURED: yes, for 3 of its 6 sigils.
+
+Asked the real question of the real API rather than reasoning about it.
+`capture_type_matched_arm("value_node", v, &defs)` returns the NAME of the arm
+that matched, so it can discriminate, not merely accept:
+
+| value                | matched arm | verdict |
+|----------------------+-------------+---------|
+| `var(--ink)`, `--ink`| `token`     | grammar handles it |
+| `$sig`               | `binding`   | grammar handles it |
+| `0 -> 1`             | `range`     | grammar handles it |
+| `inherit`            | `wide`      | grammar handles it |
+| `&self`              | **`css`**   | FELL THROUGH |
+| `` `e` ``            | **`css`**   | FELL THROUGH |
+| `%x`, `@y`           | **`css`**   | FELL THROUGH |
+| `#ff0000`, `notacolor`| `css`      | correct — these ARE css |
+
+So `value_node` today routes 4 of the 7 kinds correctly and silently misfiles
+the other 3 as CSS, because it has no arms for them. Deleting the lexical check
+now would send `&self` and a hole into lightningcss, which is a REGRESSION — the
+check is currently the only thing keeping them out.
+
+A CRITICAL MEASUREMENT TRAP, recorded because it nearly fooled me: asking
+`capture_type_accepts("value_node", v)` returns TRUE for every input, including
+`"garbage ~~~ nonsense"`. The last arm is `balanced(';')`, a catch-all, so
+ACCEPTANCE PROVES NOTHING about this production. Only the matched-ARM API is a
+real signal. A boolean gate over a grammar with a catch-all arm is a gate that
+cannot fail.
+
+ALSO FOUND, and it is a real defect in what I committed: `range_pair` does NOT
+match standalone — `capture_type_accepts("range_pair", "0 -> 1")` is FALSE. It
+only works as an arm inside `value_node`. The recursive `$from:value_node "->"
+$to:value_node` self-reference is not resolving. The composed path works, the
+standalone one does not, and I shipped the production without testing it alone.
+
+* THE WORK, as CodePath
+
+Wave 1 — close the arm gap so the grammar can answer for all seven kinds
+  stdlib/capture-types/value-node.st::`%capture_type element_ref`   NEW → wraps builtin `selector`
+  stdlib/capture-types/value-node.st::`%capture_type hole`          NEW → wraps builtin `expr`
+  stdlib/capture-types/value-node.st::`%capture_type directive_ref` NEW → `("%"|"@") $name:ident`
+  stdlib/capture-types/value-node.st::`%capture_type value_node`    add the 3 arms BEFORE `css`
+  stdlib/capture-types/value-node.st::`%capture_type range_pair`    FIX the recursive reference
+  tests/value_node_arm_test.rs                                       NEW gate: every kind routes to ITS arm,
+                                                                     asserted on the ARM NAME, never on a bool
+
+Wave 2 — only then, delete the lexical check
+  src/validation/css.rs::validate_declaration_value#body            replace the 6-sigil `if` with one
+                                                                     `matched_arm != "css"` question
+  tests/value_consistency_test.rs                                    must stay 5/5 unchanged
+
+Wave 3 — the ≤ relation (separate, unblocks compound lowering)
+  stdlib/scalars/types.st::§line[text~="%scalar_type"]              add `%widens_to` rows (data)
+  src/validation/consistency.rs                                     NEW ~60 LOC: `subtype()` transitive
+                                                                     closure + `consistent()`
+  tests/consistency_relation_test.rs                                 NEW gate
+
+Wave 4 — convert the 10 remaining deferred sites
+  src/syntax/events/mod.rs::§line[text~="is_token_reference"]
+  src/syntax/events/extractors/custom.rs::§line[text~="is_token_reference"]
+  src/emit/css.rs::lower_token_value
+
+ORDER IS FORCED: wave 2 cannot precede wave 1 without regressing, and wave 4 is
+mechanical once 1–3 are true. Wave 3 is independent of 1–2 and is what FUP-186's
+compound lowering actually needs.
+
+NOTE [2026-08-13]: CAN THE THREE FALL-THROUGH SIGILS BE GRAMMAR-MANAGED? Measured: 2 of 3 yes.
+
+Probed each as a real capture type against real values.
+
+| candidate grammar | verdict |
+|---|---|
+| `%capture_type directive_ref { ( "%" \| "@" ) $name:ident }` | WORKS — accepts `%styles`, `@fade-in`; REFUSES `plain` |
+| `%capture_type element_ref { "&" $rest:balanced(';')? }` | WORKS — accepts `&self`, `&.hover`, bare `&`; REFUSES `#ff0000`, `20px` |
+| a hole (`` `expr` ``) | BLOCKED, one layer down |
+
+FALSE STARTS WORTH RECORDING (both would have shipped a regression):
+- `{ $sel:selector }` accepts `#ff0000` — the `selector` builtin matches an id
+  selector, so wrapping the builtin cannot sit before the `css` arm. The
+  hand-written `"&" ...` form is precise where the builtin is not.
+- `{ $e:expr }` accepts `notahole` — `expr` is a catch-all. Same trap as
+  `value_node`'s own `balanced(';')` arm: acceptance from a permissive
+  production proves nothing.
+
+WHY THE HOLE IS BLOCKED, from the source: a hole is a PARSER node
+(`SyntaxKind::HTML_HOLE`), and the LEXER emits no token for a backtick. Stated
+at `src/syntax/cst/parser.rs:3735` — "it has NO token for TEMPLATE LITERALS
+(backtick) or REGEX literals, whose contents lex as ordinary tokens" — where the
+same gap also miscounts braces inside template literals (FUP-046).
+
+A capture-type grammar consumes TOKENS. No token, no grammar. `balanced('`')`
+fails because a backtick is not a bracket pair.
+
+∴ the 6-sigil `if` shrinks to a 1-sigil `if` (backtick only). Closing FUP-046
+would remove even that — which makes FUP-046 the true blocker on "delete the
+escape list entirely", and it is a LEXER fix, not a validator one.
+
+* WHAT ELSE THE ARMS WOULD REMOVE ON THE RUST SIDE
+
+Once `value_node` classifies all seven kinds, these become "route on the arm":
+  - `src/validation/css.rs` — 6 escape branches → 1 lexical + 1 arm query
+  - `src/syntax/events/mod.rs:143` — the `scalar_captures() && is_token_reference`
+    special case in `capture_type_accepts`
+  - `src/syntax/events/extractors/custom.rs` — the `match_token_reference`
+    helper I added for the paren-param path (its job becomes the `token` arm)
+  - `src/emit/css.rs::lower_token_value` — becomes "if arm == token, wrap"
+    instead of a string test, and gains COMPOUND support for free because the
+    arms nest
+  - `is_token_reference` itself (`src/syntax/events/mod.rs:333`) — its 2
+    remaining callers both become arm queries; the function is then dead
+
+That is 4 files and one whole helper function, replaced by one question asked of
+the stdlib.
+
+* FINAL WAVE — the other relations (added at your request)
+
+Wave 5, exploratory, deliberately AFTER the mechanical work:
+  research/relational-semantics.typ                     WRITTEN — sent to reMarkable
+  stdlib/scalars/types.st::§line[text~="%scalar_type"]  `%widens_to` rows → `≤` as data
+  src/validation/consistency.rs                          `join()` (⊔) for inference
+  src/syntax/events/form_scoring.rs                      overload resolution BY JOIN rather than
+                                                         by a scoring heuristic
+  src/diagnostics/suggestions.rs                         "expected length, got color;
+                                                         length_percentage accepts both" — a QUERY
+  stdlib/migrations/entries/                             a migration is CHECKABLE: `old ≤ new` proves
+                                                         a widening safe; a narrowing lists what breaks
+
+The maximalist claim, stated so it can be argued with: Spacetime is already
+unusual in that its TYPES are data. If the RELATIONS are also data, then
+coercion, overload resolution, diagnostic suggestions, editor widget offers, and
+migration safety all stop being hand-written mechanisms and become queries over
+one table.
+
+THE DISCIPLINE THAT MAKES IT SAFE: an edge in `≤` is a claim about the whole
+language forever. `number ≤ time` is the cautionary tale — locally reasonable,
+globally catastrophic (`stagger: 0.05` is seconds, `duration: 600` is ms), and
+silent. Anything conditional is a TERNARY relation keyed by the declaration
+site, or it is not a relation at all.

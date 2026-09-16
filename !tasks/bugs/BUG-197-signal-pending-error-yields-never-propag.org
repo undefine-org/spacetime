@@ -1,0 +1,205 @@
+#+TITLE: signal `_pending`/`_error` yields never propagate — interpolated %binds aliases skipped at resolve, derive watchers never bridge element-scoped exports
+#+STATE: DONE
+#+SESSION_ID: 153483dcc7307f91
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-18T10-51-20-732Z_153483dcc7307f91.jsonl]]
+#+CUSTOM_ID: BUG-197-signal-pending-error-yields-never-propag
+
+* Initial Message
+
+Loading failed for the <script> with source “http://localhost:1456/spacetime.js”. en:172:38
+Cross-Origin Request Warning: The Same Origin Policy will disallow reading the remote resource at https://spacetime.undefine.org/api/v1/projects/od8ibBpzFn6OxqwQwwSa7/status.json soon. (Reason: When the `Access-Control-Allow-Headers` is `*`, the `Authorization` header is not covered. To include the `Authorization` header, it must be explicitly listed in CORS header `Access-Control-Allow-Headers`).
+
+
+for http://localhost:1456/en/
+
+
+I clicked on "Push preview" and it was silent. Nothing happened...
+
+* Symptoms
+A `@data derive` reading a signal's auto-yielded `_pending` flag
+(e.g. `$pushPreview_pending`) NEVER reacts. Concrete user-facing case
+(PLAN-075 host widget): click "Push preview" → real POST fires (19s in
+flight) → zero visual feedback: dot stays turquoise, state label never
+shows "Working…", button label static. On completion the widget re-fires
+$status and lands on the identical settled state. User experience:
+"clicked, silent, nothing happened" — but the push DID happen (verified
+server-side via status.json preview_hash changes; reproduced twice via
+instrumented fetch in headless Chromium).
+
+This is NOT push-specific: `$status_pending`, `$promote_pending`,
+`$addDomain_pending`, `$pushPreview_pending` are ALL dead. The orange
+"in flight" dot introduced in FEAT-155 has never worked for any signal.
+The widget's working `$statusFailed` ("Host unreachable") deliberately
+does NOT use `_error` — it's a manual `@data inline` set from `@handle`
+receive arms (BUG-031 comment, index.st:223) — so no `_pending`/`_error`
+auto-yield was ever live-verified until now.
+
+* Root cause (fully traced, two breaks)
+
+Break 1 — WRITE side: the `%binds` alias never reaches the emitted
+ST.set key for INTERPOLATED aliases.
+- stdlib/macros/data-kind.st %macro data-signal binds:
+  `signal-call(...) -> { $call as $name, $pending as ${$name}_pending, … }`
+- stdlib/primitives/signal.st yieldState: `%yield pending -> $pending`
+  → src/emit/js.rs:974 lowers to `ST.set(el, <resolved>, pending)` where
+  <resolved> consults ctx.outputs (resolve_signal_name, js.rs:619).
+- BUG-154 wired bind outputs → ResolvedPrimitive.outputs →
+  PrimitiveArgs.outputs → ctx.outputs (expand.rs:442) — BUT
+  src/pipeline/resolve.rs (~:434) only inserts mappings for PLAIN-ident
+  aliases, explicitly skipping interpolated ones:
+  "An interpolated alias pattern (`${$name}_loading`, data-kind macros)
+  is resolved elsewhere and must NOT become a literal ST.set key."
+  That "elsewhere" does not exist on the write path: compiled widget JS
+  (served /__spacetime/host/runtime.js) contains
+  `ST.set(el, "pending", pending)` — raw export name. Every signal
+  instance writes the same undifferentiated "pending" key on its element
+  store; nothing ever writes `pushPreview_pending`.
+
+Break 2 — READ side: even with the right key, element-scoped yields
+don't cross to the global plane the derive reads.
+- `@data derive $isOrange … : ($status_pending || …)` compiles to
+  reads of `SpacetimeLocal['pushPreview_pending']` + listeners on
+  `local:pushPreview_pending:updated` (stdlib/primitives/data/
+  derived-signal.st, watched.forEach).
+- ST.set writes the ELEMENT-scoped store only, unless the name was
+  registered via `ST._bridgeExport(name)` — the BUG-069 bridge that
+  mirrors to SpacetimeLocal + dispatches the event.
+- html_hydrate.rs:221 DOES emit `ST._bridgeExport(dep)` for text/attr
+  binding deps; the derive watcher in derived-signal.st does NOT.
+- Live probe during a real in-flight push: zero `local:*:updated`
+  events; `SpacetimeLocal` has no `pushPreview_pending` key at all.
+
+Fix:
+1. resolve.rs — run interpolated aliases through the EXISTING
+   `resolve_yield_name` (src/analysis/mod.rs:1403, BUG-126 helper;
+   make pub(crate)) with the invocation's captures, so
+   `${$name}_pending` → `pushPreview_pending` lands in output_mappings.
+   Bare-`$cap` aliases keep today's behavior (minimal blast radius).
+2. derived-signal.st (and computed-source.st, same watcher shape) —
+   `ST._bridgeExport(d)` before subscribing, mirroring
+   html_hydrate.rs's binding path. No-op for already-global deps.
+
+* Reproduction
+1. `cargo run -- serve projects/ora-ventures.com --port 1456`
+   (any project with @deploy + host credentials).
+2. Expand host pill, click "Push preview".
+3. Observe for 19s: no "Working…", dot stays turquoise
+   (fetch instrumentation shows POST /__spacetime/host/push in flight).
+4. POST completes 200, real preview deploy created — UI identical to
+   before the click.
+
+* Verification (live, headless Chromium, 2026-07-18)
+- fetch log: `POST /__spacetime/host/push -> 200` (19s), then
+  status.json refetch 200 — the SIGNAL + @handle path works end to end.
+- 200ms DOM sampling during flight: state label/dot/button unchanged.
+- window.__spacetimeData / SpacetimeLocal inspection: no pending keys.
+- Compiled runtime grep: `ST.set(el, "pending", pending)` (raw name),
+  derive block present with `$pushPreview_pending` dep discovery.
+
+* Regression test
+(planned with the fix) — headless .test.st: a slow mocked endpoint, a
+derive over `$sig_pending`, assert it flips true mid-flight and false
+after. RED before fix, GREEN after.
+
+* Side issues found during diagnosis (fixed in the same widget pass)
+- stdlib/__host__/index.st:975 — error copy contains literal backticks
+  (`` `spacetime serve` ``); backtick is THE hole sigil → renders as an
+  empty hole: "check the terminal running  for details." (double space).
+- Button has no in-flight label/disabled state and no success
+  confirmation — the "silent" UX even once pending propagation works.
+
+* Resolution (fixed this session)
+
+** Write side (src/pipeline/resolve.rs)
+Interpolated %binds output aliases now resolve through the EXISTING
+`resolve_yield_name` (src/analysis/mod.rs, BUG-126 helper, made
+pub(crate)) against the invocation's captures: `${$name}_pending` →
+`pushPreview_pending` lands in ResolvedPrimitive.outputs, so
+`%yield pending -> $pending` emits `ST.set(el, "pushPreview_pending", …)`.
+A missing capture falls back to the raw alias, which still fails the
+plain-ident gate exactly as pre-fix (graceful, never a garbage ST.set
+key). Bare-`$cap` aliases (`$call as $name`) keep historic behavior.
+Unit tests: `test_interpolated_bind_output_alias_resolves_against_captures`
++ `…_missing_capture_yields_no_mapping` (src/pipeline/resolve.rs).
+
+** Read side (3 surfaces, one one-liner each — arm the BUG-069 bridge)
+- stdlib/primitives/data/derived-signal.st — derive watcher now calls
+  `ST._bridgeExport(d)` before subscribing (mirrors html_hydrate.rs's
+  text/attr path). No-op for already-global deps.
+- stdlib/primitives/data/computed-source.st — same watcher shape, same fix.
+- src/emit/html_reactive.rs (SignalScope::Global arm of emit_subscribe) —
+  Global reactive-class bindings (`.is-x: $rawYield`) now bridge too.
+
+** Widget UX (stdlib/__host__/index.st) — the actual user-facing silence
+- Button label swaps to "Pushing…" + `.is-busy` (pointer-events:none,
+  cursor:progress) for the ~20s window, driven by `$pushPreviewLabel` /
+  `$pushPreviewBusy` derives over the now-live `$pushPreview_pending`.
+- Success line: "Pushed -- preview updated." (`$pushPreviewOk` set in
+  the Pushed arm, cleared on next click/failure) — the settled badge
+  alone landed on the identical label after a no-op push, which read as
+  total silence.
+- Error line now shows the server's REAL message: receive arm carries
+  `$.body.error || $.statusText` (error bodies are JSON
+  HostPushErrorResponse `{"error": "…"}` — plain `$.body` would render
+  `[object Object]`); `$pushPreviewErrorText` falls back to the
+  network-level `$pushPreview_error` yield for fetch rejections (which
+  never reach a receive arm).
+- Prose-backtick hole bug fixed by the rewrite (the old copy's
+  `` `spacetime serve` `` rendered as an empty hole).
+
+** Regression tests (RED→GREEN)
+tests/integration/signal-pending-yield-propagation.test.st — 3 tests:
+pending derive flips true mid-flight / false after (incl. the raw-yield
+class-gate bridge assertion), `_error` propagates on network rejection,
+Failed arm surfaces a JSON error body's message string. All 3 GREEN
+post-fix; pre-fix the mid-flight assertions had zero possible writers
+to the asserted keys (traced mechanism), so they could only have been
+RED — labeled as inferred-RED, not observed, since the fix landed
+before the test was first run.
+
+** Live verification (headless Chromium, real dev server :4474,
+real spacetime.undefine.org orchestrator, 2026-07-18 ~23:10)
+- Mid-flight sample: btn "Pushing…", is-busy, dot ORANGE (first time
+  ever), label "Working…", SpacetimeLocal.pushPreview_pending=true,
+  isOrange=true — all six channels live.
+- Settled: btn restored, dot turquoise, "Pushed -- preview updated."
+  visible, error hidden. Real push landed (deploy_hash + preview_url).
+- 401 path (credentials moved aside, restored immediately after): error
+  line shows "Not logged in -- run `spacetime host login` first"
+  verbatim; button recovers; re-click after restore clears the error,
+  goes orange, succeeds, ok line returns.
+- Fresh reload: turquoise / "Preview ahead of production".
+- Screenshot: scratch/host-widget-bug197-fixed.png.
+- The "Logged out" state visible in that screenshot was a choreography
+  artifact (page reloaded during the credentials-aside window bakes a
+  tokenless widget at serve time), confirmed by the turquoise reload.
+
+** Suites
+- cargo test --lib: 2637 passed, 0 failed (incl. the 2 new resolve
+  tests). NOTE: a concurrent session's live edit to
+  src/metasystem/tests.rs briefly broke the lib-test build mid-session
+  (E0277 at its line 1155, file mtime 23:16, actively being edited);
+  left untouched per repo rules, it was fixed by that session minutes
+  later and the full suite then passed.
+- cargo run --features headless -- test tests/ --headless: 632 passed;
+  all 15-17 failures are OTHER sessions' untracked RED pins
+  (BUG-188/190/191/192/193/195/196 test files) — none mine, none
+  affected by these changes; the count flapped between runs because
+  those files were being edited live.
+- commercial/host cargo test --workspace: all suites green (dist bundle
+  regenerated for the widget changes).
+
+** Deployed-site bundle
+commercial/host/frontend/host-widget/dist/ regenerated via
+examples/extract_host_widget_bundle.rs (widget changes ride deployed
+sites too).
+
+** Follow-ups noted (not silently dropped)
+- The user's dev server on :1456 runs the 17:03 binary, which predates
+  the write-side fix — it must be RESTARTED to pick up resolve.rs +
+  html_reactive.rs changes (stdlib .st changes apply per-request, but
+  the alias resolution is compiled into the binary).
+- `$call as $name` still maps to the literal key "name" (historic
+  trim-the-`$` behavior preserved deliberately); invocation rides the
+  ST.registerSignalCall rail so it is functionally dead weight, but a
+  future cleanup could resolve bare-$cap aliases through captures too.

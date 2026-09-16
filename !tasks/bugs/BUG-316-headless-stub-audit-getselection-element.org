@@ -1,0 +1,47 @@
+#+TITLE: Headless stub audit: getSelection, Element.animate, IntersectionObserver fake rather than refuse
+#+STATE: ITEM
+#+SESSION_ID: 154d859cbec2d93a
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-08-06T12-08-13-733Z_154d0baaa942d918/10-W5FidelityIdempotency.jsonl]]
+#+CUSTOM_ID: BUG-316-headless-stub-audit-getselection-element
+
+* Found via
+PLAN-137 W5 (I5), gh-17 stub audit. When the getComputedStyle stylesheet-read lie was
+fixed (refuse-by-rung-name), every OTHER headless stub was audited for the same class:
+a stub returning a plausible empty/success value instead of refusing is a false-green
+generator — a test can pass against it for the wrong reason.
+
+* Audited stubs and status
+- getComputedStyle: FIXED — refuses stylesheet-derived (getPropertyValue undefined) by rung name + --cdp (gh-17).
+- requestAnimationFrame: DECLARED — synchronous fake rAF is the Logic rung's defined world (rung.rs).
+- performance.now: DECLARED — fake clock is the Logic world.
+- fetch: HONEST — mock value, else throws 'No mock' (refuses unknown URLs).
+- DOMParser: OK — faithful (linkedom.parseHTML).
+- AbortController/AbortSignal: OK — faithful contract.
+- setProperty String coercion: OK — real CSSOM contract (correctness fix).
+- Focus tracking / activeElement: OK — faithful.
+- checked / blur / select.value: OK — faithful.
+- matchMedia: HONEST-REFUSAL by non-match (only explicit light matches; else false = false-RED direction, safe).
+- getSelection: FAKES — collapsed empty selection ('' text, null range).
+- Element.animate (WAAPI): FAKES — fake Animation always playState 'running'.
+- IntersectionObserver: DECLARED-HEURISTIC — isIntersecting from inline-style; real geometry is layout-rung.
+
+* The three that fake rather than refuse
+1. Element.animate — the clearest false-green: a test asserting an element is animating
+   (be_animating, playState) passes against a stub that never renders or advances. The
+   assertion's claim is a timing/paint fact; the logic backend answers it with a fake.
+   These assertions are NOT gated today — be_animating is absent from assertion_min_rung's
+   layout list (rung.rs) — so they pass for the wrong reason. Should be gated to a higher
+   rung, or animate() must refuse when a real timeline is claimed.
+2. getSelection — returns a collapsed empty selection. A contenteditable read of the edited
+   text gets ''/null instead of refusing. Selection presence is arguably Logic-faithful, but
+   a CONTENT read should refuse or the shim should grow a settable range.
+3. IntersectionObserver — declared heuristic (inline-style visibility). Documented, gives a
+   deterministic headless contract, but `@on visible` firing depends on it so a visibility
+   claim can pass headless and fail in a real browser for geometry the heuristic can't see.
+   BUG-305 extends the scroll half; this records the visibility half.
+
+* Fix direction (not implemented)
+rung.rs assertion_min_rung should grow timing/layout entries for be_animating / getAnimations
+(animation-behavior) so those claims refuse on the logic backend instead of passing against
+Element.animate's always-'running' stub. Selection content reads should refuse or be settable.
+IntersectionObserver stays declared-heuristic pending BUG-305.

@@ -1,0 +1,60 @@
+#+TITLE: Spacetime CSS grammar rejects the :root selector
+#+STATE: ITEM
+#+SESSION_ID: 150ccb99745d347e
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-17T14-25-31-601Z_150ccb99745d347e.jsonl]]
+#+CUSTOM_ID: FUP-065-spacetime-css-grammar-rejects-the-root-s
+
+* Initial Message
+
+continue
+
+* Summary
+A top-level =:root { ... }= CSS rule fails to parse in a =.st= file
+("expected scope block, directive, or declaration at offset N"), EVEN with a
+plain property (=:root { color: red; }=). The =:root= pseudo-class selector is
+not recognized by Spacetime's CSS/scope grammar.
+
+* Evidence (reproduced)
+- =:root { --x: #fff; }= -> parse error.
+- =:root { color: red; }= -> parse error (so it is the SELECTOR, not custom props).
+- =.tokens { --x: #fff; }= -> OK (custom properties parse fine in a class selector).
+- =body { --x: #fff; background: var(--x); }= -> OK (and inherits document-wide).
+- =:root { @macro }= -> OK (examples/mobile-tasks/app.st:16 — a =:root= block
+  containing only DIRECTIVES parses; only RAW declarations under =:root= fail).
+
+So the grammar appears to accept =:root= as a scope that holds directives, but the
+selector→declaration path that every other selector uses is not wired for the
+=:root= pseudo-class head.
+
+* Impact
+- Idiomatic CSS design-token blocks (=:root { --token: ... }=) cannot be authored;
+  authors must hang custom properties off =body= (works, inherits like =:root=) or
+  inline literals. Minor but surprising; =:root= is the canonical token home.
+- Surfaced while building the MCP warm-dark chrome (FEAT-130): worked around by
+  declaring the palette as custom properties on =body=.
+
+* Hypothesis (unverified)
+The selector parser likely has a branch for tag/class/id/attribute/=*= heads but
+treats =:root= (a bare pseudo-class with no element) as not introducing a normal
+declaration-bearing rule, so the body is parsed as if at file scope -> "expected
+scope block, directive, or declaration". Compare the working =:root { @macro }=
+path (which routes through directive parsing) against the failing
+=:root { decl; }= path.
+
+* Research questions
+- Is =:root= deliberately reserved (e.g. for the =@macro=-only meaning), or an
+  oversight? Are other bare pseudo-class selectors (=:where()=, =:is()=,
+  =::selection= at top level) similarly affected?
+- Should the fix generalize to "any selector whose compound starts with a
+  pseudo-class/element" rather than special-casing =:root=?
+
+* Acceptance
+- =:root { --token: #fff; color: red; }= parses and emits the rule unchanged.
+- A regression test in the CSS-grammar suite covers =:root= with raw declarations
+  AND with directives (the existing working case must not break).
+- docs/language note on token authoring (=:root= vs =body=) if =:root= stays
+  special.
+
+* Origin
+PLAN-041 W4 / FEAT-130 (MCP warm-dark chrome). Workaround in place
+(custom properties on =body=); this FUP tracks the grammar gap itself.

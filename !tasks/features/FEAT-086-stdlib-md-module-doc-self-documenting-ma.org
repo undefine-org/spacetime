@@ -1,0 +1,61 @@
+#+TITLE: stdlib md module + @doc: self-documenting Markdown rendering
+#+STATE: DONE
+#+SESSION_ID: 14f94e45c6c3f247
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-02T11-06-49-499Z_14f94e45c6c3f247.jsonl]]
+#+CUSTOM_ID: FEAT-086-stdlib-md-module-doc-self-documenting-ma
+
+* Initial Message
+
+what's next to make this super usable? especially for e.g. multiple dispatch and making it useful as an actual browser. also, could you create a basic Markdown parser in pure Spacetime (only scoped to spacetime-docs for now, if needed), that you would use to integrate Markdown files already written about testing? How hard would that be?
+
+* Outcome
+A Spacetime ~md~ module renders Markdown to HTML behind a single ~@doc~ macro;
+demos/spacetime-docs is now a real docs READER over docs/testing/*.md. Commit
+9ba6c192.
+
+* Design (AGENTS-aligned)
+No Rust markdown parser, no hand-written JS. Engine vendored on the pretext rail:
+- git submodule ~stdlib/md/vendor/snarkdown~ (developit/snarkdown, pinned
+  7619436b) + author-owned ~snarkdown-entry.ts~ (-> ~globalThis.snarkdown~) +
+  bun-bundled ~snarkdown.bundle.js~ (~2KB IIFE) + PROVENANCE.md.
+- ~%vendor snarkdown~ (vendor.st), demand-injected only when ~@doc~ is used
+  (~vendor_is_referenced~ rail).
+- ~render-markdown~ primitive: ~%emit js { el.innerHTML = snarkdown(content) }~.
+- ~@doc~ macro: ~@doc(src: "x.md")~ | ~@doc(content: "# inline")~.
+
+* Build-time inlining
+~compiler.rs::inject_doc_content~ (mirrors FEAT-084 ~inject_registry_data~): for
+each ~@doc(src:…)~ FormMatch, read the .md file at BUILD time and move its bytes
+into the ~content~ capture; the page renders the canonical doc and cannot drift.
+Path resolves vs ~site_dir~ then CWD. Missing file -> visible inline error, never
+a silent blank. Gated by ~has_doc_src~ to skip the AST clone in the common case.
+
+* Reader
+Sticky pure-anchor sidebar + hero with a live ~@on click~ counter + six glass
+cards each ~@doc(src: docs/testing/*.md)~ (GUIDE/FIDELITY/GENERATIVE/ANIMATION/
+AUTOMATION/CDP). Long-form typography for snarkdown's h1/h2/h3/strong/code/pre/
+ul/blockquote. ~@scene~ backdrop + ~@scroll~ reveals.
+
+* Verification
+- Rust unit tests: ~doc_src_inlines_markdown_file_and_renders_via_snarkdown~,
+  ~doc_src_missing_file_emits_visible_error_not_blank~ (both green).
+- Live CDP: 6 docs rendered (correct h1/h2/pre counts), counter 0->3, 7 nav
+  links, dark themed. Deterministic node render of the shipped snarkdown bytes
+  against each inlined doc confirmed correct HTML for all 6.
+- Full lib 2160 passed / 0 failed; integration 168 passed.
+
+* Known limitations / follow-ups
+- ~stdlib/md/tests/doc.test.st~ documents intended ~@doc~ behavior but does NOT
+  gate yet (BUG-051: nested directives in a test/@fixture body don't execute —
+  same as stdlib/text/tests/measure.test.st). Verified at emit level instead.
+- BUG-073 filed: block comment with a ~<tag>~ + backtick immediately before
+  markup desyncs the events parser and silently drops following FormMatches
+  (HTML-region-vs-token-stream class, mirror of BUG-070/072). Worked around in
+  the demo; root fix tracked.
+
+* Serve gotcha (resolved)
+A zombie ~target/debug/spacetime serve~ process (not matched by
+~pkill -f "serve demos"~) kept serving stale runtime.js (0 render calls) while a
+fresh ~build~ produced 6. Kill by PID / ~pkill -f target/debug/spacetime~. The
+serve and build compile paths agree (proven via a from_file + with_site_dir
+repro).

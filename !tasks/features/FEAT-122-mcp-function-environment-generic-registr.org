@@ -1,0 +1,117 @@
+#+TITLE: MCP Function Environment — generic registry/mount/await/inspect vertical slice
+#+STATE: DONE
+#+SESSION_ID: 150a97869c1cbe15
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-15T21-21-03-088Z_150a97869c1cbe15.jsonl]]
+#+CUSTOM_ID: FEAT-122-mcp-function-environment-generic-registr
+#+DEPENDS: PLAN-038-signal-reactive-output-the-sibling-of-da
+#+LAYER: mcp
+#+PRIORITY: A
+#+COMPLETION_HASH: 42ac06d836cecbf5
+
+* Initial Message
+
+can you find the work i did around the live environment extension for Spacetime? where was I with that?
+
+* Parent
+[[id:PLAN-038-signal-reactive-output-the-sibling-of-da]] — Zen Phase 1, before the full @host/@data-signal language wave.
+
+* User intent
+The user wants the plan order to be: first the zen path (function environment + preludes), then the rest of PLAN-038, then the original fully-live MCP vision. This item is the first executable vertical slice: one registry, one mount, one sink, one awaited event, one .st function replacing one Rust-specific interface.
+
+* Goal
+Make the MCP live environment feel like a small NREPL/function host without waiting for the full reactive-output language implementation.
+
+Definitions:
+- Function = Spacetime source + compile artifacts + introspected/declared contract + revision.
+- Instance = mounted Function + input JSON + URL + event queue.
+- Event = typed envelope emitted by the mounted page to the host.
+
+This slice intentionally allows a lightweight declared contract (JSON from st_fn_put/st_mount args) while the compiler-level contract registry from FEAT-110/FEAT-113 is still pending. The data shape must be forward-compatible with the later introspected contract.
+
+* Scope
+IN:
+1. Add generic function registry to the MCP session state.
+2. Add generic instance/event store to the live HTTP server.
+3. Add tools:
+   - st_fn_put(source, name?, contract?) -> {fn_id, revision, contract, diagnostics}
+   - st_mount(fn_id OR source, input?, title?) -> {instance_id, url, contract}
+   - st_await(instance_id, timeout_secs?) -> next event or timeout
+   - st_inspect(instance_id? fn_id?) -> function/instance/event diagnostics
+4. Add one generic signal sink: POST /__mcp/signal/{instance_id} accepting JSON or form fields and pushing an event envelope.
+5. Serve mounted functions as live pages with sibling input.json and assets.
+6. Keep current st_propose/st_proposal_status/st_await_choice working; optionally implement them as compatibility wrappers only after the generic path is solid.
+
+OUT:
+- Full @host / @data signal / @handle syntax (FEAT-110).
+- Full compiler-introspected signal registry (later phase).
+- CDP browser server (PLAN-037 W3).
+- Hot module replacement over WebSocket; simple remount/reload semantics are enough here.
+
+* Design constraints
+- No custom JavaScript in Spacetime pages except inside %primitive. If a mounted page needs host communication, it must use stdlib/__mcp__/host.st (or a temporary native HTML form during this slice).
+- Rust owns transport, registry, compilation, and event queues. Spacetime owns UI/interface functions.
+- One generic event sink. No new picker/form-specific Rust route.
+- Compatibility is allowed only as a wrapper; do not create a second long-term interface system.
+- Tool results must always include structuredContent.
+
+* Acceptance criteria
+- st_fn_put accepts inline .st source, compiles it, stores revision 1, and returns function id + compile lengths/diagnostics.
+- st_mount mounts a stored function with input JSON and returns a URL.
+- Opening the URL serves the compiled page and /input.json.
+- POSTing to /__mcp/signal/{instance_id} records one typed event.
+- st_await returns that event with {decided:true,event:{type,payload,instance_id}} within the timeout.
+- st_inspect returns function metadata, instance metadata, and event history.
+- Existing MCP tools still list and work.
+- cargo build passes.
+- A JSON-RPC smoke test proves st_fn_put -> st_mount -> POST signal -> st_await -> st_inspect end-to-end.
+
+* Expected files
+- src/mcp/state.rs — function registry metadata / id allocation.
+- src/mcp/live.rs — function/instance/event store, generic signal sink, mounted page serving.
+- src/mcp/tools.rs — new tool descriptors + implementations.
+- stdlib/__mcp__/host.st — minimal host communication primitive if feasible in this slice.
+- stdlib/__mcp__/kit/ — follow-up library functions once the generic API lands.
+
+* Verification plan
+1. cargo build.
+2. cargo test --lib for regressions if build is clean enough for current baseline.
+3. Direct JSON-RPC smoke over `cargo run --quiet -- mcp`:
+   initialize -> tools/list -> st_fn_put -> st_mount -> HTTP POST /__mcp/signal/{instance} -> st_await -> st_inspect.
+4. Check that stdout remains pure JSON-RPC; HTTP/server logs stay stderr.
+
+* Risk register
+- Risk: Contract introspection is not available yet. Mitigation: store a forward-compatible `contract` object explicitly and later replace its producer with compiler introspection.
+- Risk: st_mount(source) and st_fn_put(source) duplicate compile paths. Mitigation: one helper compiles and registers; st_mount(source) calls the same helper implicitly.
+- Risk: Generic signal sink becomes under-specified. Mitigation: envelope contract is small and stable: {type, payload, correlation?}; form fallback maps fields into payload.
+- Risk: Long polling blocks MCP loop. Mitigation: same bounded poll pattern as st_await_choice; timeout under client deadline.
+
+NOTE [2026-06-15]: Implementation complete 2026-06-15. Shipped zen vertical slice: generic Function Environment in src/mcp/live.rs (FunctionRecord, InstanceRecord, LiveEvent, Function/Instance/Event store, /__mcp/instance/{id}/ page/assets/input.json, /__mcp/signal/{id} generic sink, st_await cursor semantics), new tools in src/mcp/tools.rs (st_fn_put, st_mount, st_await, st_inspect), updated MCP instructions/docs in src/mcp/{mod,protocol}. Added stdlib/__mcp__ module skeleton + primitives/host.st with @mcp-host and window.__stHost dispatch/signal bridge (JS only inside %primitive). Existing st_propose/st_proposal_status/st_await_choice preserved and smoke-tested against the new LiveStore layout.
+
+Verification:
+- cargo build: PASS (only pre-existing unused imports warning in src/pipeline/resolve.rs).
+- cargo test --lib: PASS, 2289 passed / 0 failed.
+- cargo run -- check stdlib/__mcp__/index.st: PASS.
+- JSON-RPC MCP smoke: initialize -> tools/list includes st_fn_put/st_mount/st_await/st_inspect -> st_fn_put inline .st -> st_mount -> GET mounted URL contains data-st-mcp-instance -> HTTP POST /__mcp/signal/{instance} JSON {type:chosen,payload:{index:7}} -> st_await returns decided:true with chosen event -> st_inspect returns one event. PASS.
+- Host prelude compile smoke: st_fn_put source importing "stdlib/__mcp__" and using @mcp-host compiles. PASS.
+- Legacy proposal smoke: st_propose returns prop-1 URL, picker page serves, st_proposal_status returns decided:false. PASS.
+
+Known caveat: contract is still explicit/declared JSON fallback, not compiler-introspected. That is intentional for FEAT-122 and is replaced by PLAN-038 FEAT-110/FEAT-113 later. Form URL decoding in /__mcp/signal is minimal fallback; canonical library functions should use JSON via @mcp-host.
+
+* Final outcome (2026-06-15)
+
+FEAT-122 is DONE. The MCP now has the first generic live function environment slice:
+
+#+begin_src text
+st_fn_put(source)
+  -> FunctionRecord { fn_id, revision, contract, compile artifacts }
+st_mount(fn,input)
+  -> InstanceRecord { instance_id, url, input, event stream }
+POST /__mcp/signal/{instance}
+  -> LiveEvent queued on the instance
+st_await(instance)
+  -> next unconsumed event
+st_inspect(...)
+  -> functions/instances/events/contracts/diagnostics
+#+end_src
+
+This is deliberately not the full PLAN-038 language yet. It is the stable runtime seam that the host/env/kit preludes and later @data signal/@handle machinery can target.

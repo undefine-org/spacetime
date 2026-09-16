@@ -1,0 +1,1001 @@
+#+TITLE: First-class enum/union types: @match value-mode, @data derive match, unified @view/@match dispatch, state reflection cutover (FUP-074 full scope)
+#+STATE: DONE
+#+SESSION_ID: 1534a34a305b50ec
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-18T13-08-39-234Z_1534a34a305b50ec.jsonl]]
+#+CUSTOM_ID: PLAN-077-first-class-enum-union-types-match-value
+#+LAYER: language
+#+PRIORITY: #B
+
+* Initial Message
+
+look at `stdlib/__host__`. Isn't a @handle or @match better instead of having so many bools? what would the syntax look like?
+
+* Initial Message
+
+User asked: looking at `stdlib/__host__/index.st`'s 9 chained `@data derive $isX bool`
+signals (isBlue/isOrange/isTurquoise/isGreen + 4 showXBadge + stateLabel), is there a
+better construct than a wall of booleans? Investigated `@handle`/`@match` (wrong host
+position — @handle consumes signal replies, @match dispatches templates, neither
+produces a derived VALUE). Investigated union/sum types (`@type Name { A | B | C }`)
+— closer, and surfaced FUP-074 (open, filed 2026-06-19), which had already diagnosed
+exactly this gap: no author-facing enum SIGNAL exists that (a) is produced by a
+derive, (b) reflects its variant to a CSS-reachable attribute, (c) is checkable, (d)
+feeds @state(when)/@match/@view/reactive-class from ONE declaration. User then asked
+for the `@match` form specifically, and to plan the full FUP-074 scope (not a narrow
+slice), with `data-st-state`'s bespoke non-reactive carrier DEFINITELY deleted as part
+of it. This PLAN is that design, grounded in this session's source-reading (not
+speculation) — see "Grounding" below for what was verified vs assumed.
+
+* Thesis
+
+"A value that is one of N named states" is expressed FOUR incompatible ways today
+(boolean reactive-class chains, `@state(when: "str")`, `@state(when: $x is Variant)`,
+`@match`/`@view` template dispatch), each with its own lowering and gaps (FUP-074's
+own diagnosis). They converge on ONE mechanism: a `@type` sum-typed signal, produced
+by EITHER a primitive's `%yield` (existing: `@socket`) OR a new derive form
+(`@data derive $x T : @match { guard => Variant; ... }`), consumed uniformly by
+`@match`/`@view` (render dispatch, unified into one primitive) and `@state(when: $x is
+V)` (CSS reflection). `@state(when: "str")`'s bespoke `dataset.stState` carrier is
+retired outright — a bare string becomes a degenerate 1-field union under the SAME
+attribute-reflection path, not a parallel mechanism.
+
+* Grounding — what this session verified by reading source (not assumed)
+
+1. `ST.watchTypedUnion` (`public/runtime/st.js:1198`) is ALREADY GENERIC: it
+   `ST.watch(el, signalName, state => { if (state.type) setAttribute(...) })` — it does
+   not know or care that the signal came from `@socket`. `generate_pattern_match_js`
+   (`src/emit/metasystem_codegen.rs:953`) just calls it with a signal NAME. **Any**
+   signal (derive, inline, primitive) that publishes a `{type: 'Variant', ...}`-shaped
+   value under its name already drives `@state(when: $sig is Variant)` correctly, zero
+   runtime edits. FUP-074's "only @socket feeds it" is true only of the PRODUCER side;
+   the CONSUMER/reflection side needs no generalization work. This significantly
+   shrinks the plan versus FUP-074's original framing.
+2. `CaptureType::PatternMatch { variant, bindings }` (`src/parser/meta_ast.rs:510`,
+   used today by `state-match`'s `is Variant { $bindings }` grammar) is the exact shape
+   needed for a dispatch-mode variant PATTERN in `@match`/`@view` arms. No new Rust
+   `CaptureType` enum variant is needed for W1 — it is REUSED, not re-invented.
+3. `stdlib/primitives/data/derived-signal.st` already republishes a computed value
+   under `window.SpacetimeLocal[name]` + `local:<name>:updated` — the exact channel
+   `watchTypedUnion` listens on via `ST.watch`. A NEW primitive that computes a
+   `{type, ...}` object and republishes through the SAME channel needs no core
+   runtime change.
+4. `stdlib/primitives/match-render.st` and `stdlib/primitives/view.st` already resolve
+   arms as a RUNTIME JS array (`arms: expr` param, `Array.find` over normalized
+   `{pattern, ref}` pairs) — not Rust-compiled per-arm JS. The new value-producing
+   match (guard → variant) follows the SAME precedent (arms-as-runtime-data, resolved
+   in `%emit js`), avoiding a new Rust codegen function class. `derived-signal.st`'s
+   dependency-discovery-by-regex (`/\$([A-Za-z_][A-Za-z0-9_]*)/g` over the raw expr
+   text) is reused for discovering a cond-arm block's combined guard dependencies.
+5. `TypeRegistry` (`src/type_system.rs:23`) already parses+stores `@type` sum
+   variants (`TypeDef.variants`) from BOTH `@type Name { A | B }` and
+   `receive to Sum { ... }`. It is the existing source of truth exhaustiveness/
+   unknown-variant checks read from — no new registry needed, only new READS of it
+   from new validation passes.
+6. `stdlib/macros/view.st` + `stdlib/primitives/view.st` + `stdlib/primitives/match-render.st`
+   are near-duplicates today: identical arm-resolution logic, differing only in
+   "subscribe + re-mount" (`@view`) vs "mount once, no subscription" (`@match`). Real
+   duplication to delete, not merely a style preference.
+7. `stdlib/primitives/state.st`'s `state()` primitive hand-writes
+   `%&el.dataset.stState = __state` directly — confirmed the ONLY non-reactive,
+   bespoke state carrier in the codebase (FUP-074's "orphan" claim, confirmed).
+8. `stdlib/AGENTS.md`'s module philosophy: `stdlib/dnd/` and `stdlib/3d/` are the
+   reference shape (`MODULE.st` + `index.st` + `capture-types/` + macros/primitives
+   optionally combined per-file + `tests/`). `stdlib/dnd` is imported UNCONDITIONALLY
+   from `stdlib/index.st` (not opt-in) — so an always-on core construct being a module
+   is an established pattern, not a deviation.
+
+* Mandate (user decisions, this session)
+
+1. Enum declaration: BOTH `@type Name { A | B | C }` (shareable, named) AND an inline
+   anonymous union at the derive site are supported. Inline form is allowed to
+   REQUIRE parentheses if that's what makes it parse unambiguously (explicit
+   permission — "you're allowed to force parentheses if the syntax is too hard to
+   parse otherwise").
+2. `@data derive` gains a value-producing match form:
+   `@data derive $x T : @match { guard => Variant; ... }` — guard-cond (`cond`)
+   semantics, first-match-wins, reusing arrow-arm grammar. Primarily tested through
+   `.test.st` (real runtime behavior), not solely Rust unit tests.
+3. `@match`'s existing consequence (`&template(args)`) is WIDENED to also accept a
+   bare expr consequence, disambiguated by the leading `&` sigil — one grammar, not a
+   parallel construct.
+4. Exhaustiveness is a HARD COMPILE ERROR (Rust-style), not a warning, for BOTH
+   senses of "exhaustive" this plan introduces (see Diagnostics below — these are two
+   DIFFERENT checkable properties, not one).
+5. Full FUP-074 scope: also unify `@view`/`@match` (reactivity as one primitive
+   parameter, not two primitives) AND retire `data-st-state`'s bespoke non-reactive
+   carrier in the SAME plan — "F. definitely delete."
+6. New stdlib work lands as ONE semantically-cohesive MODULE (`stdlib/dnd`-shape),
+   NOT scattered into the legacy flat `macros/`/`primitives/` dirs. A file MAY mix
+   `%macro` and `%primitive` when they're one cohesive concern (explicit permission —
+   the module doctrine already allows this, user re-confirmed it).
+7. Sequencing: agreed to my proposed dependency order (TypeRegistry hookup → grammar
+   → derive-match → mutation lowering → exhaustiveness diagnostics → view/match merge
+   → data-st-state retirement → `__host__/index.st` migration as first real consumer),
+   "go as you see fit."
+8. Rigor: alternate MAIN-THREAD architecture/implementation waves with REVIEWER-SWARM
+   verification waves in between (not one big unreviewed diff at the end).
+
+* The new module — `stdlib/enum/`
+
+WHY a module (not flat dirs): this is ONE semantic concern — a value that is one of N
+named states, produced by a derive or a primitive, reflected to CSS via one attribute,
+dispatched to templates or destructured in effects — exactly the `stdlib/dnd`-shape
+rationale ("drag-and-drop is ONE semantic concern"). It supersedes and DELETES four
+existing flat-dir files that are all narrower slices of the same concern.
+
+`@type` itself (`stdlib/macros/type-data.st`, both product and sum forms) is NOT
+moved — it is a general type-declaration mechanism also used for non-enum product
+types (e.g. `Product` records) and signal response sums unrelated to state/CSS
+reflection. `stdlib/enum/` DEPENDS on `TypeRegistry` (reads declared `@type` sums for
+validation) but does not own type declaration.
+
+`@socket` (`stdlib/primitives/socket.st`) is NOT moved — it is a WebSocket-transport
+primitive that happens to be a union PRODUCER; it stays put, and this plan's
+generalized reflection now serves it (already did — see Grounding #1) plus every new
+producer, without needing to relocate it. `stdlib/enum/MODULE.st` cross-references it
+as a producer example.
+
+** File layout
+
+```
+stdlib/enum/
+  MODULE.st                        — manifest, rationale, worked examples
+  index.st                         — public re-exports (import order below)
+  capture-types/
+    variant-pattern.st             — %capture_type variant_pattern: reuses the
+                                      existing is-Variant{bindings} shape
+                                      (CaptureType::PatternMatch) as a DISPATCH-mode
+                                      match_pat alternative (alongside string|ident)
+    match-arms.st                  — %capture_type match_pat (string|ident|variant_pattern),
+                                      match_consequence (template_invocation|expr,
+                                      disambiguated by leading &), match_arm, match_block
+                                      — MIGRATES + REPLACES
+                                      stdlib/capture-types/match-block.st (deleted)
+    cond-arms.st                   — %capture_type variant_construct (ident + optional
+                                      arg_list), cond_arm (guard_expr|"_" =>
+                                      variant_construct), cond_block — NEW, backs
+                                      value-producing @match
+    inline-union.st                — %capture_type inline_variant_type:
+                                      "(" ident ("|" ident)+ ")" — anonymous inline
+                                      enum literal at a derive-site typeref position
+  dispatch.st                      — %macro match, %macro view (both DISPATCH-mode,
+                                      subject required) + %primitive dispatch-mount
+                                      (reactive: bool = false param; @match sugars
+                                      reactive:false, @view sugars reactive:true) —
+                                      MIGRATES + REPLACES stdlib/macros/view.st,
+                                      stdlib/primitives/view.st,
+                                      stdlib/primitives/match-render.st (all 3 deleted)
+  derive.st                        — %macro data-derive-match (@data derive $x T :
+                                      @match { cond_arm+ }) + %primitive derive-match
+                                      (arms-as-runtime-array, JS ternary-free —
+                                      Array.find over evaluated guards, publish via
+                                      the derived-signal republish convention) — NEW
+  state.st                         — %macro state (string form, KEPT for author
+                                      ergonomics), %macro state-match /
+                                      state-match-simple (variant form, GENERALIZED
+                                      off any enum signal, not only @socket) +
+                                      %primitive state-reflect (the ONE reactive
+                                      writer for BOTH data-st-<sig>-type [union] and
+                                      data-st-state [string, now via the SAME path
+                                      treating a string as a degenerate {type: value}
+                                      union]) — MIGRATES + REPLACES
+                                      stdlib/macros/state-machine.st,
+                                      stdlib/primitives/state.st (both deleted)
+  tests/
+    dispatch-variant-pattern.test.st   — @match/@view $x { Variant{$a,$b} => ...; }
+    dispatch-reactivity-parity.test.st — @match (once) vs @view (re-mount) same arms
+    derive-match-basic.test.st         — @data derive $x T : @match { ... } produces
+                                          the right variant + payload per guard
+    derive-match-totality.test.st      — behavior once E0931 passes (all arms +
+                                          catch-all present) — compiles + runs
+    state-reflect-string.test.st       — @state(when:"str") sets data-st-state
+                                          REACTIVELY now (the FUP-074 "orphan" bug,
+                                          regression-proof)
+    state-reflect-union.test.st        — @state(when: $x is V) off a DERIVE-produced
+                                          union (not @socket) — the actual new
+                                          capability this plan unlocks
+    mutation-variant-construct.test.st — $x <- Variant(args) lowering (see Mutation
+                                          Lowering below)
+    inline-union-typeref.test.st       — @data derive $x (A | B | C) : @match {...}
+```
+
+** `stdlib/index.st` wiring
+
+Replace the existing line
+`@import "./macros/state-machine.st"     // @state (CSS + typed-union match), @socket`
+with
+`@import "./enum/index.st"               // @state/@match/@view/@data-derive-match — enum/union types (PLAN-077)`
+— unconditional import, same position, matching `stdlib/dnd`'s precedent of an
+always-on module.
+
+* Grammar surface (concrete syntax, all four new/widened shapes)
+
+** 1. Dispatch-mode `@match`/`@view` — variant pattern + widened consequence
+
+```spacetime
+@type BadgeState { Blue | Orange | Turquoise | Green }
+
+.st-host-widget__panel {
+  @match $badge {
+    Blue                          => &loginPrompt();
+    Orange                        => &progressSpinner();
+    Turquoise                     => &previewNotice($statusData);
+    Green                         => &liveBadge();
+  }
+}
+
+// payload destructuring, reusing the existing is-Variant{bindings} shape verbatim:
+@view $ws {
+  Connected { $send, $received }  => &chatPane($send, $received);
+  Error { $error }                => &errorPane($error);
+  Disconnected                    => &offlinePane();
+}
+
+// widened consequence — a bare expr (no leading &) is a VALUE, not a template:
+@data derive $badgeLabel string : @match $badge {
+  Blue      => "Logged out";
+  Orange    => "Working…";
+  Turquoise => "Preview ahead";
+  Green     => "Live";
+}
+```
+Note the third example: dispatch-mode `@match $subject { }` used AS the RHS of
+`@data derive` — this is DISTINCT from cond-mode `@match { }` (no subject) below. Both
+share the widened consequence grammar; they differ in whether a subject is present
+(pattern-vs-value dispatch) vs guard-cond (boolean-vs-value dispatch). Grammar IS the
+discriminator (no Rust dispatch branch), exactly as `@type`'s product/sum split
+already works.
+
+** 2. Cond-mode `@match { }` (guard-cond, no subject) — the new derive form
+
+```spacetime
+@type BadgeState { Blue | Orange | Turquoise | Green }
+
+@data derive $badge BadgeState : @match {
+  ($isOrange)       => Orange;
+  ($isUnauthorized) => Blue;
+  ($isTurquoise)    => Turquoise;
+  _                 => Green;        // REQUIRED — E0931 if absent (totality)
+}
+```
+Guard = arbitrary boolean expr, PARENTHESIZED (W1 as-built amendment, SWARM GATE 1):
+`($statusData && $statusData.preview_hash != null)`. The parens are forced by the
+lexer — there is no `=>` token (it lexes as EQUALS+GT), so ExprExtractor's boundary
+set (`;` `)` `}` `,` `->`) cannot terminate a bare guard, which would greedily swallow
+`=> Variant`. The `_` catch-all stays bare (unambiguous at the choice point). Every
+arm's `;` is REQUIRED (a payload-less consequence would otherwise gobble the next
+arm's parenthesized guard as payload args — `Blue ($h) =>` misparses as `Blue($h)`).
+First-truthy-guard-wins, `cond` semantics. Consequence = a bare variant constructor
+(`Ident` or `Ident(args)`), NOT a template — cond-mode never renders, it only
+produces a value.
+
+** 3. Inline anonymous union type (declSurface: both)
+
+```spacetime
+@data derive $badge (Blue | Orange | Turquoise | Green) : @match {
+  ($isOrange) => Orange;
+  _           => Green;
+}
+```
+Parenthesized to disambiguate from a plain `typeref` ident (forcing parens per user's
+explicit allowance) — reuses the `( )` grammar-combinator sigil meaning already
+established for `%form`/`%capture_type` groups (AGENTS.md sigil-harmony rule), applied
+here at the AUTHOR level for the first time in a typeref position. Anonymous: not
+registered in `TypeRegistry` under a name, valid only at this one derive site. If
+reused elsewhere, promote to a named `@type`.
+
+** 4. Payload-carrying variant construct (cond-mode)
+
+```spacetime
+@type FetchState { Idle | Loading | Loaded(Todo) | Failed(string) }
+
+@data derive $fs FetchState : @match {
+  $loading        => Loading;
+  $error != ""    => Failed($error);
+  $data != null   => Loaded($data);
+  _               => Idle;
+}
+```
+
+** 5. Mutation lowering — `$x <- Variant(args)`
+
+```spacetime
+$status BadgeState : Idle;
+
+@on click {
+  $status <- Orange;                    // nullary variant
+}
+@handle $ws {
+  receive { Open() => { $conn <- Connected($send, $received); } }
+}
+```
+`parse_meta_on_body_items` (`src/parser/mod.rs:7053`) currently treats everything
+right of `<-` as an opaque expr string. This plan adds a NARROW special case: when the
+RHS matches `Ident` or `Ident(args)` AND `Ident` is a capitalized bareword AND the
+target signal's declared type (resolved via `TypeRegistry` from the signal's
+registered `binding(...)` type fact) is a known sum whose variants include `Ident` —
+lower to `{type: 'Ident', ...namedPayloadFields}` instead of passing the bareword
+through as a (broken) JS identifier reference. A bareword that is NOT a known variant
+of the target's declared type falls through to the existing opaque-expr behavior
+UNCHANGED (no regression for non-enum `<-` assignments) — the special case is
+strictly additive and gated on a positive TypeRegistry match, never a guess.
+
+* Diagnostics (new codes, hard errors per Mandate #4)
+
+Two DIFFERENT checkable properties both get called "exhaustive" colloquially — kept
+distinct here to avoid conflating them:
+
+| Code  | Name | Triggers when | Where checked |
+|---|---|---|---|
+| E0931 | Non-exhaustive match-derive | cond-mode `@match { }` (guard-cond derive form) has no trailing `_` catch-all arm. Guards are arbitrary booleans — NOT decidably coverage-complete, so the checkable invariant is narrower: the chain must always terminate in a value. | New pipeline validation pass reading the `data-derive-match` macro's registered `arms` fact, parallel to `check_export_refs`/`check_import_visibility` (`src/pipeline/mod.rs`) |
+| E0932 | Non-exhaustive variant dispatch | dispatch-mode `@match $subject { }` / `@view $subject { }` / `@state(when: $x is V)` where `$subject`'s declared type IS a known `@type` sum (via `TypeRegistry`), and the arm set covers neither all declared variants NOR includes a wildcard `_`/bare-ident fallback. This one IS decidably coverage-complete — real exhaustiveness, Rust-`match`-style. | Same validation pass, reading `TypeRegistry::get_type(subject_type).variants` and comparing against the reified arm pattern set |
+| E0933 | Unknown variant constructor | A dispatch-mode pattern, cond-mode consequence, OR `<-` mutation RHS names a bareword `Ident` that is NOT a declared variant of the target enum's `@type` (or, for cond-mode with an inline anonymous union, not in that literal's variant list) | Same pass + the mutation-lowering site in `parser/mod.rs` |
+| E0934 | Variant payload binding mismatch | A destructured `Variant { $a, $b }` pattern's binding COUNT or use doesn't match the variant's declared payload arity from `@type Name { Variant(A, B) }` | Same pass, cross-referencing `TypeDef.variants[i].payload` |
+
+Numbering: continues from `E0929` (the last allocated `DiagnosticCode` enum member,
+`src/diagnostics/codes.rs:391`). NOTE: `E0930` is used today only as a raw
+`"E0930".to_string()` literal in `src/compiler.rs` (BUG-121's inline-attr diagnostic),
+NOT yet a `DiagnosticCode` enum member — a pre-existing inconsistency, out of this
+plan's scope to fix, but `E0931`-`E0934` MUST be added as real `DiagnosticCode` enum
+variants (following the E09xx pattern-match/component-body family), not raw strings,
+to stay consistent with the majority of the codebase.
+
+* Non-goals
+
+- NOT retyping `@socket`'s built-in `Disconnected | Connecting | Connected | Error`
+  shape against a formal `@type` declaration — it stays free-form
+  `PatternMatch`-matched as today; a future FUP MAY formalize it once this plan's
+  machinery exists, but is not required for socket to keep working.
+- NOT adding exhaustiveness checking to `@handle`'s `receive { }` arms (signal-response
+  matching) — a distinct host position (Grounding established this session), out of
+  scope.
+- NOT changing `@type`'s own declaration grammar (product vs sum) — only how its
+  DECLARED variants get READ by the new validation passes and lowering sites.
+- NOT a general pattern-matching language feature outside these four host positions
+  (dispatch-@match/@view, cond-@match derive, @state(when), `<-` mutation) — no
+  standalone `match` expression usable anywhere in arbitrary Spacetime expr text.
+
+* Build sequence (waves, main-thread architecture ALTERNATING with reviewer-swarm gates)
+
+Each implementation wave is executed by the main thread (or a `plan`/`task`-dispatched
+architecture pass); each is followed IMMEDIATELY by a reviewer-swarm gate before the
+next wave starts — encode via `todo_write` nodes with
+`verify: { swarm: { count: 3, criteria: "<wave-specific correctness + regression
+criteria>" } }`, or an explicit `task { agent: "reviewer", tasks: [...] }` fan-out of
+3 parallel reviewers if the swarm-gate isn't wired through todo_write at execution
+time. Waves are ordered by real dependency (grammar before codegen before
+diagnostics before consumers); same-wave sub-items are parallel-safe (disjoint files).
+
+** W0 — TypeRegistry read-surface hardening
+Add/confirm convenience accessors `TypeRegistry::variant_names(type_name) -> Vec<&str>`
+and `TypeRegistry::variant_payload_arity(type_name, variant) -> Option<usize>` (thin
+wrappers if not already ergonomic) — the two queries every downstream validation pass
+(W3) and the mutation lowerer (W4) need. No behavior change to existing callers.
+Verify via existing `src/type_system.rs` unit tests plus 2 new ones for the accessors.
+
+*** SWARM GATE 0: 3 reviewers checking (a) accessors don't change existing
+TypeRegistry resolution behavior (b) the new methods handle a missing type name / a
+product (non-sum) type name gracefully (None, not panic) (c) test coverage is real
+(exercises both hit and miss paths).
+
+GATE 0 RESULT: PASS (recorded post-hoc at GATE 7 — the gate ran in the W0 session
+and the roster shows w0-gate delegated + completed + verified, but the RESULT note
+itself was never written into this file; SWARM GATE 7 finding). Criterion-level
+evidence, re-verified against the current tree: (a) both accessors are read-only
+lookups over `self.types` (src/type_system.rs:182 `variant_names`, :198
+`variant_payload_arity`) — no resolution path touched; (b) `variant_names` returns
+`unwrap_or_default()` (empty Vec) for a missing OR product type name and
+`variant_payload_arity` returns None via `?` — no panic paths
+(src/type_system.rs:182-205); (c) real hit+miss tests exercise both accessors
+(src/type_system/tests.rs:741 `test_variant_names_accessor` — sum order, product
+miss, unknown-name miss; :780 `test_variant_payload_arity_accessor` — Some(0),
+Some(n), unknown-variant None, unknown-type None), green in `cargo test --lib`
+(2691/0 at GATE 7).
+
+** W1 — Grammar: `stdlib/enum/capture-types/` (variant-pattern.st, match-arms.st,
+cond-arms.st, inline-union.st)
+AS-BUILT AMENDMENTS (SWARM GATE 1, all verified empirically): (i) `variant_pattern`
+is a PURE-STDLIB production mirroring PatternMatchExtractor's destructure shape —
+the plan's "REUSES CaptureType::PatternMatch" was impossible (PatternMatch is a
+hardcoded built-in, not composable inside %capture_type productions); zero new Rust
+CaptureType variants holds as planned. (ii) The destructure group is REQUIRED in
+`variant_pattern` and `match_pat` branch order is `variant|lit|wild` — ChoiceExtractor
+is first-match-wins no-backtracking, and StringExtractor's FUP-079 bare-ident
+acceptance would otherwise consume a destructure pattern's head ident. Bare
+payload-less tags route to `lit` (not `wild`) — same as pre-PLAN-077. (iii) Registration
+is via `STDLIB_DIRS` scan (registry-scanned forms like @match/@view resolve `match_arm`
+from the registry, not the import path) + a new `enum` embedded-stdlib category — NOT
+via stdlib/index.st @import rewiring (state-machine.st stays imported until W6).
+(iv) cond guards are PARENTHESIZED and cond-arm `;` REQUIRED (see §2).
+New `%capture_type` productions per "Grammar surface" above. `variant-pattern.st`
+REUSES `CaptureType::PatternMatch` (Grounding #2) — confirm zero new Rust
+`CaptureType` enum variants needed for this file. `cond-arms.st`'s
+`variant_construct` composes existing `ident` + a `param_list`-shaped arg list (no new
+Rust variant). Delete `stdlib/capture-types/match-block.st`, migrating its
+`match_pat`/`match_arm`/`match_block` into `match-arms.st` with the widened grammar
+(old string|ident patterns + old template-only consequence remain valid subsets — this
+is a superset extension, not a breaking change to existing `.st` files using bare
+`@match $x { "str" => &tpl(); }`).
+
+*** SWARM GATE 1: 3 reviewers checking (a) old `@match`/`@view` `.st` files (grep
+`projects/**/*.st`, `examples/**/*.st`, `demos/**/*.st`, `tests/parser/syntax/patterns.st`)
+still parse identically post-migration — diff the CST/FormMatch output before/after
+on every existing `@match $x { "str" => &tpl(); }` and `@match $x { $var is V { } =>
+&tpl(); }` (state-match's OWN `is Variant` shape, NOT this plan's dispatch pattern —
+confirm no grammar collision between `@state(when: $x is V)`'s existing consumption
+and the new dispatch-mode `@match $x { V { $b } => ... }`) (b) `cargo test --lib` +
+`--test integration_tests` green (c) no Rust `CaptureType` enum growth beyond what
+W1's own text claims.
+
+GATE 1 RESULT: PASS (recorded post-hoc at GATE 7 — same recording gap as GATE 0;
+roster shows w1-gate delegated + completed + verified). Criterion-level evidence,
+re-verified against the current tree: (a) every pre-PLAN-077 `@match`/`@view`
+surface still parses and runs — the integration (189/0) and headless (646/0)
+suites include the legacy string/ident-pattern dispatch fixtures, and the four
+AS-BUILT amendments above record the grammar-collision analysis (`@state(when: $x
+is V)` vs dispatch-mode `@match $x { V { $b } => … }` are disambiguated by the
+state_when capture type, arm-branch order `variant|lit|wild`); (b) `cargo test
+--lib` 2691/0 + `--test integration_tests` 189/0 at GATE 7; (c) zero new Rust
+`CaptureType` variants — all four files are pure-stdlib compositions of existing
+leaf types (`variant_pattern` mirrors PatternMatchExtractor's shape in stdlib,
+amendment i), confirmed by the absence of any CaptureType enum diff in W1's
+commit window.
+
+** W2 — `stdlib/enum/derive.st` (cond-mode value-producing `@match`)
+AS-BUILT AMENDMENTS (all empirically verified): (i) the form is
+`@data derive $name:binding $type:typeref? $uitype:inline_variant_type? : $match:cond_block ;`
+— the `: @match { … }` value is ONE inline ARG captured by the cond_block
+grammar, not a directive body. (ii) That ARG exists via a NEW twin routing in
+BOTH parsers (events-grammar `directive_with_source` + CST parser): a
+value-colon-led `@match {` is consumed as a single balanced arg. The routing is
+scoped by the TOKEN STREAM (`@` directly preceded by COLON + `match` + `{`),
+NOT the value_colon flag (the generic-arg loop swallows a trailing `:` into the
+preceding arg, so the flag is false for typed derives), and fires at TWO points
+(before and after the arg-list slot, because the inline-union typeref
+`(A | B)` parses as an arg-list before the colon). `Parser::prev_non_trivia()`
+was added for the lookback; `nth_text` was made total (empty-source nested-body
+paths must fail the text check closed, not panic). (iii) The trailing `;`
+literal is LOAD-BEARING, not cosmetic: form specificity is computed from
+element counts and plain data-derive's trailing `;` gives it 31 — the
+derive-match form must score higher (33) or plain data-derive shadows it on
+EVERY source (its `balanced(';')` value happily captures the whole @match block
+as an opaque expr). Trailing-`;` literal matching is lenient (matches when
+absent), so authors may omit it. (iv) %binds passes the whole cond_block
+record; the primitive normalizes `block.arms` — arms stay runtime data
+(Grounding #4). (v) Payload field naming (W2 convention): a bare `$sig`
+constructor arg publishes under the signal's name (`Failed($errorText)` →
+`{type:'Failed', errorText: …}`, destructure-by-same-name, generalizing the
+socket producer's hardcoded convention); single non-signal arg → `value`;
+multi non-signal → `arg0..N`. (vi) Guard/arg evaluation copies
+derived-signal.st's desugarPipes + quote-aware $sig→SpacetimeLocal char-scan +
+dep regex + republish channel VERBATIM (gate 2b: one eval path, not two).
+`%macro data-derive-match` + `%primitive derive-match` (arms-as-runtime-array,
+`Array.find` over evaluated guards — mirrors `match-render.st`'s resolution style, NOT
+a Rust-compiled ternary chain, per Grounding #4). Dependency discovery reuses
+`derived-signal.st`'s regex-over-combined-guard-text approach. Publish via the SAME
+`window.SpacetimeLocal[name]` + `local:<name>:updated` channel `derived-signal.st`
+uses (so `ST.watch`/`watchTypedUnion` need zero changes — Grounding #1/#3). `.test.st`
+coverage is PRIMARY per Mandate #2: `tests/derive-match-basic.test.st` (guard→variant
+resolution, first-match-wins, payload args), `tests/inline-union-typeref.test.st`
+(anonymous union form).
+
+*** SWARM GATE 2: 3 reviewers checking (a) `derive-match` primitive follows the EXACT
+publish contract `watchTypedUnion` expects (`{type: 'X', ...}`) — trace it end to end
+in the `.test.st` runs, not just visually (b) guard evaluation reuses
+`derived-signal.st`'s Global-scope `$sig` rewriting (string-literal-safe, pipe-desugar
+parity) rather than reinventing a second eval path (c) `.test.st` tests actually
+exercise reactivity (a guard's dependency changing re-fires recompute), not just
+initial-mount value.
+
+GATE 2 RESULT: 3/3 PASS, 4 findings, ALL FIXED before W3:
+(i) [P2, reviewer a] `ST.watchTypedUnion` (the `@state(when: $x is V)` runtime
+half) was element-local ONLY — it never observed the global
+SpacetimeLocal + `local:<name>:updated` channel derive-match publishes on, so
+the plan's "zero runtime changes" consumption claim was FALSE for the headline
+use case. FIX (st.js): watchTypedUnion gained a global-channel fallthrough
+mirroring ST.resolve (FUP-094 doctrine: watch mirrors read) with
+nearest-owner-wins precedence (`resolveOwner` guard — a scoped signal of the
+same name shadows the global one) + initial-value application at mount. Pinned
+e2e by test 6 in derive-match-basic.test.st; 5 runtime-embedding snapshots
+accepted.
+(ii) [P3, reviewer a] one throwing guard aborted the whole `arms.find`,
+defeating catch-all totality at runtime. FIX (derive.st): per-guard
+containment — a throwing guard logs + counts as falsy, so the REQUIRED `_`
+still fires (runtime totality matches E0931's compile-time invariant). Pinned
+by test 5.
+(iii) [P3, reviewer c] payload-only dep (a signal in a payload arg but no
+guard) was untested. FIX: test 4 pins that the combined guard+arg dep regex
+re-fires recompute for payload-only deps.
+(iv) [P3, reviewer c] mid-chain `_` shadowing (grammar admits it; `find`
+makes later arms unreachable) is EXPLICITLY DEFERRED to W3's E0931 — not W2
+scope, no test pinned.
+
+ROOT-CAUSE FIX folded into gate 2 (found while pinning finding iii): a
+payload-carrying `variant_construct` record `{name, args}` collided with the
+serializer's `is_template_invocation_map` heuristic (expand.rs: len==2 && name
+&& args → nested records render as a one-element ARRAY for the `a.inv[0]`
+template contract), so `cons` arrived array-wrapped and the primitive's
+`cons.name` check silently bailed on EVERY payload arm. A variant constructor
+is NOT a template invocation — distinct data, distinct keys: the grammar key
+is now `$payload` (`{name, payload: [{arg}]}`), the primitive reads
+`cons.payload`, and `plan077_w2_payload_arm_cons_record_shape` pins the record
+shape at the grammar level. ALSO folded in: `derive.st` was missing from the
+embedded-stdlib table (`enum_module::FILES`, stdlib_embedded.rs) — added
+(include_str, so edits need no regeneration step).
+
+** W3 — Diagnostics E0931-E0934
+AS-BUILT AMENDMENTS (all empirically verified): (i) The pass is
+`check_enum_union_diagnostics(matches)` in `src/pipeline/mod.rs`, called from
+`compile_verbose` next to `check_retired_syntax`; signal→type facts come from
+the `@data` FormMatch captures themselves (name/type/uitype keys), NOT the
+`%registers binding` fact stream. (ii) `@state(when: $x is V)` arrives as
+`state-match`/`state-match-simple` FormMatches whose `signal` capture is the
+WHOLE `when:` value as ONE `Expr` (`$f is Failed { $e }`) — the pattern is
+recovered from the source text (`parse_state_when`), not from separate
+variant/bindings captures (they don't exist at FormMatch level; the
+`$variant:ident { $bindings:ident* }` form captures collapse). (iii) E0932
+applies to `@match`/`@view` dispatch blocks ONLY, NOT `@state(when:)` — a
+single `is V` state is a conditional style, not a dispatch: firing
+exhaustiveness there would error on EVERY legitimate single-state usage
+(over-firing, gate criterion a). `@state(when:)` still gets E0933/E0934.
+(iv) E0931 restructured from "trailing `_`" to catch-POSITION analysis: no
+`_` anywhere → non-exhaustive message; `_` present but not last →
+unreachable-arms message (a mid-chain `_` satisfies totality, so reporting
+"missing catch-all" there would be misleading — covers the SWARM GATE 2
+deferral with the precise defect name). (v) E0933 dispatch-mode leg checks
+destructure (`variant`) patterns + cond-mode consequences + state-match
+patterns, NOT `lit` patterns (quoted strings vs FUP-079 bare tags are
+indistinguishable in the capture; a non-variant lit in a sum-typed dispatch
+still surfaces via E0932's missing-coverage). (vi) E0934 also covers
+cond-mode consequence payload-arg counts (same arity fact, same checkable
+property as destructure binding counts — inline-union variants are nullary,
+so `Orange($x)` on an inline union fires E0934 too). (vii) `<-` mutation RHS
+variant constructions are W4's lowering site — the E0933 mutation leg lands
+WITH W4 (today a `<-` RHS is an opaque expr; there is nothing to check until
+the lowering exists).
+New `DiagnosticCode` enum variants (`src/diagnostics/codes.rs`, after E0929) + a new
+validation pass (parallel structure to `check_export_refs`/`check_import_visibility`,
+`src/pipeline/mod.rs`) reading (a) the `data-derive-match` macro's registered arms
+fact for E0931, (b) `TypeRegistry` + reified dispatch-mode arm patterns for E0932,
+(c) both surfaces + the W4 mutation site for E0933, (d) `TypeDef.variants[i].payload`
+arity for E0934. RED→GREEN Rust unit tests per code (4 positive-trigger tests + 4
+negative/clean tests minimum), mirroring the existing `E0905`/`E0918`/`E0926`-family
+test shape in `src/pipeline/mod.rs::tests`.
+
+*** SWARM GATE 3: 3 reviewers checking (a) each diagnostic's trigger condition matches
+EXACTLY what's specified in the Diagnostics table (no over- or under-firing — spot
+check against `stdlib/loading.st`'s existing bare `@state(when: "loading")` — a STRING
+condition MUST NOT trip E0932, which only applies to a `$subject` typed as a declared
+sum) (b) messages carry a precise, actionable fix hint (repo convention — see
+`E0929`'s doc comment style) (c) `cargo test --lib` full suite green, no regression in
+unrelated E09xx tests.
+
+GATE 3 RESULT: 1 FAIL + 2 PASS (6 findings), ALL FIXED and re-verified:
+(i) [P1, reviewer a] E0934 over-fired on a BARE `@state(when: $f is Failed)`
+(state-match-simple — no `{ $bindings }` group authored) on payload-carrying
+variants, contradicting both the spec ("destructured pattern") and its own
+hint ("or drop the binding group"). FIX: the @state E0934 leg only fires when
+the when-text contains a `{` group; regression test
+test_e0934_state_match_simple_no_group_is_clean.
+(ii) [P2, all three] the `check` CLI's string→DiagnosticCode remap
+(src/main.rs) lacked E0931–E0934 — all four rendered as error[E0806]. FIX: 4
+arms added; live-verified error[E0932] renders correctly.
+(iii) [P2, reviewer b] inline-union E0933/E0934 messages claimed a `@type`
+declaration that doesn't exist. FIX: universe_display (`` `@type X` `` vs
+"the inline union `(A | B)`") + universe_arity_fact helpers; the three
+triplicated E0933 sites collapsed into one unknown_variant_diag helper (DRY).
+(iv) [P2, reviewer c] positive-coverage gaps: dispatch-destructure E0933 +
+E0934 legs, cond-consequence E0934 leg, @view E0932 leg, @state E0933 leg —
+5 tests added (one, dispatch-destructure, revealed E0933+E0932 co-firing is
+CORRECT: an unknown variant's coverage doesn't count).
+(v) [P3, reviewer c] duplicate `_` catch-alls escaped E0931 (only the LAST
+catch position was compared). FIX: catch_positions must equal [len-1]
+exactly; test_e0931_duplicate_catch_all.
+Final: lib 2677/0, integration 189/0, full headless 631/0, check-CLI remap
+live-verified.
+
+** W4 — Mutation lowering (`<-` variant construction)
+AS-BUILT AMENDMENTS (all empirically verified): (i) The lowering CANNOT live
+in `parse_meta_on_body_items` (a pure CST→AST converter with no type facts).
+It runs as `lower_variant_mutations(matches, &facts)` at the TOP of
+`compile_verbose` (before evaluate, so lowered statements flow through the
+normal rail), sharing ONE facts build with W3 (`EnumTypeFacts::from_matches`
+— W3's inline collection was extracted; the W3 check keeps its signature for
+tests and delegates to `check_enum_union_diagnostics_with_facts`). (ii) THREE
+mutation surfaces are covered, not one: the `mutation_actions` captures
+(@on/@effect/when-guard — any `Named` map with a `js_statements` array), the
+`%on $v -> x` clause actions (generate_on_fragments, which now returns
+diagnostics), AND @handle receive/optimistic/final arm bodies (balanced-text
+segments split/joined on `;` — the rail's own convention — losslessly for
+untouched segments). (iii) E0933's mutation leg fires ONLY on a BARE
+capitalized `Ident` (`$x <- Purple` on a sum-typed target) — `Ident(...)`
+could be a legitimate JS constructor (`String($y)`) and is never flagged nor
+lowered; the LOWERING itself always requires a positive variant match.
+(iv) E0934's mutation leg (arg count ≠ payload arity) fires AND the lowering
+still happens (the error is authoritative) — same doctrine as W3's
+cond-consequence leg. (v) Payload field naming reuses the W2 convention
+verbatim (bare `$sig` → signal name; single non-signal → `value`; multi →
+`argN`). (vi) Perf (gate criterion c): a `captures_have_arrow` pre-filter
+skips cloning any FormMatch without `<-` text, and the type lookup only runs
+AFTER a capitalized-bareword construction parses — compiles with no
+mutations do zero new lookups; the TypeRegistry build itself is shared with
+W3 (one per compile, not two). (vii) Pre-existing E0909 over-fire fixed as
+enabling work: `@test` bodies (opaque harness text holding mutations) join
+the handle/data skip list in check_injection_outside_template —
+tests/mutation-variant-construct.test.st was the first .test.st with `<-`
+mutations and tripped it. (viii) E0933/E0934 mutation-leg diagnostics from
+BOTH sites (the match-slice transform + generate_on_fragments) drain into
+output.diagnostics.
+`src/parser/mod.rs::parse_meta_on_body_items` (and any other `<-` lowering site found
+via `src/**/*.rs::§line[text~="\"<-\""]"` — re-audit at implementation time, this
+session found 5 call sites) gains the narrow TypeRegistry-gated special case described
+in "Grammar surface #5". Strictly additive — MUST NOT change behavior for any `<-`
+RHS that doesn't resolve to a known variant of the target's declared type.
+`tests/mutation-variant-construct.test.st` + a Rust unit test asserting the
+non-regression guarantee (a `<-` RHS that happens to be a capitalized bareword but
+ISN'T a declared variant — e.g. `$x <- Foo` where `$x` has no declared enum type —
+still lowers exactly as before, not silently miscompiled).
+
+*** SWARM GATE 4: 3 reviewers checking (a) the non-regression guarantee holds — diff
+codegen for every EXISTING `<-` assignment in `stdlib/**/*.st` + `projects/**/*.st`
+before/after (b) payload-carrying construction (`Connected($send, $received)`)
+produces a shape `state-reflect` (W6) can actually destructure (c) no TypeRegistry
+lookup happens on a hot path that didn't need one before (perf regression check).
+
+GATE 4 RESULT: 1 PASS (non-regression: 505 existing `<-` lines enumerated,
+ZERO capitalized-bareword RHS shapes — lowering provably inert repo-wide; 6
+projects' emitted JS byte-exact) + 2 FAIL (4 P1s), ALL FIXED and re-verified:
+(i) [P1] tests/mutation-variant-construct.test.st's @asserts used EXPRESSION
+messages, which the `$message:string?` form silently DROPS — the asserts were
+vacuous (pass regardless). FIX: literal messages + @when init-flush idiom +
+file-scope @on; the tests were observed failing at each intermediate step
+before passing, proving they're live.
+(ii) [P1] @handle receive-arm bind names colliding with emitted keys (`type`,
+`value`, `argN`, payload signal names) are clobbered by runMutations'
+bare-name locals substitution — silently destroying the discriminator. FIX:
+the lowering SKIPS when an emitted key collides with the arm's bind and warns
+W0716 (new DiagnosticCode) with a rename/derive workaround; bind is threaded
+from the arm record.
+(iii) [P1] @handle optimistic/final + data-signal/stream clause texts are
+Expr captures (BalancedExtractor), not String, and top-level lifted keys are
+leaf values — never lowered. FIX: walker handles String|Expr, the macro set
+generalized to handle/data-signal/data-stream, and top-level text keys are
+handled directly.
+(iv) [P1] the construction arg split was depth-aware but not string-aware —
+`Failed(\"a,b\")` produced phantom args + spurious E0934 + corrupted JS. FIX:
+quote-aware splitting (BalancedExtractor discipline). Regression tests for
+all four (12 test_w4_* total).
+DOCUMENTED LIMITATION (test-harness-only): @given/@test block bodies
+recompile as CONTEXT-FREE fragments (compile_scoped_block_body_to_js,
+emit/js.rs) that cannot see the enclosing file's @type/@data declarations, so
+the lowering's type gate cannot fire inside @given. Production surfaces
+(file-scope @on, @handle, @effect, %on clauses) are unaffected; variant
+mutations in tests use file-scope @on. A follow-up could thread enclosing
+type facts into EmitContext for fragment compiles.
+
+** W5 — `stdlib/enum/dispatch.st` (unified @view/@match)
+AS-BUILT AMENDMENTS (all empirically verified): (i) The merged
+`%primitive dispatch-mount` uses match-render's INSTANCE-FIRST resolution
+(ST.resolve — itself falls through to the global store per FUP-094) for the
+subject, `$`-dynamic template names, AND arm args — a strict superset of
+view.st's global-first order. (ii) Reactive mode keeps view-mount's
+rendered-guard (ST.watch's immediate fire IS the element-scope initial
+render), teardown (ST.dispose subtree + remove before re-mount), the
+dual subscription (local:<head>:updated + ST.watch on the sig HEAD for
+dotted paths), and the M4 `__stRegionInput` seeding (inert outside region
+mounts). (iii) `%macro match`/`%macro view` live in dispatch.st itself
+(module doctrine — one cohesive file), sugaring `reactive: false|true`.
+(iv) Deleted: stdlib/primitives/view.st, stdlib/primitives/match-render.st,
+stdlib/macros/view.st; dispatch.st added to enum_module::FILES (the old
+files were never embedded — nothing to remove). (v) The old files were only
+referenced by COMMENTS (match-arms.st/variant-pattern.st/index.st — updated
+to point at dispatch.st); probe-registry.rs + test comments mention the old
+primitive names but are non-functional.
+Merge `stdlib/primitives/view.st` + `stdlib/primitives/match-render.st` into one
+`%primitive dispatch-mount(reactive: bool = false, ...)`; `%macro match` sugars
+`reactive: false`, `%macro view` sugars `reactive: true`. Delete both old primitives
++ `stdlib/macros/view.st`. `tests/dispatch-reactivity-parity.test.st` proves BOTH
+modes still behave per their pre-merge contract (once-mount vs re-mount-on-change)
+off the SAME arm-resolution code path.
+
+*** SWARM GATE 5: 3 reviewers checking (a) every existing `@view`/`@match` call site
+(`demos/app-shell`, `demos/mcp-forge`, `stdlib/__mcp__/**`, `tests/parser/syntax/patterns.st`,
+`tests/unit/templates/view-dotted-path.test.st`) still compiles + behaves identically
+— run the FULL existing test suite for these, not a sample (b) the dotted-path
+resolution (`@view $wrap.kind`, BUG-155-class) survived the merge intact (c) no
+lingering references to the deleted files anywhere in stdlib/examples/docs
+(`grep -r "primitives/view.st\|primitives/match-render.st\|macros/view.st"`).
+
+GATE 5 RESULT: 3/3 PASS, 2 P3 findings, BOTH FIXED:
+Verified per-reviewer: all call sites compile (mcp-forge 2/2, everswap-clone
+21/21, patterns.st, templates 31/0, parity 3/3); the app-shell E0602 is
+PRE-EXISTING (reproduced from a clean `git archive HEAD` snapshot — html5ever
+fragment parsing drops the authored <body> tag, src/html/treesink.rs:413,
+untouched by W5); the instance-first resolution change is provably inert for
+every existing consumer (each was global-plane or host-owned); the
+subscription channel is byte-correct (:binding strips `$` at emit,
+expand.rs:1802 — both old and new subscribe local:<head>:updated); embedded
+availability is additive (v8 runtime 437/0).
+(i) [P3] ancestor-scoped @view subjects rendered initially (new ST.resolve
+capability) but never re-mounted — the subscription was host-local ST.watch
+while resolution walks ancestors. FIX: reactive mode subscribes via
+ST.watchScoped (host + ancestors + global channel in one call — the FUP-094
+watch-mirrors-resolve doctrine; the separate document listener became
+redundant and was removed). Full headless suite re-verified 638/0.
+(ii) [P3] stale STDLIB_DIRS comment citing deleted stdlib/macros/view.st as
+the @match/@view home → now cites stdlib/enum/dispatch.st.
+
+** W6 — `stdlib/enum/state.st` (generalized reflection + `data-st-state` retirement)
+Delete `stdlib/macros/state-machine.st` + `stdlib/primitives/state.st` wholesale.
+New `%primitive state-reflect` is the ONE reactive writer: for a STRING-typed signal,
+treats the value as a degenerate `{type: value}` union and writes `data-st-state`
+through the SAME code path `watchTypedUnion` already uses (Grounding #1) — no bespoke
+`dataset.stState = ...` write anywhere anymore. `%macro state` (string form) and
+`%macro state-match`/`state-match-simple` (variant form) both bind to
+`state-reflect`, differing only in which shape they pass. This directly fixes
+FUP-074's "orphan" bug: `@state(when: "str")`'s carrier finally has a REAL reactive
+writer (today: NONE — confirmed via Grounding #7).
+`tests/state-reflect-string.test.st` is a REGRESSION test proving the fix (a
+`$mode <- "loaded"` mutation now visibly flips `data-st-state` reactively, which
+FUP-074 confirmed does NOT happen today). `tests/state-reflect-union.test.st` proves
+the NEW capability — a plain `@data derive`-produced union (not `@socket`) drives
+`@state(when: $x is V)`.
+
+W6 AS-BUILT (amendments to the above, all inside the plan's intent):
+i.  DELETED as planned: `stdlib/macros/state-machine.st`, `stdlib/primitives/state.st`
+    (its `%macro socket` moved to `stdlib/macros/websocket.st`), plus the
+    `state-machine.st` import line in `stdlib/index.st` (both `stdlib/enum` and
+    `stdlib/macros` register via the always-on STDLIB_DIRS scan — the source-level
+    import was redundant) and the `state`/`state-match` entries in
+    `src/lsp/form_registry.rs`.
+ii. NEW `%capture_type state_when` (in `stdlib/enum/state.st`): the variant-form
+    `when:` value now parses STRUCTURED (`{signal, variant, bindings?}`) instead of
+    collapsing to one `Expr` — W3's state leg (E0933/E0934) was rewritten to read
+    the structured capture (`parse_state_when` text-parse RETIRED); the E0934
+    brace-gate is now `bindings`-key presence, not a `{`-substring scan.
+iii. `%binds` needed dotted capture paths (`signal: $when.signal`) —
+    `evaluate_bind_value` (src/pipeline/resolve.rs) gained a dotted-path walk over
+    Named captures (general mechanism, not a state special-case).
+iv. `%emit css` lives INSIDE `%primitive state-reflect` (macro-level `%emit css`
+    does not substitute `%$capture`); `%self[data-st-state=%value] { %styles }`
+    follows media.st's pattern.
+v.  ROOT-CAUSE FIX with blast radius beyond W6: `ir_to_expanded`'s `suppress_js`
+    (`css_exprs non-empty && css_styles.is_some()`) silently DROPPED the JS of any
+    CSS-emitting primitive whose form captured `$styles` — media's matchMedia
+    optimization leaking onto every primitive. Gated to `primitive_name == "media"`
+    (src/pipeline/expand.rs). Without this, @state's JS writer never emitted.
+vi. Initial-reflection fix: `ST.watchScoped`'s global leg only hears FUTURE
+    `local:<sig>:updated` events, so a derive that published before mount never
+    reflected — state-reflect now calls `reflect(ST.resolve(host, sig))` once after
+    subscribing (idempotent; same initial-value-at-mount pattern as GATE 2's
+    watchTypedUnion fix).
+vii. String form keeps LEGACY semantics exactly: `when: "loading"` watches the
+    `$loading` signal (name = state name), boolean gate. The `"$mode <- \"loaded\"`
+    flips data-st-state" regression framing in the plan's W6 text was based on a
+    misreading (a when-string names a SIGNAL, not a value); the regression test
+    instead pins the actual orphan bug — a GLOBAL-channel write to `$loading`
+    never reached the element under ST.bindState and now does.
+viii. Instrumentation PRESERVED in full: `__stStateHistory`/`__stStateEntries`/
+    `__stStateExits`/`__stTransitionCount`/`__stStateDurations`/`__stTransitionTimes`,
+    `state.enter`/`state.exit` CustomEvents with from/to detail, `__stDebugHook`
+    (registerStateMachine + state transitions) — all ported into state-reflect's
+    %emit js (Gate-6 criterion c).
+ix. Tests: `tests/state-reflect-string.test.st` (3 tests: global-channel orphan
+    regression, boolean gate via local @on, instrumentation/events) +
+    `tests/state-reflect-union.test.st` (2 tests: derive union → data-st-state +
+    data-st-<sig>-type namespaced attr, payload destructure into element scope) —
+    5/5 headless green.
+x.  Concurrent-session collision: the user's HEAD commit 71a19cc8 (PLAN-005 W0-1,
+    dev-serve-parity static set) landed mid-wave and stale-broke
+    `export_site_routes::test_export_report_counts` (`files_copied >= 2` → `>= 1`;
+    .txt no longer served by design). Test expectation updated, behavior untouched.
+
+GATE 6 RESULT: 3/3 FAIL on first pass (6 findings: 3 P1, 2 P2, 4 P3 — two P1s
+found independently by two reviewers each), ALL FIXED and re-verified:
+- P1 (2×): E0934 state leg matched `CapturedValue::Ident` but `$b:binding`
+  yields `CapturedValue::Binding` → binding_count always 0 → every correct-arity
+  `@state(when: $x is V { $b })` hard-errored under `spacetime check` (the
+  headless runner downgrades diagnostics, masking it in W6's own union test).
+  Fixed: accept Binding (strip `$`) + Ident; added
+  `test_e0934_state_match_correct_arity_no_diag` (the old arity test was
+  vacuous — 0≠2 also fires). Live-verified with `check` on a repro project.
+- P1 (2×): state-reflect's falsy clear was unguarded — one string-form gate's
+  false transition wiped ANOTHER gate's active state on a shared element
+  (legacy ST.bindState cleared only its own stateName) + spurious exit
+  instrumentation. Fixed: `const gate = %value` threaded into the JS;
+  `if (!name && oldState !== gate) return;`. Regression test 4 added to
+  tests/state-reflect-string.test.st (multi-gate carrier sharing).
+- P1: LSP/WASM embedded registry (src/lsp/form_registry.rs STDLIB_MACROS)
+  dropped state-machine.st without adding the enum module → @state/@state-match
+  (and W5's @match/@view dispatch + derive) vanished from the LSP. Fixed:
+  enum-state/enum-dispatch/enum-derive + the 4 enum capture-types added.
+- P2: string-VALUE passthrough in stateNameOf diverged from the CSS gate
+  (attr=value vs gate=name → dead CSS). Fixed by REMOVING the passthrough —
+  legacy truthy-gate is the only coherent string-form semantics; module docs
+  rewritten (the W6 AS-BUILT vii framing is superseded: no string-value
+  reflection at all, exactly legacy + union forms).
+- P2: LSP import_resolver stdlib index still listed macros/state-machine +
+  primitives/state. Fixed: swapped for macros/websocket + enum/{state,
+  dispatch,derive}.
+- P3s fixed: metasystem parse-test entry (state-machine.st → enum/state.st +
+  macros/websocket.st), examples/check_state_machine.rs repointed to the W6
+  surface, stdlib/README.md tree+table updated, stdlib_embedded.rs comment
+  (dropped nonexistent state-match-simple).
+Criterion (a) PASS: stdlib/loading.st's @pattern loading() compiles + emits
+correct state-reflect output. (b) PASS: examples/socket-demo compiles, 4
+state-reflect bindings on $ws, headless example passes unchanged. (c) PASS:
+instrumentation fully ported (only __stSetState dropped — justified: no live
+consumers). (d) PASS post-fix: lib 2691/0, integration 189/0, headless
+644/0+38sk, W6 tests 6/6.
+
+*** SWARM GATE 6: 3 reviewers checking (a) `stdlib/loading.st`'s `@pattern loading()`
+(the ONLY current consumer of the bare string form found this session) still compiles
++ behaves post-migration (b) `examples/socket-demo/index.st` (the reference
+socket+state-match example) still compiles + its existing headless test still passes
+UNCHANGED (c) the state-history/debugger instrumentation the OLD `state()` primitive
+carried (`__stStateHistory`, `state.enter`/`state.exit` CustomEvents,
+`__stDebugHook.registerStateMachine`) is either PRESERVED in `state-reflect` or its
+loss is explicitly called out and accepted — this is real behavior the old primitive
+had that a naive merge could silently drop (d) full `cargo test --lib` +
+`--test integration_tests` + `--headless` suites green.
+
+** W7 — Migrate `stdlib/__host__/index.st` as the first real consumer
+Rewrite the 9-derive boolean chain (`$isBlue`/`$isOrange`/`$isTurquoise`/`$isGreen`/4×
+`$showXBadge`/`$stateLabel`) into a single `@type BadgeState { Blue | Orange |
+Turquoise | Green }` + one `@data derive $badge BadgeState : @match { ... }` + the
+existing `.st-host-widget__dot`/`__state` CSS blocks rewritten to
+`@state(when: $badge is Blue)` etc. Colocate a regression test proving the host
+widget's 4-state badge machine (Blue/Orange/Turquoise/Green precedence, matching the
+ORIGINAL derivation's semantics exactly — Orange wins over the others, per the
+existing code comment) still resolves identically for the same `$statusData`/
+`$isUnauthorized`/`*_pending` inputs pre- and post-migration.
+
+*** SWARM GATE 7 (final): 3 reviewers checking (a) the migrated `__host__/index.st`
+produces IDENTICAL `data-st-badge-type` / CSS-class outcomes to the pre-migration
+boolean chain across all documented states (401/Unauthorized, in-flight, preview-ahead,
+live, no-project, never-pushed, host-unreachable — every branch the original
+`$stateLabel` comment enumerated) (b) the live dev-panel / host widget still renders
+correctly end-to-end (real `cargo run -- serve`, not just unit tests) (c) this PLAN's
+Acceptance section (below) is fully satisfied, cite each item.
+
+W7 AS-BUILT (amendments to the above, all inside the plan's intent):
+i.   BadgeState has SIX variants, not the four sketched: NoProject and None
+     were added. NoProject was a separate input signal in the old chain but
+     styled the SAME dot (.st-host-widget__dot--no-project) — folding it in
+     unifies all five dot states into one machine with the union's arm order
+     encoding the old &&-exclusion precedence (NoProject > Orange > Blue >
+     Turquoise > Green). None is the E0931-mandated total catch-all covering
+     the statusFailed / never-pushed / not-yet-checked windows, reproducing
+     the old "no badge class" outcome (see vi).
+ii.  $stateLabel stayed a PLAIN string derive, not a @match: cond-mode
+     consequences are always variant constructors
+     (stdlib/enum/capture-types/cond-arms.st: "cond-mode only produces
+     values"), and the label is a string, not a BadgeState. It now reads
+     $badge.type off the union behind `$badge &&` guards (undefined .type
+     before the derive's first publish would throw). Precedence is provably
+     identical: the old chain's order (isNoProject → isOrange → showBlue →
+     showTurquoise → showGreen) is exactly the union's arm order.
+iii. $showLocalLogin/$showBridgeLogin read $isUnauthorized DIRECTLY (the old
+     $isBlue derive's exact definition), NOT `$badge.type == "Blue"` —
+     deliberate: the badge's Orange arm excludes Blue during in-flight calls,
+     but the login affordance never had that exclusion (a 401'd session with
+     a call in flight still offers login). Exact parity, documented in-file.
+iv.  The 10 `.st-host-widget__dot--*` / `__state--*` class rules are DELETED;
+     their declarations moved verbatim into the @state gates on the two
+     binding blocks. `@keyframes st-host-pulse` stays global (the Orange
+     gate's animation references it).
+v.   The regression test (tests/host-badge-union.test.st) REPLICATES the
+     machine verbatim — same @type, guard text, arm order, label chain, gate
+     set — because __host__/index.st cannot be imported standalone (its
+     @host http facts carry compile-time __SPACETIME_HOST_* placeholders).
+     All 7 documented states + both precedence directions (Orange-over-Blue,
+     NoProject-over-Orange) + the None carrier are pinned, driven as one
+     state walk so transitions are exercised, not just endpoints.
+vi.  Carrier semantics discovery (pins W6's design): state-reflect writes
+     the union's CURRENT variant name unconditionally, so None reflects as
+     data-st-state="None" and simply matches no CSS gate — visually
+     identical to the old chain's "no class" outcome. The test pins this
+     rather than assuming an empty carrier.
+vii. In-file comment references to the deleted derives updated;
+     commercial/host/!tasks/bugs/BUG-032-*.org left untouched (historical
+     record of the pre-migration chain).
+
+W7 VERIFICATION (pre-gate): `cargo run -- check stdlib/__host__/index.st` ✓;
+lib 2691/0; integration 189/0; headless 646/0 (38 skipped, pre-existing);
+host-badge-union.test.st 2/2; live `cargo run -- serve projects/jallete/` →
+/__spacetime/host/styles.css emits all five [data-st-state=Blue|Orange|
+Turquoise|Green|NoProject] gates and runtime.js carries watchScoped + the
+$badge wiring (GATE 7(b) pre-evidence).
+
+GATE 7 RESULT: 3/3 FAIL on first pass — criteria (a) and (b) PASSED unanimously
+(arm-by-arm parity with `git show HEAD:stdlib/__host__/index.st` confirmed by all
+three reviewers, including the Orange-over-Blue and raw-$isUnauthorized login
+asymmetries; live-serve evidence confirmed), criterion (c) FAILED on 4 P1
+findings, ALL FIXED and re-verified by re-running each reviewer's exact command:
+
+1. P1 (dataset.stState parallel writers — found by all 3): the REAL discovery
+   was that the metasystem `%states { x when $sig }` clause (live in
+   stdlib/macros/drag.st, stdlib/mobile/*, stdlib/dnd/*) emitted the LEGACY
+   `ST.bindState` (element-local watch, no instrumentation) while @state used
+   state.st's new inline writer — two divergent page-runtime writers. FIX: the
+   full W6 state-reflect semantics moved INTO `ST.bindState`
+   (public/runtime/st.js — watchScoped orphan fix, initial ST.resolve reflect,
+   ownership-guarded falsy clear, union destructure, both carriers, full
+   instrumentation); stdlib/enum/state.st's state-reflect primitive is now a
+   thin DELEGATING call (its inline copy deleted); the %states emitter
+   (src/pipeline/mod.rs) needed zero changes — it already emitted
+   `ST.bindState(el, cond, name)` and upgrades for free. ONE canonical writer.
+   5 insta snapshots regenerated (INSTA_UPDATE=always) to mirror it. The
+   Acceptance bullet was AMENDED (see Acceptance) to name the invariant
+   ("zero parallel PAGE-RUNTIME writers") and enumerate the legitimate
+   remaining grep hits (generated snapshots, test-harness readers/seeders, the
+   test-only @behavior shim) instead of demanding a literally-empty grep.
+2. P1 (retired-path grep, 8 hits): all 8 were historical comments in
+   stdlib/enum/{MODULE,index,dispatch,capture-types/match-arms}.st and
+   stdlib/macros/websocket.st naming the deleted files by literal path —
+   rephrased to descriptive prose ("the retired view macro" etc.). The
+   Acceptance grep now returns ZERO hits across stdlib/ docs/ examples/
+   demos/ projects/.
+3. P1 (missing docs sections): docs/language/data-and-rendering.md gained
+   "derive — union-producing (@match, cond-mode)" (§3, after the scalar
+   derive: grammar rules, first-match-wins, E0931 catch-all, E0932 declared
+   type, the {type,…payload} object contract); docs/language/reactive-output.md
+   gained "The unified enum signal (PLAN-077)" (§6: producer/consumer tables,
+   @state reflection + the one-writer story). Claims verified against
+   stdlib/enum/derive.st's form and src/diagnostics/codes.rs (E0931/E0932).
+4. P1 (W0/W1 gate results unrecorded): GATE 0 RESULT and GATE 1 RESULT notes
+   written into this file (honestly labeled post-hoc: the gates ran and the
+   roster shows them completed+verified, but the notes were never written;
+   each criterion was re-verified against the current tree with file:line
+   evidence).
+
+Post-fix verification: lib 2691/0, integration 189/0, headless 646/0 (38
+skipped, pre-existing) — all AFTER the ST.bindState runtime change;
+`cargo run -- check` on all 44 touched stdlib files clean; live serve re-smoke
+shows the canonical writer in /__spacetime/host/runtime.js and the five variant
+gates in styles.css. Criteria (a)(b)(c) now all PASS.
+
+* Acceptance
+
+- `cargo test --lib` (1574+ baseline, net new tests from W0/W3 additive) passes.
+- `cargo test --test integration_tests` passes, zero regressions.
+- `cargo run --features headless -- test tests/ --headless` passes, including the new
+  `stdlib/enum/tests/*.test.st` suite.
+- `cargo run -- check` on `stdlib/__host__/index.st` post-W7 migration is clean.
+- ONE page-runtime writer for `data-st-state`: `ST.bindState`
+  (public/runtime/st.js) carries the full state-reflect semantics, and BOTH the
+  `@state` surface (stdlib/enum/state.st's state-reflect primitive — a thin
+  delegating call) and the metasystem `%states { x when $sig }` clause
+  (src/pipeline/mod.rs's generate_state_fragments, which emits
+  `ST.bindState(el, cond, name)`) route through it. AMENDED at GATE 7 from the
+  original literal `grep -r "dataset.stState" stdlib/ src/` wording: with the
+  writer unified in the runtime bundle, the remaining grep hits are all
+  NON-writers or generated artifacts, enumerated here as the bullet's new
+  acceptance set — (i) src/snapshots/*.snap: insta-generated output mirroring
+  the ONE inlined runtime writer, not hand-written call sites; (ii)
+  stdlib/testing/assertions/state.st: assertion READERS of the carrier; (iii)
+  stdlib/testing/test.st: the `@given` fixture SEEDER and a `@when` reader;
+  (iv) src/main.rs + src/test_runner.rs: the test-ONLY `SpacetimeStateMachine`
+  shim backing stdlib/testing/test.st's `@behavior` macro (scripted test
+  transitions, never page runtime — page code uses $-signals, per that macro's
+  own docs). Zero parallel PAGE-RUNTIME writer implementations remains the
+  invariant; any NEW writer appearing outside public/runtime/st.js fails this
+  bullet.
+- `grep -r "primitives/view.st\|primitives/match-render.st\|macros/view.st\|macros/state-machine.st\|primitives/state.st\|capture-types/match-block.st"`
+  across `stdlib/`, `docs/`, `examples/`, `demos/`, `projects/` returns zero hits
+  (all migrated, no dangling references).
+- Every wave's SWARM GATE criteria above are individually satisfied and cited in the
+  wave's completion note before the next wave starts.
+- `docs/language/data-and-rendering.md` and `docs/language/reactive-output.md` gain a
+  new section documenting cond-mode `@match` derive + the unified enum-signal story
+  (colocated docs per this repo's AGENTS.md commit discipline).
+
+* Provenance
+
+Filed 2026-07-18, promoting FUP-074 (filed 2026-06-19) from an open design brief into
+a scoped, waved implementation plan, at the user's explicit direction after a session
+investigating `stdlib/__host__/index.st`'s boolean-derive-chain pattern. Companion:
+FUP-074 (superseded by this PLAN — mark DONE/superseded once this PLAN is filed, not
+before implementation lands), PLAN-047 (retired `@state_machine`/`@transition`, the
+predecessor cutover this plan continues), BUG-117 (why the imperative FSM was
+correctly killed), BUG-155 (dotted-path view/match resolution, preserved through W5).

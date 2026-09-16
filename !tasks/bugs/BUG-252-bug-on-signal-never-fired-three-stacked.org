@@ -1,0 +1,143 @@
+#+TITLE: BUG: `@on $signal { … }` never fired — three stacked silent breaks in one path
+#+STATE: ITEM
+#+SESSION_ID: 1534a2eae1903af0
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-18T13-07-01-638Z_1534a2eae1903af0.jsonl]]
+#+CUSTOM_ID: BUG-252-bug-on-signal-never-fired-three-stacked
+
+* Initial Message
+
+Please explain the queue, the root causes for bugs and the strategy for features, and what each would enable. Explain how you would go about them.
+
+* Summary
+
+Every `@on $signal { pattern => --form; }` in the language was DEAD at runtime,
+on both the headless backend and real Chromium (verified `--cdp`). The `.change`
+driver (`@on $count.change`) was dead the same way. Both are W3.6 features
+documented in the launch article, with passing gates.
+
+Found while reviewing the article sections a user asked me to confirm: I compiled
+the article's own `.done` fence and inspected the emitted bundle rather than the
+gate output.
+
+* The three breaks, all in the same path
+
+** 1. Element self-shadow (silent, `undefined`)
+
+`stdlib/primitives/signal-arms.st` opened its emitted body with:
+
+#+begin_src js
+var el = %&el;
+#+end_src
+
+`%&el` lowers to the splice site's element expression. At every real splice site
+the enclosing closure is the selector-init `const init = function(el) { … }`, so
+this lowers to the self-referential `var el = el;`. Under `var` hoisting the
+inner declaration shadows the parameter BEFORE the assignment reads it, so `el`
+is `undefined`, and the primitive's own `if (!el …) return;` guard fired. Every
+instance returned two lines in.
+
+`stdlib/primitives/signal-handler.st` (which backs `@handle`) carried the
+identical shape and was identically dead.
+
+NB `stdlib/dnd/primitives/drag-zones.st:29-31` DOCUMENTS this exact trap in a
+comment. The knowledge existed; nothing enforced it.
+
+** 2. Binding spliced as an object literal (silent, watches a dead name)
+
+The `signal_path` capture is a Named map `{base, facet?}`. The facet branch in
+`src/pipeline/drivers.rs` re-keyed it to a flat `CapturedValue::Binding`; the
+ordinary (non-facet) branch spliced the MAP. It lowered to a JS object literal,
+so the primitive's `String(%signal)` read `"[object Object]"` and the runtime
+watched a signal name that can never fire.
+
+** 3. Prime-by-call-count (silent, eats the first change)
+
+Both `signal-arms` and the change driver guarded with:
+
+#+begin_src js
+let primed = false;
+… if (!primed) { primed = true; return; }
+#+end_src
+
+This assumes a subscription always opens with a synchronous current-value call.
+`ST.watch` makes that call ONLY when THIS element's store already holds the name
+(`if (s[name].v !== undefined) fn(s[name].v)`). For a signal owned by an ancestor
+or by file scope there is no opening call — so the first callback IS the first
+change, and the guard ate it.
+
+** Compounding: the watch did not mirror the resolve
+
+All three primitives subscribed with a bare `ST.watch(el, …)`, which sees only
+one element's store, while an author's read resolves by nearest owner (element →
+ancestor → global `SpacetimeLocal`). This is the FUP-094 watch-mirrors-resolve
+doctrine, already stated in prose at `stdlib/enum/dispatch.st:192`.
+
+* Why every gate was green
+
+All pre-existing arms gates assert on COMPILED TEXT — `match: "true"` is present,
+the keyframes are present, the watch call is present. All of that was true, and
+all of it was emitted into a function that returned early / watched a dead name /
+discarded the first change. Presence-in-source and runs-in-a-browser are
+different claims, and only the first was ever asserted.
+
+This is the same failure class the PLAN-126 review swarm caught in finding A
+(nameless drivers publishing to `""`): a string gate cannot see a silent drop.
+
+* Fixes applied (pending review)
+
+- `signal-arms.st`, `signal-handler.st`: element bound to a DISTINCT name
+  (`node`), so the splice cannot self-shadow.
+- `src/pipeline/drivers.rs`: normalize the non-facet `signal_path` to a flat
+  binding, so exactly ONE value kind reaches the primitive.
+- `public/runtime/st.js`: new `ST.watchChanges` (see FEAT) — scope-correct
+  subscription with state-based priming; `signal-arms`, the change driver, and
+  `effect` all collapse onto it.
+
+* Gate
+
+`tests/signal-arms-binding.test.st` — 4 behavioral tests on `--cdp` (real
+Chromium/WAAPI): a matching arm animates; exactly once per change; a
+non-matching value plays nothing; mount is not a change. 4/4 passing.
+
+Verified RED before the fix and GREEN after, on CDP, so the gate is known to
+discriminate.
+
+* Status
+
+Fixed in working tree; awaiting user review of the structural direction before
+commit.
+
+NOTE [2026-08-01]: STRUCTURAL FINDING (S1), and the sharpest lesson of this bug: a detector for the self-shadow class ALREADY EXISTED and the bug shipped past it anyway.
+
+src/pipeline/emit.rs:153 has, since some earlier wave:
+
+  let shadows_selector_element = Regex::new(r"\b(?:const|let|var)\s+el\b")
+  … Diagnostic::warning(W0115, "primitive-body local 'el' shadows the
+    selector-init element param; rename to 'node'/'self'")
+
+It is covered by a passing test (selector_init_warns_when_primitive_body_shadows_el). It fired correctly on signal-arms and signal-handler. And it changed nothing, because:
+
+1. It is a WARNING. `cargo run -- check` exits 0 with warnings; the build succeeds; nobody reads a warning that scrolls past in a 300KB bundle build. A condition with no valid instances should not be advisory.
+2. It fires at emit time, ON THE SUBSTITUTED TEXT, at the very end of the pipeline — far from the primitive author, who sees `var el = %&el;` and no reason to think that string is dangerous.
+
+So the class was known, detected, and shipped three times. That is what makes it structural rather than a typo: the mechanism to catch it existed and was too weak to matter.
+
+The fix (validate_no_self_shadowing_bind, src/emit/metasystem_codegen.rs) differs on both axes: it is an ERROR (there is no program where `var x = x;` is intended, so there is nothing to weigh), and it fires at the PRIMITIVE, on the authored `var NAME = %&PARAM;` shape resolved against this splice site's element map — the point where the author can act on it.
+
+FOLLOW-UP: W0115 is now redundant with the error. Left in place for this commit (it also covers substituted text the new check does not see, e.g. hand-written fragments), but it should be reviewed for deletion once the error has a wave of soak — a redundant advisory that never fires is exactly the rot AGENTS.md warns about.
+
+NOTE [2026-08-01]: CLOSED. Five commits: bc13ad65 (point fixes + CDP gate), f10430ff (FEAT-169 @effect collapse), 5bdeea6d (S1), ca18de0f (S3), 9642203f (S2).
+
+STRUCTURAL OUTCOME — each of the three breaks is now impossible to reintroduce, at the layer where the mistake is made:
+
+S1 — self-shadow. `var NAME = %&PARAM;` where the param resolves to NAME is a COMPILE ERROR (validate_no_self_shadowing_bind). Fires at the primitive, on the authored shape, resolved against that splice site's element map. Note the prior art: a W0115 WARNING for this already existed at src/pipeline/emit.rs:153, with a passing test, and it fired correctly on both broken primitives — and changed nothing, because warnings don't fail builds and it fired at the end of the pipeline on substituted text, far from the author. Error-not-warning and at-the-author are the two axes that make it structural.
+
+S2 — object into a scalar param. A param declared binding/string/number/time/bool that receives a JS object literal is a COMPILE ERROR (validate_scalar_params_are_not_objects). Generalizes past signal_path: any structured capture reaching any scalar param now fails loudly instead of stringifying to "[object Object]" and going inert. Params declared `any`/array/union are untouched — they are where structured data belongs.
+
+S3 — hand-rolled change-watch. A `primed` flag beside a bare `ST.watch(…)` anywhere in stdlib fails tests/stdlib_change_watch_discipline_test.rs, naming the file, the reason, and the replacement. Deliberately narrow: @when legitimately wants ST.watch's immediate current-value call and is not flagged — the priming flag is the tell that distinguishes "tell me when it moves" from "tell me the value now". A second test pins ST.watchChanges' contract (watchScoped + resolve) so a future rename cannot silently reopen the class while call sites still look right. PROVEN TO DISCRIMINATE: verified failing against a deliberately reintroduced offender, then passing after removal.
+
+TDD throughout: every fix had its test written first and verified RED before implementation. The two CDP suites (signal-arms-binding, effect-change-semantics) were RED against the old code and are the only reason the defects were provable rather than asserted.
+
+FINAL BATTERY: lib 2894 · integration 202 · v8 451 · w36 gates 29 · article gate 9 · CDP 4/4 + 4/4.
+
+LESSON FOR THE NEXT AGENT (the reason all of this was invisible): every gate on these features asserted on COMPILED TEXT. The strings were all present — emitted into a function that returned early, watched a dead name, or discarded the first change. A feature whose job is to MOVE something in a browser needs at least one --cdp gate asserting the movement. Source assertions cannot see a silent drop, and worse, they block correct refactors (feat074_effect_emits_subscription_and_body did exactly that).

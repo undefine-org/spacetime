@@ -1,0 +1,75 @@
+#+TITLE: Unknown top-level @directive is silently swallowed (no diagnostic)
+#+STATE: DONE
+#+SESSION_ID: 1510d7e0efe8848c
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-20T17-53-05-983Z_1510d7e0efe8848c.jsonl]]
+#+CUSTOM_ID: BUG-133-unknown-top-level-directive-is-silently
+#+COMPLETION_HASH: 50ead1e6e51400c0
+
+* Initial Message
+
+please showcase this (I reloaded the session, you can start the MCP), then tell me what we should do next
+
+* Symptom
+A top-level `@`-directive the compiler does not recognize (a typo, a wrong
+construct name, or a misremembered API like `@style { ... }`) compiles CLEANLY
+with NO error or warning. Its body is swallowed (leaks into page HTML as inert
+text or is dropped), so the author silently loses the construct.
+
+Reproduction (`cargo run -- check`):
+  @template &card($title) { <div>`$title`</div> }
+  @bogusdirective { foo: bar; }
+-> `✓ All 1 file(s) passed` (no diagnostic for @bogusdirective).
+
+Real-world trigger that surfaced this (2026-06-21, MCP builder showcase): a guest
+authored CSS as `@style { .c { color: … } }` (NOT a Spacetime construct — real
+Spacetime uses BARE top-level selectors `.c { … }`). The `@style` block was
+swallowed: `compile_to_bundle(...).css` came back EMPTY (0 bytes) while bare
+`.c { … }` yields the css correctly. The author sees an unstyled page with zero
+indication that `@style` is wrong. (This was misdiagnosed as a region-compose
+"finding D — dropped @style"; the real cause is the silent swallow.)
+
+* Why it matters (DX)
+- A typo'd or misremembered directive name vanishes with no feedback — the
+  opposite of the metasystem's "self-describing" intent (AGENTS).
+- The compiler HAS the registry to know which `@`-names are defined (macros +
+  primitives + built-ins); an unknown one is detectable.
+- Pairs with W0712 (BUG-130) which warns on a DIFFERENT silent-swallow
+  (inline @each in template markup) — same class of bug, same fix shape.
+
+* Root cause (to verify during fix)
+The parser treats an unknown `@name { … }` as opaque/file-scope content rather
+than checking the name against the macro/primitive/built-in registry. Likely in
+the directive/scope parse path (src/parser/mod.rs) where a `@`-led block with no
+matching registered form falls through to HTML/opaque handling.
+
+* Fix direction
+1. At parse/expansion, when a top-level `@ident` block matches NO registered
+   macro/primitive/built-in directive, emit a WARNING diagnostic (new W-code,
+   e.g. W0713) naming the unknown directive + a hint ("not a known directive;
+   did you mean bare CSS `.sel { }` / a defined macro?"). Mirror W0712's shape
+   (src/diagnostics/codes.rs + the emit site).
+2. Keep it a WARNING (not error): forward-compat with directives defined later
+   in stdlib; a hard error could break valid-but-late-resolved forms. Verify
+   against the registry AFTER stdlib load so a real stdlib directive isn't
+   flagged.
+3. Tests: fires on `@bogusdirective {…}`; SILENT for every real directive
+   (@template, @style IF we decide to define it, @data, @each in valid position,
+   @import, …). No false positives on examples/ + demos/ + stdlib/.
+
+* Open question
+Should `@style { }` actually BE defined (a real construct that routes its body to
+`compiled.css`)? Many authors will reach for it by analogy to other frameworks.
+Two options: (a) define `@style` as a stdlib macro that emits its body as CSS
+(ergonomic, one construct), or (b) keep bare top-level CSS as the one true way
+and let W0713 redirect `@style` users. Decision belongs with the owner (harmony:
+one need = one impl). Filing as part of this bug's resolution.
+
+* Provenance
+Surfaced 2026-06-21 during the MCP builder showcase while live-verifying BUG-131
+on a dev server (port 42011). Bare-CSS guest renders + styles correctly;
+`@style`-wrapped guest silently loses its CSS. Confirmed `check` emits no
+diagnostic for an arbitrary `@bogusdirective`.
+
+NOTE [2026-06-21]: Implemented in src/diagnostics/codes.rs (W0714 variant + string mapping), src/parser/mod.rs (registry-driven unknown check in `_` arm), and src/parser/tests.rs (3 tests). W0713 was already in use for %animates unknown-property warnings, so W0714 was used. cargo check --lib passes; cargo test --lib parser::tests::test_w0714* passes; temporary smoke test confirmed zero W0714 across examples/demos/stdlib. cargo test --lib has 5 pre-existing snapshot failures unrelated to this change; cargo build has a pre-existing error in src/mcp/live.rs.
+
+NOTE [2026-06-21]: FIXED 2026-06-21. Two parts: (1) W0714 (W0713 was taken by %animates) emitted on unknown top-level @directive — registry-driven check (get_forms_for_directive non-empty = known), guarded by registry.is_some(), mirrors W0712. 3 tests, zero false positives across examples/demos/stdlib. Commit 1519d54a (delegated). (2) check_file now surfaces ast.diagnostics (parser warnings) — previously check showed ONLY validate/analysis diagnostics so W0712/W0714 were unreachable via CLI; merged ast.diagnostics into the collector in src/main.rs. W0714 now shows under `check --verbose`. Commit 232ea8b3. Open design Q (define @style as a real construct vs warn-only) deferred to owner — W0714 redirects @style users for now.

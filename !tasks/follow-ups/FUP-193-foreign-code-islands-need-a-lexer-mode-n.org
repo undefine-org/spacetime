@@ -1,0 +1,76 @@
+#+TITLE: Foreign-code islands need a lexer mode, not more tokens
+#+STATE: ITEM
+#+SESSION_ID: 153f5ed0617636c7
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-26T21-12-46-213Z_153f5ed0617636c7.jsonl]]
+#+CUSTOM_ID: FUP-193-foreign-code-islands-need-a-lexer-mode-n
+
+* Initial Message
+
+also make sure you file all the 'maximalist reading' you wrote as FUPs to be taken on later (with CodePaths and seeds for designing hte implementation and verifying its reach and ensuring e don't leave redundant/deprecated code in the end
+
+* Why — the residue of FUP-046
+
+FUP-046 is closed: the backtick is a sigil and now lexes as one. Its ORIGINAL
+motivating defect survives, in a smaller and better-understood form.
+
+Inside an `@eval` / `@drive` / `@when` payload, or an `%emit js` body, the text
+is JAVASCRIPT. There a backtick really IS a template delimiter, and a `{` inside
+that template is text. The lexer does not know this — it lexes those bytes with
+Spacetime rules — so `parse_arrow_fn_balanced` can still mis-count a brace
+inside `` `…}…` `` (its limitation comment, `src/syntax/cst/parser.rs:3733`).
+
+* Why a token cannot fix it, and a MODE can
+
+This is the lesson that cost a full corpus regression. The character is the
+same; the LANGUAGE is different. A lexer rule keyed on the character alone must
+be wrong in one of the two languages — make the backtick consume and Spacetime's
+4,934 holes die; leave it and JS templates stay transparent.
+
+∴ the discriminator is not the character. It is WHERE. That is a mode.
+
+The parser ALREADY knows where these islands are — `parse_emit_body` exists
+precisely because "%emit js must not be read as Spacetime", and it solves the
+problem by refusing to interpret anything but `%`. The knowledge is present at
+the parser and absent at the lexer, and the fix is to move it one layer down.
+
+* CodePath
+
+  src/syntax/cst/lexer.rs::Lexer                      add a mode parameter
+  src/syntax/cst/lexer.rs::RawToken                   a JS-mode template token,
+      live ONLY in that mode — never in the default one
+  src/syntax/cst/parser.rs::parse_emit_body           island boundary (known)
+  src/syntax/cst/parser.rs::is_arrow_fn               island boundary (known)
+  src/syntax/cst/parser.rs::parse_arrow_fn_balanced   the victim; its LIMITATION
+      comment at :3733 is deleted when this lands, or this has not landed
+  tests/foreign_island_mode_test.rs                   NEW
+
+Precedent to copy: the existing re-lex machinery. `parse_html_element` already
+re-lexes a tail with `Lexer::new(&tail)` when a token straddles a region
+boundary (:2467). An island can be lexed the same way — scan the region, lex its
+bytes under JS rules, splice.
+
+* Verification seeds
+
+- RED FIRST, and it must be a REAL payload: an `@eval` whose arrow body contains
+  `` `a}b` ``. Today the body terminates early. Assert the whole body survives.
+- THE REGRESSION GATE IS NON-NEGOTIABLE: `tests/backtick_token_test.rs` must stay
+  7/7 unchanged. A backtick in Spacetime source must keep lexing as BACKTICK.
+  Run it in the same commit; if it moves, the mode is leaking.
+- Corpus flat: examples 35, demos 36, fixtures 6. This is the measurement that
+  caught attempt 1 — a lexer change is never proven by unit tests alone.
+- headless 744/11, and `cargo test --lib` (3209/0 as of 71de8e55).
+
+* Deprecation sweep
+
+When this lands, DELETE rather than amend:
+  - the LIMITATION paragraph at `parser.rs:3733`
+  - the `#[ignore]`s in `tests/template_literal_token_test.rs` — its seven gates
+    describe exactly the behaviour a JS-mode template token should have, and
+    become live gates INSIDE the mode. That is why they were kept.
+Anything less means two mechanisms both claiming to handle templates.
+
+* Priority
+
+#C — deliberately. No current `.st` payload trips it (checked in FUP-046), the
+limitation is documented, and the workaround is one quoted string. It is filed
+so it is not rediscovered, not because it is urgent.

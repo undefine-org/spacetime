@@ -1,0 +1,88 @@
+#+TITLE: Fix scroll timeline regression and composition bug
+#+STATE: DONE
+#+SESSION_ID: 14af0a7e71c1adaa
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-04-05T18-43-05-799Z_14af0a7e71c1adaa.jsonl]]
+#+CUSTOM_ID: PLAN-014-fix-scroll-timeline-regression-and-compo
+
+
+* Initial Message
+
+the final states in the scrolls in http://localhost:9416/en/ (ora-ventures.com) are always shown, I don't have that scroll timeline working anymore. Find the root cause and exlpain it to me. Use the browser tool to find out as well.
+
+* Context
+
+Scroll-driven animations on ora-ventures.com (/en/) show final states immediately instead of animating. Two root causes:
+
+** Primary regression: scope default change
+Commit =ac5bb3e8= (March 8) changed the =@scroll= macro's default =scope= from =cover= to =entry= in =stdlib/macros/timeline.st=. For the 300vh scroll-locked sections, this compressed the animation range from ~3072px to ~768px, causing all sequential panel animations to fire in under one viewport height. All 34 =@scroll= blocks in =ora-ventures.com/index.st= rely on the default. Sites that need =entry= already specify it explicitly.
+
+** Latent composition bug
+When two =@scroll= animations target the same CSS property on the same element (the in/out pattern: =work-panel-1-in= and =work-panel-1-out= both setting =opacity= on =[data-panel="crystal"]=), the =apply-animations= primitive unconditionally writes to =el.style[property]=. At init, the out-animation's start state (=opacity: 1=) overwrites the in-animation's start state (=opacity: 0=). During scroll, microtask ordering causes the first-registered animation to always write last, preventing later animations from controlling the property. Masked by overlay positioning but architecturally incorrect.
+
+** Approach
+1. Revert the scope default to =cover= (one-line stdlib fix, zero website changes)
+2. Add per-element, per-property ownership tracking in =apply-animations.st= (prevents the composition clobber)
+
+** Key decisions
+- No website code changes required
+- =cover= is the safer default — works for both reveals and scroll-scrubbed sequences
+- Ownership model: active animations (=0 < progress < 1=) always claim; boundary animations (=progress=0= or =1=) only write if already owner or uncontested
+- Transform sub-properties tracked individually (=translateY=, =scale=), not composite
+
+* Verification
+
+** After BUG-016 (scope revert)
+- =cargo test --lib= passes
+- =cargo run --features headless -- test tests/unit/primitives/scroll-driver.test.st --headless= passes
+- =cargo run --features headless -- test tests/unit/primitives/scroll-scope.test.st --headless= passes
+- =grep -r 'scope: entry' site/ ora-ventures.com/= confirms sites that need entry already specify it
+
+** After BUG-017 (composition fix)
+- =cargo run --features headless -- test tests/unit/primitives/scroll-composition.test.st --headless= passes (new test)
+- =cargo run --features headless -- test tests/unit/primitives/scroll-multi-keyframe.test.st --headless= passes (existing)
+- =cargo run --features headless -- test tests/integration/animation-chain.test.st --headless= passes
+- =cargo run --features headless -- test ora-ventures.com/ora-ventures-motion.test.st --headless= passes
+
+** Final verification
+- =cargo test --lib= — all unit tests pass
+- =cargo run --features headless -- test tests/ --headless= — all headless tests pass
+- Visual: load =http://localhost:9416/en/=, scroll through — panels fade in/out gradually with scroll, not stuck at final state
+
+* Execution Manifest
+
+| Wave | Item | Effort | Dep |
+|------+------+--------+-----|
+| 1 | [[id:BUG-016-revert-scroll-scope-default-from-entry-t]] | 1 | — |
+| 2 | [[id:BUG-017-fix-animation-composition-when-multiple]] | 3 | BUG-016 |
+
+Wave 1 fixes the primary regression (scope default). Wave 2 hardens the animation system against the composition bug. Both are stdlib-only changes — zero website modifications.
+
+
+** Completion [2026-04-05]
+
+*** Verification
+- =cargo test --lib=: 1983 passed, 0 failed
+- =cargo run -- check ora-ventures.com/=: all 30 files passed
+- =cargo run -- build ora-ventures.com/=: export complete (1 page, 5 files)
+- Visual browser verification at =http://127.0.0.1:3333/index.html=:
+  - Hero section loads with rotating text animation
+  - Work section panels (crystal, ready) fade in/out gradually with scroll
+  - Growth section panels (market, gap) animate correctly
+  - Panel opacity confirmed mid-transition: 0.87 at partial scroll position
+  - Ownership tracking confirmed: crystal panel owned by =work-panel-1-in= at init, transfers to =work-panel-1-out= during scroll
+- Headless scroll tests: pre-existing V8 syntax error at generated line ~2236 affects all scroll-related headless tests (scroll-driver, scroll-scope, scroll-multi-keyframe, animation-chain, scroll-composition). Error occurs identically before and after this change. Root cause is in V8 runtime code generation, not in stdlib changes.
+
+*** Artifacts
+- [[file:!tasks/plans/plan-artifacts/PLAN-014-fix-scroll-timeline-regression-and-compo/01-initial-viewport.png]] — Hero section with rotating text, page load
+- [[file:!tasks/plans/plan-artifacts/PLAN-014-fix-scroll-timeline-regression-and-compo/02-work-section-panel-visible.png]] — Crystal Clear Potential panel fully visible at correct scroll
+- [[file:!tasks/plans/plan-artifacts/PLAN-014-fix-scroll-timeline-regression-and-compo/03-work-panel-2-visible.png]] — Ready to Implement panel visible, panel 1 faded out
+- [[file:!tasks/plans/plan-artifacts/PLAN-014-fix-scroll-timeline-regression-and-compo/04-mid-fade-transition.png]] — Crystal panel at 87% opacity, proving gradual scroll animation
+- [[file:!tasks/plans/plan-artifacts/PLAN-014-fix-scroll-timeline-regression-and-compo/05-growth-section.png]] — Growth section with Market Strategy panel visible
+
+*** Changes
+- =stdlib/macros/timeline.st=: reverted =@scroll= default =scope= from =entry= to =cover= (line 43)
+- =stdlib/primitives/animation/apply-animations.st=: added per-element, per-property ownership tracking (=_stAnimOwner=) in =applyInitialState= and both watcher callback paths (XY and scalar)
+- =tests/unit/primitives/scroll-composition.test.st=: new test file with 5 tests for animation composition
+
+*** Deviations
+- Headless scroll tests could not be verified due to pre-existing V8 syntax error in generated code (not caused by this change). All other verification methods confirm correctness.

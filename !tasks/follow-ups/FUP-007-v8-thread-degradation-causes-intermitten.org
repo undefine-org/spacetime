@@ -1,0 +1,35 @@
+#+TITLE: V8 thread degradation causes intermittent 404 on locale routes
+#+STATE: ITEM
+#+SESSION_ID: 14aef9c617fc29ee
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-04-05T17-30-02-719Z_14aef9c617fc29ee.jsonl]]
+#+CUSTOM_ID: FUP-007-v8-thread-degradation-causes-intermitten
+#+EFFORT: M
+#+PRIORITY: #B
+#+LAYER: server
+
+* Initial Message
+
+Run a full audit of the ora-ventures.com/ website at localhost:9416. A lot of stuff is broken. Please be thorough and list the issues.
+
+* Problem
+
+The locale build-script execution path in =try_serve_locale= (=src/server.rs= ~line 706+) spawns a new OS thread with a fresh V8 isolate per request (via =rustyscript=). After approximately 5-6 requests, the V8 runtime silently fails, causing all subsequent locale route requests to return 404.
+
+This was documented as a deviation in PLAN-008 (=!tasks/plans/PLAN-008-fix-ora-ventures-com-dev-server-and-css.org= line 81) but no tracking item was filed.
+
+* Context
+- Only affects the build-script execution path (=compiled.build_scripts= is non-empty)
+- The inline fallback path (=build_scripts.is_empty()=) does not use V8 and is unaffected
+- For sites like ora-ventures.com where =@locale= does not generate build scripts, the inline path is now used, so this bug is masked
+- Sites that DO produce build scripts with locale routing will hit this after a few dev-server reloads
+
+* Possible Approaches
+1. Reuse a single V8 isolate across requests instead of spawning fresh ones
+2. Pool V8 threads with bounded concurrency
+3. Move build-script execution out of the request path entirely (pre-compile on file change)
+
+* Source
+PLAN-008 deviation note, line 81:
+#+begin_quote
+Pre-existing V8 thread degradation: The locale build-script path spawns a new OS thread with a fresh V8 isolate per request. After ~5-6 requests, the V8 runtime starts failing silently, causing subsequent locale routes to 404.
+#+end_quote

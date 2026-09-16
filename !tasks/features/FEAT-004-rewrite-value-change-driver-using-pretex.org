@@ -1,0 +1,279 @@
+#+TITLE: Rewrite value-change-driver using pretext and clean patterns
+#+STATE: DONE
+#+SESSION_ID: 14a6f40c6ae9910d
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-03-30T11-18-58-449Z_14a6eb4da46990fa/8-CreateFEAT2.jsonl]]
+#+CUSTOM_ID: FEAT-004-rewrite-value-change-driver-using-pretex
+#+EFFORT: 8h
+#+PRIORITY: #A
+#+LAYER: stdlib
+#+TODO: ITEM(i) DOING(d) REVIEW(r) | DONE(D) BLOCKED(b)
+
+NOTE [2026-03-30]: Completed. Value-change-driver rewritten with pretext canvas-based measurement, clip-path overflow, Intl.Segmenter grapheme splitting, prefers-reduced-motion, one-time @keyframes registration. All 7 hacks eliminated. 19 codegen tests pass, 1965 lib tests pass, 129 integration tests pass."
+
+* Scope
+** In-scope
+- Vendor pretext into a new =%emit prelude-js= block in the value-change-driver primitive (=stdlib/primitives/animation/drivers.st= line 625, before the existing =%emit js=). This is emitted once per primitive type — only when =@value-change= is actually used on the page. No Rust compiler changes needed.
+- Full rewrite of the ~380-line =%emit js= block (value-change-driver, lines 626-1008)
+- Atomic update of codegen tests in =tests/value_change_test.rs=
+- Seven specific eliminations:
+  1. cloneNode + offsetHeight height measurement → =ST.text.prepare()= + =layout()=
+  2. measureSpan + getBoundingClientRect per character → =ST.text.measureWidth()=
+  3. =font-kerning: none= hack → removed (canvas measurement is CSS-independent)
+  4. paddingTop/marginTop overflow headroom → =overflow: visible= + =clip-path: inset()=
+  5. letter-spacing margin-right workaround → removed
+  6. Per-cycle =<style>= injection for @keyframes → one-time registration per instance
+  7. =.split('')= character iteration → =Intl.Segmenter({ granularity: 'grapheme' })=
+- Add =prefers-reduced-motion= check (instant text swap, no animation)
+- Font string extraction: =getComputedStyle(el).font= with manual fallback
+- Grapheme-correct =findPrefixSuffix= (operate on grapheme arrays, not code unit indices)
+** Out-of-scope
+- Changes to the =%primitive= signature, =%form= definition, or =%binds= clause
+- Changes to the Rust compiler pipeline (=src/pipeline/emit.rs=, =src/main.rs=) — pretext is purely in stdlib via =%emit prelude-js=, not a runtime module
+- Consumer site CSS changes (separate item)
+** Rationale
+The current driver forces 4+ layout reflows per animation cycle via DOM reads (cloneNode, getBoundingClientRect), has Firefox-specific compositing flash bugs from box-model mutation, and uses font-kerning/letter-spacing hacks for cross-browser consistency. Pretext's canvas-based measurement eliminates all of these.
+
+Using =%emit prelude-js= instead of adding pretext to the runtime module chain means: (a) zero Rust changes, (b) pretext is tree-shaken — only included when =@value-change= is used, (c) follows the established pattern (scroll-driver already uses =%emit prelude-js= at line 37).
+* Tests
+** =tests/value_change_test.rs= — codegen assertion updates (atomic with driver change)
+*** Tests that WILL break and need new assertions:
+- =test_compile_value_change_has_clone_measurement= (line 351): remove =cloneNode= assertion → assert =ST.text.prepare= or =ST.text.layout= present
+- =test_compile_value_change_concurrent_height= (line 376): keep =targetHeight= / =totalAnimDur= names in new code so assertion passes; OR update assertion if renamed
+*** Tests that stay unchanged:
+- =test_compile_value_change_generates_runtime= (MutationObserver — still used)
+- =test_compile_value_change_contains_waapi_converter= (irToWaapi — still used, name preserved)
+- =test_compile_value_change_no_sequential_height= (naturalHeight negative check — still valid)
+- All 4 parse verification tests (macro syntax unchanged)
+- All 3 form matching capture tests (captures unchanged)
+*** New codegen assertions to add:
+- =compiled.js.contains("clipPath")= — clip-path used instead of paddingTop/marginTop
+- =compiled.js.contains("Segmenter")= — Intl.Segmenter used for grapheme splitting
+- =!compiled.js.contains("fontKerning")= — font-kerning hack removed
+** =tests/unit/animations/value-change.test.st= — existing behavioral tests (must still pass)
+- "value-change keeps staying chars visible during animation"
+- "value-change animates exit and enter concurrently"
+- "value-change restores plain text after animation completes"
+- "value-change does not flash old text before animating"
+
+* Implementation
+** Step 0: Build and embed pretext into =%emit prelude-js=
+
+*** Build pretext IIFE (one-time, outside cargo build)
+
+CRITICAL BUILD CONSTRAINTS (from Momus review):
+1. *No backtick template literals*: Spacetime's CST lexer (=src/syntax/cst/lexer.rs=) has no backtick token. =parse_emit_body()= tracks brace depth via L_BRACE/R_BRACE — backticks containing ={= / =}= corrupt depth tracking. Use =--target=es2015= to downlevel template literals.
+2. *Escape =%= and =$= patterns*: The emit tokenizer (=src/emit/emit_tokenizer.rs=:305-335) treats =%identifier= as Spacetime param placeholders and =$identifier= as signal references. Vendored JS with modulo operators (=width%total=) or dollar signs will be misinterpreted. Post-process the IIFE to escape these.
+
+#+begin_src bash
+# Step 1: Build with ES2015 target (no template literals)
+bun install @chenglou/pretext
+bun build node_modules/@chenglou/pretext/src/layout.ts \
+  --target=browser --format=iife --global-name=__PretextInternal \
+  --minify-whitespace --no-bundle=false \
+  --outfile /tmp/pretext-raw.js
+
+# Step 2: Verify no backticks
+if grep -q '`' /tmp/pretext-raw.js; then
+  echo "ERROR: Backtick template literals detected. Add --target=es2015 or use esbuild."
+  exit 1
+fi
+
+# Step 3: Escape % and $ for Spacetime emit tokenizer
+# Replace %<identifier_char> with %%<identifier_char> (literal % in emitted JS)
+# Replace $<identifier_char> outside strings with workarounds
+sed -E 's/%([a-zA-Z_])/%%\1/g' /tmp/pretext-raw.js > /tmp/pretext-escaped.js
+# Verify no bare $identifier patterns (signal syntax)
+# If found, replace with alternative (e.g., use String.fromCharCode(36) or rename)
+
+# Step 4: Measure final size
+wc -c /tmp/pretext-escaped.js
+# If >50KB, consider tree-shaking unused exports (bidi, profiling, etc.)
+#+end_src
+
+If =bun build= does not support =--target=es2015=, use esbuild as fallback:
+#+begin_src bash
+npx esbuild node_modules/@chenglou/pretext/src/layout.ts \
+  --bundle --format=iife --global-name=__PretextInternal \
+  --target=es2015 --outfile=/tmp/pretext-raw.js
+#+end_src
+
+*** Embed in drivers.st
+Insert a =%emit prelude-js= block BEFORE the existing =%emit js= (at line 625 of =stdlib/primitives/animation/drivers.st=):
+#+begin_src
+%primitive value-change-driver(...) {
+  %emit prelude-js {
+    // Pretext v0.0.3 — canvas-based text measurement
+    // Vendored from @chenglou/pretext (MIT license).
+    // Build: esbuild layout.ts --bundle --format=iife --target=es2015
+    // Post-process: escape %id -> %%id for Spacetime emit tokenizer
+    // CONSTRAINT: No backtick template literals (CST lexer limitation)
+    (function() {
+      /* ... escaped pretext IIFE content ... */
+    })();
+
+    // Expose via ST namespace using pretext's corrected measurement
+    // (NOT raw canvas.measureText — pretext applies emoji width correction)
+    (function() {
+      var P = typeof __PretextInternal !== 'undefined' ? __PretextInternal : null;
+      if (!P) return;
+      ST.text = {
+        prepare: P.prepare,
+        layout: P.layout,
+        prepareWithSegments: P.prepareWithSegments,
+        layoutWithLines: P.layoutWithLines,
+        clearCache: P.clearCache,
+        setLocale: P.setLocale,
+        // Corrected word width measurement using pretext's internal pipeline.
+        // This applies emoji correction (Chrome/Firefox macOS canvas measures emoji
+        // wider than DOM). Raw ctx.measureText() would give wrong widths for emoji.
+        measureCorrected: function(word, font) {
+          var prepared = P.prepare(word, font);
+          // For a single-segment word, layout width == segment width
+          var result = P.layout(prepared, Infinity, 0);
+          // layout with infinite width = single line, height is meaningless,
+          // but we can get width from layoutWithLines
+          var lines = P.layoutWithLines(prepared, Infinity, 0);
+          return lines.lines.length > 0 ? lines.lines[0].width : 0;
+        }
+      };
+    })();
+  }
+
+  %emit js {
+    // ... per-element value-change code using ST.text ...
+  }
+}
+#+end_src
+
+Note: =ST.text.measureCorrected()= uses pretext's full measurement pipeline (including emoji correction from =getCorrectedSegmentWidth()=) instead of raw =ctx.measureText()=. This ensures per-word widths in the animation match the widths used for height calculation. Pretext internally uses a single shared canvas context — no duplicate contexts.
+
+** Step 1: Architecture — 6-phase pipeline (same phases, cleaner implementation)
+
+*** Preserved contract code (from existing driver — MUST be in rewrite)
+The rewritten =%emit js= block MUST preserve these contract elements from the current driver:
+- =%yield true -> $changing;= — at start of =animateChange()= (signals animation in progress)
+- =%yield false -> $changing;= — at end of =animateChange()= (signals animation complete)
+- =%yield destroy -> $destroy;= — cleanup function for external consumers
+- =ST.onCleanup(%&el, destroy);= — register cleanup with element lifecycle
+- MutationObserver setup: =observer.observe(%&el, { characterData: true, childList: true, subtree: true, characterDataOldValue: true });=
+- Observer disconnect at start of =animateChange()=, reconnect at end
+- =const controller = new AbortController();= — abort controller for cleanup
+- =%exports= block: =$changing: bool=, =$destroy: fn() ~> effect=
+
+*** Phase 0: Initialization (once per instance, in the =%emit js= outer scope)
+#+begin_src javascript
+// Extract font string (once, cached for all cycles)
+var cs = getComputedStyle(%&el);
+var font = cs.font || [cs.fontStyle, cs.fontWeight, cs.fontSize, cs.fontFamily].filter(Boolean).join(' ');
+// lineHeight: parseFloat returns NaN for 'normal' — use fontSize * 1.2 as fallback
+var lhRaw = parseFloat(cs.lineHeight);
+var lineHeight = isNaN(lhRaw) ? (parseFloat(cs.fontSize) || 16) * 1.2 : lhRaw;
+
+// Pre-register @keyframes (once per instance, not per cycle)
+// enterKf/exitKf come from IR params resolved at emit time — they are constants.
+// Use String.fromCharCode(123/125) for { } to avoid CST lexer issues in CSS strings.
+var animId = 'vc_' + Math.random().toString(36).slice(2, 8);
+var styleEl = document.createElement('style');
+// ... build @keyframes CSS from enterKf/exitKf using kfToCss() ...
+document.head.appendChild(styleEl);
+
+// Grapheme segmenter (shared across cycles)
+var segmenter = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
+var toGraphemes = function(text) {
+  var result = [];
+  for (var seg of segmenter.segment(text)) result.push(seg.segment);
+  return result;
+};
+#+end_src
+
+IMPORTANT: All code in =%emit js= block must avoid template literals (backticks) — same CST lexer constraint as the prelude-js block.
+
+*** Phase 1: Measurement (two batched DOM reads, then all canvas/arithmetic)
+#+begin_src javascript
+// Called on each text mutation inside animateChange()
+var containerWidth = %&el.offsetWidth; // DOM read 1 — batched before writes
+var currentHeight = %&el.offsetHeight; // DOM read 2 — batched
+
+// Height via pretext (full line-breaking, emoji-corrected)
+var prepared = ST.text.prepare(newText, font);
+var targetHeight = ST.text.layout(prepared, containerWidth, lineHeight).height;
+
+// Word widths via pretext (emoji-corrected, single canvas context)
+var oldWordWidths = oldWords.map(function(w) { return ST.text.measureCorrected(w, font); });
+var newWordWidths = newWords.map(function(w) { return ST.text.measureCorrected(w, font); });
+#+end_src
+
+*** Phase 2: Overflow setup (no box-model mutation)
+#+begin_src javascript
+var elFontSize = parseFloat(cs.fontSize) || 16;
+var overflowPad = Math.ceil(elFontSize * 0.6);
+%&el.style.overflow = 'visible';  // override CSS overflow:hidden
+%&el.style.clipPath = 'inset(-' + overflowPad + 'px 0 0 0)';
+%&el.style.height = currentHeight + 'px';  // lock height
+#+end_src
+
+*** Phase 3: DOM construction
+- Grapheme-correct =findPrefixSuffix=: compare arrays of graphemes from =toGraphemes()=, not code unit indices
+- Build wrapper span with prefix text, per-word containers, suffix text
+- Enter layer: in-flow, grapheme spans (no explicit widths — natural sizing with kerning)
+- Exit layer: absolute, word-level width from =ST.text.measureCorrected()=
+- Character spans use =toGraphemes(word)=, not =word.split('')=
+- Word container: =display: inline-block; position: relative; isolation: isolate; will-change: transform, opacity=
+
+*** Phase 4: DOM swap + animate
+- Single DOM swap: =%&el.textContent = ''; %&el.appendChild(wrapper);=
+- Reuse pre-registered @keyframes by =animId= (no per-cycle =<style>= injection)
+- CSS animations for per-char stagger (transform only, not opacity per-char)
+- WAAPI for layer-level opacity (2 elements per word — enter 0→1, exit 1→0)
+- WAAPI for container height transition (if =targetHeight !== currentHeight=)
+
+*** Phase 5: Cleanup (instant)
+#+begin_src javascript
+%&el.style.height = targetHeight + 'px';
+%&el.textContent = newText;
+%&el.getAnimations().forEach(function(a) { a.cancel(); });
+%&el.style.height = '';
+%&el.style.overflow = '';  // CSS overflow:hidden resumes
+%&el.style.clipPath = '';  // no clip-path
+#+end_src
+
+** Step 2: Reduced-motion handling
+#+begin_src javascript
+// At top of animateChange(), before any measurement
+if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+  %&el.textContent = newText;
+  currentText = newText;
+  isChanging = false;
+  %yield false -> $changing;
+  observer.observe(%&el, { characterData: true, childList: true, subtree: true, characterDataOldValue: true });
+  return;
+}
+#+end_src
+
+** Step 3: Font string extraction
+=getComputedStyle(el).font= returns empty in some Firefox versions. Fallback:
+=cs.fontStyle + ' ' + cs.fontWeight + ' ' + cs.fontSize + ' ' + cs.fontFamily=
+
+** Step 4: Atomic test updates in =tests/value_change_test.rs=
+See Tests section above for the full enumeration of which tests change and which stay.
+* Edge Cases
+- *Empty text*: =oldText= or =newText= is empty → handle as full enter/exit of entire text
+- *Same text*: Already handled by existing =newText !== currentText= guard
+- *Emoji*: =Intl.Segmenter= correctly handles multi-codepoint graphemes (ZWJ sequences, flag emoji)
+- *RTL text*: Word containers use =inline-block= which respects bidi. Exit layer =left: 0= works for LTR; RTL would need =right: 0=. Current implementation is LTR-only (same as before).
+- *Rapid mutations during animation*: =isChanging= guard prevents re-entry. Mutation during animation is dropped (same as before).
+- *Font not loaded*: Canvas measures with fallback font, same as DOM would. Widths match.
+- *system-ui font*: Pretext warns this is unsafe on macOS. ora-ventures uses named fonts (Inter). Document the limitation.
+- *Multi-line text*: Pretext =layout()= correctly handles line-breaking and returns accurate height.
+- *V8 headless tests*: =ST.text.prepare()= will throw without canvas. Value-change headless tests (=value-change.test.st=) run in real browser, not V8. Codegen tests (=value_change_test.rs=) only check string presence in compiled JS, not execution.
+
+* Acceptance Criteria
+- [ ] =cargo test --test value_change_test= — all tests pass (12 tests, including updated codegen assertions)
+- [ ] =cargo run --features headless -- test tests/unit/animations/value-change.test.st --headless= — all 4 behavioral tests pass
+- [ ] Compiled JS contains NO =cloneNode= (replaced by pretext)
+- [ ] Compiled JS contains NO =fontKerning= (hack removed)
+- [ ] Compiled JS contains NO =paddingTop= / =marginTop= (replaced by clip-path)
+- [ ] Compiled JS contains =ST.text.prepare= or =ST.text.layout=
+- [ ] Compiled JS contains =clipPath=
+- [ ] Compiled JS contains =Segmenter=
+- [ ] Compiled JS contains =prefers-reduced-motion=

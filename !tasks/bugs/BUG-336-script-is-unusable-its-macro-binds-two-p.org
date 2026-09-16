@@ -1,0 +1,101 @@
+#+TITLE: @script is unusable: its macro binds two primitives and never the one named script
+#+STATE: DONE
+#+SESSION_ID: 154d0baaa942d918
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-08-06T12-08-13-733Z_154d0baaa942d918.jsonl]]
+#+CUSTOM_ID: BUG-336-script-is-unusable-its-macro-binds-two-p
+
+* Initial Message
+
+exlpain #30, and for #14 and #11, does the new @on's text-change facet solve this?
+
+#+STATE: ITEM
+#+PRIORITY: B
+
+* Symptom
+
+The documented `@script` surface does not compile:
+
+#+begin_src spacetime
+@import "stdlib"
+@import "stdlib/scripting/script.st"
+@script "hello" {
+  <p>from a script</p>
+}
+#+end_src
+
+  error[E0956]: unknown primitive: script
+
+* Root cause
+
+`stdlib/scripting/script.st` declares three primitives — `file_context` (:49), `script_runner`
+(:82), `edit_collector` (:131) — and `%macro script` (:183) binds only two of them:
+
+#+begin_src spacetime
+%binds {
+  file_context(&self) -> { $source, $ast, $path, $forms }
+  edit_collector(&self) -> { $addEdit, $getEdits, $applyEdits }
+}
+#+end_src
+
+`script_runner` — the primitive that would actually RUN the script — is bound by nothing, and
+something downstream resolves the directive name `script` to a primitive of that name, which does
+not exist. So the macro names a primitive that was never declared while the primitive that was
+declared is never named.
+
+* How it was found
+
+PLAN-141 W1.1, triaging the G1 unreachable-primitive list. `script_runner` appeared as
+unreachable; checking whether it had an author surface produced the error above.
+
+This is the G1 thesis paying out directly: an unreachable primitive is not merely dead weight,
+it is a SIGNAL. Here it flagged a macro whose `%binds` does not match its own file's
+declarations — a defect no test covered, because no test compiles `@script`.
+
+* Also found in the same triage (separate, filed here for context)
+
+`@on &.media(...)` — `media-driver` is declared but has no `%registers driver(media)` entry, so:
+
+  error[E0948]: unknown driver projection `.media` — no `%registers driver(media)` entry exists
+
+By contrast `@on &.steps(count: 4)` compiles cleanly, so `steps-driver` IS reachable and the
+classifier's blind spot there is `%registers driver(...)`, not a defect.
+
+* Fix direction
+
+Decide what `@script` is FOR, then either:
+- bind `script_runner` in `%binds` (if the macro should run scripts), or
+- delete `script_runner` (if `file_context` + `edit_collector` are the whole story and the
+  runner is a fossil).
+
+Either way the E0956 must go, and `@script` must compile or be removed. A documented surface
+that errors on its own example is worse than no surface.
+
+For `@on &.media`: either add the `%registers driver(media)` entry (making `media-driver`
+reachable) or delete the primitive. A driver primitive with no registration cannot be projected.
+
+* Gate
+
+A `.test.st` compiling the `@script` example from the file's own doc comment. Same for
+`@on &.media` if it is kept.
+
+
+* RESOLVED (verified 2026-08-07, commit 28d7cd3b)
+
+Root cause was ONE mechanism, shared with BUG-336/338/340: `resolve_stdlib` consulted the
+EMBEDDED module index BEFORE the filesystem. `build_stdlib_index` indexes every .st under
+stdlib/ by bare name, so `stdlib/md/index.st` registered the name "md"; the embedded branch
+matched and returned `ResolvedImport::Stdlib`, which `resolve_imports` skips as "handled by
+MetaRegistry" — and MetaRegistry only loads STDLIB_DIRS. So an opt-in module's file on disk was
+never read and its %macro set never registered. Fix: filesystem first, embedded name as fallback.
+No module-name special-casing in Rust.
+
+Independently re-verified by the orchestrator (not taken on the agent's word):
+- tests/repro/bug-339-submodule-alone/check-contract.sh — GREEN (RED against 1b24e320^).
+- The two gates this bug MASKED are both GREEN again: gh-12-stage-non-canvas,
+  bug-333-undeclared-element-ref. Neither was ever regressed.
+- `cargo test --lib snapshot_tests` 14 failures -> 5; `cargo test --lib bug220` 6/0.
+- The 5 residual snapshot failures are the CONCURRENT session's runtime-JS change
+  (semicolon-joined mutation-body splitting) — 4 of the 5 diffs literally contain that comment.
+  Their snapshots to accept, not ours.
+
+@script now compiles (was E0956 unknown primitive: script).

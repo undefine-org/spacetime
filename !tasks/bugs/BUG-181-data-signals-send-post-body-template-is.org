@@ -1,0 +1,202 @@
+#+TITLE: `@data signal`'s `send POST "..." { body }` template is captured but never applied -- the fire() payload is sent raw, ignoring the declared body shape entirely
+#+STATE: DONE
+#+SESSION_ID: 153115a0b151f3c0
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse-commercial-host/2026-07-15T18-54-16-774Z_153115a0b151f3c0.jsonl]]
+#+CUSTOM_ID: BUG-181-data-signals-send-post-body-template-is
+#+layer: compiler,primitives
+
+* Found by
+Same session as BUG-179/BUG-180 (=stdlib/__host__/index.st=
+implementation). This is the THIRD, and most severe, defect found in
+=@data signal='s real runtime behavior during this investigation --
+this one makes EVERY =@data signal= with a =send POST "..." { ... }=
+BODY TEMPLATE silently send the WRONG request body.
+
+* Minimal reproduction
+#+begin_src text
+@data signal $addDomain($domain string) to $api {
+  send POST "/domains" { domain: $domain }
+  receive to Result { 200 => Added($.body); _ => Failed($.statusText); }
+  policy latest
+}
+#+end_src
+
+Firing =$addDomain("app.example.com")= (either via a real
+=@on click { $addDomain($newDomain); }= handler, or by directly
+invoking the registered =ST.getSignalCall('addDomain')= function in
+a browser console) sends an HTTP POST whose body is
+=JSON.stringify(payload)= where =payload= is EXACTLY the raw
+argument(s) passed to the call -- i.e. the literal string
+=\"app.example.com\"= -- COMPLETELY IGNORING the declared
+={ domain: $domain }= body template. Confirmed empirically by
+patching =window.fetch= to capture the real outgoing =opts.body=:
+it was =\"app.example.com\"= (a bare JSON string), never
+={\"domain\":\"app.example.com\"}=.
+
+Fired against a real server expecting ={\"domain\": string}=
+(=spacetime-host-server::domains::BindDomainRequest=), this produces
+a genuine, real =422= (axum's JSON-extractor deserialization
+failure: \"invalid type: string ... expected struct
+BindDomainRequest\") -- confirmed via a matching direct =curl= POST
+with a bare string body. The =422= happens BEFORE the handler runs,
+so it produces NO application-level log line, making this doubly
+silent: no compile diagnostic, no browser console error (the
+=receive= block's =_ => Failed(...)= arm SHOULD have caught it, but
+see the OPEN QUESTION below), and no server-side application log.
+
+* Root cause (structurally confirmed)
+Read =stdlib/primitives/signal.st= (389 lines) in FULL this session.
+The primitive declares a =body: any?= parameter (its own doc comment,
+line ~29: \"@param body - the send request body (object expression
+text)\"), and =stdlib/macros/data-kind.st='s =%binds= block DOES pass
+=body: $body= (the captured =send= clause's body object) into
+=signal-call(...)=. But grepping the primitive's ENTIRE =%emit js=
+block for =%body= (the interpolation sigil that would actually READ
+that captured value) returns ZERO matches. The parameter is declared,
+captured, and threaded all the way to the primitive -- then silently
+discarded. =doHttpRequest(payload)= (the only place a body is
+constructed) does =opts.body = JSON.stringify(payload)= where
+=payload= is =fire()='s OWN raw call argument(s), with NO reference
+to the primitive's =body= param anywhere.
+
+The SAME applies to the primitive's =params: any?= parameter (its
+own doc comment: \"@param params - the call signature
+(param_list)\") -- also captured, also threaded in, also NEVER
+referenced via =%params= anywhere in the emit block.
+
+* Impact
+This makes the DOCUMENTED, headline =@data signal= body-template
+feature (the entire point of writing
+=send POST \"/domains\" { domain: $domain }= instead of just
+=send POST \"/domains\"=) a NO-OP that silently sends the wrong
+payload shape. Every real API this product (or any =.st= site) POSTs
+a STRUCTURED body to via =@data signal= is currently broken this way
+-- the body template in the =.st= source is decorative, not
+functional. This is the MOST severe of the three bugs filed this
+session (BUG-179 =2xx=, BUG-180 =.prevent=): those affect specific
+receive-arm/event-modifier syntax; this one affects the CORE
+send-a-typed-body mechanism every real-world =@data signal= that
+POSTs structured data depends on.
+
+* Open question for the fix-implementer
+Given =policy latest='s =fire(payload)= signature takes exactly the
+call's raw argument(s) (matching the OBSERVED behavior: single arg ->
+raw payload = that arg, unwrapped), the CORRECT fix likely needs
+=fire= (or =doRequest=/=doHttpRequest=) to construct the actual body
+from the CAPTURED =%body= TEMPLATE, substituting each =$param= token
+in that template against the CURRENT call's named arguments (per
+=%params='s param_list, e.g. =$domain= from
+=$addDomain($domain string)='s own signature) -- NOT the bare
+=payload= positional value. This requires wiring BOTH =%params= AND
+=%body= for real, not just one of them -- fixing =%body= alone
+without also correctly binding named params against it would still
+leave named-multi-arg signals (e.g.
+=$move(card string, to string) to $board { send ... { card: $card,
+to: $to } }=, the EXACT shape =demos/liveview-kanban/index.st= uses
+for its =ws= transport) broken the same way for =http= transport
+signals.
+
+* Fix required
+1. Root-cause + fix why =%body=/=%params= are declared+captured but
+   never interpolated in =signal-call='s =%emit js= -- the body
+   sent by an http-transport =@data signal= must actually be built
+   from the DECLARED =send ... { ... }= template, substituting each
+   named param from the call's actual arguments.
+2. Add a REAL integration test: a =@data signal= with a MULTI-FIELD
+   body template (=send POST \"/x\" { a: $a, b: $b }=), fired with
+   real distinct values for =$a=/=$b=, asserting the ACTUAL HTTP
+   request body sent (via a mock/real endpoint capturing it) matches
+   ={\"a\": <value>, \"b\": <value>}= -- not just that SOME request
+   was sent. This exact test would have caught this bug immediately
+   (it currently would fail against ANY real backend expecting a
+   structured body).
+3. Audit =ws= transport's frame construction too
+   (=doWsRequest='s =JSON.stringify({ type: target, payload: payload,
+   __corr: corr })= -- SAME raw-=payload= pattern) for the identical
+   defect; =demos/liveview-kanban/index.st= happens to work today
+   only because its =ws= receiver on the Elixir/LiveView side may be
+   tolerant of (or specifically expects) the raw positional-payload
+   shape rather than a named-field object -- verify this is
+   INTENTIONAL for ws, not the same bug wearing a different transport.
+
+* Workaround applied (this session)
+NONE -- this bug blocks =stdlib/__host__/index.st='s =$addDomain=
+signal from ever sending a correctly-shaped request to the real
+=spacetime-host-server::domains::bind= endpoint (which requires
+={\"domain\": string}=). Documented inline in that file as a KNOWN,
+UNRESOLVED blocker (not silently worked around, since there is no
+clean workaround within a single-param signal's own surface --
+manually JSON-encoding a string that happens to look like an object
+inside =$domain= itself would be a real hack, not a fix). Wave 4's
+domain-panel \"add domain\" affordance is therefore NOT fully
+functional end-to-end until this bug is fixed; the REST of the
+panel (list rendering, real backend GET .../domains call, CORS,
+compile-time credential injection) is verified working via a live
+browser + real backend + real Cloudflare API test this session.
+
+* FIXED this session
+
+Root cause confirmed exactly as filed: =stdlib/primitives/signal.st='s
+=%body=/=%params= sigils were captured (verified via a live
+instrumentation probe: =%params= compiles to
+=[{name, kind, optional, type}, ...]=, =%body= compiles to the RAW
+inner-object text e.g. ="fieldA: $a, fieldB: $b"=) but never
+referenced anywhere in the primitive's own =%emit js= -- =fire(payload)=
+sent the call's raw first positional argument verbatim, ignoring the
+declared template entirely.
+
+** Fix
+1. =fire()= is now VARIADIC (=function fire() { var callArgs =
+   Array.prototype.slice.call(arguments); ... }=), not
+   single-parameter -- a multi-arg call
+   (=ST.runMutations='s =fire.apply(null, args)= dispatch) was
+   previously silently dropping every argument past the first.
+2. New =buildBody(args)=: when a body template exists, constructs the
+   actual request payload via
+   =new Function($paramNames.join(','), 'return ({'+bodyTemplate+'});').apply(null, args)=
+   -- =$=-PREFIXED parameter names (matching the template's own literal
+   =$a=/=$b= token spelling; =$= is a legal JS identifier character). A
+   bodyless =send= (e.g. a bare GET) falls back to the pre-fix
+   single-positional-arg behavior for backward compatibility.
+3. Verified across BOTH transports this bug's own filing flagged for
+   audit: =http= (the original repro) AND =ws= (=doWsRequest='s frame
+   construction) -- both receive the SAME =payload= value =fire()=
+   builds, so the fix applies uniformly with no separate =ws=-specific
+   change needed. Confirmed via a live browser test mocking
+   =WebSocket.send= against a real compiled
+   =@data signal ... to $ws-host { send emit "move" { card: $card, to: $to } }=
+   (the EXACT shape =demos/liveview-kanban/index.st= uses) -- the
+   captured frame correctly carried
+   ={"type":"move","payload":{"card":"card-123","to":"doing"},"__corr":1}=,
+   not the raw positional array this bug's OWN open question worried
+   about.
+
+** New regression tests
+=tests/integration/signal-body-template.test.st= (3 new tests, all
+passing): single-field body sends a structured object (not the raw
+arg), a two-field body sends BOTH fields correctly named, and a
+bodyless GET attaches no body at all -- exactly the test this bug's own
+"Fix required" section #2 asked for.
+
+** Real-world unblock
+=stdlib/__host__/index.st='s own =$addDomain= signal (this bug's
+original discovery site) now sends a correctly-shaped
+={"domain": "..."}= body -- confirmed via a live browser test against
+a REAL running =spacetime-host-server= with a real DB-inserted account
++ project + bearer token (not mocked): the request reached the real
+=domains::bind= handler (confirmed via a real, EXPECTED Cloudflare-API
+failure in the server's OWN log, using intentionally-fake CF
+credentials in this test env -- proving the request reached the
+correct handler, not a 422 body-shape rejection as before). A SEPARATE,
+independent bug was found+fixed alongside this one: =$addDomain='s own
+=send= target was a bare =/domains=, missing the
+=/api/projects/{project_id}/= prefix every other real route in this
+widget correctly uses -- fixed in the same file.
+
+** No regressions
+All pre-existing signal tests (=signal-call-fire.test.st=,
+=signal-dispatch.test.st=, 12 tests total) still pass unchanged,
+confirming =runMutations='s by-name dispatch mechanism (which THESE
+tests exercise, via hand-registered fake fire fns) is unaffected by the
+real-primitive fix.
+

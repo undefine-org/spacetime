@@ -1,0 +1,46 @@
+#+TITLE: Apostrophe in file-scope HTML text aborts compile (drops all CSS)
+#+STATE: DONE
+#+SESSION_ID: 14f94e45c6c3f247
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-02T11-06-49-499Z_14f94e45c6c3f247.jsonl]]
+#+CUSTOM_ID: BUG-072-apostrophe-in-file-scope-html-text-abort
+#+COMPLETION_HASH: 7218c8e101e52914
+
+* Initial Message
+
+can you write docs for them and feature the link to that prominently in AGENTS.md?
+
+first do a markdown version (in .md files) for the content. keep it short and concise, but complete, and focused on the testing infra for now.
+
+then tell me how you'd make a Spacetime-based documentation generator that also acts as a showcase for the features of Spacetime. I want something that really slaps. You can use the latest %capture_type, %primitive, %form, and %macro and whatnot to really really slap (give me your ideas). you can test drive that
+
+A plain apostrophe in file-scope HTML text content silently breaks compilation — the page emits 0 bytes of CSS (and JS is corrupted downstream), so a styled page renders completely unstyled.
+
+REPRO (minimal):
+  <main><p class="d">the compiler's OWN registry</p></main>
+  .d { color: red; }
+  body { color: white; }
+→ `cargo run -- build` produces spacetime.css of 0 bytes. Remove the apostrophe
+  (or write &apos;) → 46 bytes, correct.
+
+DISCOVERED: demos/spacetime-docs rendered with no CSS on localhost:3333; the
+"Tap me" buttons were unstyled. Root-caused by bisection to one apostrophe in the
+gallery panel body text ("compiler's OWN macro registry", index.st:96). Escaping
+it to &apos;s restored the full 4003-byte stylesheet. (An apostrophe inside a
+/* comment */ is fine; only HTML *text content* triggers it.)
+
+LIKELY CAUSE: the HTML-text lexer/tokenizer treats `'` as a string-delimiter
+start (as it would in a directive arg / expression), consuming everything until
+the next `'` or EOF. That swallows the following `</p></main>` + the entire CSS
+section into a phantom string, so the style rules never parse and CompiledSpacetime.css
+is empty. The same class as BUG-070 (file-scope text vs directive-token confusion)
+but for the quote lexer in HTML text runs. Double-quote `"` in text likely has the
+same risk; needs checking.
+
+FIX DIRECTION: in the file-scope HTML skeleton collection (the CST html_element
+text-run lexing, src/syntax/cst/parser.rs parse_html_element / collect_skeleton,
+or the html5ever TreeSink feed), `'` and `"` inside element TEXT content must be
+literal characters, not string delimiters. Add regression: apostrophe + double
+quote in file-scope <p> text must round-trip and must NOT suppress CSS/JS.
+Metasystem fix, no Rust special-case for the docs page.
+
+NOTE [2026-06-09]: Fixed (commit dbd1b473). Root: parse_html_element token-cursor advance assumed region-end aligns to a token boundary; a ' in HTML text emits a STRING token straddling scan.end, swallowing trailing CSS. Fix: re-lex the tail from scan.end when a straddling token is detected. Regression test added; double-quotes also covered. demos/spacetime-docs CSS restored (4003B) on :3333.

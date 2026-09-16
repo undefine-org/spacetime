@@ -1,0 +1,118 @@
+#+TITLE: Headless residual triage: home the non-state-machine clusters (debug-hook, cycle, style, signal, misc)
+#+STATE: ITEM
+#+SESSION_ID: 150f475256d7192f
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-19T12-43-02-363Z_150f475256d7192f.jsonl]]
+#+CUSTOM_ID: BUG-120-headless-residual-triage-home-the-non-st
+
+* Initial Message
+
+Verification: lib 2363 passed/0 failed · integration 172 · FUP-069 acceptance green · headless 456→513
+ passed.
+
+ Filed BUG-112 for the residual @try $error lowering bug ($error signal-lowers to ST.get(el,"error") =
+ __e) — out of FUP-072 scope, accounts for the remaining state/binding @try failures.
+
+ Notes (honesty):
+ - 9 v8_runtime failures (@media→JS, getSelection/DOMParser/IntersectionObserver, async initElement) are
+ pre-existing — st.js is byte-identical to HEAD, and @media("print") (no colon, real selector) fails
+ identically, ruling out all my changes.
+ - 4 non-test snapshots + part of test_and_fixture drift from the other session's concurrent
+ public/runtime/templates.js edit (FEAT-124/126 bundle code), embedded in compiled-JS snapshots — not my
+ logic. Left the test_and_fixture snapshot unstaged since it's entangled with their unstaged bundle.
+
+
+
+please review this owrk and what it was trying to achieve, and tell me what it did right and what the next steps are
+
+* Purpose
+Account for every remaining headless failure NOT covered by PLAN-047
+(state-machine, 37), BUG-085 (@each, 4), BUG-119 (reactive .cls harness, part of
+the SM-classtoggle count), or the CDP-ceiling refusals (26, correct-by-design).
+This item homes the leftover ~21 so none float unattributed in "the 91".
+
+Full taxonomy (2026-06-19 headless run: 527 passed / 91 failed):
+| cluster | n | home |
+|---|---|---|
+| State-machine (transition/classtoggle/mutate/scoped) | 37 | PLAN-047 (delete) |
+| CDP-ceiling (layout 9, getSelection 5, DOMParser 5, IntersectionObserver 4, FocusEvent 2, animate 1) | 26 | correct refusals — see "CDP" below |
+| @each collection-ref | 4 | BUG-085 |
+| Debug-hook | 5 | this item, §A |
+| REACT cycle | 3 | this item, §B |
+| REACT style (CSS var / opacity) | 3 | this item, §C |
+| REACT signal (sigA / dependent) | 2 | this item, §D |
+| MISC (sticky 2, revelation 2, have_count 1, focus 2, mutation 1, registry 1, click-mutation 1) | ~10 | this item, §E + CDP |
+
+* §A — Debug-hook cluster (5) — HARNESS-ENV gap, not a product bug
+Files: tests/dev-hooks.test.st. Asserts window.__stDebugHook / __ST_DEBUG__ /
+registerTimeline / clearErrors exist. These globals are defined ONLY by the
+debug runtime (src/debugger/runtime.rs generate_debug_runtime, from
+stdlib/__dev__/primitives/dev-hooks.st), injected under `serve --debug`. The
+HEADLESS test runtime does not inject the dev primitives, so the globals are
+legitimately absent.
+Fix direction: either (a) inject the debug runtime into the headless test
+harness when a test imports/【needs】 dev-hooks, or (b) gate dev-hooks.test.st to
+--cdp/--debug only (mark as needing the debug runtime, like layout tests refuse
+on logic). Prefer (a) if cheap — these are real, useful assertions.
+
+* §B — REACT cycle cluster (3) — likely REAL timing/value bug, NEEDS triage
+Files: tests/unit/macros/cycle.test.st. "cycle changes text after interval" got
+"first" expected "second"; wrap/field variants similarly off-by-one or
+not-advancing. @cycle steps a value on an interval; under headless virtual time
+the advance may not be pumped, OR the cycle primitive has a real off-by-one.
+Action: reproduce in isolation; determine virtual-clock-pump vs real bug. If the
+@clock isn't advanced by @wait under headless → harness; if it advances but
+value is wrong → real @cycle bug. File a dedicated BUG once classified.
+
+* §C — REACT style cluster (3) — NEEDS triage (CSS-var / style application)
+Files: tests/unit/runtime/interpolate.test.st, core.test.st. "ST.set updates CSS
+variable" / "ST.bindStyle applies style changes" / "ST.applyProperty sets
+opacity". These touch computed style — may be CDP-ceiling (style fidelity refuses
+on logic backend) OR a real runtime style-application bug. Action: check whether
+the assertion reads getComputedStyle (→ likely CDP-ceiling, reclassify) or reads
+the inline style attribute / a JS value (→ real bug). File/route accordingly.
+
+* §D — REACT signal cluster (2) — NEEDS triage
+"ST.set dependent that triggers another ST.set does not infinite loop" → sigA
+expected 20 got 0; "ST.set rapid updates deliver final value to dependents" →
+dependent must receive 5. Dependent-signal propagation under headless. Likely a
+real reactive-graph batching/ordering issue OR microtask-pump gap. Action:
+reproduce; classify harness-pump vs real batching bug.
+
+* §E — MISC (route individually)
+- sticky 2 (soft-sticky height) + revelation 2 (headline top >= 65px): these are
+  LAYOUT assertions → CDP-ceiling, should REFUSE on logic not FAIL. Bug: they
+  fail with a value mismatch instead of refusing → the @then layout-needs
+  declaration is missing on these assertions. Fix: tag them layout-fidelity so
+  they refuse cleanly on headless (consistency with the 9 that already refuse).
+- "Unknown assertion: have_count" (1): a test uses an assertion verb that isn't
+  registered. Either implement have_count or fix the test to use have_length/
+  children count. Real, small.
+- focus 2 (invalid-field / first-focusable focused): :focus is a CDP-ceiling
+  (focus state needs real browser) → should refuse, not fail. Same fix as sticky.
+- "click mutation should still work via addEventListener" (1) + MutationObserver
+  (1): part of @on-visible mutation set; IntersectionObserver-adjacent → likely
+  CDP-ceiling.
+- "Locale source should appear alongside data sources in the registry" (1):
+  data-registry introspection; likely real, small — verify @data + locale both
+  register.
+
+* Recurring theme — the "refuse vs fail" gap
+Several MISC + style failures are LAYOUT/FOCUS/COMPUTED-STYLE assertions that
+SHOULD refuse on the logic backend (like the 9 layout-refusals already do) but
+instead FAIL with a value mismatch. Root: those @then verbs lack the fidelity
+"needs" declaration, so the refuse-to-fake gate doesn't catch them. A single
+sweep adding the correct `needs` tier to have_style/be_visible/be_focused/sticky/
+computed assertions would convert ~6-8 false failures into clean refusals.
+Consider a focused FUP for that sweep (touches stdlib/testing/assertions/*).
+
+* Acceptance
+- [ ] §A homed: dev-hooks injected into headless OR test gated to --debug.
+- [ ] §B/§C/§D triaged into harness-pump vs real-bug; real ones get dedicated BUGs.
+- [ ] §E "refuse vs fail" sweep: layout/focus/computed assertions declare fidelity
+      needs and refuse on logic (not fail). have_count implemented or test fixed.
+- [ ] After all: every headless failure maps to exactly one of {PLAN-047, BUG-085,
+      BUG-119, CDP-ceiling-by-design, a dedicated triaged BUG}. Zero unattributed.
+
+* Provenance
+Filed 2026-06-19 from the headless 91-failure deep triage. Companion:
+PLAN-047, BUG-085, BUG-117, BUG-119.

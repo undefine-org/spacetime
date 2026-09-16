@@ -1,0 +1,102 @@
+#+TITLE: @data fetch { cache: … } is a dead capture (parsed, never bound, silently ignored)
+#+STATE: DONE
+#+SESSION_ID: 15132754c6e25396
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-22T12-57-11-707Z_15132754c6e25396.jsonl]]
+#+CUSTOM_ID: BUG-139-data-fetch-cache-is-a-dead-capture-parse
+
+* Initial Message
+
+Understrand FUP-099 and its root cause, and surface anything else that may come up during the investigation
+
+* Problem
+
+`stdlib/macros/data-kind.st` `data-fetch-opts` captures a `cache:` option that
+goes NOWHERE:
+
+    %macro data-fetch-opts {
+      %form {
+        @data fetch $name:binding $type:typeref? : $src:expr {
+          refresh: $refresh:duration?
+          cache: $cache:duration?          // <-- captured
+          initial: $initial:balanced(';')?
+        }
+      }
+      %binds {
+        data-source(
+          name: $name, src: $src, default: $initial, refresh: $refresh
+        ) -> { ... }                        // <-- $cache NEVER passed
+      }
+    }
+
+`$cache` is captured in the `%form` but never referenced in `%binds`. And the
+primitive it binds — `data-source` (stdlib/primitives/data/source.st) — has NO
+`cache` param at all (only `name`, `src`, `default`, `refresh`). So
+`@data fetch $x T : "/u" { cache: 5m }` parses successfully and the cache duration
+is silently discarded. A user-facing knob that does nothing — worse than absent,
+because it implies a behavior that never happens.
+
+NB the legacy/removed `@data NAME : T { cache: 5m }` block-form historically
+mapped `cache` → `refresh` (see stdlib/macros/type-data.st:65 doc:
+`@data x: T { src:"/u"; cache:5m }  ->  @data fetch x T : "/u" { refresh: 5m }`),
+i.e. `cache` was an ALIAS for `refresh`, never an independent cache-TTL. Real
+cache-TTL logic exists only in a DIFFERENT primitive (stdlib/primitives/fetch.st,
+`cache: number`, with `cachedData`/`cacheTime` invalidation) which `data-source`
+does not use.
+
+* Decision: DROP the dead capture
+
+Remove `cache: $cache:duration?` from the `data-fetch-opts` %form. Rationale:
+- It binds to nothing and the target primitive has no cache concept.
+- A genuine cache-TTL on `@data fetch` is a FEATURE (needs design: separate from
+  refresh? wire data-source to fetch-primitive caching? invalidation semantics?),
+  not a bug fix. Per AGENTS elegance bar, don't smuggle a half-feature in under a
+  bug. If wanted, file a FEAT to give `data-source` real caching and re-add the
+  knob wired through.
+- One construct, one meaning (harmony): a parsed option MUST do something.
+
+* Acceptance
+
+- `cache:` removed from data-fetch-opts %form.
+- `@data fetch $x T : "/u" { refresh: 5m }` still compiles (the common case).
+- `@data fetch $x T : "/u" { cache: 5m }` now errors clearly (unknown option in
+  the options body) rather than silently swallowing — OR, if the options body is
+  lenient, simply no longer captures it. Verify which and note it.
+- No primitive/codegen references `$cache` anywhere (grep clean).
+
+* Files
+- stdlib/macros/data-kind.st (drop the cache spec)
+- (verify) no test asserts `{ cache: … }` round-trips
+
+* Origin
+Found during the FUP-099/BUG-138 investigation, 2026-06-22, while auditing the
+brace-body `:duration` capture path. Pairs with BUG-138 (the conversion fix) —
+both live in the same `data-fetch-opts` form.
+
+* IMPLEMENTED + VERIFIED (2026-06-22)
+
+** Fix
+stdlib/macros/data-kind.st: removed `cache: $cache:duration?` from the
+`data-fetch-opts` %form, and updated the doc header
+(`remote source with refresh/cache/initial` → `refresh/initial`).
+
+** Verification
+- `grep -rn '\$cache' stdlib/` → clean (no reference anywhere).
+- CLI build of `@data fetch … { cache: 5m }`: the unknown option is leniently
+  IGNORED (no hard error) — the user's `cache`/`5m` token does NOT leak into the
+  emitted JS (verified: every `cache`/`5m` occurrence in output is runtime st.js
+  noise, e.g. relation-cache comments, `fetch(..., {cache:'no-store'})`).
+- `@data fetch … { refresh: 5m }` (the common case) still compiles correctly to
+  `refreshInterval = 300000` (BUG-138).
+- cargo test --lib / integration / v8 all green (see BUG-138 for counts).
+
+NB: type-data.st:65 doc still shows the legacy `@data x:T { cache:5m } →
+@data fetch … { refresh:5m }` translation — that documents the REMOVED legacy
+block form's alias behavior (cache≡refresh) and remains accurate as history; left
+as-is.
+
+A genuine cache-TTL on @data fetch remains a FEATURE (would wire data-source to
+the fetch-primitive's cachedData/cacheTime logic + invalidation) — file a FEAT if
+wanted; not re-added as a dead knob.
+
+** Files changed
+- stdlib/macros/data-kind.st (cache spec + doc)

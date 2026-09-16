@@ -1,0 +1,255 @@
+#+TITLE: @media emits matchMedia JS + no CSS (suppress_js broken) — pre-existing
+#+STATE: DONE
+#+SESSION_ID: 1511c4913cace6c5
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-21T11-07-12-498Z_1511c4913cace6c5.jsonl]]
+#+CUSTOM_ID: BUG-137-media-emits-matchmedia-js-no-css-suppres
+
+* Initial Message
+
+read the '@research/drag-drop-declarative-design-2026-06-21.org' document, get your own understanding of it, then propose an implementation plan, alongside examples of the resulting Spacetime code, and what that would enable, both for the liveview-kanban demo and overall
+
+* Problem
+
+`@media("max-width: 1023px") { font-size: 14px }` compiles to matchMedia JS and
+ZERO CSS, so the `suppress_js` optimization (src/pipeline/expand.rs:199:
+`suppress_js = !ir.css_exprs.is_empty() && primitive.css_styles.is_some()`)
+never fires. The `media-query` macro's `%when $matches { %applies { $styles } }`
+CSS path produces no `ir.css_exprs`, so the JS primitive is emitted instead of
+pure CSS.
+
+Repro:
+  .responsive { @media("max-width: 1023px") { font-size: 14px; } }
+  → spacetime.css is 0 bytes; spacetime.js contains window.matchMedia(...)
+
+* Pre-existing (NOT a regression)
+
+Confirmed by bisect during PLAN-058 W2: reverting ALL of that session's Rust
+edits (simple.rs IdentExtractor, parser state-property-skip, form_compiler
+body-capture non-property loop, evaluate resolve_state_variables, main.rs
+headless import resolution) STILL reproduces the empty-CSS media output. No
+media/responsive/expand files were touched. So the breakage predates the
+session — likely fallout from an earlier `%applies`/`%when` or media-self
+codegen change (cf. d99282b8 "resolve top-level @media %self empty-selector
+codegen").
+
+* Failing tests (9, all pre-existing)
+- tests/v8_runtime media_dedup_tests: test_duplicate_media_queries_different_selectors,
+  test_media_compound_selector, test_media_emits_css_not_js,
+  test_media_multiple_properties, test_media_query_no_double_quotes,
+  test_multiple_media_blocks_no_redeclaration, test_multiple_media_css_structure
+- tests/v8_runtime selector_init_tests: test_comment_in_selector_string_causes_error,
+  test_init_element_with_text_node
+
+* Likely root cause to investigate
+The `%applies { $styles }` clause under `%when $matches` should emit a CSS
+fragment (selector wrapped in @media query) AND set primitive.css_styles. One of
+those stopped happening, so suppress_js's two-part guard fails. Check how
+`%applies` lowers `$styles:properties` into css_exprs/css_styles in
+evaluate/expand, and whether the `media` primitive's CSS emission regressed.
+
+* Acceptance
+`@media("...") { props }` emits pure CSS (`@media (query) { selector { props } }`),
+compiled.js empty; the 7 media_dedup + 2 selector_init v8 tests pass.
+
+* ROOT CAUSE (traced + verified 2026-06-21)
+
+Confirmed failing: `cargo test --test v8_runtime_test test_media_emits_css_not_js`
+→ output emits `window.matchMedia(...)` + `ST.registerSelectorInit('.responsive', …)`
+and ZERO css. The suppress_js guard never fires.
+
+** The exact chain (two dead half-mechanisms, one shared across the whole family)
+
+`@media("max-width: 1023px") { font-size: 14px }` expands via the `media-query`
+macro (stdlib/macros/responsive.st). That macro has TWO paths that should produce
+the CSS; BOTH are dead:
+
+*** Dead path 1 — `%when $matches { %applies { $styles } }` (the macro body)
+src/pipeline/evaluate.rs:356 evaluates `%when` by resolving its condition at the
+EVALUATE stage:
+    MacroBodyItem::When(when) => if let Some(v) = ctx.resolve(&when.condition) { if v.is_truthy() {…} }
+But `$matches` is a PRIMITIVE OUTPUT (media yields `$matches` at runtime), not an
+evaluate-time binding. ctx.resolve("$matches") → None → the `%applies { $styles }`
+body NEVER executes → no CSS fragment, css_styles never set. (Semantically wrong
+anyway: `%when $matches` gates a RUNTIME signal; CSS can't be conditioned on it at
+compile time — that's what the `@media (...)` wrapper is for.)
+
+*** Dead path 2 — the media primitive's `%emit css` block (stdlib/primitives/media.st)
+    %emit css { @media (%query) { %self { %styles } } }
+This is the CORRECT place to emit the static CSS, but it never receives `$styles`.
+The macro's `%binds { media($query) -> { $matches } }` passes ONLY `$query` to the
+primitive — NOT the captured `$styles:properties`. So in
+src/emit/metasystem_codegen.rs:~493 the CSS branch hits its guard:
+    if emit_block.content.contains("%styles") && !args.params.contains_key("styles") { return; }
+`args.params` has no "styles" key → EARLY RETURN → css_exprs stays empty,
+css_styles stays None.
+
+*** Consequence at the suppress_js guard (src/pipeline/expand.rs:200)
+    let suppress_js = !ir.css_exprs.is_empty() && primitive.css_styles.is_some();
+Both halves false → suppress_js = false → the matchMedia JS primitive is emitted
+(expand.rs:202 `if !ir.js_stmts.is_empty() && !suppress_js`). Pure-CSS output is
+never produced.
+
+** Scope: the ENTIRE responsive.st family is affected
+media-query, container-query, breakpoint, portrait, landscape, print, dark-mode,
+light-mode, reduced-motion — ALL use the same `%when $<sig> { %applies { $styles } }`
+shape with a `%binds { … -> { $sig } }` that omits `$styles`. So a fix to the
+mechanism repairs all of them; a fix narrowed to @media leaves the rest broken.
+
+** Pre-existing (NOT a regression) — confirmed
+Bisect during PLAN-058 W2 (see above) reverted all session Rust edits and STILL
+reproduced empty-CSS @media output; no media/expand files were in that session.
+Commit d99282b8 ("resolve top-level @media %self empty-selector codegen") added
+`unwrap_empty_self_block` + always-inject `self` param, but did NOT make `%styles`
+reach the primitive — it fixed the SELECTOR side, not the STYLES side. So the
+`%emit css` path has been half-wired since before this session.
+
+* FIX PLAN
+
+The principled fix: route the captured `$styles:properties` into the media
+primitive's `%emit css` so it emits `@media (query) { selector { props } }` and
+sets css_styles, letting suppress_js drop the JS. Kill the dead `%applies`/`%when`
+path (it cannot work — CSS isn't runtime-conditioned). Per AGENTS.md ("don't write
+Rust fallbacks for stdlib constructs; fix the stdlib mechanism"), prefer a
+stdlib/registry fix over a Rust special-case.
+
+** Option A (PREFERRED) — pass $styles through %binds to the primitive
+Wire the capture into the primitive call and let the EXISTING `%emit css` resolve it:
+  stdlib/macros/responsive.st  (media-query + every sibling):
+    %binds { media($query, styles: $styles) -> { $matches } }
+    // drop the `%when $matches { %applies { $styles } }` block entirely
+  stdlib/primitives/media.st:
+    %primitive media(query: string, styles: properties) { %emit css { … %styles … } %emit js { … } }
+Then in metasystem_codegen.rs the CSS guard passes (args.params has "styles"),
+css_parser::parse_emit_css resolves `%query`/`%self`/`%styles`, css_exprs gets the
+@media rule, AND css_styles must be set so suppress_js fires.
+  - VERIFY: does a `:properties` capture flow into `args.params["styles"]` as CSS
+    declarations? The css_overrides path (metasystem_codegen.rs ~520, "StyleProperties
+    → CSS declarations") already special-cases property captures for CSS — confirm
+    media's styles capture lands in css_overrides so `%styles` emits real decls, not a
+    JS-quoted blob. If css_overrides is keyed correctly this is mostly stdlib edits.
+  - VERIFY: primitive.css_styles is populated from the styles param so the suppress_js
+    second conjunct is true. If expand.rs computes css_styles only from a dedicated
+    field, thread the styles param into it (small, principled).
+
+** Option B — emit the @media CSS fragment directly in the pipeline for the family
+If property-capture→CSS plumbing through %binds proves too invasive, generate the
+CSS fragment where the macro is lowered (analogous to generate_state_fragments in
+src/pipeline/mod.rs): for a `media-query`-family match with a `$styles` capture and
+a `$query`, push a CssFragment `@media (query) { selector { props } }` and set
+css_styles. This is a Rust path (less preferred per AGENTS.md) but localized and
+mirrors an existing fragment-gen pattern. Use only if A's capture plumbing is shown
+to be missing a primitive.
+
+** Either way — delete the dead path
+Remove `%when $matches { %applies { $styles } }` from the family macros (it never
+runs and misleads). Keep `%binds … -> { $matches }` ONLY if a macro still needs the
+runtime `$matches` signal for behavior; for pure responsive styling the media JS
+primitive is entirely suppressed, so confirm nothing reads `$matches` before
+dropping the bind. (If a consumer DOES use `$matches` reactively, keep the js
+primitive un-suppressed for THAT case — suppress_js already guards on css presence,
+so a sty=-only @media suppresses JS while a `$matches`-consuming one keeps it.)
+
+* Acceptance (unchanged)
+`@media("...") { props }` emits pure CSS (`@media (query) { selector { props } }`),
+compiled.js empty for a styles-only media; the 7 media_dedup + 2 selector_init v8
+tests pass. Add a sibling-family smoke test (e.g. @dark { } emits CSS not JS) so the
+whole responsive.st family is covered, not just @media.
+
+* Files
+- stdlib/macros/responsive.st (media-query + siblings: %binds passes styles; drop %applies/%when)
+- stdlib/primitives/media.st (add `styles: properties` param; %emit css consumes %styles)
+- src/emit/metasystem_codegen.rs (~493 guard — should now pass; verify css_overrides keying for the styles capture)
+- src/pipeline/expand.rs:200 (verify css_styles is set from the styles param so suppress_js fires)
+- (Option B only) src/pipeline/mod.rs (generate a media CssFragment, mirroring generate_state_fragments)
+- tests/v8_runtime/media_dedup_tests.rs + selector_init_tests.rs (the 9 already-failing tests; add a family smoke test)
+
+* IMPLEMENTED + VERIFIED (2026-06-21)
+
+The fix landed in TWO layers — the stdlib route (as planned) PLUS a parser
+form-shape resolution that the implementation surfaced as a hard prerequisite.
+
+** Part 1 — stdlib: route $styles into the media primitive (Option A, as planned)
+- stdlib/primitives/media.st: the `media(query, styles: properties)` primitive's
+  `%emit css { @media (%query) { %self { %styles } } }` now receives the captured
+  styles; the `colorScheme(scheme)` primitive likewise emits `@media
+  (prefers-color-scheme: %scheme) { %self { %styles } }`.
+- stdlib/macros/responsive.st: every family macro now binds the body styles through
+  to the primitive — `media($query, styles: $styles) -> { $matches }` — and the dead
+  `%when $matches { %applies { $styles } }` block is removed. @dark/@light bind
+  `media("(prefers-color-scheme: dark|light)", styles: $styles)`, unifying them with
+  the rest of the family (one shape, harmony).
+- src/emit/metasystem_codegen.rs (~493): the CSS guard now checks css_overrides for
+  a non-empty styles capture (not just params), and injects css_overrides into
+  css_params so `%styles` emits real declarations.
+- Deleted stdlib/primitives/prefers-color-scheme.st (a dead, never-imported
+  primitive an earlier attempt added).
+
+** Part 2 — parser: body-shape overload resolution (the surfaced prerequisite)
+ROOT CAUSE (deeper than the org plan anticipated): the parse-stage SyntaxRegistry
+(`bootstrap_stdlib` over the whole `stdlib/` tree) registers EVERY directive form,
+including the opt-in 3D module's `@light(type, …)` (all params defaulted). Forms are
+tried by SPECIFICITY (descending). For `@light { color: red }` the high-specificity
+3D paren-form matched by IGNORING the brace body, shadowing the responsive
+`light-mode` `@light { $styles }` — so `$styles` was never captured and compile hit
+E0804. The SAME class of bug silently afflicted `@data fetch … { refresh: … }`: the
+bodyless `data-fetch-kind` (ends `;`) matched the body-bearing input and ignored the
+options, hardcoding `refresh: 0`.
+
+FIX (src/syntax/events/): a form now knows whether it consumes a body
+(`CompiledForm::consumes_body()` = body_capture ∨ body_params ∨ body_groups). In the
+MatchSink trial loop, when a node carries a `{ … }` BODY block, a matching form that
+does NOT consume it is DEFERRED as a fallback while the loop keeps scanning for a
+sibling overload that DOES consume the body; the body-consuming sibling wins. The
+fallback is accepted only when no overload consumes the body (e.g. a bodyless
+`element-ref` whose trailing `{ … }` is a separate scope) — so element-refs,
+synthetic single-form @on, etc. are unaffected. This is BUG-037's named-collision
+disambiguation generalized to the syntax layer, and it is DATA-driven (reads the
+form's own body-consumer fields), not a per-directive special-case.
+
+NB this is the architecturally-correct subset of the "import-aware parse registry"
+direction: rather than make the global SyntaxRegistry per-page import-aware (large,
+high-risk; 3D directives are parsed via that same global registry even on importing
+pages), the overload AMBIGUITY a leaked form creates is resolved at match time by
+syntactic shape. The 3D `@light(…)` form stays registered (3D pages still parse it);
+it simply no longer wins a brace-body `@light { … }`.
+
+** Test changes
+- tests/v8_runtime/selector_init_tests.rs: 2 tests (`test_init_element_with_text_node`,
+  `test_comment_in_selector_string_causes_error`) split register+assert into two
+  `ctx.eval` calls — `ST.initElement` schedules init via a microtask now, so the flag
+  is asserted in a second eval (the microtask drains between calls). Pre-existing
+  failures in BUG-137's "9 failing" list.
+- src/parser/tests.rs: 3 `@data fetch … { … }` tests now assert the body-consuming
+  `data-fetch-opts` overload (was the buggy `data-fetch-kind`).
+- src/compiler.rs snapshot_data_directive: input uses numeric `refresh: 0` (see FUP
+  below) so the snapshot tests the fetch path without coupling to the unconverted
+  `:duration` value.
+
+** Verification
+- cargo test --test v8_runtime_test media_dedup → 11/11 (incl test_media_emits_css_not_js).
+- cargo test --test v8_runtime_test selector_init → 19/19.
+- cargo test --lib → 2498/2498. cargo test --test integration_tests → 181/181.
+- End-to-end family smoke (CLI build): a page with @media + @dark + @light + @print
+  emits 4 CSS @media rules and ZERO `matchMedia(` in JS.
+- 3D demos (glass-hero, gltf-studio, scroll-tunnel) still compile and emit their
+  three.js light calls — no regression from the overload resolver.
+
+** Files changed
+- stdlib/macros/responsive.st, stdlib/primitives/media.st
+- stdlib/primitives/prefers-color-scheme.st (deleted)
+- src/emit/metasystem_codegen.rs
+- src/syntax/events/form_compiler.rs (consumes_body + FailureKind::UnexpectedBody, unused now but kept as a named kind)
+- src/syntax/events/match_sink.rs (sibling-overload body-shape resolution)
+- tests/v8_runtime/selector_init_tests.rs, src/parser/tests.rs, src/compiler.rs (snapshot)
+
+** Follow-up filed
+FUP: the `:duration` capture (`refresh: 5m`, `cache: 1h`) stores the raw token
+(`CapturedValue::Expr("5m")`) and is NOT converted to milliseconds, so
+`@data fetch … { refresh: 5m }` emits `refreshInterval = "5m"` (a string; the
+data-source primitive's `refresh: number` then no-ops `if (refreshInterval > 0)`).
+Pre-existing — was masked because `data-fetch-kind` always won and hardcoded
+`refresh: 0`. BUG-137's overload fix surfaced it. Fix belongs at the duration
+capture→value conversion (form_compiler.rs ~1694, currently returns Expr(raw)) or
+the data-source binding, and must keep `@on hover(300ms)` etc. working. Not required
+for BUG-137 (the @media/@dark/@light CSS path — the bug's actual scope — is fully
+fixed).

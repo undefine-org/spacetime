@@ -1,0 +1,40 @@
+#+TITLE: Truly-empty @each body { } still raises E0804
+#+STATE: DONE
+#+SESSION_ID: 14f48ced503111a7
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-05-29T18-28-09-664Z_14f48ced503111a7.jsonl]]
+#+CUSTOM_ID: BUG-030-truly-empty-each-body-still-raises-e0804
+#+EFFORT: 3h
+#+LAYER: coding-agent
+#+COMPLETION_HASH: cb4e1c02fe34b037
+
+* Initial Message
+
+my friend, I want you to do two things that are quite related to each other:
+1. look at projects/unkn for the way it structures its files and tell me how you would have structured it
+2. look up reactive bindings and how they are done in Spacetime (the $ sigil), as well as full-spacetime work (as in, not using index.html, only index.st and generating the html from it by putting the html inline).
+
+The goal is to build a project that showcases reactive bindings, so that websites can start dealing with userland values instead of just animation-specific values (although one of the strengths of Spacetime is its ability to bring reactive bindings to the animation sphere).
+
+The goal of this is both to make a showcase demo (in demos/) and to use that to find all the BUGs and FEATs and REFACTORs that we need to implement. Do NOT use the 'emacs' way of managing tasks; only the Spell-native way. Think a bit about the type of demo that would make sense to showcase reactive bindings; get inspiration by choosing from awwwards.com too
+
+* Source
+Follow-up from BUG-028. After making the @each invocations capture optional (+ -> *), realistic bodies (slot-binding, template-invoke) compile. But a TRULY empty body still fails:
+
+  .g { @each($products as $p) { } }   => error[E0804]: Missing required parameter 'invocations'
+
+* Root cause (hypothesis)
+With slot/template content present, the body brace-block is parsed and the `invocations` capture registers as an empty array, so bind resolution + is_form_param_optional (ZeroOrMore) succeed. With an empty `{ }`, the body block parse is skipped entirely, so `invocations` never registers as a (present-but-empty) capture and bind resolution at src/pipeline/resolve.rs (~L770) raises MissingParameter -> E0804.
+
+* Fix direction
+Ensure a matched form with an empty body still registers ZeroOrMore body captures as empty arrays (so they're 'present'), OR make bind resolution treat an unregistered ZeroOrMore body capture as an empty array rather than missing. Verify is_form_param_optional reaches body-block captures (not just form.params/body_params).
+
+* Severity
+Low — a truly empty @each renders nothing, so it's a degenerate authoring case. Realistic reactive lists always have a body.
+
+* Acceptance
+- `.g { @each($xs as $x) { } }` compiles with no diagnostics.
+- Existing slot/template @each tests stay green.
+
+NOTE [2026-05-29]: Merged into BUG-028. The truly-empty @each body and the slot-only body share one root cause (body-capture optionality at bind resolution) and one fix (resolve.rs: unregistered ZeroOrMore/OneOrMore body capture -> empty array). Tracking the unified fix under BUG-028 to avoid a split.
+
+NOTE [2026-06-01]: DONE via PLAN-023 W4 (commit 0cdb107a). A truly empty @each body now compiles (renders nothing): a required html_block capture is satisfied as empty HTML when the body is empty, while OneOrMore (template_invocation+) always rejects empty so the html_block form wins. Enshrined: tests/integration/each_inline_html.rs::each_empty_body_is_valid.

@@ -1,0 +1,112 @@
+#+TITLE: Rich text editing toolbar and media picker for dev mode
+#+STATE: DONE
+#+SESSION_ID: 14a73642d90c17d7
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-03-30T14-30-47-693Z_14a71735234c17b2/22-CreateFeat6.jsonl]]
+#+CUSTOM_ID: FEAT-007-rich-text-editing-toolbar-and-media-pick
+#+EFFORT: L
+#+PRIORITY: #B
+#+LAYER: stdlib
+#+BLOCKER: BUG-002-fix-text-duplication-in-dev-editable-inl FEAT-006-asset-upload-protocol-and-file-managemen
+
+NOTE [2026-03-30]: Implemented floating rich text toolbar (Bold/Italic/Code/Link) positioned above contenteditable elements, and media picker with hover overlay on images, file upload to /__spacetime/dev/upload, object URL preview, and EditJson persistence.
+
+* Scope
+
+** In scope
+- Floating rich text toolbar for contenteditable elements in dev mode
+- Formatting buttons: Bold (<strong>), Italic (<em>), Link (<a> with URL input), Code (<code>)
+- Configurable HTML whitelist via @rich-editor macro (per-project allowed tags/attributes)
+- Sanitizer upgrade: use project whitelist instead of hardcoded ALLOWED_TAGS
+- Image click-to-replace: clicking <img> elements with data-st-bind opens file picker
+- Upload via asset upload endpoint (item #3), update JSON field with new path
+- Asset browser section in admin panel showing uploaded assets
+
+** Out of scope
+- Block-level formatting (headings, lists, blockquotes) - FUP
+- Markdown support - FUP
+- Image cropping/resizing - FUP
+- Video/audio media management - FUP
+
+** Boundary rationale
+Rich text is already working via HTML strings in JSON. The toolbar just makes it editable visually. Media management covers the most common non-text content type (images). Block-level editing is significantly more complex and deferred.
+* Tests
+
+** Headless .test.st
+- ~tests/dev-tools/rich-text-toolbar.test.st~: simulate selecting text, clicking Bold, verify <strong> tags in output
+- ~tests/dev-tools/rich-text-sanitizer.test.st~: input HTML with non-whitelisted tags, verify stripped
+- ~tests/dev-tools/rich-text-whitelist.test.st~: configure custom whitelist, verify only whitelisted tags pass
+
+** Playwright E2E
+- ~tests/playwright_st/rich_text_editing.spec.ts~: click text element, verify toolbar appears, click Bold, verify text wrapped in <strong>, save, verify JSON updated with HTML string
+- ~tests/playwright_st/media_picker.spec.ts~: click image, verify file picker opens, select image, verify upload happens, verify image src updated
+
+** Rust unit tests
+- Sanitizer with custom whitelist: verify different whitelists produce different sanitization
+- This tests the sanitizer primitive, not Rust code directly (sanitizer is in JS), so covered by headless tests
+* Implementation
+
+** Step 1: Rewrite @rich-editor macro (~stdlib/__dev__/macros/rich-editor.st~)
+- Replace stub with real macro definition
+- %form: ~@rich-editor(allow: $allow:tag_list? = [strong, em, a, code, br])~
+- %binds: dev-hooks() to get dev mode state
+- The macro configures the toolbar and sanitizer whitelist for the project
+
+** Step 2: Rich text toolbar primitive (~stdlib/__dev__/primitives/dev-rich-toolbar.st~)
+- New %primitive that creates a floating toolbar
+- Toolbar positioned above the currently-edited contenteditable element
+- Buttons: Bold (B), Italic (I), Link (chain icon), Code (</>)
+- Uses Selection API: ~document.getSelection()~ to read current selection
+- Bold: wraps selection in <strong> (or removes if already bold)
+- Italic: wraps selection in <em>
+- Link: prompts for URL, wraps in <a href="...">
+- Code: wraps in <code>
+- Toolbar appears when element enters edit mode (coordinates with dev-editable)
+- Toolbar hidden when edit mode exits
+- Shadow DOM boundary: toolbar lives in main document (not Shadow DOM) for Selection API compatibility
+
+** Step 3: Media picker primitive (~stdlib/__dev__/primitives/dev-media-picker.st~)
+- New %primitive for image click-to-replace
+- In dev mode, <img> elements with data-st-bind or data-st-id get an overlay on hover
+- Click opens native file picker (~<input type=file accept="image/*">~)
+- On file selected: upload via fetch() to /__spacetime/dev/upload
+- On upload success: update JSON field via EditJson with new image path
+- Show loading indicator during upload
+- Preview: update <img> src immediately with object URL, then replace with server path on confirm
+
+** Step 4: Sanitizer whitelist integration (~stdlib/primitives/data/sanitize.st~)
+- Extend sanitize-html primitive to accept a configurable whitelist
+- If @rich-editor defines a whitelist, use it; otherwise use default ALLOWED_TAGS
+- Expose whitelist configuration via a global: ~window.__stRichEditorConfig~
+- Sanitizer reads from global when available
+
+** Step 5: Asset browser (extend admin panel)
+- Add "Assets" section to the Data Editor tab (or new tab)
+- List uploaded files from assets/uploads/ with thumbnails
+- Click asset to copy path to clipboard
+- This is a lightweight addition to the admin panel, not a full asset management system
+
+** Key files
+- ~stdlib/__dev__/macros/rich-editor.st~ (rewrite from stub)
+- ~stdlib/__dev__/primitives/dev-rich-toolbar.st~ (new)
+- ~stdlib/__dev__/primitives/dev-media-picker.st~ (new)
+- ~stdlib/primitives/data/sanitize.st~ (extend whitelist)
+- ~stdlib/__dev__/index.st~ (import new primitives)
+* Edge Cases
+- Selection across multiple elements: toolbar should only work within a single contenteditable
+- Nested formatting (bold inside italic): should produce <em><strong>text</strong></em>, not malformed HTML
+- Link editing: clicking an existing <a> should pre-fill URL in prompt
+- Image upload failure: revert to original src, show error message
+- Large image upload: show progress indicator, respect size limit from upload endpoint
+- SVG images: upload works but preview may have different behavior
+- No toolbar on non-editable elements: toolbar only appears when dev-editable activates an element
+- Touch devices: toolbar should work with touch selection (deferred if complex)
+* Acceptance Criteria
+- Floating toolbar appears above contenteditable element when in edit mode
+- Bold/Italic/Link/Code buttons correctly wrap selected text in HTML tags
+- Formatted HTML round-trips through JSON: save, reload, formatting preserved
+- Sanitizer respects project-level @rich-editor whitelist
+- Image click-to-replace uploads new image and updates JSON path
+- Asset browser shows uploaded files with thumbnails
+- All tests pass (headless + Playwright)
+- Screenshot: toolbar floating above edited text with bold selection
+- Screenshot: media picker with image replacement flow

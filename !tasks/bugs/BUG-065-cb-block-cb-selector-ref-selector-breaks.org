@@ -1,0 +1,39 @@
+#+TITLE: cb_block/cb_selector_ref selector breaks on functional pseudo-class; cb_content_bind too narrow
+#+STATE: DONE
+#+SESSION_ID: 14fc108ed3772fa8
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-04T14-32-37-965Z_14fc108ed3772fa8.jsonl]]
+#+CUSTOM_ID: BUG-065-cb-block-cb-selector-ref-selector-breaks
+#+COMPLETION_HASH: 3ec0d4d83263f685
+
+* Initial Message
+
+Ok, start with Phase B. Use a wave manifest with in-chat mid-flight check-ins exlpaining what's going on, what' you've done, and what you're doing next. use main thread for architectural work and reviewer swarms in between waves. add as many gap implementation as needed; you have unlimited time budget. file FEAT/BUG you find mid-flight using the org tool and fix/implement them mid-flight
+
+* Source
+Post-cutover reviewer swarm (agents 17/18) on FEAT-079. 3 corpus-missed divergences + 1 dead-code.
+
+* Divergences
+1. [P1] cb_block + cb_selector_ref use `$sel:selector` (SelectorExtractor), which STOPS at an
+   L_PAREN at depth 0 (reference.rs:120). A CSS block/ref whose selector has a functional
+   pseudo-class (`.foo:not(.bar) { }`, `.card:nth-child(2) { }`, `:is()`, `:has()`) fails to
+   classify: cb_block -> no arm -> segment LEAKS into html (lost from stylesheet); cb_selector_ref
+   -> falls to cb_template_ref -> parse_template_ref None -> wrong E0900. Old parser used
+   find('{'), keeping the full selector. FIX: capture the selector run verbatim up to `{` via
+   `balanced('{')` (like cb_inject's balanced('<') target), not SelectorExtractor. reify keeps the
+   verbatim selector string.
+2. [P2] cb_content_bind = `ident ":" "$" balanced(';')` requires `$` IMMEDIATELY after the colon,
+   narrowing the old `rhs.contains('$')` gate. A block reactive binding whose RHS is not
+   `$`-leading (`text: currency($count);`, `text: 5 + $count;`) degrades to a css_rule. FIX:
+   cb_content_bind captures the whole RHS verbatim (`ident ":" balanced(';')`); reify checks
+   `rhs.contains('$')` (value-semantics) to decide content-binding vs css \u2014 BUT a non-$ plain CSS
+   decl (`color: red`) must still NOT become a binding. So the reify gate is `contains('$')`.
+   NB: this needs cb_block to expose the FULL inner so reify can re-split + apply the gate; the
+   current cb_block_item path already segments + the cb_content_bind arm must widen.
+3. [P2] parse_nested_each still string-parses @each(...) in Rust (extends FEAT-080 purity).
+4. [P3] split_arrow dead code (parse_injection/parse_self_property_binding deleted).
+
+* Regression
+Add pseudo-class block, pseudo-class selector-ref, wrapped-expr content-binding to CORPUS
+(red->green). The corpus missed these (only simple selectors + $-leading RHS).
+
+NOTE [2026-06-09]: Fixed #1+#2+#4. #1: SelectorExtractor now balances () so functional pseudo-classes (:not/:nth-child/:is/:has) are consumed whole (generic engine fix, reference.rs) — pseudo-class css blocks + selector refs reify correctly instead of leaking to html / wrong E0900. #2: cb_content_bind widened to `ident ":" balanced(';')` (verbatim RHS); reify_block applies the contains('$') gate. Also fixed a LATENT bug (present in old parse_component_body too): reify_block used the top-level segment_component_body which split block-inner values at '$' (`text: currency($count)` -> broken). New split_block_statements does depth-aware ;-splitting. This makes block content-bindings with wrapped/operator-prefixed reactive values (`text: currency($count)`, `text: 5 + $count`) AND even the simple `text: $count` now correctly reify as ContentBinding — the old parser leaked these to css_rules (1 golden updated: block_content_binding, strictly more correct). #4: deleted dead split_arrow. 4 BUG-065 behavior tests + control green, lib 2134/0, selector 79/0, integration 162/0, v8 311/12 (pre-existing), fleet smoke green. #3 (parse_nested_each purity) deferred to extend FEAT-080.

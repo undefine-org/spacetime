@@ -1,0 +1,107 @@
+#+TITLE: World-class Spacetime macro dispatch reference
+#+STATE: DONE
+#+SESSION_ID: 14f94e45c6c3f247
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-02T11-06-49-499Z_14f94e45c6c3f247.jsonl]]
+#+CUSTOM_ID: PLAN-033-world-class-spacetime-macro-dispatch-ref
+
+* Initial Message
+
+what's next to make this super usable? especially for e.g. multiple dispatch and making it useful as an actual browser. also, could you create a basic Markdown parser in pure Spacetime (only scoped to spacetime-docs for now, if needed), that you would use to integrate Markdown files already written about testing? How hard would that be?
+
+* Initial Message
+"for the spacetime-docs reference: that is also the fucking amazing part; I want a
+Spacetime macro reference that is a delight to use and traverse and click on and
+whatnot. number 5 [the live probe], if you can make it really cool, can also be in
+scope, but you'll have to go deeper."
+
+* North star
+Not "a list of macros." A LIVING, EXPLORABLE MAP OF THE DISPATCH MACHINE. Every
+directive is a node you search, click, expand, and PROBE. The reference is itself
+a projection of ~score_form_match~, so it CANNOT ROT: change the scorer or add a
+~%macro~ and the reference updates next build. Reading the reference and
+understanding how Spacetime resolves a call become the same act.
+
+This extends demos/spacetime-docs (the FEAT-086 reader) from "renders prose about
+directives" to "lets you SEE the dispatch machine think."
+
+* What dispatch IS (the thing being surfaced)
+Spacetime resolution is PREDICATE DISPATCH, not nominal lookup.
+~registry.rs::find_macro_for_match~ scores EVERY macro whose ~form.directive_name~
+matches, over (arg TYPES × selector SCOPE × literal KEYWORDS), and takes argmax.
+Real weights from ~src/syntax/form_scoring.rs::score_form_match~:
+  literal token matched      +3   (exact keyword: "fetch","query" — strongest)
+  required capture present   +2
+  comparison capture         +2
+  optional/defaulted present +1
+  param present              +1
+  literal NOT matched      −100   (wrong keyword → form eliminated)
+  required missing / type mismatch → None (hard reject)
+Winner = ~max_by_key(score)~. Today this is INVISIBLE: ties silently first-wins; a
+new %macro can shadow an existing call unnoticed; you can't ask "why this macro?".
+
+* Architecture — five layers, each on an EXISTING rail
+** Substrate (Rust) — reusable win for ALL macro authors
+- ~inspect --layer dispatch~ (new ~InspectLayer::Dispatch~), mirrors
+  ~cli/inspect.rs::build_registry_output~. Catalog mode (every macro grouped by
+  directive + serialized ~FormClause~ + doc + scopes + %binds); ~--probe "<call>"~
+  mode (parse via ~parse_matches~, score all candidates, emit resolution table).
+- ~explain_form_match(form, input) -> ScoreExplanation{ total, terms[] }~ sibling
+  to the fast ~score_form_match -> Option<u32>~. ONE source of truth: fast path
+  becomes ~explain(...).map(|e| e.total)~ so they cannot diverge. Introspection-only.
+- ~E09xx ambiguous-dispatch~ diagnostic: top-two viable candidates tie → warn
+  (today silent). The real correctness payback — catches shadow bugs.
+** Data plane (Rust) — one function, mirrors FEAT-084
+- ~format_form_signature(&FormClause) -> String~ (walks inline_elements/params/
+  post_arg_inline using CaptureType + CaptureModifier) + ~build_dispatch_json~.
+- ~@data dispatch $macros~ source (sibling to ~@data registry~) → catalog into the
+  page with zero fetch, SSG path identical to FEAT-084.
+** Markup plane (pure .st) — the delight
+- Search: ~@data inline $q~ + ~<input>~ two-way (~value <- $q; @on input { $q <- value }~).
+- Filter chips: ~@data inline $kind~ + ~@on click~.
+- Grouped cards: ~@each-filtered($macros as $m, when match($q,$kind,$m))~ →
+  ~&macro-card($m)~. @each-filtered reactively display:none's non-matches —
+  LIVE SEARCH, ZERO CUSTOM JS.
+- Detail expand: ~@on click~ toggles a signal → form-sig + @doc prose + probe.
+- Form-signature rendering: each token a styled CHIP ($name teal · :type dim ·
+  literal bright · ? ghosted) so a signature is SCANNABLE, not a wall of text.
+** Live plane (#5) — the playground (going deeper)
+- ~/__spacetime/dispatch?call=<urlenc>~ route (mirrors runtime_js_handler):
+  parse_matches + explainer over the live registry → resolution JSON.
+- ~%primitive dispatch-probe(&el)~ (%emit js posts input → renders table; winner
+  glows, −100 rows show WHY they lost) behind ~@dispatch-probe~ macro.
+- UX: type ~@on cdick~ → all-red no-winner; fix to ~@on click~ → ~+3 ✓~ lights up.
+  You watch multiple dispatch resolve keystroke by keystroke. Honest to "no custom
+  JS": the only JS is inside %primitive %emit js (the sanctioned escape hatch).
+
+* Children (independently shippable, commit as you go)
+- [[id:FEAT-087-explain-form-match-inspect-layer-dispatc]] explain_form_match + inspect --layer dispatch (catalog + --probe). SUBSTRATE.
+- [[id:FEAT-088-e09xx-ambiguous-dispatch-diagnostic]] E09xx ambiguous-dispatch diagnostic. (dep 087)
+- [[id:FEAT-089-format-form-signature-data-dispatch-sour]] format_form_signature + @data dispatch source. (dep 087)
+- [[id:FEAT-090-reference-ui-search-filter-chips-grouped]] reference UI: search + chips + grouped cards + detail. (dep 089; soft-dep FEAT-085)
+- [[id:FEAT-091-dispatch-probe-live-dispatch-playground]] @dispatch-probe live playground: primitive + endpoint. (dep 087; the #5 "cool" layer)
+
+* Sequencing
+087 (load-bearing — everything projects from the explainer)
+  → 088 (cheap correctness win, rides the scoring exposure)
+  → 089 (data plane: signature formatter + @data dispatch)
+    → 090 (visible reference UI — pure .st)
+  → 091 (live probe — parallel to 089/090 after 087)
+Soft dep: FEAT-085 (SSG-unroll &template-call @each bodies) makes 090's cards
+SEO/no-JS-correct; not a blocker (the reference is an interactive app).
+
+* Acceptance (whole plan)
+- ~cargo run -- inspect --layer dispatch~ lists every macro grouped by directive
+  with its form signature; ~--probe "@data fetch $x : \"/u\""~ prints the scored
+  resolution table with per-term breakdown and the winner.
+- An intentional ambiguous pair emits E09xx (mutation-proven: remove the tie →
+  no diagnostic).
+- demos/spacetime-docs reference: type in the search box → cards filter live;
+  click a card → form signature (chips) + rendered @doc + dispatch probe; type a
+  call in the probe → live scored table with the winner highlit. Verified over CDP.
+- Full lib + integration green; new tests for explainer + signature formatter +
+  endpoint.
+
+* Anti-goals
+- No Rust reimplementation of scoring for the docs (project the real scorer).
+- No custom site JS outside %primitive %emit js.
+- Don't touch foreign-CMS uncommitted files; commit only own files per child.

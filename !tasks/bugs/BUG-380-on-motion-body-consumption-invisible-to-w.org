@@ -1,0 +1,138 @@
+#+TITLE: W0201 false positive: `@on` motion-body consumption is invisible to read-usages
+#+STATE: DONE
+#+CUSTOM_ID: BUG-380-on-motion-body-consumption-invisible-to-w
+
+* Symptom
+
+A `@data` source consumed ONLY inside an `@on` handler body is flagged
+=W0201 "defined but never used"= by =check --deny-warnings=, on BOTH concrete
+syntaxes. Reproduced against the release binary (2026-08-28):
+
+#+begin_src spacetime
+@data inline $draft : "";
+@data inline $send : null;
+.composer { @on &.click { $send($draft); } }
+#+end_src
+
+→ =warning[W0201]: 'draft' is defined but never used= AND ='send'=. The fired
+signal AND its argument are both invisible.
+
+#+begin_src spacetime
+@data inline $flag : false;
+.box { @on &.click { $flag <- !$flag; } }
+#+end_src
+
+→ =warning[W0201]: 'flag'=. Even a plain mutation — the case
+=handler_body_signal_deps=' own doc comment claims keeps a signal alive — is
+flagged.
+
+* Root cause
+
+=CompileAnalysis::analyze_read_usages= (src/analysis/mod.rs:828) collects
+read-positions from:
+
+1. CSS declarations (=text: $x=, =var(--st-x)=) — BUG-207's fix
+2. =body.js_statements= via =handler_body_signal_deps=
+3. =@handle $signal= arms
+
+Channel 2 is DEAD for =@on=. =js_statements= is produced only for the
+=mutation_actions= capture type (=when-guard=), or by the W4 transform in the
+compile pipeline — which runs AFTER =check='s analysis. =@on='s body capture is
+=on_motion_body= (stdlib/macros/on.st:200): a STRUCTURED array of
+=$stmt:on_signal_call= (={"signal" send "args" […]}=), =$mut:mutation=
+(={"target" flag "expr" …}=), =$call:on_method_call= and =$line:motion_line=
+entries. =handler_body_signal_deps= asks the body for a =js_statements= key an
+=on_motion_body= never carries at analysis time and returns empty — for
+hand-written =.st= exactly as for EDN ingress.
+
+* Found by
+
+Auditing spell's =apps/interface/lib/interface/verse.ex= =@exempt_sources= —
+a name-keyed list (=draft status send partial error refresh vars_count
+new-session=) that downgrades =check --deny-warnings= failures to passes when
+every diagnostic is a W0201 naming a listed source. Half the list
+(=send=, =refresh=, =new-session= fired; =draft= passed as arg / reset by
+=st/set=) exists solely because of this blind spot. A name-keyed exemption can
+mask a GENUINELY unused source that happens to share a name, and every new
+event a page fires has to be hand-added. The compiler owns the AST; the
+exemption is a downstream patch over an upstream hole.
+
+* Fix
+
+Extend =analyze_read_usages= with an =on_motion_body= reader (a sibling of
+=handler_body_signal_deps= in src/syntax/form_match.rs):
+
+- =stmt= (=on_signal_call=): insert the fired =signal= name; for each arg,
+  =collect_signal_deps= over the =value= expr string
+- =mut= (=mutation=): insert =target=; =collect_signal_deps= over =expr=
+- =line= (=motion_line=) and any bare =String= entry: =collect_signal_deps=
+
+Scan BOTH the flat =matches= and =ScopeBlock::matches= (EDN ingress
+dual-registers scoped forms; the read_usages HashSet dedups).
+
+* Gate
+
+RED: Rust unit tests in =src/analysis/tests.rs= parsing REAL =.st= source
+through the production chain (modelled on =analyze_src=), plus an EDN-ingress
+variant through =to_st_file=. The W0201 grammar is compile-time, so — as
+BUG-207 recorded — a behavioural =.test.st= cannot go red on the diagnostic
+itself; =tests/bugs/BUG-380-….test.st= is the behavioural guard proving the
+consumption is real at runtime (click fires the handler; the signal changes).
+
+GREEN also requires the existing negatives to stay red: a genuinely unused
+source still warns (=test_unused_data_source_still_warns=).
+* AS BUILT
+
+** The change
+
+- =src/syntax/form_match.rs= — new =on_motion_body_signal_deps=: reads the
+  =on_motion_body= body array. =stmt= (on_signal_call) contributes the fired
+  =signal= name (verbatim — dashes are legal: =new-session=) plus
+  =collect_signal_deps= over each arg's =value=; =mut= (mutation)
+  contributes =target= plus deps of =expr=; every other alternative
+  (=call=, =line=, …) gets a generic String/Expr-leaf scan. A private
+  =capture_signal_name= normalises Ident/String/Binding and reduces dotted
+  reads (=$chat.status=) to their base.
+- =src/analysis/mod.rs= — =analyze_read_usages= calls it from =walk_matches=,
+  and now also walks the FLAT =matches= list: a file-scope =@on= (no selector)
+  never enters a ScopeBlock, and EDN ingress dual-registers scoped forms (the
+  HashSet dedups). New =read_base= helper — =leading_source_ident= truncates
+  at =-=, which would have misread dashed signal names.
+
+** Gates
+
+- RED→GREEN, =src/analysis/tests.rs=: =on_signal_call_marks_fired_signal_and_
+  args_used_bug380=, =on_mutation_marks_target_and_expr_used_bug380=, and the
+  EDN-ingress half of =edn_page_on_and_view_consumption_marks_sources_used_
+  bug380_381= (the exact document shape spell's interface emits) all failed
+  before, pass after. The t9 shape proved the pre-existing
+  =handler_body_signal_deps= comment claimed coverage it did not have — an
+  =@on= body NEVER carries =js_statements= at analysis time.
+- Negative kept red: =genuinely_unused_source_still_warns_via_parse= (and the
+  pre-existing =test_unused_data_source_still_warns=).
+- Behavioural guard: =tests/bugs/BUG-380-on-motion-body-consumption-
+  invisible-to-w0201.test.st= — click runs the handler, the mutation reaches
+  the file-scope signal store (headless V8). Green before and after, by
+  design: the defect was compile-time.
+- End-to-end against the release binary: the repro pages (fired signal + args,
+  mutation, and spell's seam-page shape in EDN) pass
+  =check --deny-warnings=; a page with a genuinely unused source still
+  refuses.
+
+** Suites
+
+| suite | result |
+|-------+--------|
+| `cargo test --lib` | 3225 pass, 5 fail — PRE-EXISTING snapshot drift from
+uncommitted =$$=-escape work in =public/runtime/templates.js= /
+=src/emit/html_reactive.rs= (files untouched here; diffs are exclusively that
+feature) |
+| `cargo test --test integration_tests` | 217 pass |
+| headless `.test.st` guards | 3 pass (with BUG-381's two) |
+
+** Downstream
+
+spell's =@exempt_sources= deleted (FUP-195); =Interface.Verse.check= now
+treats any W0201 as a refusal, and the seeded machine's page passes rung 3
+with no exemptions.
+

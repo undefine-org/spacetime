@@ -1,0 +1,178 @@
+#+TITLE: PLAN: W3 — the @on cutover (one generalized head, drivers as data)
+#+STATE: DONE
+#+SESSION_ID: 1534a2eae1903af0
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-18T13-07-01-638Z_1534a2eae1903af0.jsonl]]
+#+CUSTOM_ID: PLAN-124-plan-w3-the-on-cutover-one-generalized-h
+
+* Initial Message
+
+explain BUG-241 please, and the choice I need to make. Explain this 'explicit kind marker' too, I am fine with that idea as long as you exlpain. Ask me all the questions you wish so you can go on with W3 and W4 with full confidence
+
+* Context and intent
+
+PLAN-121 W3. SIP-001's falsifiable thesis (SIP-001b §5): a website and a video
+differ only in which projection drives the score. W3 lands the website half's
+HEAD: `@on <driver> [form]` — one generalized head replacing the nine
+animation directives (@scroll, @load, @hover, @click, @time, @value-change,
+@mouse, @pointer, plus @anim already retired by design).
+
+This is the plan's conversational-design output recorded as an executable
+document: the syntax is ALREADY settled (launch article + W1 spikes + user
+rulings); what remains is implementation sequencing, cutover mechanics, and
+gates. Design questions that surface during implementation STOP the wave and
+go back to the user (conversational-design rule).
+
+* Settled syntax (ground truth — do not redesign)
+
+From docs/specs/SIP-001-LAUNCH-ARTICLE.st.md (fences are the acceptance test):
+
+#+begin_src spacetime
+@on &.visible --rise;                                   // driver + named form
+
+@on &.visible {
+  --rise(distance: 12px, duration: 420ms);              // driver + inline form
+  stagger: 70ms;
+}
+
+.drawer {
+  @on $open {                                            // Gate on a signal
+    true  => --slide-open(280ms);
+    false => --slide-shut(200ms);
+  }
+}
+
+@on $view {
+  "grid" => --grid-in(360ms);                            // Event on a signal
+  "list" => --list-in(360ms);
+}
+
+@on $ready {                                             // event arms
+  a -> b => --cut;
+  _      => --dissolve(6f);
+}
+#+end_src
+
+Grammar pieces already SPIKED and locked by tests
+(tests/sip_001_w1_grammar_spikes_test.rs — the fixture grammars are the
+starting point, not a rewrite):
+- `drv_ref` — `&card.visible` (subject OPTIONAL: `&.visible` is legal)
+- `driver_expr` — driver projections with value types
+- `on_arm` / `on_pat` / `on_leaf` — arms; `->` is the discriminator; a bare
+  pattern means "arrived here from anywhere"; `a -> b -> c` REJECTS
+- Arm consequences are statement-position form splices (BUG-241 machinery:
+  undeclared = E0947)
+
+Driver value types (SIP-001b): Progress (0..1, scrubbed — visible, scroll),
+Transport (playhead — time, media), Gate (discrete two-state — signals used
+as toggles), Event (discrete fire — signals used as messages). Gate vs Event
+on signals is decided by ARM SHAPE (two-state arms vs fired arms), not by a
+declaration — recorded in SIP-001b; verify it still reads true while
+implementing, flag to the user if not.
+
+* Measured current state (start here)
+
+- Today's `@on` is stdlib/macros/on-event.st `on-event-dispatcher`:
+  `%form { @on $event:ident $name:ident( … ) { $body:keyframes } }` with
+  `%if $event == "hover" %elif … "click" … "focus" … "visible" … "intersect"`
+  — a closed enum in grammar clothing. This is what the registry REPLACES.
+  The article gate error (`Expected $event:Ident, got token AMPERSAND`) is
+  this form rejecting `&.visible`.
+- Driver registry consumption EXISTS (W2.1, commit ab242763):
+  `MetaRegistry::entries_of("driver")`, `entry_key`, `entry_field`; the
+  fixture pattern is tests/sip_001_w2_projection_registry_test.rs
+  (`%registers driver(visible) { policy: "progress", value_type: progress,
+  seekable: false }`). A driver appearing nowhere in Rust is provably
+  readable. W3's job is to make stdlib DECLARE the real drivers and make
+  `@on`'s binds CONSUME the registry entry (which %binds arm to emit) instead
+  of the `%if $event ==` ladder.
+- Form splices dispatch and validate (BUG-241): statement-position
+  `--name;` → FORM_REF → E0947 if undeclared. Arm consequences ride this.
+- The kind-is-the-macro idiom for the six @form kinds is in
+  stdlib/macros/form.st; its header documents union-capture discrimination
+  and why bare literals are not used (LiteralMismatch suppression).
+
+* Waves
+
+** W3.1 — stdlib driver registry
+Declare the real drivers as `%macro driver-<name>` with
+`%registers driver(<name>) { policy, value_type, seekable }` in a new
+stdlib/macros/drivers.st, wired like form.st (stdlib_embedded, LSP lists,
+import resolver). Initial set from SIP-001b's table: visible, scroll, time,
+hover, click, focus, mouse, pointer, load, value-change. Each entry's fields
+are the policy the binds layer reads.
+GATE: a Rust test asserts entries_of("driver") returns the full set with
+typed fields, through the production registration path (same pattern as the
+W2.1 suite).
+
+** W3.2 — `@on` head grammar: driver projection slot
+Extend/replace on-event-dispatcher so the head accepts:
+`@on <driver_expr> [<form-or-body>]`. Driver expr = `&name?.member` (with
+optional args, e.g. `&.time($duration)`, `&viewport.scroll`) OR a `$signal`.
+The member is looked up in the driver registry; unknown member → E-code
+naming the registered drivers (NOT silent — the BUG-229/241 reporting rule:
+the failure kind must be one the sink retains; a union capture per driver
+member is NOT viable across an open registry, so this diagnostic likely
+needs the registry read-back, following validate_form_refs' shape).
+GATE: the article's `@on &.visible --rise;` fence compiles; `@on &.typo`
+errors naming the registry.
+
+** W3.3 — arms grammar in `@on $signal { … }`
+Promote the spiked on_arm/on_pat/on_leaf capture types into stdlib (they are
+spike fixtures today). Arms discriminate on `->`; bare pattern = final state;
+wildcard `_`; string-literal patterns for signal values; consequences are
+form splices (already validated).
+GATE: the article's `.drawer` and `$view` fences compile; the W1 spike
+negatives still reject (chained `->`, empty consequence, missing `;`).
+
+** W3.4 — the cutover: nine directives become migration capsules
+@scroll/@load/@hover/@click/@time/@value-change/@mouse/@pointer (and any
+@anim remnants) become migration capsules rewriting to `@on <driver>` forms
+(the existing migration-shim machinery, same shape as prior retirements).
+FUP-152's `~` retirement and FUP-153's PresetType deletion RIDE THIS WAVE
+(same construct, one migration, per PLAN-121's sequencing decision).
+GATE: full repo migration run; examples/demos/projects compile post-migration
+with zero capsules left unapplied; `cargo test` suites green; no silent drops
+(every capsule either rewrites or errors).
+
+** W3.5 — article @on gates green
+Every `@on` fence in docs/specs/SIP-001-LAUNCH-ARTICLE.st.md compiles AND
+runs (headless test where the harness supports it; CDP where layout/timing
+matters). Per W7.2: a gate that stays red changes the PROSE, not the gate —
+but any prose change goes back to the user first.
+
+* Constraints and non-goals
+
+- Drivers are DATA: adding a driver is a registry entry, never a Rust match
+  arm, never a `%if` ladder. If a driver needs policy the registry fields
+  can't express, extend the FIELDS (data), not the consumer (Rust) — and if
+  that isn't enough, STOP and take it to the user.
+- `@when` keeps its own job (markup emission on interaction); `@on` owns
+  motion. B6 pressure-test (`@when` × `@on` nesting) must get a worked
+  example in SIP-001b during W3.3.
+- Not in this wave: @score (W4), render (W5), studio (W7), form splice
+  EXPANSION semantics beyond what the gates need (the splice is recognized
+  and validated; splicing a style form's declarations into the host block IS
+  needed for the article's `.card` fence — scope it minimally and honestly).
+- Reviewer swarm between waves (the W0–W2 pattern: every wave closes with a
+  swarm, verdicts addressed before the next wave).
+
+* Acceptance (whole wave)
+
+1. `cargo run -- check docs/specs/SIP-001-LAUNCH-ARTICLE.st.md` — all `@on`
+   fences green.
+2. Drivers enumerable via entries_of("driver"); adding a test-only driver
+   touches no Rust.
+3. The nine retired directives route through migration capsules; zero
+   `%if $event ==` ladders remain in stdlib.
+4. Suites: lib, integration, v8, headless all green; new gates per wave.
+
+W3 COMPLETE (2026-07-26). All five waves landed:
+- W3.1 driver registry (16 entries, primitive field IS the dispatch table)
+- W3.2 @on head (drive pseudo-primitive, E0948/E0949)
+- W3.3 arms + bodies (signal-arms runtime, on_motion_body, event mutations)
+- W3.4 cutover (capsule + 14 rules, repo migrated, zero cutover-caused failures; D19 cache-poison fix; D20 review swarm, 10 findings)
+- W3.5 article gates (subject projections — observed vs animated elements; BUG-246 grammar fix; BUG-250 mixed CSS lowering; article = acceptance test with 8 gates incl. node --check on emitted JS)
+
+Review swarms: W3 (6 findings fixed), W3.4 (10 findings), W3.5 (6 findings) — all resolved with RED→GREEN gates. BUG-246/250 filed+fixed+gated; BUG-247/248/249 filed (pre-existing, not cutover).
+
+Remaining for W3.4b (user decision needed, documented in the implementation report): @value-change surface, @after/.done wave, @effect, WAAPI variants (@wscroll/@wloop), FUP-152 (~) + FUP-153 (PresetType).

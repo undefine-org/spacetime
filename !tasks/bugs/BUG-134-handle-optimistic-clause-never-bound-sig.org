@@ -1,0 +1,103 @@
+#+TITLE: @handle optimistic clause never bound signal-call params ($card/$to) → DnD no-op
+#+STATE: DONE
+#+SESSION_ID: 15119c48cafc615e
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-21T08-11-12-555Z_15119c48cafc615e.jsonl]]
+#+CUSTOM_ID: BUG-134-handle-optimistic-clause-never-bound-sig
+
+* Initial Message
+
+the recent %animates on the liveview-kanban demo still does not work. Here's what I get in the browser:
+
+
+[derived-signal viewedCards] TypeError: can't access property "length", SpacetimeLocal.history is undefined
+    anonymous http://localhost:3333/__spacetime/runtime.js?entry=index.st line 8275 > Function:3
+    recompute http://localhost:3333/__spacetime/runtime.js?entry=index.st:8275
+    afterData http://localhost:3333/__spacetime/runtime.js?entry=index.st:2337
+runtime.js:8278:19
+    recompute http://localhost:3333/__spacetime/runtime.js?entry=index.st:8278
+    afterData http://localhost:3333/__spacetime/runtime.js?entry=index.st:2337
+[derived-signal viewedCards] TypeError: can't access property "length", SpacetimeLocal.history is undefined
+    anonymous http://localhost:3333/__spacetime/runtime.js?entry=index.st line 8275 > Function:3
+    recompute http://localhost:3333/__spacetime/runtime.js?entry=index.st:8275
+    set http://localhost:3333/__spacetime/runtime.js?entry=index.st:8118
+    load http://localhost:3333/__spacetime/runtime.js?entry=index.st:6269
+runtime.js:8278:19
+Template not found: card 2 runtime.js:10106:19
+Template not found: card 2 runtime.js:10391:19
+Template not found: card 2 runtime.js:10676:19
+[derived-signal viewedCards] TypeError: can't access property "length", SpacetimeLocal.history is undefined
+    anonymous http://localhost:3333/__spacetime/runtime.js?entry=index.st line 8275 > Function:3
+    recompute http://localhost:3333/__spacetime/runtime.js?entry=index.st:8275
+    <anonymous> http://localhost:3333/__spacetime/runtime.js?entry=index.st:8154
+    <anonymous> http://localhost:3333/__spacetime/runtime.js?entry=index.st:8155
+runtime.js:8278:19
+[derived-signal viewedCards] TypeError: can't access property "length", SpacetimeLocal.history is undefined
+    anonymous http://localhost:3333/__spacetime/runtime.js?entry=index.st line 8275 > Function:3
+    recompute http://localhost:3333/__spacetime/runtime.js?entry=index.st:8275
+    afterData http://localhost:3333/__spacetime/runtime.js?entry=index.st:2337
+
+* Symptom
+On demos/liveview-kanban, drag-and-drop did nothing: a card dragged to another
+column snapped back, the server "received nothing" useful, and the console
+showed transient "Template not found: card N" warnings.
+
+* Investigation (live, headless puppeteer)
+Traced the full drag chain — it was almost entirely CORRECT:
+- =@drag= on-drop fires on release (=$dropped= false->true edge).
+- =ST.dropTarget($, '.col')= hit-tests the release point and returns the CORRECT
+  target column (e.g. =doing=).
+- =$move({ card: 'c1', to: 'doing' })= is invoked and the ws frame is SENT:
+  =\{"type":"move","payload":\{"card":"c1","to":"doing"\},"__corr":1\}=.
+- The =.board @handle= =optimistic= clause RUNS.
+
+So =@drag= was NOT the bug (despite being an old construct). The break was in the
+NEWER =@handle= / signal-handler runtime (PLAN-038).
+
+* Root cause
+The optimistic clause is authored with the signal's call params in $-sigil form:
+=$cards <- $cards.map(c => c.id == $card ? \{ ...c, col: $to \} : c)=.
+
+=signal-handler.st='s =onFire()= ran that clause with NO payload bound
+(=runStmts(optimisticStmts, null, null)=), ignoring the fire event's
+=detail.payload= (= the =\{ card, to \}= call args). And =ST.runMutations='s
+=transformExpr= rewrote =$card= -> =SpacetimeLocal.card= (a nonexistent global)
+BEFORE any local substitution, and the existing bare-name local loop's lookbehind
+=(?<![\w.$])= deliberately skips a =.card= member — so even a bound local could
+never reach a =$=-prefixed hole.
+
+Net: =$card= / =$to= resolved to =undefined= -> =c.id == undefined= is false for
+every card -> =.map= returned the array unchanged -> no move. The
+"Template not found" warnings were collateral from the @each churn during the
+dead moves; they vanish once the move actually applies.
+
+* Fix (two coordinated edits, clean separation of binding kinds)
+=@handle= carries TWO disjoint binding conventions; they must not cross-substitute:
+1. BARE-NAME receive-arm carry — =Moved(c) => $cards.map(x => x.id == c.id ? c : x)=
+   (authored bare =c=).
+2. $-SIGIL signal-call params — =$card= / =$to= in the optimistic clause
+   (authored with the param sigil).
+
+- =public/runtime/st.js= (=ST.runMutations=): added a 4th =params= arg — a
+  separate channel for $-sigil signal params. =transformExpr= now substitutes
+  =$param= FIRST (anchored to the =$= sigil, so an object key =\{ to: … \}= or a
+  =.to= member is never touched), THEN the generic =$name=->SpacetimeLocal
+  rewrite, THEN the bare-name receive-arm locals (unchanged).
+- =stdlib/primitives/signal-handler.st=: =onFire(ev)= extracts
+  =ev.detail.payload= and passes it via the new =params= channel;
+  =runStmts(text, bindName, bindValue, params)= threads it to =runMutations=.
+
+* Tests
+- =tests/integration/signal-dispatch.test.st=: two new cases
+  - "runMutations binds a $-sigil signal param local over a missing global"
+    (the core regression: =$card=/=$to= resolve from params, move applies).
+  - "a $-sigil param local does not clobber a member access of the same name"
+    (=\{ to: $to \}= keeps the =to:= key; only the =$to= hole substitutes).
+  All 8 signal-dispatch tests pass; all 5 drag-on-drop tests still pass.
+- Live (headless puppeteer on demos/liveview-kanban): three drags across columns
+  (c1->doing, c5->todo, c2->done) all land correctly, ZERO console warnings, and
+  the ws frame carries the correct payload.
+
+* NB
+Still no multiplayer BACKEND on the dev =/ws= (the server doesn't act on the
+=move= frame; the optimistic update is the visible behavior). That backend
+remains FEAT-136/137. The wire + optimistic UI are now correct end to end.

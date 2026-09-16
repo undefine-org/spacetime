@@ -1,0 +1,83 @@
+#+TITLE: @eval lexer mis-parses array-of-object literal ([ { … } ]) as a CSS selector block
+#+STATE: DONE
+#+SESSION_ID: 1503ca05d05c0c62
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-10T14-32-18-497Z_1503ca05d05c0c62.jsonl]]
+#+CUSTOM_ID: BUG-095-eval-lexer-mis-parses-array-of-object-li
+#+COMPLETION_HASH: aba45ccb00229f0a
+
+* Initial Message
+
+okkk! how does that translate to the actual admin? is the actual editing interface working, and how? let's DESIGN and BRAINSTORM how we'd do it properly
+
+* Symptom
+A Spacetime test `@eval (() => { ... })` body that contains a JS ARRAY LITERAL holding
+an OBJECT LITERAL crashes the test parser with `expected '{' after selector` (multiple,
+at offsets into the EXPANDED source ~47K for a tiny file). The `@eval` body extractor /
+lexer treats the `[ { ... } ]` sequence as a CSS selector followed by a rule block.
+
+* Minimal repro (no imports)
+#+begin_src
+@test "arrobj" {
+  @mount { <main><div class="x"></div></main> }
+  @eval (() => { const o = { c:[ { t:1 } ] }; window.__v = o.c[0].t; })
+  @then { @assert (window.__v === 1) "ao"; }
+}
+#+end_src
+→ ParseError "expected '{' after selector".
+
+* What WORKS (narrows the trigger)
+- `const o = { a:{ b:1 } };`        ✓ (nested object, no array)
+- `const o = { a: { b:1 } };`       ✓
+- `JSON.parse('{"a":1}')`           ✓ (colon inside a string is fine)
+So the trigger is specifically an OBJECT literal nested INSIDE an ARRAY literal:
+`[ { … } ]`. The `[` then `{` makes the embedded-JS scanner think `{ … }` is a
+selector's rule block.
+
+* Impact
+Blocks writing a Spacetime `.test.st` `@eval` that constructs a structured document
+inline (e.g. an editable doc `{ type:'doc', content:[ { type:'p', … } ] }`). Hit while
+writing the FUP-045 S3 region surface test \u2014 had to route the live region-edit proof to
+the CDP/puppeteer rung instead (real browser JS, not the `.st` @eval lexer). Workaround:
+avoid array-of-object literals in `@eval`; build via property assignment or a runtime
+helper, OR seed through a bound signal rather than `@eval`.
+
+* Likely fix locus
+The embedded-JS body scanner for `@eval` (and probably `@when`/`@drive` payloads) \u2014
+wherever the `.st` parser balances `@eval (...)` it must treat `[`/`{` uniformly as JS
+bracket nesting, not switch into selector/rule mode on `{` after `[`. Find the @eval
+body tokenizer in the test-runner parser.
+
+* Provenance
+Surfaced during FUP-045 S3 (region-editing surface). Not a regions bug \u2014 a test-runner
+@eval lexer bug. The region model + ops + bridge are proven by 38 V8 tests; the live
+surface proof moved to S4 CDP.
+
+* Scope is BROADER than first characterized (FUP-045 S4)
+The @eval lexer breaks on MORE than array-of-object. In a `@drive` body, even:
+- `const regs = [];`   (empty array literal)
+- `const blk = { type: 'columns' };`  (object literal on a line after a `[]` line)
+both raise "expected '{' after selector". So the embedded-JS scanner for @eval/@drive
+mis-handles `[` and `{` in several positions, not just `[ { … } ]`. The common factor:
+once a `[` appears, the scanner's selector/rule-block detection desyncs and subsequent
+`{` are read as rule blocks.
+
+This blocks BOTH:
+1. the headless `.st` region surface test (seed a region doc in @eval), AND
+2. the `@drive` CDP region test (stdlib/editable/tests/region-surface.cdp.test.st) \u2014
+   which cannot even parse today.
+
+The FUP-045 S4 live region-edit loop is instead PROVEN interactively via the browser
+tool against the live demo (projects/region-edit-demo/ on a dev port): a real browser
+Selection at the right region's end → posFromDOM=6 → insertText → right region 'RZ',
+left 'L' untouched → domFromPos restored the caret inside the right region. Evidence:
+scratch/region-edit-live.png. The .cdp.test.st is committed as the INTENDED automated
+form, run-pending on this BUG-095 fix.
+
+Fix priority effectively raised: it blocks authored coverage of any `.st` test whose
+@eval/@drive body builds a structured value (very common for editable/data tests).
+
+NOTE [2026-06-12]: FIXED. Root cause: parse_arg_value (the @eval/@drive/@when payload path) had NO arrow-fn handling. An arrow `(params) => { …JS… }` fell through to parse_paren_expr → the body `{}` was parsed as parse_object_or_body (Spacetime selectors/rules), and the body's first inner `}` ended the arg early, spilling the rest of the JS to the top level → "expected '{' after selector".
+
+Fix (src/syntax/cst/parser.rs): a new parse_arrow_fn_balanced() consumes the whole arrow — params paren (matched), `=>` (EQUALS+GT), then the body with FULL bracket-depth tracking (block body by matched braces tracking {}/[]/(); expression body to the depth-0 boundary). Wired via `L_PAREN if self.is_arrow_fn() => parse_arrow_fn_balanced()` in parse_arg_value, reusing the existing is_arrow_fn() lookahead. ~55 lines, purely additive (a non-arrow `(` still routes to parse_paren_expr).
+
+Verified: the exact array-of-object @eval repro now parses + runs; lib 2250, integration 172, import_resolution 22, all green (no regression in the shared directive parser). Unblocked BOTH the headless .st region surface test (stdlib/editable/tests/surface.test.st — 'typing into a column region lands in that region', now PASSING) AND the @drive CDP test (region-surface.cdp.test.st now parses). This was the run-pending blocker for FUP-045 S4 automated coverage — now an automated, committed gate.

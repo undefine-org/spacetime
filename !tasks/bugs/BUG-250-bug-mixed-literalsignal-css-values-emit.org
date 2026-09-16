@@ -1,0 +1,21 @@
+#+TITLE: BUG: mixed literal+signal CSS values emit invalid JS (reactive binding lowering)
+#+STATE: DONE
+#+SESSION_ID: 1534a2eae1903af0
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-18T13-07-01-638Z_1534a2eae1903af0.jsonl]]
+#+CUSTOM_ID: BUG-250-bug-mixed-literalsignal-css-values-emit
+
+* Initial Message
+
+continue. use parallel agents when you can
+
+A reactive CSS declaration whose value mixes literal text and a signal hole — `border: 1px solid $brand.rule;` — emits INVALID JS: `__v = (1px solid ST.resolve(__node, 'brand').rule);` → "Uncaught SyntaxError: identifier starts immediately after numeric literal" at page load. The whole page's runtime dies (discovered serving docs/specs/SIP-001-LAUNCH-ARTICLE, runtime.js:11709).
+
+Root cause: emit_reactive_binding_js (src/compiler.rs:1869) treats EVERY declaration value as one JS expression via transpile_signal_expr_with — valid for `$brand.panel` or `$a + 1`, wrong for CSS shorthands (`1px solid $x`, also `calc(100% - $x)`, `translate($x, $y)`) where the literal parts are not JS.
+
+No repo usage existed before the launch article — the article-as-acceptance-test exposed it at RUNTIME (content gates can't catch it; a JS-syntax gate can).
+
+Fix direction: lower CSS declaration values as string templates when they contain literal CSS outside the holes (rule: strip quoted strings and `$ident(.seg)*` reads; letters in the remainder = CSS template; operators/digits/parens only = expression). Template holes splice the FULL dotted read (`$brand.rule` → ST.resolve(brand).rule), literal runs are quoted. Single-hole / pure-expression values keep the existing expression path (e.g. `$items.length` must NOT become a template).
+
+Gate direction: the article gate must verify the emitted spacetime.js PARSES (node --check or the V8 backend), not just that strings appear in it.
+
+FIXED + GATED (2026-07-26, commit 2b02b7fc). lower_css_binding_value: expression vs CSS-template discrimination; template holes splice full dotted reads. Verified via dev server: the article's emitted runtime passes node --check end-to-end. Gates: 3 lib tests (compiler.rs) + article gate now node --checks the emitted JS (skips with a note when node is unavailable).

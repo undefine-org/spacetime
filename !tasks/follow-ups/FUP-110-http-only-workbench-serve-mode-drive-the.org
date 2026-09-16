@@ -1,0 +1,41 @@
+#+TITLE: HTTP-only workbench serve mode (drive the live environment without the MCP stdio transport)
+#+STATE: DONE
+#+SESSION_ID: 1522aa9778a04732
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-04T14-07-53-826Z_1522aa9778a04732.jsonl]]
+#+CUSTOM_ID: FUP-110-http-only-workbench-serve-mode-drive-the
+#+COMPLETION_HASH: 63fe7a58adbfce1f
+
+* Initial Message
+
+i have restarted the session, can you do the visual confirmation now?
+
+Verifying the live workbench today requires the FULL MCP server (`spacetime mcp`), which couples the HTTP live surface (the region pipeline + workbench host page + signal sink) to the MCP stdio JSON-RPC transport. That transport is harness-managed (one long-lived process, in-process compile), so:
+- an agent cannot spin up a throwaway instance to drive with puppeteer without either racing the harness process or reimplementing the whole MCP handshake;
+- a stale in-process binary (compile happens in-memory) means on-disk rebuilds don't take effect until a harness-managed restart;
+- there's no way to exercise the live HTTP surface in a test/automation loop WITHOUT the MCP part we don't need for UI-driving.
+
+** Ask
+Add an HTTP-only serve mode that boots the SAME live surface (LiveServer / region pipeline / workbench env.st host / /__mcp/instance/{id}/ + /bundles + /__mcp/signal/{id}) on a chosen port, WITHOUT the stdio MCP transport. Something like `spacetime workbench-serve --port N` (or `spacetime mcp --http-only --port N`). Then st_fn_put/st_mount-equivalent operations are driven over plain HTTP (or a small seed file), and an agent/CI can launch its own instance, compose a guest, and drive it with puppeteer deterministically.
+
+** Why it matters (surfaced during PLAN-065)
+The whole reason the prior "live verification" degenerated into calling handlers directly + synthetic events was that the real server was unreachable/stale and un-launchable independently. A driveable HTTP-only mode makes real end-to-end click-through the DEFAULT verification, not a fallback. Also unblocks docs/testing/AUTOMATION.md driving the workbench with @drive against a self-launched instance.
+
+** Acceptance
+`<serve-cmd> --port N` serves a working workbench instance an agent can open in a browser, compose a registered/inline function onto the stage, and drive with real clicks — no MCP stdio client, no harness process. Document the invocation in docs/testing/AUTOMATION.md.
+
+Parent: PLAN-065 (surfaced by, not blocking).
+
+NOTE [2026-07-06]: DONE (2026-07-06, commit d03b5419). User directive verbatim: "int inst-1 bullshit needs to go!! ... would it be possible to include the workbench as a /__spacetime/workbench".
+
+Shipped:
+1. `GET /__mcp/workbench` + `/__spacetime/workbench` alias on the MCP live surface \u2014 idempotently registers/reuses the ONE workbench instance, 302s to it. Repeated hits land on the SAME inst-N; never piles up duplicates.
+2. `spacetime workbench [--port 4949] [--root] [--stdlib-dir] [--no-open]` \u2014 standalone command, HTTP-only (no MCP stdio, no harness process to race), fixed predictable port, auto-opens browser at the stable URL. This is the thing this FUP originally asked for \u2014 an agent/CI/human can launch + drive it themselves without any MCP client.
+3. `spacetime serve <project>` also boots the same live surface and exposes `/__spacetime/workbench` as a redirect \u2014 one-click access while iterating on any project.
+
+LiveServer::start_on(workbench, addr) added (start() = start_on(.., "127.0.0.1:0")); LiveStore now tracks its own bound port for handlers that only have Store in State.
+
+Live-verified TWICE with real puppeteer clicks (not synthetic events): (a) standalone `spacetime workbench --port 4949` \u2014 typed a real @template, clicked "Create & compose", watched it render on stage; (b) `spacetime serve demos/balanced-headline` \u2014 followed the /__spacetime/workbench -> workbench-port -> inst-N redirect chain, dev site itself unaffected.
+
++2 tests (workbench_redirect_tests: mount-then-reuse idempotence; input.json live-snapshot branch reuse). lib 2558 passed (was 2556), integration 181 passed. Zero regressions in touched files (src/main.rs, src/mcp/live.rs, src/mcp/mod.rs only \u2014 verified via git diff --stat before commit, deliberately avoided an unrelated concurrent session's uncommitted WIP in stdlib/primitives/template.st + stdlib/__mcp__/primitives/host.st, per AGENTS "don't touch other sessions' in-flight work").
+
+The old workaround (self-launched python driver script /tmp/wb_driver2.py from the PLAN-065 session) is now obsolete \u2014 `spacetime workbench` replaces it as a first-class capability.

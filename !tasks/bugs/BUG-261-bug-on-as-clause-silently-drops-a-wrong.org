@@ -1,0 +1,75 @@
+#+TITLE: BUG: @on `as` clause silently drops a wrong-sigil name
+#+STATE: ITEM
+#+SESSION_ID: 1534a2eae1903af0
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-18T13-07-01-638Z_1534a2eae1903af0.jsonl]]
+#+CUSTOM_ID: BUG-261-bug-on-as-clause-silently-drops-a-wrong
+
+* Initial Message
+
+ok please explain everything that is next and that got carried forward. What would be your plan for achieving it all?
+
+#+STATE: ITEM
+
+* Reproduced
+
+Same page, three spellings of the `as` clause:
+
+| written | publishes | verdict |
+|---------+-----------+---------|
+| =as $reveal= | ="reveal"= | ✓ |
+| =as &reveal= | ="__drive_visible_1"= | ✗ SILENT |
+| =as reveal=  | ="__drive_visible_1"= | ✗ SILENT |
+
+All three compile clean. Two of them drop the author's name and publish under
+the counter fallback instead.
+
+* Cause
+
+`stdlib/macros/on.st:64`:
+
+: %capture_type on_as { "as" $name:binding }
+
+`binding` is the `$`-sigil capture. `on_as` is OPTIONAL in both `@on` forms
+(`$as:on_as?`), so a wrong-sigil name fails the capture and the whole clause
+vanishes — no diagnostic, because an optional capture that does not match is
+not an error.
+
+`src/pipeline/drivers.rs:307` then compounds it: it strips a leading `$`
+(`trim_start_matches('$')`) but not `&`, so even if the capture were widened
+the name would arrive with its sigil attached.
+
+* This is the SAME defect already fixed once
+
+W4's review swarm found `@score … as &film` vanishing for exactly this reason,
+and the fix was a dedicated `score_as_name` capture type accepting `$element`.
+The `@on` side was never audited. One defect, two sites, one fixed.
+
+The sigils are doing their job and the grammar is not listening:
+- =as $reveal= names a progress SIGNAL (correct — this is a value that flows)
+- =as &reveal= names a TIMELINE ENTITY
+
+For `@on` the published thing IS a signal, so `$` is the RIGHT sigil and `&`
+should be REFUSED — but refused LOUDLY, naming the correct sigil. Silence is
+the bug, not the sigil rule.
+
+* Fix
+
+1. `on_as` accepts either sigil, and the pipeline REFUSES `&` with a
+   diagnostic naming `$` — "a driver's `as` clause names a progress signal;
+   write `as $reveal`". Bare `as reveal` gets the same treatment.
+2. Audit every OPTIONAL capture in a directive head for the same shape: an
+   optional capture whose failure mode is silence is a silent-drop generator
+   by construction. This is the fourth instance of the family (BUG-216,
+   BUG-229, BUG-253, FEAT-170/BUG-256).
+3. Gate with a NEGATIVE: `as &reveal` must produce a diagnostic, not a
+   counter-named signal.
+
+* Found via
+
+Migrating `tests/unit/macros/on-hover.test.st` off the retired
+`@on visible NAME(800ms)` syntax. The mechanical migration produced
+`as &test-reveal` (an entity-looking name), which compiled clean and published
+nothing — so the migrated test still failed, and the failure looked like the
+test's fault rather than the compiler's.
+
+NOTE [2026-08-03]: 2026-08-03: Extended BUG-261 to bare `as lift`. Added one `on_as_invalid` capture union (`element | event_name`) and colon/body error-sibling rows routed to shared `drive-as-error`; `event_name` deliberately excludes `$` so valid `$lift` heads do not collide. Reused E0953 because element and bare spellings violate one rule: a driver's `as` clause publishes a progress SIGNAL. Negative gate was proven: temporarily removing the sibling made `a_bare_name_in_an_as_clause_is_refused_with_its_fix` fail because `as lift` produced `✓ All 1 file(s) passed`; after restoration `cargo test --test on_as_sigil_test` passed all 7 tests.

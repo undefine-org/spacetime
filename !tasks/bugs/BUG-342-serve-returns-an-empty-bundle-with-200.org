@@ -1,0 +1,79 @@
+#+TITLE: `serve` returns a 0-byte bundle with HTTP 200 and no error
+#+STATE: ITEM
+#+PRIORITY: #A
+#+CATEGORY: BUG
+#+CUSTOM_ID: BUG-342
+
+* Symptom
+
+`cargo run -- serve demos/brand-catalog/` served a page whose body contained
+only the dev dock. `demos/school-gallery` did the same. Both:
+
+: curl -o /dev/null -w "%{http_code} %{size_download}" .../__spacetime/runtime.js?entry=index.st
+: 200 0
+
+Zero bytes. HTTP **200**. Nothing on stderr, nothing in the server log, no
+diagnostic, no exit code. The same projects build correctly:
+`build demos/brand-catalog/` emits 740891 bytes of `spacetime.js`, and every
+test gate is green (`demo_brand_catalog_test` 4/4, `demo_school_gallery_test`
+4/4).
+
+So the demo looked broken to a user while `check`, `build` and the whole suite
+said everything was fine. This is what sent the reporter looking for a URL that
+"doesn't work".
+
+* Trigger
+
+A STALE `stdlib/.cache/registry.bin`.
+
+: serve                 -> 200, 0 bytes
+: serve --fresh-stdlib  -> 200, 599034 bytes
+: serve (again, after)  -> 200, 599034 bytes
+
+The fresh run rewrites the cache and every later default run is correct — which
+is exactly why this is so easy to miss and so hard to attribute: it fixes
+itself the moment you try to investigate it with a flag.
+
+* Root cause of the staleness
+
+`load_binary_cache` (src/metasystem/incremental_cache.rs:371) accepts a cache
+when `version == CARGO_PKG_VERSION` and `struct_canary == CACHE_STRUCT_HASH`,
+plus per-file mtime checks over `stdlib/`.
+
+All three are blind to COMPILER LOGIC. The BUG-340 fix changed import
+resolution in `src/lsp/workspace/import_resolver.rs` — no stdlib `.st` file
+changed, the package version did not change, and no cached struct changed
+shape. So the new binary loaded a registry serialized by the OLD, broken binary
+and served its results.
+
+Any Rust-side change to how the registry is POPULATED has this hazard. The
+cache key describes the inputs and the container, never the producer.
+
+* The deeper defect (fix this even if the cache key is fixed)
+
+A 0-byte bundle is a fully-formed answer to "what should this page run?" and
+the server gives it a 200. Whatever the cause — stale cache, failed compile,
+bad entry — an empty bundle for a non-empty entry is never correct, and it
+must not be reported as success. That silence is the BUG-229/BUG-243 class:
+the failure mode is indistinguishable from a working page until a human opens
+a browser.
+
+* Acceptance
+
+1. A compiler-logic change invalidates the stdlib cache — key it on something
+   that tracks the producer (build fingerprint / binary mtime / an explicit
+   `CACHE_LOGIC_VERSION` bumped by anything touching registry population), not
+   only on stdlib mtimes + package version + struct layout.
+2. `serve` refuses to answer 200 with an empty bundle for a non-empty entry:
+   it emits a diagnostic naming the entry and the likely cause, the same way
+   `build` would.
+3. A gate that SERVES a demo over HTTP and asserts the bundle is non-empty and
+   contains a known symbol from the page. Every current gate uses `build`,
+   which is why the entire serve path could break with the suite green.
+   RED-check it by planting a stale cache.
+
+* Notes
+
+Found while answering "how do I see W2/W3/W4" — the features were all correct;
+the server was the thing that was broken. Worth remembering that the demo gates
+proved the compiler and never once exercised the command a user actually runs.

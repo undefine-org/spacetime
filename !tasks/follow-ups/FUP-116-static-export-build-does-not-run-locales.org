@@ -1,0 +1,75 @@
+#+TITLE: static export/build does not run @locale's build-js — /en//fr/ dirs never generated (dev server works, static export doesn't)
+#+STATE: ITEM
+#+SESSION_ID: 152939d2e5b25e66
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-09T16-24-34-454Z_152939d2e5b25e66.jsonl]]
+#+CUSTOM_ID: FUP-116-static-export-build-does-not-run-locales
+
+* Initial Message
+
+can dom-refs (`&my-template(..., ...) { ... }`) contain all of ST? As in, html, CSS, ST syntax through macros, etc. and then it gets its scope solved to be within the template? Or does it have some special case?
+
+The goal is to empower the 'element-ref as function' way of creating Spacetime affordances the most blessed way to build encapsulation and whatnot. I would like to do that for Ora Ventures, whose website we want to rewrite completely to be attractive to Chief AI Officers at big groups in emerging markets, as well as capital-rich SMBs that want to be more dynamic and competitve. That website should be sober, have crisp but minimal copy, and showcase Spacetime features in a way that is unique and helps us convert more (so think of advanced interactions and motions in terms of high-convertion)
+
+Come back with your plan, sources, inspirations, for the copy
+Come back with your analysis for the &... thing
+
+* Found via
+PLAN-071 (ora-ventures.com rewrite) build verification. Expected =cargo run --
+build <dir>= (site export) to produce =dist/en/index.html= / =dist/fr/index.html=
+per =locale-build='s own doc-comment ("Build-time output: <locale>/index.html
+for each locale"), matching what the DEV SERVER already does correctly.
+
+* Repro
+#+begin_src
+@locale(default: en, available: [en, fr], src: "locales/{locale}.json")
+#+end_src
+- =cargo run -- serve <dir>= then =curl localhost:PORT/fr/= \u2192 correctly
+  translated FR page (verified working, PLAN-071 session).
+- =cargo run -- build <dir>= (site export, =Command::Build= \u2192
+  =spacetime::export::export_site=) \u2192 =dist/= has NO =en/= or =fr/= directories
+  at all. Only the untranslated root =index.html= is emitted.
+
+* Root cause (traced)
+=stdlib/primitives/i18n.st::locale-build= is a =%primitive= whose body is an
+=%emit build-js= block \u2014 a build-time script meant to run once per locale,
+parse the compiled HTML, rewrite every =[data-t]= element, and write
+=<locale>/index.html=. The DEV SERVER path (=src/server.rs=, around the
+=try_serve_locale_prefix=-style handler ~L600) checks =compiled.build_scripts=
+and runs them dynamically per-request. =src/export/*.rs= (the static
+=export_site= used by both the CLI =build= command on a directory, and
+presumably any future static host deploy) has **no** reference to
+=build_scripts=/=build_js= at all \u2014 grep confirms zero hits. The static
+export path was never wired to execute a construct's =%emit build-js=,
+so any primitive relying on that phase (not just =locale-build=) silently
+no-ops in the shipped static site.
+
+* Impact
+Any Spacetime site using =@locale= with =available: [locale1, locale2, \u2026]=
+and shipping via static export (the common deploy path \u2014 CDN/static host,
+not a live =spacetime serve= process) never gets per-locale routes. The
+non-default locale is UNREACHABLE in production even though it renders
+correctly in dev. This is a real production-blocking gap, not a cosmetic one.
+
+* Structural fix (direction, not yet implemented)
+=src/export/*.rs= needs a build-js execution pass, mirroring the dev
+server's handling: for each entry with non-empty =compiled.build_scripts=,
+run the script(s) (same JS execution substrate the dev server already
+uses \u2014 locate and reuse it, don't reimplement) and write EACH locale's
+output to =<output_dir>/<locale>/index.html= instead of (or alongside) the
+single default =index.html=. Also add the root =index.html= redirect stub
+the doc comment promises ("root index.html redirect to /<default>/").
+
+* Acceptance (for whoever picks this up)
+1. A minimal =@locale(default: en, available: [en, fr], \u2026)= fixture, built
+   via =cargo run -- build <dir>=, produces =dist/en/index.html= AND
+   =dist/fr/index.html= with correctly translated =[data-t]= content, plus a
+   root =dist/index.html= that redirects to =/en/=.
+2. Existing dev-server locale routing behavior unchanged (regression guard).
+3. =cargo test --lib= / =--test integration_tests= green; add a new
+   integration test asserting the exported per-locale files.
+
+* Workaround used in PLAN-071 (this session)
+Verified FR-locale acceptance via the DEV SERVER (=cargo run -- serve= +
+=curl=/puppeteer against =/fr/=), which correctly represents the intended
+end-state behavior. Static-export parity is this follow-up's job, not
+blocking the site content work.

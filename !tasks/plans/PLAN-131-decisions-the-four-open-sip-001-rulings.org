@@ -1,0 +1,283 @@
+#+TITLE: DECISIONS: the four open SIP-001 rulings, with syntax
+#+STATE: ITEM
+#+SESSION_ID: 1534a2eae1903af0
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-18T13-07-01-638Z_1534a2eae1903af0.jsonl]]
+#+CUSTOM_ID: PLAN-131-decisions-the-four-open-sip-001-rulings
+
+* Initial Message
+
+ok please explain everything that is next and that got carried forward. What would be your plan for achieving it all?
+
+#+STATE: ITEM
+
+Four rulings block W5. Each below: what is broken TODAY (probed), the options
+WITH SYNTAX, what each buys and costs, and a recommendation. Nothing here is
+recalled — every "today" block was run.
+
+* D1 — the consumer surface: how an element reads its window
+
+** Today
+
+#+begin_src spacetime
+.title { @on &.clip: --rise; }
+// error[E0949]: projection `.clip` applies to `clip` refs,
+//               but `&.clip` (no subject) is the element host
+#+end_src
+
+There is NO way to consume a clip's progress. `tests/score/clip-consumer.test.st`
+is RED in Chromium on exactly this.
+
+The mechanism, though, already exists and is generic — `apply-animations` does
+`ST.watch(root, "<name>", ...)` and takes the signal name as a STRING. A score
+already publishes `__clip_title`. So this is a NAMING decision, not a runtime one.
+
+** Option A — the inherited-naming rule (RECOMMENDED)
+
+#+begin_src spacetime
+.stage { @score &.time(12s) { &title at 2s for 3s; } }
+.title { @on &.clip: --rise; }        // reads __clip_title
+#+end_src
+
+A `domain: inherited` driver addresses its progress by ELEMENT, not by counter.
+That rule ALREADY EXISTS at `src/pipeline/score.rs:517` for the nested-score
+join; this makes the drive path honor the same one.
+
++ zero new syntax; `@on &.clip` reads like `@on &.scroll`
++ ONE rule serving two paths that are currently two lookalike mechanisms
++ registry-data driven off the existing `domain:` column
+
+- PROBED: flipping `on_kinds` ALONE is green-and-wrong — apply-animations
+  watches `__drive_clip_1` while the score publishes `__clip_title`. The
+  naming rule is the actual change; the field flip is a trap.
+- needs a NEGATIVE: `@on &.clip` on an element no score places must error.
+- cannot address a repeat placement (`__clip_title_1`).
+
+** Option B — subject-carrying projection
+
+#+begin_src spacetime
+.title { @on &title.clip: --rise; }
+.title { @on &title.clip(2): --rise; }   // the repeat placement
+#+end_src
+
++ keeps `on_kinds: clip` honest; reaches repeats
+- names `title` twice at the common call site; every other driver on an
+  element's own rule is subject-less, so this breaks the learnability rule
+
+** Option C — the score places AND drives (sugar over A)
+
+#+begin_src spacetime
+.stage {
+  @score &.time(12s) {
+    &title at 2s for 3s: --rise;
+  }
+}
+#+end_src
+
++ ONE place; the score is the whole story — which is what a timeline UI edits
++ the unplaced-element error becomes STRUCTURALLY IMPOSSIBLE rather than checked
++ P4-consistent (`:` is the same consequence punctuation `@on` uses, D28)
+- motion now lives in two places (score bodies and CSS rules)
+- `score_entry` grammar grows a consequence slot
+- does not compose when one element wants several motions off one window
+
+** Option D — `.progress` value facet
+
+#+begin_src spacetime
+.title { @on &.clip.progress -> $p: --rise($amount: $p); }
+#+end_src
+
++ fully general (arbitrary derivation)
+- heaviest for the common case; nothing in W4/W8 needs arbitrary clip math yet
+
+** Option E — implicit (REJECTED, recorded for completeness)
+
+#+begin_src spacetime
+.title { @on: --rise; }   // "being placed IS the binding"
+#+end_src
+
+Magic. The same rule means different things depending on a distant score.
+Unreviewable in a diff. Rejected.
+
+** Recommendation
+
+A now (it is the mechanism), C later as sugar lowering to A. Both need A's
+negative gate. B's indexing gap only matters once repeat placement is real.
+
+* D2 — percentages inside fragments
+
+** Today, PROBED — the same line means two different things by POSITION
+
+#+begin_src spacetime
+.stage { @score &.time(6s) { &title for 50%; } }   // error[E0951]
+@form score --story { &head for 50%; }
+.stage { @score &.time(6s) { --story; } }          // ACCEPTED, silently
+#+end_src
+
+`check_score_domains` runs over the score's own entries BEFORE fragments splice,
+so a measure inside a fragment is never checked. `demos/score-launch/index.st.md`
+DEPENDS on this hole.
+
+** Option A — check after splicing (close the hole)
+
+`for 50%` becomes an error in both positions.
+
++ one rule, one meaning, no position-dependence
+- KILLS cross-domain fragments, which is R2's entire point: a fragment written
+  `for 50%` could no longer be reused under `&.time`. The thesis needs one
+  fragment to run under both a page clock and a render clock.
+
+** Option B — a fragment's measures are FRAGMENT-RELATIVE (RECOMMENDED)
+
+A percentage inside a fragment means "of the fragment's own span", which is
+domain-independent BY CONSTRUCTION. The splice supplies the scale:
+
+#+begin_src spacetime
+@form score --story {
+  &head for 50%;      // half of whatever span --story is given
+  &tail for 50%;
+}
+
+.page  { @score &.scroll      { --story; } }          // 50% of scroll range
+.film  { @score &.time(60s)   { --story for 20s; } }  // 10s each
+#+end_src
+
++ makes the fragment TRULY portable — the R2 claim becomes true rather than
+  accidental
++ the window map already composes this way (a map over a map); no new runtime
++ explains WHY the two positions differ instead of forcing them to agree
+
+- a fragment spliced with no span needs one: either inherit the parent's whole
+  span, or ERROR. Must be decided (recommend: error under a `declared` domain,
+  inherit under `normalized` — the parent's span IS 0..1 there).
+- `at 2s` inside a fragment stays domain-checked; only RELATIVE measures float.
+
+** Option C — mark the fragment's domain explicitly
+
+#+begin_src spacetime
+@form score --story normalized { &head for 50%; }
+#+end_src
+
++ explicit, checkable at declaration
+- a new keyword on `@form`; and the whole R1 point is that the DRIVER owns the
+  domain, so putting a domain on a fragment reopens that ruling
+
+** Recommendation
+
+B. It is the only option under which R2's portability claim is TRUE. It needs
+the no-span case ruled (error vs inherit) and E0951's message reworded to say
+WHERE it checked.
+
+* D3 — rate sign semantics
+
+** Today, PROBED by sampling the emitted map at t = 0, .25, .5, .75, 1
+
+| rate | samples | verdict |
+|------+---------+---------|
+| 1 | 0 .25 .5 .75 1 | ✓ |
+| 1 -> 2 | 0 .281 .625 1 1 | ✓ finishes early |
+| -1 | 0 .75 .5 .25 0 | ✓ |
+| *-2* | 0 *.5 0 0 0* | ✗ hits start halfway, then DEAD |
+| *1 -> -1* | 0 .188 *.25* .188 0 | ✗ unspecified meaning |
+| *10* | 0 *1 1 1 1* | ✗ 90% of the window dead, silently |
+
+The culprit is `if (area < 0) area = 1 + area` — a correction that fires
+per-sample and happens to be right only when total area is exactly -1.
+
+** Option A — negative rate = reversed ORIGIN (RECOMMENDED)
+
+A negative rate starts the playhead at the clip's END and walks back. Decided
+ONCE from the sign at t=0, not per-sample:
+
+#+begin_src spacetime
+&a for 2s rate -1;    // 1 -> 0 across the window
+&a for 2s rate -2;    // 1 -> 0 across the FIRST HALF, then holds at 0
+#+end_src
+
++ one decision, at one place, from data already present
++ `rate -2` becomes meaningful (fast reverse, then done) instead of nonsense
+
+** Option B — refuse sign-crossing ramps
+
+#+begin_src spacetime
+&a for 2s rate 1 -> -1;   // error: a rate ramp may not cross zero
+#+end_src
+
+Defensible: `1 -> -1` has no single obvious meaning (advance-then-retreat? ease
+to a stop then reverse?). Refusing is honest; the author can write two clips.
+
+** Option C — warn when a rate leaves dead window
+
+#+begin_src spacetime
+&a for 2s rate 10;
+// warning: this clip completes at 10% of its window; 90% is held at its end
+//          value. Use `for 200ms` if that is what you meant.
+#+end_src
+
++ this is the number the author actually wants to know
+- a warning, so it does not make anything impossible
+
+** Recommendation
+
+A + B + C together: A fixes the arithmetic, B refuses the one case with no
+meaning, C surfaces the mis-specification class. Gate by SAMPLING the map with
+the full table above (negatives included) — the existing gate compares emitted
+CONSTANTS and is blind to all of this.
+
+* D4 — the audio model (001b open-q6) — GATES W5
+
+001b says explicitly: pick ONE model before W5, or live and rendered films
+will diverge. Not yet picked.
+
+** Option A — WebAudio live, ffmpeg render, reconciled by a conformance test
+
+#+begin_src spacetime
+.film { @score &.time(60s) {
+  &voice(src: "vo.mp3") at 0s gain 0 -> 1;
+} }
+#+end_src
+
++ each side uses its native, best tool
+- TWO implementations of one declaration — exactly what AGENTS.md §2 forbids;
+  the conformance test (loudness envelope within tolerance) is the ONLY thing
+  keeping them honest, and a tolerance is a place drift hides
+
+** Option B — ffmpeg is the ONLY mixer; live playback plays the rendered mix
+
++ ONE implementation, trivially identical
+- live preview needs a render before audio is heard; kills interactive scrubbing
+
+** Option C — declare the graph, compile it to BOTH targets (RECOMMENDED)
+
+The score declares an audio GRAPH (sources, gains, ducks). One compiler emits a
+WebAudio graph for live and an ffmpeg filtergraph for render — two BACKENDS of
+one declaration, the same way the window map has two callers (rAF live, frame
+/n/ render).
+
++ structurally identical to the choice already made for time (R3), so the
+  family stays one mechanism rather than two
++ conformance becomes a property of the compiler, not a tolerance
+
+- more work up front than A
+- some effects exist on one side only; needs an honest refusal (a live-only
+  effect in a rendered score must ERROR, per P18's renderability warning)
+
+** Recommendation
+
+C, because it is R3's own answer applied to audio, and A is the shape the
+family's own rules forbid. Needs a spike before W5 opens.
+
+* Bonus finding — the spec promises measures that DO NOT PARSE
+
+#+begin_src spacetime
+.stage { @score &.time(10s) { &a for 6f; } }
+// error[E0946]: Expected capture `$entries:body` but no tokens remaining
+#+end_src
+
+FAMILY-README §4 and SIP-001 both show `for beat(16)` and `6f` (frames).
+Neither parses. So `score_measure` today accepts time and percent only.
+
+That is a fifth pending decision in disguise: are frames and beats MEASURES
+(new `score_measure` spellings, domain-checked like the rest) or FUNCTIONS
+(`beat(16)` resolving against a tempo the driver carries)? The music-video
+example in the README depends on the answer, and W5's media work will hit it
+immediately.

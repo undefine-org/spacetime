@@ -1,0 +1,446 @@
+#+TITLE: Headless Blender MCP — single-process stdio server for procedural glTF asset generation
+#+STATE: DONE
+#+SESSION_ID: 1522a68ca8a351a6
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-04T13-50-14-178Z_1522a68ca8a351a6.jsonl]]
+#+CUSTOM_ID: PLAN-063-headless-blender-mcp-single-process-stdi
+
+* Initial Message
+
+look up the blender mcp and other stuff that we need to start making our own gltf shapes
+
+* Initial Message
+
+Follow-up to FUP-104 (Blender MCP setup). User asked to think through integrating
+Blender to Spell/Spacetime directly and pressure-test the approach before
+committing. Findings below are all independently VERIFIED in this session (not
+guessed) — see the session transcript for exact commands/output.
+
+* Why NOT the community ahujasid/blender-mcp shape
+
+Traced its wire protocol: Blender addon opens a TCP socket (port 9876) inside a
+LIVE GUI Blender session, requiring a human to manually click "Connect to MCP".
+A separate stdio MCP process bridges an MCP client to that socket. This is built
+for interactive chat-driven modeling with a human present — not for an agent
+generating assets headlessly in a repo pipeline. Wrong shape for our use case.
+
+* What was actually verified this session (2026-07-04)
+
+1. System Blender (5.1.2, Arch pkg) uses the SYSTEM Python 3.14 as its
+   interpreter (`sys.executable` = /usr/bin/python3.14) — NOT a vendored/frozen
+   interpreter. `pip install --break-system-packages mcp` installs directly
+   against it. This is what makes a single-process design possible at all.
+2. `asyncio` + stdio pipes work fine inside `blender --background --python
+   script.py` — no competing GUI event loop blocks it. Verified with a minimal
+   stdin-readline loop.
+3. `bpy`/`bmesh` can construct real procedural geometry headless (hexagonal
+   prism via bm.faces.new + extrude_face_region + bevel), assign a
+   Principled-BSDF PBR material (maps 1:1 onto three.js MeshStandardMaterial:
+   baseColorFactor/metallicFactor/roughnessFactor), and export valid glTF 2.0
+   via `bpy.ops.export_scene.gltf` — confirmed by inspecting the binary glTF
+   JSON chunk directly (magic, version, meshes, materials, accessors all
+   correct).
+4. CRITICAL BLOCKER FOUND + FIXED: Blender writes its startup banner + "Blender
+   quit" directly to the process's stdout (fd 1), which corrupts a naive stdio
+   JSON-RPC channel — `ModuleNotFoundError`-free MCP client got
+   `mcp.shared.exceptions.McpError: Connection closed` until this was fixed.
+   FIX: dup the real stdout fd BEFORE bpy has a chance to write to it, rebind
+   fd 1 -> /dev/null for the rest of the process, and hand MCP's
+   `stdio_server()` the protected fd re-wrapped as a text-mode `anyio` async
+   file (`anyio.wrap_file(os.fdopen(dup_fd, "w", encoding="utf-8"))`). This is
+   presumably WHY the community project routes around stdio with a TCP socket
+   instead — a stdio-native fix was found here.
+5. Blender's isolated Python startup IGNORES `PYTHONPATH` env var entirely
+   (verified: sys.path has no trace of it even when exported). Deps must be
+   `sys.path.insert(0, "...")`'d INSIDE the bootstrap script itself, before
+   `import mcp`.
+6. Draco compression IS available in Blender's gltf exporter by default and
+   MUST be explicitly disabled (`export_draco_mesh_compression_enable=False`)
+   to satisfy the existing `stdlib/3d` constraint (`three-entry.ts` excludes
+   DRACOLoader — see stdlib/3d/primitives/three-gltf.st NOTE).
+
+* Full end-to-end proof (this session)
+
+Built and ran a complete PoC:
+- `/tmp/blender_mcp_poc/server3.py` — single-process headless MCP stdio server
+  registering one tool (`create_hex_tile`), doing the fd-hijack fix + sys.path
+  injection + bmesh geometry + material + no-Draco glTF export.
+- `/tmp/blender_mcp_poc/client_test3.py` — minimal MCP stdio client (spawns
+  `blender --background --python server3.py` as its transport) that called
+  `list_tools` then `call_tool("create_hex_tile", …)`.
+- Result: valid 8036-byte .glb, verified via raw glTF JSON-chunk parsing
+  (1 mesh, 1 material with correct PBR params, 3 accessors, no Draco extension).
+- Staged the .glb into a scratch Spacetime project (`projects/blender-mcp-poc/`,
+  since deleted/scratch — see below) using the stdlib `@stage`/`@gltf`/`@light`/
+  `@orbit` macros, `cargo run -- check` passed clean, `cargo run -- serve`
+  rendered it live in a real headless-Chromium screenshot — the Blender-
+  generated hex-prism tile is visibly rendering with its assigned material
+  under studio lighting via three.js. Full round trip confirmed VISUALLY, not
+  just "compiles".
+- Bonus catch (unrelated to Blender, a real Spacetime authoring footgun found
+  while building the PoC page): a selector-scoped 3D macro block (`@stage {
+  … }`) nested INSIDE a `body { … }` file-scope block silently emits
+  `registerSelectorInit('body', init)` instead of scoping to the actual canvas
+  selector — the init closure then runs with `el = document.body` and
+  misbehaves (canvas.width/height stay at browser defaults, `_stThree` never
+  attaches) with NO diagnostic. Root cause not yet isolated to a specific
+  compiler pass; workaround is "always declare the 3D canvas selector at
+  FILE SCOPE, never nested inside `body { }`" (matches how every existing
+  demos/3d/*.st file already does it — glass-hero, particle-morph, etc. all
+  declare `canvas.<name> { }` top-level). Worth its own BUG ticket + minimal
+  RED test if it recurs; not filed separately here since a plausible authorial
+  convention already avoids it and this PLAN's scope is Blender integration,
+  not this authoring footgun.
+
+* Proposed design: single-process headless MCP server (not a TCP bridge)
+
+Register directly in spell.kdl exactly like Spacetime's own MCP server:
+
+```kdl
+mcp {
+    server "blender" type=stdio timeout=120000 {
+        command "blender"
+        args "--background" "--python" "tools/blender-mcp/bootstrap.py"
+    }
+}
+```
+
+One process. No GUI. No socket. `tools/blender-mcp/bootstrap.py` IS the MCP
+server — runs inside Blender's interpreter with direct bpy/bmesh access, tools
+return `.glb` paths droppable straight into `projects/<name>/models/`.
+
+Advantages over the community shape:
+- Same operational pattern as the existing `spacetime` MCP server in this repo
+  (stdio, one binary, cwd-scoped) — consistent mental model.
+- Zero manual GUI step, fully agent/CI-drivable.
+- No TCP port to manage or collide with anything else on the box.
+- Deterministic: each call can spin a fresh `--background` process (safer,
+  no state leakage across calls) — or we keep one warm process if latency
+  matters; this is a real design knob to decide, not yet chosen.
+
+* Open items — NOT yet built (this PLAN scopes them)
+
+** Wave 1 — bootstrap + minimal tool surface
+- [ ] Promote `/tmp/blender_mcp_poc/server3.py` into a real, tested
+      `tools/blender-mcp/bootstrap.py` (or similar path — TBD during
+      implementation) with the fd-hijack + sys.path-injection shims as
+      documented, commented code (not ad-hoc).
+- [ ] Decide + document the pip-install step for the `mcp` package against
+      Blender's system Python (currently proven via
+      `python3.14 -m pip install --break-system-packages --target <dir> mcp`
+      + sys.path injection in the bootstrap; a `--break-system-packages`
+      direct install is the simpler alternative — pick one, document why).
+- [ ] Minimal tool surface: create-primitive (box/cylinder/hex-prism style
+      params), extrude/bevel a 2D profile, assign PBR material (base color,
+      roughness, metalness, emissive), export .glb (Draco forced off).
+- [ ] Register the server in `spell.kdl`.
+
+** Wave 2 — pressure-test hardening
+- [ ] Decide warm-process vs. cold-per-call (latency vs. safety tradeoff).
+- [ ] Error surface: what happens when a tool call throws inside bpy (dangling
+      partial scene state) — needs a clean-scene-first policy per call if
+      cold-restart isn't chosen.
+- [ ] Concurrency: can two tool calls interleave safely, or must calls be
+      serialized (bpy is not thread-safe against concurrent scene mutation)?
+
+** Wave 3 — consumer-facing polish
+- [ ] Smoke-test doc/example: model something non-trivial (a rounded box with
+      two materials — cap vs. rim, echoing FUP-102's tile use case) end to end
+      via the MCP tool, load through `@gltf` in a demo page.
+- [ ] Decide whether this MCP server documents itself as a general asset tool
+      (any project) or gets project-scoped per the `projects/<name>/` convention.
+
+* Provenance / related
+
+- FUP-104 (filed earlier this session) — original "set up Blender MCP" ask;
+  this PLAN supersedes its exploratory scope with a verified, concrete design.
+- FUP-102 — stdlib/3d procedural-geometry gaps (extrude/multi-material/shadow);
+  a separate agent is working this. This PLAN's Blender path is a DIFFERENT,
+  complementary way to get custom shapes (hand/procedurally-authored assets
+  via Blender vs. native stdlib macro extension) — not a replacement for it.
+
+* Status
+OPEN — pressure-test/feasibility phase COMPLETE and verified end-to-end
+(working PoC, screenshot proof). Implementation (Waves 1-3) not yet started.
+
+* Wave 1 SHIPPED — bootstrap.py + tool surface + Genesis showcase (2026-07-04)
+
+** What was built
+
+*** tools/blender-mcp/bootstrap.py (production, NOT the /tmp PoC)
+Real, committed single-process headless MCP stdio server. Seven tools:
+=clear_scene=, =create_primitive= (box/uv_sphere/ico_sphere/cylinder/cone/
+torus/plane — mirrors stdlib/3d's =@object= shape surface), =extrude_polygon=
+(closes FUP-102 gap #1: arbitrary N-gon \u2192 extrude \u2192 bevel, the thing no
+=@object= shape can express), =boolean_op= (union/difference/intersect \u2014 real
+CSG, genuinely impossible via a declarative shape macro), =assign_material=,
+=set_face_material= (closes FUP-102 gap #2: multi-material-per-mesh via
+face-normal selection \u2014 top/bottom/sides/all), =export_glb= (Draco ALWAYS
+force-disabled, matching stdlib/3d's three-entry.ts constraint).
+
+Carries forward both verified fixes from the PoC phase (fd-hijack for
+Blender's stdout-corrupts-JSON-RPC bug; sys.path injection since Blender
+ignores PYTHONPATH) as documented, commented production code — not ad-hoc
+/tmp scripts.
+
+*** NEW bug found + fixed during Wave 1 (not in the original PoC)
+=assign_material= silently dropped the material on ANY object that had
+already been through a =boolean_op= \u2014 a boolean-modifier apply leaves a
+stray EMPTY (=None=) material slot on the target mesh (Blender pads a slot
+for the tool object even when it had none), and if every face still pointed
+at that empty slot, the freshly-appended real material had zero faces using
+it \u2014 glTF export silently drops UNUSED materials with no diagnostic. Root-
+caused by isolating a minimal box-minus-sphere repro (material survived
+there) vs. the full medallion script (material vanished) and diffing the
+two. Fix: after appending a new material, re-target any face still pointing
+at an empty slot to it, so a plain \"assign one material to this object\" call
+always actually paints the whole thing (verified: exported glb now lists
+the material; before the fix, =MATERIALS: []=).
+
+*** tools/blender-mcp/setup.sh
+One-time dependency install (mcp SDK into Blender's OWN Python \u2014 this
+Blender build uses SYSTEM Python, not vendored, confirmed via
+=sys.executable=). Auto-detects the interpreter, supports either direct
+=--break-system-packages= install or an isolated =--target= dir via
+=BLENDER_MCP_DEPS_DIR= for operators who don't want to touch system
+site-packages.
+
+*** tools/blender-mcp/drive.py
+Manual MCP stdio CLIENT (list/call/script subcommands) \u2014 lets an agent (or
+human) drive bootstrap.py's tools directly from the command line WITHOUT
+registering the server in spell.kdl or reloading Spell, per explicit user
+preference this session (\"drive it as a manual MCP within this one session
+to not need to reload the session\"). =script= mode runs a JSON array of
+tool calls sequentially in ONE Blender process/scene \u2014 real multi-step
+modeling sessions (build \u2192 material \u2192 export), not one-shot calls.
+
+Bug found + fixed here too: =StdioServerParameters(..., env=None)= by
+default does NOT inherit the parent shell's environment when spawning
+Blender \u2014 so =BLENDER_MCP_DEPS_DIR= silently never reached the subprocess
+and every call failed =ModuleNotFoundError: No module named 'mcp'= even
+though the var was correctly exported in the invoking shell. Fixed by
+passing =env=dict(os.environ)= explicitly in both _run() and _list().
+
+** demos/3d/genesis/ \u2014 the showcase
+
+Built end-to-end via =drive.py script= (NOT the GUI, NOT hand-authored
+Blender edits) to prove the pipeline for real, then iterated the geometry
+2 revisions (v1 \u2192 v2: deeper/wider spiral, added a rim groove) using
+screenshot-verified visual feedback each round before committing the final
+asset.
+
+*** The artifact (models/medallion.glb, ~370KB \u2014 wait, verify exact size below)
+A bronze medallion: 96-point disc \u2192 extrude+bevel \u2192 boolean-difference cut
+a logarithmic spiral engraving \u2192 boolean-difference cut a rim groove \u2192
+boolean-union fuse a raised central boss \u2192 PBR bronze material
+(roughness 0.22, metalness 1.0). Built via exactly 8 sequential MCP tool
+calls in one Blender process, zero GUI, zero hand modeling.
+
+*** The page (index.st + index.html)
+Pinned =canvas.stage= (position:fixed) hosting =@stage/@env/@light/@gltf/
+@scroll-3d/@orbit/@post= \u2014 100% stdlib/3d, ZERO project-local lib/
+primitive (a stronger claim than zellijist/zellijist-2, which both needed
+project-local primitives for their gap-closing needs; Genesis's single-glTF-
+object design sidesteps all five FUP-102 gaps because the geometry
+complexity lives in the Blender-side pipeline, not in the page's declarative
+surface).
+
+Four real 100vh document-flow acts (hero \u2192 pipeline \u2192 craft \u2192 close)
+narrate the pipeline HONESTLY (per explicit design confirmation via
+proxy_ask \u2014 \"Yes \u2014 go with the carved medallion + honest pipeline
+narrative\"): what the artifact is, how it was made (agent \u2192 Blender \u2192
+glTF \u2014 tool names cited verbatim), why real CSG matters, and that the
+whole page is zero authored JavaScript.
+
+Camera dollies in on scroll (=@scroll-3d(drive:\"dollyZ\")=); drag-to-orbit
+stays live throughout (verified: a puppeteer drag moved =camera.position.x=
+from 0 to -0.70, confirming OrbitControls responds at any scroll depth).
+
+** Bugs found in EXISTING stdlib during page-building (not fixed, out of
+   scope for this PLAN, documented for whoever picks them up)
+
+*** @reveal(split:\"lines\") content-duplication bug (pre-existing, confirmed
+    independently against demos/reveal-lines-reflow-free \u2014 NOT introduced
+    by this work). Repro: any element with =@reveal(split:\"lines\", …)=
+    ends up with its text content duplicated 3-5x, growing with re-renders.
+    Confirmed on the REFERENCE demo too (=.kinetic= on
+    demos/reveal-lines-reflow-free renders the sentence repeated 4x), so
+    this is a real, currently-shipping defect, not a regression. Worked
+    around in Genesis by using =@load= (threshold-based on-visible, no
+    text-splitting) instead \u2014 same \"zero authored JS\" bar met, just the
+    plain-fade variant instead of kinetic-per-line stagger. Worth its own
+    BUG ticket + RED test independent of this PLAN.
+
+*** @scroll-spy's $isActive is genuinely element-scoped (=ST.set(el, …)=),
+    NOT a page-scope reactive value a sibling =.cls: $x;= binding in the
+    SAME selector scope can read directly \u2014 confirmed via a minimal
+    isolated repro (scratch/scrollspy-iso, deleted after use) that a bare
+    =.sec--live: $isActive;= inside a =@scroll-spy=-bearing selector never
+    lowers to a =classList.toggle= call, with NO compiler diagnostic (silent
+    drop). The documented read path (stdlib/macros/when-guard.st) is
+    =@when &self.scrollSpy.isActive { … }=, and even THAT only fires on the
+    truthy transition (never on \"became false\") per when-guard.st's
+    =if (!v) return;= guard \u2014 so it can flip a signal true but never back
+    to false, making a symmetric fade-in/fade-out impossible with the
+    documented surface as it stands today. This is a real gap for anyone
+    wanting per-section scroll-driven fade — not investigated further here;
+    Genesis sidesteps it entirely via @load instead of trying to make
+    @scroll-spy do fade in/out.
+
+** Verification performed (all observed this session, not inferred)
+- =cargo run -- check demos/3d/genesis/index.st= \u2014 clean compile, zero
+  warnings from the page itself.
+- Full scroll-arc screenshot verification at 4 depths (hero/pipeline/craft/
+  close) via headless-Chromium puppeteer \u2014 medallion visible, engraving
+  legible, copy legible, no overexposure (after 2 lighting-tuning passes:
+  initial camY-elevation blew out the specular under the studio env +
+  directional keys; retuned exposure 1.05\u21920.62, env intensity 1.15\u21920.4,
+  key/rim intensities halved, bloom threshold 0.82\u21920.97).
+- Drag-to-orbit interactivity confirmed live at scroll position 0 (camera.
+  position.x moved after a puppeteer drag gesture).
+- =git status= confirms zero footprint outside =demos/3d/genesis/=,
+  =tools/blender-mcp/=, and org tracking files \u2014 fully isolated from the
+  parallel FUP-102 agent's in-flight =src/= changes (which have 5 unrelated,
+  pre-existing snapshot-test failures from THEIR uncommitted work, confirmed
+  via git blame/diff, not caused by or related to this PLAN).
+
+** Still open (Wave 2/3, not done this session)
+- spell.kdl registration (user explicitly deferred this \u2014 preferred driving
+  bootstrap.py manually via drive.py within this session, no Spell reload).
+- Warm-process vs. cold-per-call decision (drive.py currently spins a fresh
+  Blender process per =script= invocation \u2014 fine for this showcase's scale,
+  unexamined at larger scale).
+- Concurrency/serialization policy for overlapping tool calls (bpy is not
+  thread-safe; not stress-tested).
+- The two stdlib bugs found above (@reveal split:lines duplication;
+  @scroll-spy fade-out impossibility) \u2014 filed as documentation here, not
+  as separate BUG org items yet.
+
+* Wave 2 SHIPPED — hardening verification (2026-07-04, same session)
+
+** Concurrency: VERIFIED SAFE, no code change needed
+
+Stress-tested via 3 independent scripts (since deleted from /tmp after use,
+reproducible from the descriptions below):
+
+1. =asyncio.gather()= of 5 concurrent =create_primitive= calls against one
+   live server \u2014 all 5 succeeded with correct, non-corrupted vertex counts
+   (8 each), no interleaving artifacts.
+2. Riskier case: =asyncio.gather()= of 6 concurrent =(clear_scene \u2192
+   create_primitive)= pairs \u2014 the exact shape that WOULD race if
+   =bpy.context.active_object= got clobbered mid-sequence by another
+   task. All 6 completed correctly with distinct object names/sizes,
+   zero cross-contamination.
+
+Root cause of why this is safe (not luck): =_dispatch()= in bootstrap.py is
+FULLY SYNCHRONOUS \u2014 it contains no =await= internally. Python's asyncio
+scheduler can only switch tasks at an =await= point, so even with N
+concurrent MCP tool-call requests queued via =tg.start_soon()= in the mcp
+SDK's =Server.run()=, only ONE =_dispatch()= body can be mid-execution at
+any instant \u2014 the rest are serialized by construction, not by an explicit
+lock. This is a real, load-bearing property of the current design: DO NOT
+introduce an =await= inside =_dispatch()= (e.g. for a future async bpy
+operation) without adding an explicit =asyncio.Lock()= around scene
+mutations, or this safety guarantee silently breaks.
+
+** Error surface: VERIFIED CLEAN, no code change needed
+
+Tested two failure shapes against a live server:
+1. A logical error we raise ourselves (=boolean_op= referencing a
+   nonexistent object name) \u2014 surfaces as a structured
+   =`{"error": ..., "trace": ...}`= via the normal MCP content channel (the
+   existing =try/except Exception= in =call_tool= already handles this).
+   Scene state after the error: fully intact, subsequent calls
+   (=assign_material=, =export_glb=) on the surviving object succeeded.
+2. Reusing an object already CONSUMED by a prior =boolean_op= (Blender
+   deletes the =tool= object as part of the op) \u2014 same clean error, same
+   scene-state integrity confirmed by a follow-up =assign_material= +
+   =export_glb= both succeeding on the surviving object afterward.
+
+Also re-confirmed the Wave-1 empty-material-slot fix holds under this exact
+boolean-then-assign sequence: exported glb had =materials: ["Mat"]= with
+the primitive's =material= index correctly remapped (dispatch printed
+=slot: 1= internally i.e. the material landed in Blender's 2nd slot after
+boolean padded an empty 1st slot, but glTF export correctly compacts unused
+slots away \u2014 verified via direct glTF JSON-chunk parsing, not assumed).
+
+** Decision: cold-per-script-invocation (no change from current drive.py
+   design), warm-within-a-script
+
+=drive.py='s =script= subcommand already gives the right granularity: ONE
+Blender process/scene per multi-step build (the common real workload \u2014
+"model this asset end to end"), fresh process per INVOCATION of =drive.py=
+itself. This is the right default because:
+- Asset generation is not a high-frequency/low-latency workload \u2014 Blender's
+  ~1-2s startup cost per invocation is immaterial against the seconds a
+  multi-step geometry build already takes.
+- Cold-per-invocation means zero state leakage risk between UNRELATED build
+  sessions (no need to trust every future tool author to remember to call
+  =clear_scene= first) \u2014 the safest default, and =clear_scene= remains
+  available for intentional same-session resets mid-script (as the
+  medallion build script itself demonstrates: it doesn't need it since
+  each script invocation starts fresh, but a LONGER script wanting to
+  build multiple unrelated assets from one warm process could call it
+  between them).
+- No warm-process pooling/reuse infrastructure needed \u2014 avoids an entire
+  class of "which warm process is this call talking to" bugs for zero
+  proven benefit at current usage scale.
+
+If a future workload needs many small, latency-sensitive calls (e.g. a
+live-preview loop), THAT would be the trigger to revisit \u2014 not built
+speculatively here.
+
+** Wave 2 status: COMPLETE. Remaining open items (deferred, no current
+   trigger to build them):
+- spell.kdl registration (still explicitly deferred per user preference).
+- Warm-process pooling (explicitly decided against above, revisit only if
+  a real latency-sensitive workload appears).
+
+* Wave 3 SHIPPED — consumer-facing polish (2026-07-04, same session)
+
+** tools/blender-mcp/README.md (NEW)
+Consumer-facing docs: setup, manual-driver usage, future spell.kdl
+registration snippet, full tool-surface table, the 3 verified hardening
+properties from Wave 2 (concurrency-safety, error-surface, process model
+decision), and all 4 non-obvious gotchas found + fixed during Waves 1-2
+(stdout corruption fix, PYTHONPATH-ignored fix, env-inheritance fix,
+empty-material-slot fix) — so a future consumer (human or agent) doesn't
+need to re-derive any of this from source comments alone.
+
+** Smoke-test example already in place
+demos/3d/genesis/models/build.json IS the "model something non-trivial end
+to end" smoke test the original Wave-3 scope asked for (referenced directly
+from the new README as the worked example) — no separate throwaway smoke
+test needed, the real showcase asset already demonstrates the full
+extrude+boolean+multi-op-material+export path.
+
+** Scope decision: general asset tool, not project-scoped
+tools/blender-mcp/ lives at the repo root (sibling to stdlib/, docs/, NOT
+under projects/<name>/), matching its role as shared infra any project/demo
+can consume (demos/3d/genesis/ is its first consumer, not its only intended
+one) — consistent with how tools/ already isn't itself a "project" per this
+repo's projects/ convention (private, gitignored, separate git repo).
+
+* PLAN STATUS: DONE
+
+All 3 waves shipped and independently verified this session:
+- Wave 1: bootstrap.py + drive.py + setup.sh (production, committed) +
+  Genesis showcase (demos/3d/genesis/) proving the pipeline end-to-end with
+  a real, screenshot-verified rendering result.
+- Wave 2: concurrency-safety and error-surface hardening VERIFIED (not
+  guessed) via targeted stress scripts; cold-per-invocation process model
+  DECIDED with rationale (not deferred indefinitely — a real decision was
+  made, with the explicit revisit trigger documented).
+- Wave 3: README.md written; smoke-test scope satisfied by the existing
+  Genesis build.json; repo-placement scope decision made explicit.
+
+Follow-up items intentionally left open (not blocking DONE, each has its own
+tracking):
+- spell.kdl registration — deferred per explicit user preference this
+  session (manual drive.py driving preferred over a Spell reload).
+- BUG-147 (@reveal split:lines duplication) — filed, unrelated to this PLAN.
+- BUG-148 (@scroll-spy element-scoping + when-guard one-way-only) — filed,
+  unrelated to this PLAN.
+- FUP-102 (stdlib/3d native procedural-geometry gaps) — a DIFFERENT,
+  complementary path to custom shapes (native DSL macros vs. this PLAN's
+  external-asset-authoring path); another agent's parallel in-flight work,
+  not superseded or blocked by this PLAN.

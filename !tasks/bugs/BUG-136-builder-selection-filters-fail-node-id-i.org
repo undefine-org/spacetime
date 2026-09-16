@@ -1,0 +1,56 @@
+#+TITLE: Builder selection filters fail: node id is int but $selectedNode is string
+#+STATE: DONE
+#+SESSION_ID: 1510d7e0efe8848c
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-20T17-53-05-983Z_1510d7e0efe8848c.jsonl]]
+#+CUSTOM_ID: BUG-136-builder-selection-filters-fail-node-id-i
+#+COMPLETION_HASH: 454b8630fb890302
+
+* Initial Message
+
+please showcase this (I reloaded the session, you can start the MCP), then tell me what we should do next
+
+* Symptom
+In the MCP builder, selecting a navigator node does NOT filter the inspector to
+that node. Live (2026-06-21, post-restart): clicking card node id 1 sets
+$selectedNode = "1" correctly, but:
+- the SELECTED NODE detail (B3) shows ALL nodes (main, card, card), not just the
+  selected one;
+- the B4 editable param rows show ALL 4 rows (both cards' params), not the
+  selected node's 2;
+- the navigator highlight `data-active` is "" not "true" for the selected node.
+
+* Root cause (VERIFIED live)
+The structure projection emits node `id` as a JSON NUMBER (the usize walk counter:
+0,1,2 — confirmed via input.json: `node id= 1 type int`). The selection signal
+`$selectedNode` is sourced from `$.dataset.node` — a DOM attribute, which is
+ALWAYS a STRING ("1"). The reactive comparisons:
+  - `@each($mcpStageStructure as $node, when $node.id == $selectedNode)` (B3 detail)
+  - `@each($mcpStageNodeParams as $p, when $p.node_id == $selectedNode)` (B4 rows)
+  - `data-active="`$node.id == $selectedNode`"` (B2/B3 highlight)
+all compare int(1) == string("1"), which is FALSE in the ST runtime's equality.
+So every filter either matches nothing (or, where the container shows unfiltered
+children, shows everything).
+
+* Fix (LANDED)
+Emit the structure node `id` as a STRING (`id.to_string()`) in
+stage_structure_from_bundle (both the template-node and extern-node push sites,
+src/mcp/live.rs ~754/785). `stage_node_params_from_structure` inherits it via
+`node.get("id")` -> node_id string. DOM dataset values are always strings, so a
+string id is the NATURAL type for the selection comparison — no runtime equality
+change needed. Updated the B4 projection test to assert node_id.is_string().
+mcp::live 52 green.
+
+* Impact
+Fixes B2 highlight + B3 node-detail filter + B4 editable-param filter in ONE
+change (all three ride the same id==selectedNode comparison). The earlier session
+notes claimed B3 selection "worked"; live verification on the restarted binary
+showed it did not (the unit tests asserted projection SHAPE, not the int/string
+equality that only fails at the JS reactive layer — a fidelity-ladder gap: the
+Rust test couldn't catch a JS-equality bug).
+
+* Provenance
+Found during live B4 end-to-end verification on the restarted MCP server
+(port 39135), 2026-06-21. Confirmed id type via input.json + $selectedNode type
+via ST.get in the browser.
+
+NOTE [2026-06-21]: FIXED + LIVE-VERIFIED 2026-06-21 (commits e05c64b1 string-id, + CSS fix this commit). After restart: node ids are strings ('1','2'); clicking node 2 correctly scopes B3 detail (1 visible card: Cortado/$4.00), B4 param rows (node 1's span-134 rows display:none, node 2's span-178 rows display:flex), and the nav highlight attr (data-active present only on node 2). Screenshot scratch/bug136-verified.png shows the inspector scoped to node 2. SECONDARY fix folded in: a reactive BOOLEAN attr renders true as data-active="" (EMPTY string) + removes when false, so the highlight CSS [data-active="true"] NEVER matched — changed to [data-active] (presence). That CSS lives in the mcp-workbench function (compiled once at server start, NOT disk-overlay hot-reloaded), so it needs the next restart to light up visually; the filter/selection logic is fully verified. The string-id root cause + presence-selector are both correct fixes.

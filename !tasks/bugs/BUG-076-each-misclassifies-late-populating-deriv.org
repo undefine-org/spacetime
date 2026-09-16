@@ -1,0 +1,43 @@
+#+TITLE: @each misclassifies late-populating derived source (no render)
+#+STATE: ITEM
+#+SESSION_ID: 14fc108ed3772fa8
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-04T14-32-37-965Z_14fc108ed3772fa8.jsonl]]
+#+CUSTOM_ID: BUG-076-each-misclassifies-late-populating-deriv
+
+* Initial Message
+
+what do you need from me to implement FEAT-076 fully and in a Spacetime-y way? I am going to sleep so you'll auto-accept the most ambitious and Spacetime-y choice every time (unlimited budget). Ask me questions one last time, if needed, before going off
+
+* BUG — @each binds to ONE source channel by init-time snapshot; late derived sources never render
+
+** Parent
+[[id:FEAT-076-rebuild-the-cms-admin-multi-file-the-pro]] W1. Surfaced by the admin rail: @each($collections) where $collections is a @data derive over a fetched $site.
+
+** Symptom (RED, reproduced in browser)
+each-with-templates (stdlib/primitives/template.st) decided its source channel with a
+one-shot snapshot at init:
+  const isLocalSource = sourceName in window.SpacetimeLocal;  // at init only
+  if (isLocalSource) { listen local:<name>:updated + initial render }
+  else { ST.afterData(<name>) }   // @data registry only
+A `@data derive $collections : $site.collections` is NOT in SpacetimeLocal at @each-init
+time (its fetched dep $site resolves later). So @each takes the ELSE branch (afterData),
+but a DERIVE is not a data-source → afterData never fires. When the derive later recomputes
+and dispatches `local:collections:updated`, NO listener is attached (it was only added in
+the IF branch). Result: the list renders ZERO items forever, even though the signal holds
+the correct array. Verified: SpacetimeLocal.collections = [2 items], nav children = 0.
+
+** Root cause
+The two channels (local:<name>:updated event vs ST.afterData registry) were treated as
+mutually exclusive, chosen by a snapshot that races late-resolving derived/fold sources.
+
+** Fix (GREEN, stdlib only)
+Wire BOTH channels unconditionally in each-with-templates: always addEventListener
+local:<name>:updated AND ST.afterData(name), plus an initial render from whichever channel
+already holds data. render() diffs against lastData so a double-arrival collapses to one
+paint (idempotent). Same unification the data-source primitive already documents ("unifies
+the two signal channels"). `update()` closure likewise reads from any channel.
+
+** Acceptance
+- [ ] @each over a @data derive/fold source renders when the source resolves late.
+- [ ] @each over @data fetch + @data inline + local mutation still render (no regression).
+- [ ] V8/browser: admin rail @each($collections) shows the collection buttons.

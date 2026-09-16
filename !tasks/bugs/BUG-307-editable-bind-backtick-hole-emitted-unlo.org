@@ -1,0 +1,20 @@
+#+TITLE: @editable bind backtick hole emitted unlowered under raw from_ast compile (v8 per-instance test red)
+#+STATE: ITEM
+#+SESSION_ID: 1534a2eae1903af0
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-18T13-07-01-638Z_1534a2eae1903af0.jsonl]]
+#+CUSTOM_ID: BUG-307-editable-bind-backtick-hole-emitted-unlo
+
+* Found
+2026-08-05, during PLAN-135 W3 full-suite verification. (Prior-session notes referenced this break as "BUG-272" but no org item was ever filed.)
+
+* The failing gate
+tests/v8_runtime_test.rs → `v8_runtime::per_instance_compiled_tests::editable_bind_is_per_instance_across_two_compiled_instances` — the ONLY red test in the 469-test v8 suite (as of a1878e40).
+
+The test compiles a page with `@template &fld($f)` whose `.fld { @editable(bind: `$f.value`); }` is instantiated twice ({value:"alpha"}, {value:"beta"}), via raw `Compiler::from_ast` (no stdlib import). Assertion 1 passes (`js.contains("f.value")`); assertion 2 FAILS: `!js.contains("`$f.value`")` — the bind's backtick hole is emitted UNLOWERED as a literal string into the compiled JS.
+
+* Root cause (two breaks, per prior-session investigation)
+1. `%binds` targets `editable-surface`, which lives in opt-in `stdlib/editable` — not resolvable via a raw `Compiler::from_ast` compile with no stdlib import, so the bind never lowers.
+2. The test's negative assertion can also false-positive on the primitive's own doc comment if the literal ever appears in bundled prelude JS.
+
+* Verified
+Pre-existing at HEAD a1878e40; untouched by the BUG-297/PLAN-135 W3 diff (no editable files changed there). The fix likely belongs in the per-instance template compile path (the bind must lower against the instance's scope even when editable-surface's %binds registry row is absent), or the test needs the stdlib/editable import it implicitly assumes.

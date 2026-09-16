@@ -1,0 +1,69 @@
+#+TITLE: %primitive body binding `const el = %&el` silently shadows the selector-init param (self-referential dead binding) — lint or rename guidance
+#+STATE: DONE
+#+SESSION_ID: 153c9c68ea93c166
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-24T17-46-26-602Z_153c9c68ea93c166.jsonl]]
+#+CUSTOM_ID: BUG-231-primitive-body-binding-const-el-el-silen
+#+COMPLETION_HASH: 79f5cf2b426d7d74
+
+* Initial Message
+
+look at the spacetime_lv and do a review and show me the features that would be most exciting for you to do there
+
+* Initial Message
+Surfaced by FUP-142 SPIKE 4 (2026-07-24) writing a `@field` primitive.
+
+* Symptom
+A `%primitive` whose `%emit js` body binds a local named `el` from `%&el`:
+: %emit js {
+:   (() => {
+:     const el = %&el;   // <-- footgun
+:     el.addEventListener(...);   // never runs
+:   })();
+: }
+compiles into the selector-init wrapper, which ALREADY binds the element as `el`:
+: const init = function(el) {
+:   if (el._st_init_xxx) return;
+:   el._st_init_xxx = true;
+:   (() => {
+:     const el = el;   // <-- self-referential: inner const shadows param,
+:                      //     reads the not-yet-initialized inner `el` (TDZ/undefined)
+:     ...
+:   })();
+: };
+Result: the primitive's body silently no-ops (listeners never attach, no error).
+
+* Reproduction
+FUP-142 field.st first cut used `const el = %&el` → the @field input listener
+never fired; browser showed values never updating. Renaming the local to `node`
+fixed it immediately (verified: `const node = el` is valid; 4 occurrences, all
+work).
+
+* Root cause
+`%&el` substitutes to the literal identifier `el` (the selector-init param name).
+Any primitive body that reintroduces `const el = %&el` creates `const el = el`,
+which JS evaluates as a self-reference in the TDZ of the inner binding.
+
+* Fix options (pick, then implement)
+1. LINT (preferred, cheap): warn when a `%emit js` body declares `const/let el`
+   (or any name colliding with the selector-init param) — "primitive-body local
+   `el` shadows the selector-init element param; rename to `node`/`self`". This
+   catches every future author.
+2. RENAME the selector-init param to something unlikely to collide (e.g. `__el`)
+   so `const el = %&el` is safe. Riskier (touches emit for every primitive) and
+   just moves the collision surface.
+3. DOC: add a "do not name a primitive-body local `el`" note to the %primitive
+   authoring guide. Weakest (relies on authors reading it).
+
+RECOMMEND option 1 (lint) + option 3 (doc). Option 2 only if the lint proves
+insufficient.
+
+* Acceptance
+- A `%primitive` with `const el = %&el` in its body triggers a compile warning
+  naming the shadow.
+- The %primitive authoring doc notes the reserved `el` name.
+
+* Relation
+Found via FUP-142 forms `@field` sugar. General primitive-authoring trap,
+orthogonal to forms.
+
+NOTE [2026-07-26]: DONE 2026-07-24 via PLAN-119 W6 (commit 64226ae2). A %primitive %emit js body declaring `const el = %&el` silently shadowed the selector-init param and no-oped. Now emits W0115 warning "primitive-body local 'el' shadows the selector-init element param; rename to 'node'/'self'", scoped to the selector-init path + the exact `el` identifier (no false positive on `const node` or non-selector emit). Doc: docs/language/primitives.md "Selector-init local names". Test: pipeline::emit::tests::selector_init_warns_when_primitive_body_shadows_el. Chose the lint option (option 1, preferred in the bug) + doc (option 3).

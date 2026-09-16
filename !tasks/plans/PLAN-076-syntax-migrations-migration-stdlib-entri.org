@@ -1,0 +1,433 @@
+#+TITLE: Syntax migrations: %migration stdlib entries, dated waves, compat shim, dev-dock pill
+#+STATE: DONE
+#+SESSION_ID: 1534a246b3aa1d15
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-18T13-04-13-518Z_1534a246b3aa1d15.jsonl]]
+#+CUSTOM_ID: PLAN-076-syntax-migrations-migration-stdlib-entri
+#+COMPLETION_HASH: bcac99e63d6ccfb4
+
+* Initial Message
+
+i want us to design a system where the stdlib has 'migrations', i.e. a macro that takes old st syntax and turns it to new st syntax. the macro should include the date so that we can order the migrations by syntax and apply syntax waves. It should be shown in all dev environments next to the current host pill, in the same style as the host pill
+
+* Initial Message
+
+"i want us to design a system where the stdlib has 'migrations', i.e. a
+macro that takes old st syntax and turns it to new st syntax. the macro
+should include the date so that we can order the migrations by syntax
+and apply syntax waves. It should be shown in all dev environments next
+to the current host pill, in the same style as the host pill"
+
+User decisions (asked + answered this session):
+- Semantics: COMPAT SHIM — old syntax keeps compiling via in-memory
+  rewrite + warning; the pill persists the rewrite to disk on click.
+- Apply UX: pill expands to a panel (host-pill pattern): waves listed
+  with pending counts, per-wave Apply button, then live-reload.
+- Scope: DESIGN ONLY this session — this PLAN is the deliverable,
+  reviewed before any implementation.
+
+* Problem
+
+Spacetime evolves its authoring surface aggressively (pre-release, hard
+cutovers: FEAT-072 killed @bind/@show/@input; PLAN-023 W5 killed the
+paren-forms of @data/@each/@computed). Today each retirement costs:
+
+1. A hand-written tombstone `%form` in stdlib (keeps the directive
+   RECOGNIZED so it fails loud, not silently dropped) — e.g.
+   stdlib/macros/data.st `%macro bind/show/input-bind`.
+2. A hardcoded Rust checker per retirement —
+   `check_bind_deprecation()` + `bind_migration_hint()` in
+   src/pipeline/mod.rs:1363-…, emitting E0910 with hand-written,
+   per-parameter hint strings.
+3. A prose migration doc (docs/MIGRATION.md) the user must apply by
+   hand, file by file.
+
+This is exactly the rot the AGENTS elegance bar names: syntax
+retirements are DATA, but each one currently costs a Rust match-arm.
+And the developer experience is "error wall": old sites break the
+moment the toolchain updates, with no mechanical path forward.
+
+* Design — %migration: syntax rewrites as stdlib data
+
+** Elegance-bar check (all four hold)
+
+1. Small extension of EXISTING grammar/registry: one new meta-def kind
+   (`%migration`), whose match half IS the existing `%form` grammar and
+   whose storage IS the existing MetaRegistry + stdlib loader.
+2. Variants are DATA: each retired syntax = one `.st` entry under
+   `stdlib/migrations/`. Zero Rust per migration.
+3. DELETES existing special-cases: `check_bind_deprecation()` +
+   `bind_migration_hint()` (≈100 lines of Rust) and the three tombstone
+   `%macro`s in stdlib/macros/data.st are all replaced by data entries.
+4. Testable by the SAME machinery: `%match` is parsed by the same
+   `%form` PEG (CapturePatternParser), matched by the same form-matcher
+   that produces FormMatch — a migration test is an ordinary
+   compile-input → diagnostics/output test, plus headless .st tests for
+   the widget.
+
+** Grammar (author surface, stdlib-only `%` domain)
+
+#+begin_src spacetime
+/// stdlib/migrations/2026-06-09-bind-text.st
+%migration bind-text-to-arrow {
+  %date 2026-06-09
+  %docs "FEAT-072: @bind(text:) became the `text <- $expr` arrow binding."
+
+  %match {
+    @bind(text: $x:expr)
+  }
+
+  %rewrite {
+    text <- `$x`;
+  }
+}
+#+end_src
+
+- `%migration <ident>` — unique id (validated at load; duplicate id =
+  stdlib load error).
+- `%date YYYY-MM-DD` — REQUIRED. ISO-8601 date literal; lexicographic
+  order == chronological order. THE wave key: a wave is the set of all
+  migrations sharing one date. Waves apply oldest-first.
+- `%docs "…"` — one-line human description; surfaces in the pill panel,
+  `check` output, and the W-diagnostic.
+- `%match { … }` — EXACTLY the `%form` body grammar (same parser path,
+  same capture types, same `$name:type` captures). Registers in the
+  form-directive index like a macro form so old syntax still parses
+  into a FormMatch instead of being dropped as an unmatched child.
+- `%rewrite { … }` — a source-text template. Holes are backtick-quoted
+  captures: `` `$x` `` (harmony rule: backtick is THE hole form
+  everywhere; bare `$x` in the template is literal output text, which
+  rewrites need — e.g. rewriting TO a `$signal <- v` surface). Splice
+  value = the RAW SOURCE SLICE of the capture (via
+  FormMatch.capture_spans, which already exists), never a typed
+  re-serialization — formatting/expressions survive verbatim.
+- `%hint "…"` — ALTERNATIVE to `%rewrite` for retirements that are not
+  mechanically rewritable (need auxiliary rules or human judgment).
+  Exactly one of `%rewrite` | `%hint` must be present (load-time
+  validation).
+
+Two migration kinds, one grammar:
+- rewrite-kind → compat shim (compiles) + auto-apply (pill/CLI).
+- hint-kind → hard error E0910 (as today), but message/hint now come
+  from the registry entry, not Rust; pill lists it under "manual".
+
+** `@version` — the project's syntax-version fact (user revision)
+
+User surface (`@`, not `%` — it lives in USER source):
+
+#+begin_example
+@version 2026-06-09;
+#+end_example
+
+- Location: the project's ROOT entry file (index.st — the file the
+  server/CLI compiles as the entry; same place @deploy{} lives as a
+  compile-time fact). One per project; duplicate or non-root
+  declarations = compile error.
+- Backed by an ordinary stdlib %macro (`%form { @version $d:date ; }`)
+  — no Rust parser special-case; the compiler reads it as a fact the
+  same way read_deploy_project_id reads @deploy{}.
+- MEANING: "this project's source is written against the syntax as of
+  this wave date." It is the disambiguation key that FIXES the shadow
+  guard (see Risks):
+  - migrations with %date ≤ @version are INERT for this project —
+    they neither match, shim, nor count as pending. The project has
+    already crossed that wave; its source means the NEW thing.
+  - migrations with %date > @version participate normally (shim +
+    pending).
+  - ABSENT @version = date-zero: every wave participates (the
+    bootstrap case — pre-existing projects).
+- WRITE-BACK: the FIRST persisted apply (pill POST or `spacetime
+  migrate`) INSERTS `@version <applied-wave-date>;` at the top of the
+  root entry file (after any leading doc comments); every subsequent
+  apply UPDATES the date in place to the newest applied wave. The
+  in-memory shim NEVER writes it — only persistence does (shim is
+  read-only by definition).
+- Consequence for syntax REUSE: once a wave retires a form and a
+  project's @version passes it, the same directive name/shape can
+  later be legitimately re-introduced as a live macro — version-
+  scoped matching resolves what the global shadow guard alone could
+  not (old projects still get the migration; new projects get the
+  live macro).
+
+** Mechanics — in-memory shim (one implementation, two consumers)
+
+The shim and the on-disk apply are the SAME function over (source,
+matches, registry) → rewritten source. No parallel implementations.
+
+Compile-time pass (in `compile_pipeline`, after parse, before Resolve):
+
+0. Read the project's `@version` fact from the root entry; drop every
+   migration wave with %date ≤ @version from consideration (inert).
+1. Scan `ast.matches` for FormMatches whose directive resolves to a
+   migration `%match` (registry lookup by form-directive, marker flag).
+2. If any rewrite-kind matched: compute replacement text per match by
+   instantiating `%rewrite` with raw capture slices; splice into the
+   SOURCE string at FormMatch.span, applied in reverse span order
+   (established pattern: edit_collector / apply_text_patch both do
+   reverse-order splicing).
+3. Re-parse the rewritten source; loop. Waves apply in date order;
+   fuel = (number of distinct dates + 1) iterations, so chained
+   rewrites (wave 1: A→B, wave 2: B→C) terminate and a cycle is a
+   load-time validation error, not a hang.
+4. Emit ONE W-diagnostic per applied match (new code, next free W07xx
+   — "old syntax auto-migrated in memory; persist via the migrations
+   pill or `spacetime migrate`") carrying migration id + %docs line.
+5. Hint-kind matches short-circuit to E0910, message built from the
+   registry entry (id + %docs + %hint). E0910 semantics unchanged;
+   its message source moves from Rust strings to data.
+6. Record pending entries `{migration_id, date, file, span, old_text,
+   new_text|hint}` on the compile output — the single source the
+   status route, `check`, and CLI all read. No second scanner.
+
+Constraint (observed): the shim needs SOURCE TEXT. `Compiler::from_file`
+has it; a bare `Compiler::from_ast` (no source) cannot splice — there,
+rewrite-kind matches degrade to the E0910 error path with a
+"recompile from source to auto-migrate" hint. All server/CLI paths use
+from_file, so in practice the shim always runs.
+
+Trade-off accepted: comments INSIDE a matched span are consumed by the
+rewrite (span-replacement). Surrounding trivia is untouched (splice is
+span-exact on the original source). Documented in the language doc.
+
+** Persistence — pill, CLI, check (three consumers, one rail)
+
+- `POST /__spacetime/migrations/apply {date}` (dev server, dev-mode
+  only like host/push): runs the SAME rewrite fn over each project .st
+  file, writes results to disk atomically (write-temp-rename), then
+  writes/updates the `@version` fact in the root entry (insert on
+  first apply, update in place after), returns
+  `{files_changed, per_file_counts, version}`. The existing file
+  watcher then triggers live-reload naturally — no bespoke reload
+  path.
+- `GET /__spacetime/migrations/status.json`: compiles project entries
+  (through the existing compile cache), aggregates pending entries →
+  `{waves: [{date, migrations: [{id, docs, kind, count}], total}]}`.
+- CLI `spacetime migrate <path> [--wave YYYY-MM-DD] [--dry-run]`:
+  headless/CI form of the same apply; dry-run prints a unified diff.
+- `spacetime check` gains a summary line when pending > 0 (reads the
+  same pending entries; no new scan).
+
+Safety: apply only ever touches files under the project dir (never
+stdlib/, never vendored paths), refuses when the file changed on disk
+since the scan (mtime check), and is idempotent — after a successful
+apply, a rescan MUST report 0 for that wave (this is an
+integration-test acceptance, not an aspiration).
+
+** The migrations pill — `stdlib/migrations/__dev__/pill.st`
+Module layout (user revision, this session): migrations are a FULL
+stdlib module — vertical slice per stdlib/AGENTS.md, not a new flat
+dir + a new `__x__` sibling:
+
+#+begin_example
+stdlib/migrations/
+  MODULE.st        manifest: identity, public surface
+  entries/         %migration defs — the ONLY registry-loaded part
+  __dev__/
+    pill.st        the pill widget — dev-server-compiled, NEVER
+                   registry-loaded (kept out of the loader dir list,
+                   same separation __host__/__dev__ get today)
+  tests/           *.test.st
+#+end_example
+
+The registry loader dir list gains `stdlib/migrations/entries`
+(NOT the module root) — this is what keeps widget source from being
+parsed as migration defs. Precedent to eventually port `__host__`
+into the same shape (follow-up below).
+
+Same architecture as the host widget (the proven shape):
+- Pure-Spacetime widget file compiled server-side
+  (`compile_migrations_widget_raw`, mirroring
+  `compile_host_widget_raw` minus sentinel substitution — no secrets
+  here), source `stdlib/migrations/__dev__/pill.st`, served at
+  `/__spacetime/migrations/{styles.css,runtime.js}`.
+- Data via `@data fetch $status : "/__spacetime/migrations/status.json"`
+  + refresh; apply via the widget's action → POST (same fetch surface
+  the host widget uses for promote/push).
+- Visual: EXACT host-pill tokens — glass surface
+  rgba(17,17,22,0.82) + blur(16px), 999px radius, same font stack,
+  mark + label ("Syntax") + count badge + chevron; panel expands with
+  one row per wave: date, docs lines, pending count, Apply button;
+  hint-kind rows render as "manual" with the hint text, no button.
+- Resting state: pill hidden entirely when pending == 0 (a
+  zero-migration project sees nothing — no dead chrome).
+- States: idle / applying (orange working dot, same 5-dot vocabulary)
+  / applied (green flash then row disappears on next status refresh)
+  / error (red + message).
+** Shared dev dock (the "next to the host pill" requirement)
+
+Host pill is `position:fixed` today, so nothing can sit BESIDE it.
+Introduce `.st-dev-dock`: ONE fixed bottom-right flex-row container
+(gap 8px, align-items flex-end, pointer-events none — children
+restore), injected once per page. Refactor:
+- `host_widget_inject` generalizes to `dev_dock_inject(…)` emitting the
+  dock div wrapping BOTH widgets' markup + both asset pairs, at the
+  SAME page-serve call sites (11 references in src/server.rs — all go
+  through the one inject fn, so the change is one function +
+  call-site renames).
+- `stdlib/__host__/index.st` CSS: `.st-host-widget` drops
+  `position:fixed; bottom; right` (moves to the dock), keeps its own
+  internal column layout; its panel stays absolutely positioned
+  relative to the widget — verify panel anchoring after the change
+  (explicit live-browser check in W5 acceptance).
+- Order in dock: [migrations pill] [host pill] (host stays rightmost,
+  its current muscle-memory position).
+
+"All dev environments" = every dev-server page-serve path that gets the
+host pill today (incl. locale + .st-only synthesized shell). MCP
+workbench/canvas environments: FOLLOW-UP (different injection
+substrate), filed below.
+
+** Seed migrations (replace the hardcoded tombstones)
+
+stdlib/migrations/entries/ initial defs — these EXERCISE the system and
+delete the Rust special-case:
+- 2026-06-09 (FEAT-072 date, from git history):
+  - bind-text  `@bind(text: $x)`  → `text <- `$x`;`  (rewrite)
+  - bind-attr  `@bind(attr: $a, value: $v)` → ``$a` <- `$v`;` (rewrite)
+  - bind-class `@bind(class: $c, when: $w)` → `.`$c`: `$w`;` (rewrite)
+  - bind-style `@bind(style: $s, value: $v)` → ``$s`: `$v`;` (rewrite)
+  - show-to-class-toggle `@show(when:, mode:)` → %hint (needs an
+    auxiliary `.hidden { display:none }` rule — not a local rewrite)
+  - input-to-two-way `@input(bind:, event:, debounce:)` → %hint
+    (two-way = value-arrow + @on input, two insertions)
+DELETE: `%macro bind/show/input-bind` tombstones (data.st),
+`check_bind_deprecation` + `bind_migration_hint` (pipeline/mod.rs)
+and their tests migrate to migration-entry tests. E0910 code stays;
+W0707 @bind check-path references get retired with the fn.
+NB the @bind %form used `""`/`undefined` defaults so any one param
+matched a single form; as migrations, each param-shape is its OWN
+%match (cleaner: one migration = one rewrite shape). Multi-param uses
+of @bind (e.g. text+class together) match multiple migrations in one
+wave — reverse-span splicing handles disjoint spans; SAME-span overlap
+is a load-time validation error between entries of one wave.
+
+* Waves (implementation plan — each independently landable, RED→GREEN)
+
+** W1 — metasystem: parse + registry + load
+Target: src/parser/mod.rs (meta-def dispatch, "migration" arm beside
+"capture_type"/"vendor"), src/parser/meta_ast.rs
+(`MigrationDefAst {id, date, docs, match_form, rewrite: Option, hint:
+Option, span, source_file}`, `MetaDef::Migration`),
+src/metasystem/registry.rs (store: `BTreeMap<String /*date*/,
+Vec<MigrationDef>>` + by-id index + form-directive index entries with
+an is_migration marker), src/metasystem/validate.rs (required %date
+ISO shape; exactly-one-of rewrite|hint; unique ids; intra-wave overlap
+check; rewrite-template hole names ⊆ match captures), compiler stdlib
+dir list += "stdlib/migrations/entries" (both sites: compiler.rs ~92
+and ~485 — entries/ ONLY, so __dev__/pill.st is never registry-parsed),
+embedded stdlib inclusion (build.rs / stdlib_embedded), plus module
+scaffold: stdlib/migrations/{MODULE.st,entries/,__dev__/,tests/}.
+Accept: `cargo test --lib` — new unit tests: parse round-trip, date
+validation errors, duplicate-id error, unknown-hole error; registry
+returns waves date-sorted.
+
+** W2 — pipeline shim + seed migrations + tombstone deletion
+Target: src/pipeline/mod.rs + src/compiler.rs (the pre-Resolve rewrite
+loop with fuel; pending-entries on compile output; W07xx diagnostic;
+E0910-from-registry for hint-kind), `@version` fact: stdlib %macro
+(`%form { @version $d:date ; }`) + compiler read of the root-entry
+fact + wave filtering (step 0), DELETE check_bind_deprecation /
+bind_migration_hint, stdlib/migrations/entries/*.st seed defs, DELETE
+tombstone %macros in stdlib/macros/data.st.
+Accept: `cargo test --lib && cargo test --test integration_tests` —
+RED→GREEN: fixture with `@bind(text: $user.name)` COMPILES to the same
+JS as `text <- $user.name;` + carries exactly one W07xx; `@show`
+fixture still hard-errors E0910 with the registry hint; chained
+two-wave fixture (A→B→C) compiles with two W07xx; fuel/cycle fixture
+errors at load.
+
+** W3 — persistence rail + CLI + check
+Target: new src/migrate.rs (apply-to-disk over the shared rewrite fn;
+mtime guard; temp-rename writes), src/main.rs `Migrate` subcommand
+(--wave, --dry-run w/ unified diff), check output summary line.
+W3 also owns @version write-back: insert-on-first-apply into the root
+entry (after leading doc comments), update-in-place thereafter — one
+fn, used by both CLI and the W4 route.
+Accept: integration test: project dir fixture with 3 old-syntax files
+→ `spacetime migrate` rewrites all AND root index.st gains
+`@version <date>;`, second run = no-op (idempotence — now ALSO
+guaranteed structurally: the version fact makes the applied wave
+inert); --dry-run leaves disk untouched (incl. no @version) and
+prints diff; `--wave` applies only that date; refuses waves out of
+order (older pending wave blocks newer — apply oldest first); a
+fixture at @version ≥ all waves reports 0 pending.
+
+** W4 — dev server routes + dock injection
+Target: src/server.rs — `GET /__spacetime/migrations/status.json`,
+`POST /__spacetime/migrations/apply` (dev-mode only; Compiled → 404,
+same stance as host/push), `compile_migrations_widget_raw`, asset
+routes, `host_widget_inject` → `dev_dock_inject` (all call sites),
+`.st-host-widget` fixed-positioning moves to dock (stdlib/__host__/
+index.st CSS delta).
+Accept: `cargo test --lib`; manual: `cargo run -- serve` on a fixture
+project — status.json shape correct; apply writes files and live-reload
+fires; host pill still bottom-right and its panel opens correctly
+(live browser check — the positioning refactor is the risk point).
+
+** W5 — the pill + docs + live verification
+Target: stdlib/migrations/__dev__/pill.st (full widget per design
+above; module tests in stdlib/migrations/tests/),
+docs/language/migrations.md (grammar, semantics, waves, trade-offs,
+authoring guide for stdlib contributors), docs/MIGRATION.md pointer
+("mechanical migrations are now toolchain-applied — see the pill"),
+docs/language/README.md + form-syntax.md cross-links, stdlib/AGENTS.md
+note (retiring syntax = write a %migration, never a Rust check).
+Accept: live serve on a fixture with seeded old syntax → pill visible
+next to host pill, same glass style; wave row Apply → files rewritten
+on disk → reload → pill disappears (pending 0); @show fixture shows
+"manual" row with hint. Screenshot in the org item. Headless: widget
+compile smoke test for any new .test.st; full suite green:
+`cargo test --lib && cargo test --test integration_tests`.
+
+* Non-goals (v1)
+- (SUPERSEDED by user revision: `@version` IS the syntax-version pin
+  — see its section above. Pending is still recomputed from source;
+  @version only scopes WHICH waves participate.)
+- No downgrade/reverse migrations.
+- No cross-file or multi-insertion rewrites (that's what %hint is for).
+- No LSP quick-fix surface (follow-up).
+- No MCP workbench/canvas pill (follow-up; different injection rail).
+- `spacetime script` stays as-is (runtime text-replace tool; separate
+  concern — migrations are registry-driven + span-faithful).
+
+* Risks
+- Host-pill positioning refactor (W4) is the only change touching an
+  existing user-visible surface — mitigated by explicit live-browser
+  acceptance and by keeping the panel's own anchoring untouched.
+- Shadowing a LIVE macro: RESOLVED by `@version` (user revision this
+  session). Matching is version-scoped — a migration only ever
+  matches in a project whose @version predates its wave, so a
+  directive retired in wave N can be re-introduced as a live macro
+  for projects at @version ≥ N with zero ambiguity. Residual
+  load-time check kept: a %match colliding with a live %macro form
+  registered in the SAME state (i.e. no wave separates them) is
+  still an error — that is an authoring mistake, not a reuse.
+- Rewrite templates producing non-parsing output: caught by the
+  re-parse step (loop step 3) → surfaced as a stdlib-entry error with
+  the migration id, never a silent bad splice.
+
+* Follow-ups to file on completion
+- FUP: migrations pill in MCP workbench/canvas environments.
+- FUP: port `__host__` to the same module shape
+  (stdlib/host/{MODULE.st,__dev__/pill.st,…}) — migrations module is
+  the precedent for modularising dev-widget verticals.
+- FUP: LSP code-action ("apply migration") from the same registry.
+- FUP: `%hint`-kind upgrade path — multi-edit rewrite templates
+  (insertion lists), unlocking @show/@input mechanical migration.
+- FUP: "commit from pill" — after a persisted apply, the pill offers
+  a Commit action that stages ONLY the migration's own changes and
+  commits them: git add by HUNK, not by file (build a patch from the
+  apply's recorded {file, span, old_text, new_text} entries and
+  `git apply --cached` it), so a migration commit never sweeps up
+  unrelated in-flight edits sitting in the same files. Includes the
+  @version insertion hunk. Commit message auto-composed from wave
+  date + migration ids/%docs lines.
+
+NOTE [2026-07-19]: W1+W2 landed (impl-only, no commits per session norms): %migration parse/registry/validate (W1, 11+5 tests), compat shim + @version + 7 seed entries + tombstone/check deletion (W2, 6 unit + 11 integration tests). Review swarms R1/R2 ran; their findings were fixed inline (capture collector completeness, post-load order-independent chain validation, string-aware arg scanner, cache keyed on pre-shim content, chains on ALL registry-load paths, @version ISO + root-only validation). Design refinement recorded: an inert wave (≤ @version) with lingering old syntax is an E0911 version-inconsistency, not silence. Also mid-flight: BUG-198 (form-param comparison misparse, filed ITEM), BUG-199 (v8 emit-shape assertion drift, FIXED — 437 v8 green). NOTE: concurrent BUG-188/BUG-194 work (not this session's) landed in the tree mid-flight (src/emit/html_reactive.rs, src/pipeline/expand.rs, public/runtime/st.js); the 5 compiler snapshots were regenerated to match (INSTA_UPDATE=always) — flagging in case that regen should belong to that work's commit instead.
+
+NOTE [2026-07-19]: W5 live-verified end-to-end (fixture project, headless Chromium): (1) resting dock — [SYNTAX 2] pill immediately left of [HOST] pill, identical glass chrome; (2) panel — wave row 2026-06-09 with Apply button, bind-text AUTOMATIC entry, show-to-class-toggle MANUAL entry with amber %hint box fully rendered; (3) Apply clicked → index.st rewritten on disk + @version inserted, page reloaded via watcher; (4) pill hidden (is-hidden), host pill intact alone. Screenshots: /tmp/dock-resting2.png, /tmp/dock-panel2.png, /tmp/dock-panel-final.png, /tmp/dock-final.png (also session artifacts screenshot/372,373,434,390). W5 fixes along the way: host panel switched to the absolute-upward idiom (in-flow column made the dock gap); standalone /__spacetime/{host,migrations}/ pages now wrap their widget in the same dock (DEV_DOCK_CSS const, z 2147483647); migrations pill signals prefixed $mig after discovering co-hosted widgets share ONE global SpacetimeLocal (filed FEAT-156 for compiler-level namespacing); BUG-203 found+fixed (each-inline nested @each outer hole-pass re-scanned and erased backticked inner-row data — sentinel protection in both the dynamic primitive and the SSG unroll path, regression tests added). Docs landed: docs/language/migrations.md, MIGRATION.md pointer, language/README + form-syntax cross-links, stdlib/AGENTS.md retiring-syntax charter. FUPs filed: FEAT-157 (commit from pill, hunk-staged), FEAT-158 (MCP workbench pill, __host__ module port, LSP code-action, multi-edit rewrites).
+
+NOTE [2026-07-19]: R5 review passed (2 reviewers): sentinel fix proven sound (no leak path), pill idioms verified, docs verified claim-by-claim. Final fixes landed: (1) write_apply_plans now carries the plan-mandated staleness guard — FileApplyPlan.content_hash captured at scan time, re-checked before every rename, refuses with "changed on disk … re-run to rescan" (unit-tested); (2) dead $migStatus() refetch removed from the pill (@data fetch bindings have no callable refetch — R5 catch); (3) BUG-203 comment accuracy (restore site = unroll_scope). Recorded design drift (durable record): status.json shape is {version, waves: [{date, entries: [{id, docs, kind, count, hint}], total, appliable}], pending} (entries rename + hint/appliable/version/pending additions); apply response uses entries_applied (not per_file_counts); the status route does a direct per-file parse+shim scan of ALL project files instead of going through the compile cache (compiling only the entry would miss un-imported files — same engine, broader scan); the "applied (green flash)" pill state was dropped (page reload via watcher covers it); module tests landed as Rust tests (tests/migrations_test.rs incl. pill compile smoke) rather than .test.st; host_widget_inject kept its name (the dock is an internal detail of the same fn); hint-kind rows carry the %hint text in the panel (amber box) per the design's "manual with the hint text".
+
+* DONE 2026-07-20 — completed via PLAN-079 (capsule redesign)
+
+The user-directed capsule redesign (PLAN-079, DONE) subsumed the remaining R5 review wave: %migration entries are now self-contained capsules embedding the retired %macro definitions verbatim (one migration may retire several macros); the synthetic-macro registration was deleted in favor of retired-tagged real macros; hint-kind directives compile through the window (restoring the original "old syntax keeps compiling" promise); the 7 seed fragments collapsed into ONE 2026-06-09-reactive-surface capsule. All R1-R4 swarm findings fixed; all suites green; dev-ex rail (--explain/--scaffold/--at-version, pill expander) added per user directive. See PLAN-079 for the full record.

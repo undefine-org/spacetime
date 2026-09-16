@@ -1,0 +1,73 @@
+#+TITLE: FUP: a primitive emit-block parse error must fail the build, not emit silence
+#+STATE: DONE
+#+SESSION_ID: 1534a2eae1903af0
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-18T13-07-01-638Z_1534a2eae1903af0.jsonl]]
+#+CUSTOM_ID: FEAT-170-fup-a-primitive-emit-block-parse-error-m
+
+* Initial Message
+
+let's have the score conversation. Please start by reminding yourself of what we were trying to do and what our design goals were. this is like a "Previously on Spacetime" feature where we get to understand what our design intentions were and where we stopped our investigations
+
+#+STATE: ITEM
+
+* The defect
+
+When a `%primitive`'s `%emit js { … }` block fails to parse, the expand stage
+records an `E0800` diagnostic on the generated IR and then DISCARDS it. The
+primitive emits ZERO statements. No error reaches `check`, the build, or the
+user. A green compile produces a bundle with the primitive silently absent.
+
+Observed at `src/pipeline/expand.rs` (the `for diag in &ir.diagnostics` loop
+only `trace!`s them):
+
+: [expand] score-window -> js_stmts=0 diags=1
+: diag: E0800 "JS emit parse error: JS syntax error: ExpectedSemiForExprStmt { expr: 1302..1348 }"
+
+* Why #A
+
+This is the banned silent-drop class living inside the compiler's own
+plumbing, and it has the worst possible signature: EVERY OTHER LAYER REPORTS
+SUCCESS. During BUG-256 the primitive was registered, the macro was
+registered, the bind was synthesized with correct arguments, the registry
+lookup succeeded, and `resolve` emitted the primitive by name. Only the IR
+knew, and it was not telling.
+
+Cost measured: most of a session, on a defect whose fix was one line. Every
+future primitive author pays the same toll, and stdlib gains primitives
+regularly.
+
+* What it should do
+
+An emit-block parse error is not a user-source error — it is a STDLIB DEFECT,
+so it should be loud in the way stdlib load errors already are:
+
+- promote the diagnostic out of the IR into the pipeline's diagnostics (the
+  same channel `drive_diagnostics` and `score_diagnostics` use), so `check`
+  and `build` both fail;
+- name the primitive, the source file, and the offending span in the .st;
+- ideally catch it at REGISTRY LOAD rather than at expand, so a broken
+  primitive fails the moment stdlib is read rather than only when something
+  happens to use it. A primitive nobody instantiates today is a landmine for
+  whoever instantiates it tomorrow.
+
+* Acceptance
+
+- A `%primitive` with a deliberately malformed `%emit js` block fails
+  `spacetime check` with a diagnostic naming the primitive and the parse
+  error.
+- The well-formed case is unchanged (assert this too — a check that rejects
+  everything passes a positive-only suite).
+- Regression test alongside the existing silent-drop gates
+  (`tests/bug_216_silent_directive_drop_test.rs`,
+  `tests/bug_229_capture_type_failure_gate_test.rs`), which this joins as a
+  third instance of one pattern.
+
+* Notes
+
+While fixing, sweep for the sibling shape: other places that collect
+`ir.diagnostics` or equivalent and only `trace!` them. The BUG-229 fix found
+exactly this (`cst_to_stfile_with_registry` discarded every match diagnostic
+except one hardcoded case), which suggests the pattern is systemic rather than
+isolated — worth a deliberate audit rather than a point fix.
+
+Related: BUG-216, BUG-229, BUG-253 — same family, different layers.

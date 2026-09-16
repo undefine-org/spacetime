@@ -1,0 +1,49 @@
+#+TITLE: dev-editable .test.st files fail: 'Identifier el already declared' (eval-scope collision)
+#+STATE: DONE
+#+SESSION_ID: 1503ca05d05c0c62
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-10T14-32-18-497Z_1503ca05d05c0c62.jsonl]]
+#+CUSTOM_ID: BUG-101-dev-editable-test-st-files-fail-identifi
+#+COMPLETION_HASH: 3ec720154cb13558
+
+* Initial Message
+
+(b) -> what would that achieve?
+(c) -> is an FUP filed?
+(d) -> yeah what about integration points with stdlib/__admin__? I'd LOVE so automatic content editing on the website directly. This is a DESIGN investigation, let's think about what's most Spacetimey. At the same time, you may think about showing me how you'd use this to edit blogs and whatnot.
+
+Also, think about how you could set up a default editable flow and leverage Spacetime's introspection to automatically augment the admin side with editable-everything, optionally improvable with something akin to the @cms block
+
+* Problem
+Three older dev-editable test files fail under --headless with a JS error:
+  "Identifier 'el' has already been declared"
+- tests/dev-editable-locale.test.st          (6 failed)
+- tests/dev-editable-text-duplication.test.st (5 failed)
+- tests/dev-editable-toggle.test.st           (3 failed; 3 pass)
+
+* Cause
+These tests inline-`eval()` COPIES of dev-editable helpers (findEditableTarget,
+handleClick, readProvenance) as strings, each declaring `var el = ...`. The @eval/eval
+blocks share ONE global scope in the headless V8 runner, so the SECOND `var el` (9
+occurrences across the blocks in toggle.test.st alone) throws "already declared". It is a
+TEST-HARNESS scoping issue, not a product bug — the real dev-editable.st declares these in
+proper function scopes.
+
+* Not caused by W3 (commit 49b5027c)
+The W3 change touches only readProvenance's single-object branch (adds `var raw`/`var m`),
+which these tests do NOT eval. The `el` collision exists in the test files independent of
+any source change. Likely surfaced/worsened by a change to the headless @eval scoping
+(the test runner now shares scope where it previously isolated, or BUG-095-era @eval work).
+
+* Fix
+Either (a) wrap each test's eval'd helper in an IIFE / unique-name the `var el` per block
+(as tests/dev-editable-single-object.test.st does — it scopes helpers in arrow IIFEs and
+passes), or (b) better: stop inline-`eval`-ing copies of the source and drive the REAL
+dev-editable primitive (mount it, dispatch events, assert the emitted edit event) — the
+single-object test is closer to this. The copies drift from the source anyway.
+
+* Provenance
+Found during W3 (whole-page inline editing). The new tests/dev-editable-single-object.test.st
+uses the IIFE-scoped pattern and passes (3/3); these three legacy files predate it and want
+the same treatment.
+
+NOTE [2026-06-19]: FIXED 2026-06-19 as a consequence of the FUP-072 el_init fix (no test-file rewrite needed). The "Identifier 'el' already declared" collision was the per-step `const el = document.body` preamble colliding with the `var el` hoisted from these tests' inline `eval("...var el...")` helper copies. Removing the spurious preamble (treat empty-string selector as None in ir_to_expanded) eliminates the collision: tests/dev-editable-locale.test.st 0→6 pass, tests/dev-editable-toggle.test.st 3→6 pass. tests/dev-editable-text-duplication.test.st still fails but on `window.getSelection is not a function` (a V8-backend ceiling, --cdp-only), NOT the `el` collision — so the BUG-101 defect (eval-scope `el` collision) is fully resolved. The deeper "drive the real primitive instead of eval'ing source copies" refactor (recommended fix b) remains a possible cleanup but is no longer required for green.

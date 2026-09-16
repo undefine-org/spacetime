@@ -1,0 +1,175 @@
+#+TITLE: FUP-168 — MCP resource change notifications (the server advertises them and sends none)
+#+CATEGORY: follow-ups
+
+* ITEM FUP-168 — `resources/subscribe` is accepted, recorded, and never honoured
+:PROPERTIES:
+:CUSTOM_ID: FUP-168-mcp-resource-change-notifications
+:PARENT:   PLAN-123
+:END:
+
+** Summary
+
+The Spacetime MCP server ADVERTISES resource subscriptions and resource-list
+change notifications in its `initialize` reply, accepts `resources/subscribe`,
+validates the URI, and stores the subscription. It then never emits a single
+notification. A subscribed client holds a stale view forever unless it happens
+to re-read.
+
+This is not merely an unimplemented feature. It is an advertised capability the
+server does not have, which is worse: a correct client is entitled to subscribe
+INSTEAD of polling, and will therefore never see a change.
+
+** Evidence (verified, not inferred)
+
+*** The capability is advertised
+
+=src/mcp/protocol.rs:317=, inside the `initialize` result:
+
+#+begin_src rust
+"resources": { "subscribe": true, "listChanged": true }
+#+end_src
+
+And it is PINNED BY TESTS at =src/mcp/protocol.rs:378-379=:
+
+#+begin_src rust
+assert_eq!(init["capabilities"]["resources"]["subscribe"], true);
+assert_eq!(init["capabilities"]["resources"]["listChanged"], true);
+#+end_src
+
+So the promise is not accidental; it is asserted.
+
+*** The subscription is accepted and stored
+
+=src/mcp/protocol.rs:270= handles `resources/subscribe`: it validates the URI
+via `resources::validate_uri`, calls `state.subscribe_resource(uri)`, and
+returns `{}`. Storage is real: =src/mcp/state.rs:388= holds
+`resource_subscriptions: BTreeSet<String>`, with `subscribe_resource` /
+`unsubscribe_resource` / `resource_subscriptions()` around it.
+
+The state.rs comment says it plainly: "W1 stores [subscriptions]" — i.e. the
+storage half shipped and the delivery half did not.
+
+*** Nothing is ever sent
+
+Searching `src/mcp/` for `notifications/` finds exactly three hits, all
+INBOUND (client→server): the `notifications/initialized` and
+`notifications/cancelled` arms, plus a doc comment describing the handshake.
+There is NO `notifications/resources/updated` and NO
+`notifications/resources/list_changed` anywhere in the crate.
+
+`resource_subscriptions()` therefore has no caller that sends anything: the set
+is written and never acted upon.
+
+** Root cause: the loop shape, not a missing function
+
+=src/mcp/protocol.rs:36= — the server loop is documented as:
+
+#+begin_quote
+Blocking single-threaded read loop: MCP stdio is strictly request/response per
+line, so we never need concurrency here in Wave 1.
+#+end_quote
+
+It reads a line, dispatches, writes one response, repeats. There is no point at
+which the server speaks unprompted, and no other thread holding the stdout lock
+that could. Adding a notification is not "call a send function" — the function
+does not exist because the ARCHITECTURE has no unsolicited-write path.
+
+NB the loop is not a hard blocker. It already does one server→client message
+mid-dispatch: the `st_elicit` tool sends a request and pulls the reply off the
+same stream (the comment at line 49 calls this the "pull-based line iterator"
+reason). So the transport CAN carry a server-originated message. What is
+missing is (a) a place to emit one when no request is in flight, and (b) a
+change signal to emit it FROM.
+
+** Why comments did not build this alone (PLAN-123 decision, upheld)
+
+`comments://<env>` was the first resource that genuinely wanted change
+notification. Building a notification path for one resource would have meant a
+bespoke rail — precisely the parallel implementation this repo forbids — that
+would then be rebuilt when a general mechanism arrived. The deferral was
+recorded in FUP-171 §4 and stands.
+
+The honest interim is what shipped: `docs/language/comments.md` states that
+subscribing is accepted but no change notifications are emitted, so a reader
+knows to re-read. THE DOC IS CURRENTLY MORE TRUTHFUL THAN THE PROTOCOL
+HANDSHAKE, which is the wrong way round.
+
+** The work
+
+*** W-a: decide the honest capability, and say it today
+
+Two options; they are not equal.
+
+1. STOP ADVERTISING what is not implemented — set `subscribe: false`,
+   `listChanged: false`, and reject `resources/subscribe` with a clear error.
+   Small, immediate, and makes the handshake truthful. Cost: a client that
+   would have subscribed must poll, which it can do TODAY because the resource
+   reads correctly.
+2. Implement notifications (W-b onward) and keep the advertisement.
+
+Doing NEITHER is the only unacceptable outcome, because it is the current
+state: a promise with nothing behind it. If W-b is not scheduled promptly,
+take option 1 in the meantime — and update the two capability assertions in
+`protocol.rs` tests, which currently lock the false promise in place.
+
+*** W-b: an outbound channel on the stdio loop
+
+Give the server a way to write a message that is not a response:
+
+- an outbound queue (`mpsc`) drained at the top of each loop iteration, before
+  the next request is dispatched — simplest, keeps the single-writer
+  invariant, and is enough for a client that is also making calls; OR
+- a writer thread owning stdout behind a mutex, so a notification can be
+  emitted while the loop is blocked in `lines.next()` — needed if a client
+  subscribes and then goes quiet, which is exactly the "watch for changes"
+  case.
+
+Prefer the second if notifications are meant to be timely; the first will
+silently deliver nothing to an idle client, reproducing this bug in a subtler
+form. WHICHEVER IS CHOSEN, the stdout invariant at protocol.rs:7 must hold:
+stdout carries protocol bytes ONLY, diagnostics to stderr.
+
+*** W-c: a change signal to emit from
+
+Notifications need to know a resource CHANGED. Today nothing tells them.
+
+For `comments://`, the natural trigger is the comment write path — the same
+place the process-local `comment_write_lock` already serializes
+add/update/dismiss/re-anchor/prune. That lock is the existing chokepoint and
+therefore the honest place to hang a "this env's comments changed" signal.
+
+For env/tab/instance resources, the trigger is the corresponding mutation in
+`McpState`.
+
+Design constraint: the signal must be a GENERAL "resource X changed" edge, not
+a comments-specific callback. One publisher interface, many resources — the
+same rule that kept comments from building its own rail.
+
+*** W-d: emit, filtered by subscription
+
+On a change, emit `notifications/resources/updated` with the URI, but ONLY for
+URIs in `resource_subscriptions`. Emitting for unsubscribed resources is
+protocol noise, and a client that never subscribed did not ask to be woken.
+
+`notifications/resources/list_changed` is a separate edge: it fires when the
+SET of resources changes (an env opened/closed, a tab created), not when one
+resource's contents change. Both are advertised; both need an owner.
+
+*** W-e: prove it
+
+A test that subscribes, mutates through the real write path, and asserts the
+notification appears on the wire. Assert on the EMITTED BYTES, not on an
+internal queue — the whole defect here is that internal state was recorded
+while the wire stayed silent, and a test on internal state would have passed
+throughout.
+
+** Blast radius if left as is
+
+- A client that trusts the handshake and subscribes will show stale comments
+  indefinitely, with no error to diagnose from.
+- The agency tier (PLAN-123 D10) is a transport swap onto this contract. A
+  hosted, multi-user comments surface where writers do not learn of each
+  other's writes is not a viable product; the notification path is on that
+  critical path, not adjacent to it.
+- Every future resource inherits the same false promise, because the
+  capability is declared once, globally, for all resources.

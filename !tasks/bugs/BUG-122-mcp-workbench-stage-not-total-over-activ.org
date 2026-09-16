@@ -1,0 +1,148 @@
+#+TITLE: MCP workbench stage not total over active-env: opening an environment paints nothing
+#+STATE: DONE
+#+SESSION_ID: 150f9b60559952f5
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-19T18-50-16-790Z_150f9b60559952f5.jsonl]]
+#+CUSTOM_ID: BUG-122-mcp-workbench-stage-not-total-over-activ
+#+COMPLETION_HASH: c3739c2e910292af
+
+* Initial Message
+
+what did PLAN-048 do? can you let me try it out and show me?
+
+* Initial Message
+
+Found while test-driving the MCP workbench (2026-06-19). User: "open environment
+simply doesn't work" and "why a separate page instead of loading it when I load an
+environment — load in the main frame is the primary concern."
+
+* VERIFIED behaviour (live, source-traced)
+
+Clicking "Open environment" DOES work server-side: the `.mcp-open-env` button fires
+`st_env_open` (audience: server), the sink resolves it synchronously, and the
+snapshot's `environments.open` grows (verified: after clicking, `open:[ikarchitecte,
+playground]` in input.json; the nav drawer's "open" section renders the open-env
+cards). So the ACTION is wired and the server state is correct.
+
+The DEFECT is on the render side: the dominant surface (the STAGE) is NOT a function
+of the active-env state. Opening an env changes server state but the stage shows the
+SAME "Begin here" empty-state. From the user's seat that is indistinguishable from
+"doesn't work" — the result is buried as one card among 40+ "discovered" cards in a
+drawer, with zero feedback on the main surface.
+
+* Root cause: the stage @view is not total over active state
+
+stdlib/__mcp__/env.st, the stage region:
+
+  .mcp-stage[data-st-region="stage"] {
+    @mcp-region
+    @view $stageTpl {
+      _ => &$stageTpl();      // ONLY guest-or-empty. NO arm for an opened env.
+    }
+  }
+
+The stage switches on `$stageTpl` (a composed guest function) with a single
+wildcard arm. There is NO arm for "an environment is open" — so opening one cannot
+paint anything on the stage. The state exists; the surface ignores it.
+
+Compounding (the "separate page" complaint): the only env/tab affordance that shows
+CONTENT is the instance card's `<a href=... target="_blank">Open preview</a>`
+(cards.st). Frame-first loading does not exist for envs/tabs — separate page is the
+ONLY door, when it should be the secondary opt-out.
+
+* The invariant being violated: the dominant surface is total over declared state
+
+A state-mutating action with no visible effect on the dominant surface must be
+UNREPRESENTABLE. The cure is the pattern env.st ALREADY uses for `$drawer` and
+`$selected`: a single-value signal + a TOTAL `@view` switch (every value has an arm).
+Once `stage = f(activeView)`, "I opened an env and the stage ignored it" cannot exist
+— the author either writes the arm or sees the gap.
+
+* FIX (Spacetime — mirrors the existing $drawer idiom in env.st)
+
+1. Add an active-view signal (mirrors `@data inline $drawer : "none"`):
+     @data inline $stageView : "";
+
+2. The open-env button also NAMES the view (pairs with the existing server action):
+     .mcp-open-env { @on click { $stageView <- "env"; } }
+   (the @mcp-action stays — server opens the env; this makes the stage react.)
+
+3. Make the stage @view TOTAL — an arm per state, including the open-env one:
+     .mcp-stage[data-st-region="stage"] {
+       @mcp-region
+       @view $stageView {
+         "env"   => &mcp-env-detail($mcpActiveEnv);   // tabs + files, IN the stage
+         "guest" => &$stageTpl();                       // composed function (today's path)
+         _       => &mcp-begin();                        // "Begin here" empty-state
+       }
+     }
+
+4. New `&mcp-env-detail($env)` template (cards.st) renders the open env's tabs/files
+   IN the stage, with the separate-page link demoted to an explicit secondary action:
+     @template &mcp-env-detail($env) {
+       <section class="mcp-env-detail">
+         <h2>`$env.title`</h2>
+         <div class="mcp-tab-list"></div>            // tabs load HERE, frame-first
+         <a class="mcp-popout" href="`$env.url`" target="_blank">Open as separate page ↗</a>
+       </section>
+     }
+
+5. Data plumbing: the snapshot must publish the ACTIVE env (the most-recently-opened,
+   or a selected one) as `$mcpActiveEnv` so the "env" arm has a subject. Check
+   workbench_snapshot in src/mcp/live.rs (it already flattens environments.open) +
+   data.st (the $mcp* published signals). Likely: publish `active_env` = last opened,
+   set $stageView to "env" on open server-side too (so a reload shows it), and bind
+   $mcpActiveEnv from it. Confirm the empty-state ("Begin here") becomes the `&mcp-begin`
+   template extracted from the current inline stage-empty markup (so the `_` arm has a
+   real template to mount).
+
+NB harmony: this adds ONE signal + arms mirroring the proven $drawer/$selected
+pattern — no new mechanism, no parallel renderer. The empty-state markup currently
+inlined in the stage must move into a `&mcp-begin` template so it's an @view arm
+(today it's the region root's initial child + a CSS hide-on-sibling rule; with a
+total @view the empty-state becomes the `_` arm — cleaner, and removes the CSS
+:has hide hack).
+
+* Acceptance (live)
+- Click "Open environment" on any discovered env -> the STAGE immediately shows that
+  env's detail (title + its tabs), NOT the unchanged "Begin here". Tabs load in the
+  main frame.
+- The separate-page link still exists but is a secondary affordance inside the env
+  detail, not the only way to see content.
+- Composing a function onto the stage (existing guest path) still works (the "guest"
+  arm) — no regression to FEAT-126 region mount.
+- Empty state (no env open, no guest) still shows "Begin here" (the `_` arm).
+- Headless/unit: stage @view has an arm for each of {env, guest, empty}; snapshot
+  publishes active_env when an env is open.
+
+* Out of scope
+- Multi-frame drag canvas (separate deferred PLAN — north star).
+- Full tab CONTENT rendering (opening a tab's compiled page in-stage) — this BUG gets
+  env-detail + tab LIST in the frame; live tab-page-in-stage can be a follow-on once
+  the active-view loop is proven.
+
+* Provenance
+- Stage region: stdlib/__mcp__/env.st (`.mcp-stage[data-st-region=stage]`).
+- Existing idiom mirrored: env.st `$drawer` / `$selected` single-value signals + reactive arms.
+- Separate-page-only affordance: stdlib/__mcp__/workbench/cards.st (&mcp-instance-card).
+- Snapshot: src/mcp/live.rs::workbench_snapshot; published signals: workbench/data.st.
+- Session: MCP workbench round-3 test-drive (PLAN-048 follow-on). North star: Spacetime × Squarespace × Figma/Framer.
+
+NOTE [2026-06-19]: IMPLEMENTATION DEVIATION from the original fix sketch (source-verified 2026-06-19). The body proposed a second `@data inline $stageView` + a `@view $stageView` switch on the stage region. VERIFIED that collides: the stage region `.mcp-stage[data-st-region="stage"]` already owns ONE `@view $stageTpl` slot, and `$stageTpl` is an ELEMENT-scoped signal written by the bundle-poll's `registerBundle` (guest composition, bundle.st + view.st). A second `@view` on the same root is not supported and would fight the guest-mount path.
+
+HARMONIOUS FIX (respects existing architecture, pure stdlib, zero server change): render the open-env detail FRAME-FIRST inside the stage empty-state (`.mcp-stage-empty`), revealed by the SAME JS-free `:has()` CSS idiom the gallery + comms already use (styles.st:230/300/435). Data is already published — `$mcpOpenEnvironments` + `$mcpTabs` (data.st via mcp-input). When an env is open, the stage shows its env card(s) + tabs and the "Begin here" zero-state recedes; composing a guest function still overlays via the untouched `$stageTpl` path. This converts "open env → nothing visible on the dominant surface" into "open env → env appears in the main frame", which is the user's core complaint, without a second reactive plane.
+
+NOTE [2026-06-19]: FIXED + live-verified 2026-06-19. Implemented the frame-first active-environment view as a `:has`-revealed section inside the stage empty-state (the deviation logged above), NOT a second @view.
+
+CHANGES:
+- stdlib/__mcp__/env.st: added `.mcp-active-env` section (open-env cards + tabs + empty-tabs hint) in the stage empty-state.
+- stdlib/__mcp__/workbench/lists.st: `.mcp-active-env-cards` @each($mcpOpenEnvironments) + `.mcp-active-env-tabs` @each($mcpTabs), reusing the existing &mcp-open-env-card / &mcp-tab-card templates.
+- stdlib/__mcp__/workbench/styles.st: JS-free `:has(.mcp-active-env-cards .mcp-open-env-card)` reveal — shows the section + recedes "Begin here"/gallery when an env is open; mirrors the existing gallery-hint :has idiom.
+
+LIVE VERIFICATION (real browser via st_workbench inst-3, env.st disk-live per FUP-071):
+- Open envs render frame-first on the STAGE (ikarchitecte, playground, sothema cards + paths) with a TABS section — the user's core complaint ("load in the main frame") resolved.
+- DYNAMIC: st_env_open(sothema) live-appended env-3 to the stage with no reload (the @each re-rendered reactively, identical to the nav drawer).
+- NO REGRESSION: composing a guest (greeter3) still mounts via the untouched $stageTpl path ("Composed, Stage!" rendered) and the empty-state (incl. active-env) correctly hides under the existing `:has(> :not(.mcp-stage-empty))` rule.
+
+GATES: env.st compiles clean (no E0930, no pipeline errors — verified via Compiler::from_file probe); lib 2380/0; integration 172/0; v8 430/9 (9 pre-existing BUG-039, zero new); MCP/workbench headless all pass. The 85 headless + 9 v8 failures are pre-existing + tracked (BUG-120/BUG-112/BUG-039), untouched by this work.
+
+SCOPE NOTE: this BUG delivers env + tab-LIST frame-first (the visibility fix). Rendering a tab's COMPILED PAGE in-stage (live tab-page-in-stage) remains the documented follow-on, as scoped in the BUG body's "Out of scope".

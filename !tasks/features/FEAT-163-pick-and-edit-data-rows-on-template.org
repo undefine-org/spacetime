@@ -1,0 +1,106 @@
+#+TITLE: Pick and edit @data rows on template-less pages
+#+STATE: DONE
+#+CUSTOM_ID: FEAT-163-pick-and-edit-data-rows-on-template
+#+PRIORITY: #A
+
+* Origin
+
+User report (2026-07-24): "the Pick element is not working when I run
+localhost:3333 — the button changes colours but otherwise nothing happens,
+doesn't even show the highlight overlay, no console.log appearing anywhere."
+
+The diagnosis was that pick was not broken; it had nothing to point at.
+
+* Diagnosis
+
+Both halves of pick keyed exclusively off `data-st-node`, the stamp marking a
+TEMPLATE INVOCATION:
+- the hover outline, as a CSS rule `[data-st-node]:hover`
+- the click, as `target.closest('[data-st-node]')`
+
+`projects/backdesk-new` declares ZERO `@template`. Its markup is selector-scoped
+and its content comes from `@each` over `@data` collections, so there were no
+invocations, no stamps, no overlay matches, and every click resolved to null. No
+console error because nothing errored: the code ran correctly and found nothing.
+
+Measured, not assumed: 12 of 23 projects under `projects/` declare no `@template`
+at all. Pick could never have worked on any of them.
+
+** Verification gap that hid it
+
+PLAN-112's "main is no longer mandatory" fix made the TREE render on `main`-less
+pages, and that is exactly what was verified. Whether STAMPS existed was never
+checked, and the fix was reported as complete while the selection spine was still
+absent on those pages. The lesson is recorded in PLAN-113's cross-cutting rules:
+verifying the adjacent thing is not verifying the thing.
+
+* What shipped (commit cbeb5f69)
+
+The editable surface of a template-less page is the JSON record behind each
+`@each` row, addressed by (source, index, field) rather than a `.st` byte span.
+The WRITE rail for that already existed — `EditJson` (file/path/value/op_id,
+handled in `src/sync/handlers.rs`) is what the admin CMS uses, and
+`ST._dataRegistry` already maps a source to its backing file. Only the ADDRESS
+was missing, so this reuses both rails whole.
+
+1. *Row stamping.* `stdlib/primitives/data/each-inline.st` now stamps
+   `data-st-source` / `data-st-index` in dev, which `each.st` has done since
+   PLAN-057. The inline variant is what every backtick-hole `@each` compiles to —
+   the common case — so in practice NO page carried row identity. (`each.st`'s
+   own stamps were latent too: they sit behind `window.__ST_DEV__`, set only by
+   `stdlib/__dev__`.)
+
+2. *Field stamping.* `data-st-field` is recorded at hole-substitution time, the
+   only moment the field name is knowable — after parsing, a hole's value is
+   indistinguishable from any other text. Two deliberate refusals: a value
+   appearing twice in a row is AMBIGUOUS and is skipped rather than guessed, and a
+   PIPED hole is never stamped because it renders a projection of the data, not
+   the data (writing to it would write to a derived value). Same rule as W4R's
+   ambiguous-span handling — no stamp beats a wrong stamp.
+
+3. *Pick.* `inspect-pick.st` tries a data address only when no invocation stamp is
+   present, so an invocation still wins where both exist. Selection drives the
+   SAME two signals (`insSelectedNode`, `insActiveParams`) the invocation path
+   uses, so the panel needs no branch.
+
+4. *Editors.* The shared `field-*` widgets. Widget kind is inferred from the VALUE
+   (bool→toggle, number→number, #hex→color, else text) because a `@data` record
+   declares no types. A number is written back as a NUMBER so an edit cannot
+   silently change the record's shape. Data rows blank the span/hash fields so the
+   EditAst rail can never claim them; the two write rails are separate primitives
+   rather than one branching per event.
+
+5. *Availability.* The pill stays VISIBLE on a template-less page (it used to hide
+   when the tree was empty), and the empty-state names the gesture that works.
+
+* Verification
+
+Live in Chromium against `projects/backdesk-new`: 15 rows and 40 fields stamped;
+picking a `.bn-pain` field selected `data:pains[0]` and rendered its typed
+editors; edits wrote `data/pains.json` and `data/pillars.json` with the server
+logging `EditJson … ok`. All fixture files restored byte-identical to HEAD after
+testing. Production build re-checked: `__ST_DEV__` is never set there, so no stamp
+can be emitted.
+
+Tests (`stdlib/__inspector__/tests/pill.test.st`): address resolution including
+the record-level click; descriptor projection including unstamped-field exclusion
+and widget inference; typed EditJson request including the orphan-control
+refusal. Both sabotage-verified — reverting the path-strip or the widget
+inference fails them.
+
+Gates: 2792 lib · 200 integration · 438 v8 · 656 headless · 20 pill · 8 fields.
+
+* Known gap
+
+The panel's Saved/error line still does not display — `%exports` never reach a
+file-scope binding. Pre-existing for the EditAst rail since the pill shipped, and
+untested, which is why it was invisible. Writes are confirmed by server ack and
+file bytes. Filed as FUP-138 with the four approaches already tried and reverted.
+
+* Follow-on worth considering
+
+- Editing an `@each` row edits ONE record; the pill does not yet offer
+  insert/delete/reorder, though `EditJsonArray` already supports them
+  (`stdlib/primitives/data/collection.st`).
+- Nested `@each` rows get the inner source's address; deeper nesting is untested.
+- A field whose value is an object is skipped (not a flat field edit).

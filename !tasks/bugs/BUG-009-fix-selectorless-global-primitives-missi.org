@@ -1,0 +1,93 @@
+#+TITLE: Fix selectorless global primitives missing el binding in codegen
+#+STATE: DONE
+#+SESSION_ID: 14a74cedac0c17fa
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-03-30T18-25-30-288Z_14a74cedac0c17fa.jsonl]]
+#+CUSTOM_ID: BUG-009-fix-selectorless-global-primitives-missi
+#+EFFORT: S
+#+PRIORITY: #A
+#+LAYER: pipeline
+
+NOTE [2026-03-30]: Fixed in expand.rs:189. Selectorless global primitives with %yield/%cleanup now get ElInit::Body. Verified: 13 `const el = document.body` in dev runtime, all 5 dev globals assigned.
+
+* Initial Message
+
+test in the browser with the appropriate stuff
+
+* Scope
+** In Scope
+- Fix ~el_init~ determination in ~src/pipeline/expand.rs~ for Global phase selectorless primitives that have ~%yield~ or ~%cleanup~ directives
+- These primitives generate ~ST.set(el, ...)~ and ~ST.onCleanup(el, ...)~ calls but the IIFE wrapper doesn't inject ~el~, causing ~ReferenceError~ at runtime
+** Out of Scope
+- Primitives with selectors (already handled correctly)
+- Selector-phase primitives (already handled correctly)
+- Truly selectorless primitives without yield/cleanup (e.g., ~dev-flag~) — these correctly get ~el_init=None~ and should not change
+** Boundary Rationale
+The bug is a single missing condition in the expand phase. The emit phase and runtime already handle ~ElInit::Body~ correctly. Primitives that don't use yield/cleanup don't reference ~el~ and must remain ~el_init=None~ to avoid unnecessary ~const el = document.body~ preamble.
+
+* Tests
+** Unit Test: expand.rs
+File: ~src/pipeline/expand.rs~ (inline test module)
+
+Scenario 1: Global selectorless primitive WITH exports → el_init = Some(ElInit::Body)
+- Construct ~GeneratedPrimitiveIR~ with ~exports: vec!["connected".to_string()]~, empty cleanup, empty selector
+- Construct ~ResolvedPrimitive~ with ~phase: Phase::Global~, ~selector: None~
+- Call ~ir_to_expanded~
+- Assert ~js.unwrap().el_init == Some(ElInit::Body)~
+
+Scenario 2: Global selectorless primitive WITH cleanup → el_init = Some(ElInit::Body)
+- Construct ~GeneratedPrimitiveIR~ with empty exports, non-empty ~cleanup_stmts~
+- Assert ~js.unwrap().el_init == Some(ElInit::Body)~
+
+Scenario 3: Global selectorless primitive with NEITHER exports NOR cleanup → el_init = None
+- Construct ~GeneratedPrimitiveIR~ with empty exports, empty cleanup
+- Assert ~js.unwrap().el_init == None~
+
+** Integration: verify compiled output
+- Run ~cargo run -- serve site/dataiku --debug~ (in background)
+- Fetch ~http://127.0.0.1:3333/__spacetime/dev/runtime.js~
+- Assert output contains ~const el = document.body;~ at least once (before dev-panel, dev-ws code)
+- Assert ~window.__stDevPanel~ appears in the output and the panel initializes in browser
+
+* Implementation
+** File: ~src/pipeline/expand.rs~
+Lines 185-195, the ~el_init~ match block.
+
+Current code:
+#+begin_src rust
+let el_init = match primitive.phase {
+    Phase::Global => match &primitive.selector {
+        Some(sel) if !sel.is_empty() => Some(ElInit::Selector(sel.clone())),
+        Some(_) => Some(ElInit::Body),
+        None => None,
+    },
+    // ...
+};
+#+end_src
+
+Change the ~None => None~ arm to:
+#+begin_src rust
+None => {
+    // Selectorless global primitives that use %yield or %cleanup
+    // need an element reference for ST.set(el, ...) and ST.onCleanup(el, ...)
+    if !ir.exports.is_empty() || !ir.cleanup_stmts.is_empty() {
+        Some(ElInit::Body)
+    } else {
+        None
+    }
+}
+#+end_src
+
+This checks ~ir.exports~ (populated from ~%yield~ declarations at codegen time) and ~ir.cleanup_stmts~ (populated from ~%cleanup~ blocks). Using ~document.body~ is safe because signal names across dev primitives are disjoint and ~ST.set~ uses per-name slots in a WeakMap.
+
+* Edge Cases
+- ~dev-flag()~ primitive has no yields or cleanup — remains ~el_init=None~ (correct)
+- Multiple primitives sharing ~document.body~ as ~el~ — safe because ST.set uses per-signal-name slots in a WeakMap keyed by element
+- Double-IIFE pattern (hand-written IIFE inside ~%emit js~) — the outer pipeline IIFE injects ~const el = document.body~, inner IIFE captures it via JS closure (verified)
+- Race condition: primitives that depend on ~__stDevPanel~ use ~setTimeout(init, 200)~ retry loops — once panel initializes, dependents will follow
+
+* Acceptance Criteria
+1. ~cargo test --lib~ passes (1977+ tests, zero failures)
+2. Compiled ~/__spacetime/dev/runtime.js~ contains ~const el = document.body;~ before dev-panel code
+3. ~window.__stDevPanel~ is defined in the browser after page load
+4. Dev panel sidebar renders in the browser (visible via Puppeteer screenshot)
+5. ~window.__stDevWs~, ~window.__stDevDataEditor~, ~window.__stDevContentTree~, ~window.__stDevSave~ are all defined

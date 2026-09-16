@@ -1,0 +1,94 @@
+#+TITLE: check does not gate on capture-type failure inside directive bodies (BUG-216 class, second path)
+#+STATE: DONE
+#+SESSION_ID: 1534a2eae1903af0
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-18T13-07-01-638Z_1534a2eae1903af0.jsonl]]
+#+CUSTOM_ID: BUG-229-check-does-not-gate-on-capture-type-fail
+
+* Initial Message
+
+1. you did not change the internals of the sections that I talked about (look up HUMAN-NOTE and HUMAN NOTE and the setions they're in.
+ the code samples are not up to date. This is SHODDY SIP updating. Commit that SIP if it's not, then show me all the things that need
+ updating, as well as taking into account all my new notes into a v3. understand both the current usages of @on and the future usages and
+ make sure you make a usecase list with complete-enough syntax to show you understand what you want. Show the meta-compiler vs. runtime
+ vs. stdlib blast radius, and get informed on the %migration syntax to also prepare the cutover using Spacetime features.
+
+Found while spiking SIP-001 v5's =on_arm= grammar (2026-07-26).
+
+* Symptom
+
+A directive body whose custom =%capture_type= CANNOT match still compiles
+green. Both of these pass =spacetime check= identically:
+
+#+begin_src spacetime
+%capture_type on_leaf { ( $lit:string ) | ( $wild:ident ) }
+%capture_type on_transition { $from:on_leaf "->" $to:on_leaf }
+%capture_type on_pat { ( $transition:on_transition ) | ( $leaf:on_leaf ) }
+%capture_type on_arm { $pat:on_pat "=>" $form:ident ";" }
+
+%macro spike-two {
+  %form { @spike-two $subject:binding "{" ( $arms:on_arm )+ "}" }
+  %binds { spike-noop(subject: $subject, arms: $arms) }
+}
+
+// WELL-FORMED — passes (correct)
+.show { @spike-two $take { a -> b => cut; b => dissolve; } }
+
+// MALFORMED — ALSO passes (WRONG: `a -> -> b => ;` is not an on_arm)
+.show { @spike-two $take { a -> -> b => ; => cut } }
+#+end_src
+
+=inspect --layer expansion= shows the body captured as RAW TEXT
+(="arms: a -> b => cut; b => dissolve;..."=) with "(macro not found in
+registry)" — i.e. the body is passed through opaquely rather than parsed
+by the declared capture type.
+
+* Why #A
+
+Same class as BUG-216 (=tests/bug_216_silent_directive_drop_test.rs=):
+"a body that fails to parse is indistinguishable from a body that
+legitimately emits nothing, so the failure is invisible to a green suite."
+BUG-216 fixed the =@test=-body path; this is the same hazard on the
+custom-capture-type-in-directive-body path.
+
+Consequence for design work: **grammar spikes cannot be validated with
+=check= alone.** A green result proves nothing about whether the capture
+type matched. Any SIP claiming "spiked, works" needs a positive AND a
+negative case, with the negative confirmed to FAIL.
+
+* Repro
+
+1. Write the two files above.
+2. =cargo run -- check <file>= on each → both ✓.
+3. Expected: the malformed one errors with a capture-type mismatch
+   naming =on_arm=.
+
+* Acceptance
+
+- Malformed body → non-zero exit + diagnostic naming the capture type and
+  the offending span.
+- Well-formed body → unchanged ✓.
+- Regression test in =tests/= alongside bug_216, covering a custom
+  =%capture_type= used as a directive-body capture.
+
+* Notes
+
+Blocks the SIP-001 v5 =on_arm= grammar from being marked "verified" —
+recorded there as an explicit open question rather than a settled fact.
+
+NOTE [2026-08-02]: ALREADY FIXED 2026-07-26 in 0d437e5b + 44da039b (reviewer-swarm follow-ups). State was stale at ITEM; the gate `tests/bug_229_capture_type_failure_gate_test.rs` is 5/5 green today. Closing the record.
+
+I found this by trying to REPRODUCE before fixing, which is the only reason the duplicate work was caught — SIP-001 open-q8, the family README, and PLAN-128's hazard list all still said BUG-229 blocked grammar verification, so the next agent (me) went to fix a fixed bug. Stale bug state is not a bookkeeping detail; it costs a full investigation.
+
+TWO DEFECTS, both closed:
+(A) `parser::rematch_with_user_macros_in` registered same-file `%macro` definitions into the augmented registry but never same-file `%capture_type` definitions — a user grammar was therefore ALWAYS absent from the registry meant to enforce it.
+(B) With the extractor absent, form_compiler's Custom body-capture branch fell back to `Some(CapturedValue::String(inner))` to "preserve historical lenient behavior", so the capture SUCCEEDED holding unparsed raw text. The form matched and check reported success on malformed source. Then `cst_to_stfile_with_registry` discarded every match diagnostic except a hardcoded `@data subscribe` case (BUG-234), so even a produced failure never reached StFile::diagnostics.
+
+WHAT MY REPRO TAUGHT ME ANYWAY (worth keeping — it cost an hour and will cost the next person the same):
+
+1. A `%form` body written as a GROUP — `"{" ( $arms:x )+ "}"` — compiles against STDLIB capture types only, so a same-file `%capture_type` is invisible there and the directive never matches AT ALL. Written as a direct repeated body capture — `{ $arms:x+ }` — it resolves through the augmented registry and sees the user grammar. The existing test documents this in a comment on GRAMMAR; my probe used the group form and spent several rounds on a self-inflicted null result. The two spellings look interchangeable and are not.
+
+2. `cargo run -- check <dir>/` on a directory with no page compiles NOTHING and still prints "✓ All 1 file(s) passed". My whole first repro was vacuous — `build` reported `Pages: 0`. A green check on a fixture you have not proven is a PAGE is not evidence. Establish a control that MOVES (my `@cursor` control shifted the bundle 9329 bytes) before trusting any A/B.
+
+3. `inspect --layer expansion` is the discriminator the existing test correctly uses: exit 0 does not distinguish "matched" from "silently vanished", which IS the bug class. Assert the directive appears in the expansion, not merely that check passed.
+
+No code change needed. Follow-up: SIP-001 open-q8 and the FAMILY README both still name BUG-229 as blocking — corrected in the same commit as this note.

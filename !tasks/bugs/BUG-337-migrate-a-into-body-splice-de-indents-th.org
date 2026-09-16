@@ -1,0 +1,87 @@
+#+TITLE: migrate: a %into body splice de-indents the capture's first line
+#+STATE: DONE
+#+SESSION_ID: 153497be379ff5cc
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-18T12-18-12-318Z_153497be379ff5cc.jsonl]]
+#+CUSTOM_ID: BUG-337-migrate-a-into-body-splice-de-indents-th
+#+COMPLETION_HASH: 05d99b71eff54aec
+
+* Initial Message
+
+ok what's next in terms of making the whole test suite pass?
+
+* Symptom
+
+`spacetime migrate` writes correct CODE with damaged FORMATTING: wherever a
+=%rewrite='s =%into= splices a captured body (=`$body`=, =`$enterAnim`=,
+=`$exitAnim`=), the FIRST line of that capture loses its indentation and lands
+at column 0. Subsequent lines keep theirs.
+
+Observed on =examples/value_change_demo.st= (=on-cutover=, =%rewrite value-change=),
+12 occurrences in one 6-site file:
+
+#+begin_src spacetime
+    @on &.text-change(duration: 300ms, stagger: 40ms, from: start) {
+        :entering {
+translate-y: -100% -> 0          // \u2190 column 0
+            opacity: 0 -> 1              // \u2190 correct
+            easing: cubic-bezier(0, 0, 0.2, 1)
+        }
+#+end_src
+
+The closing brace of the rewritten directive is also off by two
+(=      }= against an opening =    @on=).
+
+* Severity: cosmetic, but it scales
+
+Nothing miscompiles \u2014 the migrated file checks clean and its expansion is
+correct (verified below). But AUD-009 records **102 pending sites**, 92 of them
+in =tests/=. Running the migration as-is would scatter column-0 lines through
+the test corpus, making every migrated file's diff noisy and its body
+unreadable. Worth fixing BEFORE the sweep, not after.
+
+* What is NOT wrong
+
+The rewrite itself is correct and is a genuine improvement. Before/after
+=inspect --layer expansion= on the same file:
+
+| | =macro not found in registry= |
+|--------+-----------------------------|
+| before |                           6 |
+| after  |                           0 |
+
+The pre-migration =@value-change= sites were resolving to NOTHING \u2014 tolerated by
+the migration window, expanding to nothing, doing nothing. After the rewrite
+each is a fully-structured =@on= with parsed driver params and =entering=/=exiting=
+slots. So the migration converted six silent no-ops into six live directives;
+only the whitespace is wrong.
+
+* Likely locus
+
+The =%into= splice path that substitutes a captured block into the template.
+The first line is emitted at the template's own column (the =`$body`= token in
+=stdlib/migrations/entries/2026-07-26-on-cutover.st= sits at column 0 inside the
+=%into= block \u2014 see the =%rewrite loop-positional= / =value-change= bodies), while
+later lines carry their original source indentation verbatim. So the fix is
+probably to re-indent the WHOLE captured block to the splice site's column,
+rather than emitting line 1 at the template column and the rest untouched.
+
+Note the capsule source itself writes =`$body`= flush-left inside =%into=,
+which is consistent with the observed output and is the natural place to look
+first.
+
+* Acceptance
+
+- Migrate a file whose rewrite splices a multi-line body; every line of the
+  spliced block shares one indentation, aligned to its new nesting depth.
+- The rewritten directive's closing brace aligns with its opening line.
+- Re-running =migrate= on an already-migrated file is a no-op (idempotence \u2014
+  worth asserting once whitespace is stable, since a re-indent bug could
+  otherwise creep a block rightward on each run).
+
+NOTE [2026-08-08]: FIXED. `reindent_splice` / `current_column` in src/migrate.rs re-indent a %into
+body splice to the invocation's column instead of emitting it at column 0.
+
+Verified during the @on cutover: migrated output across 102 sites keeps its
+authored indentation, and `migrations_test` is green on every gate except the
+two owned by BUG-342 (object-literal decl), which is a parse defect unrelated to
+splice indentation.

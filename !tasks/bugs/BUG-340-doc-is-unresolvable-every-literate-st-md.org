@@ -1,0 +1,145 @@
+#+TITLE: EVERY opt-in stdlib module is unreachable — `stdlib/md`, `stdlib/text`, `stdlib/3d` all fail with "unknown primitive"
+#+STATE: DONE
+#+SESSION_ID: 1534a2eae1903af0
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-18T13-07-01-638Z_1534a2eae1903af0.jsonl]]
+#+CUSTOM_ID: BUG-340-doc-is-unresolvable-every-literate-st-md
+
+* Initial Message
+
+so how do I use it? i launched it and little seems to actually work or be interactive. use the browser tool and see if there are errors in the code and stuff. please be thorough and make sure all expectred storiees work. work autonomously and complete as you go
+
+* Summary
+
+`@doc` no longer resolves. Any page that imports `stdlib/md` — and therefore
+EVERY literate `.st.md` document, since the tangler synthesizes that import for
+prose — fails to build:
+
+: ✗ Export failed: Route '' has compile diagnostic: unknown primitive: doc
+
+The `doc` macro binds `render-markdown` (`stdlib/md/macros/doc.st`), so
+"unknown primitive: doc" means the macro itself was never matched and `doc` was
+treated as a bare primitive name.
+
+* Reproduction (both fail, clean HEAD `3b074339`, isolated target dir)
+
+Explicit import:
+
+#+begin_src spacetime
+@import "stdlib/md"
+
+<div class="d"></div>
+.d { @doc(content: "# hi"); }
+#+end_src
+
+Literate (the import is synthesized by `src/literate.rs:457`):
+
+#+begin_src markdown
+# T
+
+Prose.
+
+```st
+body { color: #111; }
+```
+#+end_src
+
+Also fails: `cargo run -- build demos/brand-catalog/` (route `guidelines`),
+which is what surfaced it.
+
+* Verified NOT a build race
+
+The shared `cargo-target` dir is being rebuilt concurrently by another lane,
+which produced several false readings during triage. This was re-confirmed with
+`CARGO_TARGET_DIR=/tmp/isotarget` in a clean `git worktree` at `3b074339`: same
+failure, from a binary nothing else touched.
+
+* Bisect
+
+Green through `100c6ac9` / `6100ee72`; failing at `68650ff7`
+("fix(W1.1/W3): triage the unreachable primitives — 24 -> 14"). NB that commit
+touches only an org file and `tests/generalizations/g1_primitive_reachability_test.rs`,
+and the test is read-only — so either the bisect boundary is off by a
+concurrent rebuild, or the reachability triage changed something that reaches
+the registry indirectly. Worth re-bisecting with an isolated target dir per
+step; each step is a full rebuild, so it is slow but unambiguous.
+
+* Why this matters
+
+- Every `.st.md` page in the repo is dead, including
+  `demos/starter-pack/index.st.md` (the tutorial that IS the program it teaches)
+  and `demos/spacetime-docs`.
+- `demos/brand-catalog` cannot export, so `tests/demo_brand_catalog_test.rs`
+  (4 tests) fails.
+- Per AGENTS, docs-as-a-feature is a load-bearing rail: `@doc(src:)` is what
+  keeps a rendered page from drifting from the markdown it documents.
+
+* Acceptance
+
+1. Both reproductions above build.
+2. `cargo test --test demo_brand_catalog_test` — 4/4.
+3. A gate that compiles a minimal `.st.md` and asserts the prose rendered, so
+   the whole literate rail cannot go dark silently again. Today nothing in the
+   suite compiles a literate page end to end, which is why this shipped.
+
+** NOTE 2026-08-07 — the scope is far wider than `@doc`
+Re-probed each opt-in module with an ISOLATED target dir
+(`CARGO_TARGET_DIR=/tmp/isotarget`) in a clean worktree at `3b074339`, so no
+concurrent rebuild can explain it:
+
+| module          | probe                                     | result                              |
+|-----------------+-------------------------------------------+-------------------------------------|
+| `stdlib/md`     | `.d { @doc(content: "# hi"); }`            | ✗ unknown primitive: doc            |
+| `stdlib/text`   | `.t { @balance; }`                         | ✗ unknown primitive: balance        |
+| `stdlib/3d`     | `.s { @stage; }`                           | ✗ unknown primitive: stage          |
+
+Each probe carries the explicit `@import "stdlib/<module>"`, so this is not the
+literate synthesis path — it is module import resolution generally.
+
+MECHANISM (partly established): `STDLIB_DIRS` (`src/metasystem/registry.rs:147`)
+lists only the always-on directories — capture-types, runtime, primitives,
+syntax, macros, testing, migrations/entries, comments/entries, scalars, enum.
+The opt-in modules are NOT in that list by design; they are meant to load
+on demand when a page imports them. That on-demand path is what regressed:
+`spacetime inspect --layer registry` on a page that imports `stdlib/md` shows
+129 primitives and no `render-markdown`, and no `doc` macro.
+
+Each module's own files parse clean (`check` on `stdlib/md/{index,MODULE,vendor}.st`,
+`macros/doc.st`, `primitives/render-markdown.st` — 0 errors each), and the
+vendored snarkdown bundle is present and matches its `.commit` pin. So the
+files are fine; the loader never registers them.
+
+BISECT: green at `6100ee72`, failing at `68650ff7`, both rebuilt from scratch in
+the isolated target dir. NB those two are NOT parent/child — the range between
+them spans a large lane merge (~170 files incl. `src/lsp/workspace/import_resolver.rs`,
+`src/metasystem/*`, `stdlib/index.st`). `import_resolver.rs` is the first place
+to look: it carries the stdlib-module resolution branch and was touched in that
+range.
+
+IMPACT: every `.st.md` page in the repo (incl. `demos/starter-pack`, the
+tutorial that IS the program it teaches), `demos/spacetime-docs`,
+`demos/brand-catalog`, and any page using `@balance` or `@stage`.
+`tests/demo_brand_catalog_test.rs` fails 4/4 for this reason and this reason
+only — its other assertions pass once the export succeeds.
+
+** NOTE FIXED (commit 1b24e320)
+Ordering bug in resolve_stdlib (src/lsp/workspace/import_resolver.rs): the
+EMBEDDED module index was checked before the filesystem, and build_stdlib_index
+indexes every .st under stdlib/ by BARE NAME — so stdlib/md/index.st registered
+the name "md", the embedded branch matched, and the import returned
+ResolvedImport::Stdlib. That variant is a dead end for the opt-in modules:
+resolve_imports skips it ("handled by MetaRegistry") and MetaRegistry loads only
+STDLIB_DIRS, which deliberately excludes them.
+
+Fix: filesystem first, embedded name as the fallback (for an installed binary
+with no checkout). The always-on modules resolved either way, which is why this
+presented as a @doc bug rather than a resolver bug.
+
+Gates: tests/bug_340_optin_stdlib_modules_test.rs — one page per opt-in module
+(md / text / 3d) plus a literate .st.md page built end to end. RED-checked: all
+four fail against the old ordering. The literate test is the one that would have
+caught this on landing day — it imports nothing by hand, and asserts the prose
+segment reaches the document, so a green build emitting no prose still fails.
+
+Recovered: demos/brand-catalog (demo_brand_catalog_test 0/4 -> 4/4),
+demos/spacetime-docs, every .st.md page. NB demos/starter-pack still fails on an
+unrelated pre-existing issue (retired @on syntax, 2026-07-26 wave).

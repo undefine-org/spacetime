@@ -1,0 +1,64 @@
+#+TITLE: Overload resolution by join, not by a scoring heuristic
+#+STATE: ITEM
+#+SESSION_ID: 153f5ed0617636c7
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-26T21-12-46-213Z_153f5ed0617636c7.jsonl]]
+#+CUSTOM_ID: FUP-190-overload-resolution-by-join-not-by-a-sco
+
+* Initial Message
+
+ok so is there any point in keeping the worktree now? verify
+
+* Why
+
+Several `%form`s can match the same directive. Today the winner is chosen by a
+SCORING FUNCTION — a hand-tuned heuristic that assigns points and takes the
+maximum. A heuristic answers "which felt best"; it cannot answer "which is
+strictly more specific", and it cannot explain a tie.
+
+With `≤` (FUP-189) specificity stops being a feeling and becomes an ORDER: form
+A is more specific than form B when every parameter of A is `≤` the
+corresponding parameter of B. The winner is the least element — a JOIN, not a
+maximum score.
+
+* What this fixes that scoring cannot
+
+- A TIE becomes detectable and reportable. Two forms neither of which is `≤` the
+  other are genuinely ambiguous, and today one silently wins by point ordering.
+- The choice becomes EXPLAINABLE: "form A won because `length ≤
+  length_percentage`" is a path through the relation, printable in a diagnostic.
+- Adding a scalar can no longer perturb unrelated resolutions, which a shared
+  point scale can.
+
+* CodePath
+
+  src/syntax/events/form_scoring.rs                     the current heuristic
+  src/syntax/events/form_scoring.rs::§line[text~="score"]
+      every scoring site — each becomes a `subtype()` comparison or is deleted
+  src/validation/consistency.rs::join                    from FUP-189
+  tests/overload_resolution_test.rs                      NEW
+
+* Verification seeds
+
+- CHARACTERISE FIRST. Before changing anything, dump the current winner for
+  every multi-match directive in the corpus:
+  `cargo run -- inspect --layer expansion <file>` over examples + demos, recorded
+  to a file. The new resolution must produce the SAME winner everywhere except
+  where the old one was provably wrong — and each difference must be explained
+  in the commit, not averaged away.
+- The 3 known same-directive sibling forms (from PLAN-136's map: 16 global
+  conflicts reduced to 3 deliberate siblings) are the sharp cases. A flat table
+  would have forced 13 false reconciliations and broken the 3D macros — the new
+  order must keep all three distinct.
+- `cargo test --lib`, corpus flat (35 / 36 / 6).
+
+* Deprecation sweep
+
+The scoring function is the thing being replaced. When this lands, `form_scoring.rs`
+should be substantially SMALLER or gone. If it survives intact alongside
+`subtype()`, that is a parallel implementation and the work is not finished —
+grep `grep -rn "form_scoring\|fn score" --include=*.rs src/` and account for
+every remaining caller.
+
+* Blocked on
+
+FUP-189 (the `≤` relation must exist first).

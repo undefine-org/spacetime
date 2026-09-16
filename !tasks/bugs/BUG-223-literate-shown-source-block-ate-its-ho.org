@@ -1,0 +1,51 @@
+#+TITLE: BUG-223 — literate `st src` block ate its own holes (backtick unescaped)
+#+DATE: 2026-07-24
+
+* BUG-223 literate shown-source block ate its own holes
+:PROPERTIES:
+:CUSTOM_ID: BUG-223
+:STATE: DONE
+:END:
+
+** Symptom
+
+In a literate document (=.st.md=, SIP-002), a ` ```st src ` fence displays its
+source above the live result. Any hole in that source VANISHED from the display:
+
+: @template &task-row($t) {
+:   <li class="trow" data-id="">      <-- should read data-id="`$t.id`"
+:     <span></span>                    <-- should read `$t.label`
+
+So the block that exists to TEACH interpolation syntax rendered with the
+interpolation syntax deleted — while the live copy below it worked perfectly,
+making the doc look like the syntax was optional.
+
+** Root cause
+
+=escape_html= in =src/literate.rs= escaped =<=, =>=, =&=, ="= — but not the
+BACKTICK. In Spacetime markup a backtick opens a hole (=HTML_HOLE=, see
+=src/syntax/cst/ast.rs=), so the compiler lexed the backticks inside the
+synthesized =<pre class="lit-src">= as real interpolations and rendered them
+against the (absent) template scope: empty string.
+
+** Fix
+
+Escape the backtick as the numeric entity =&#96;= — displays as a backtick,
+invisible to the hole lexer. The SPLICED copy (the program) keeps its real
+backticks; only the SHOWN copy is escaped.
+
+** Test
+
+=literate::tests::shown_source_escapes_backticks_so_holes_are_not_eaten=
+asserts both halves: shown source contains =&#96;$title&#96;=, spliced source
+contains a real =`$title`=.
+
+** Discovery
+
+PLAN-114 W2 (starter-pack migration). Caught by a SCREENSHOT — the compile
+check passed, and every DOM assertion I had written passed too, because I was
+asserting on the LIVE elements rather than the displayed source text.
+
+Second defect this session visible only in a rendered image (cf. BUG-221,
+literal =\n= in prose). Recorded as a standing lesson: "it compiles" and "the
+DOM has the right nodes" are both weaker than "a human can read the page".

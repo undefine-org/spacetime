@@ -1,0 +1,74 @@
+#+TITLE: An animation keyframe directive inside a @test body silently compiles the whole test EMPTY (false greens)
+#+STATE: DONE
+#+SESSION_ID: 153497c78a510229
+#+CUSTOM_ID: BUG-194-keyframe-directive-swallows-test-body
+#+COMPLETION_HASH: 9ecbf683a5835a2e
+
+* Severity
+CRITICAL test-integrity compiler bug: silently turns real tests into
+vacuous passes. Already present, unnoticed, across the committed suite.
+
+* Symptom
+An animation-driver directive whose body is a KEYFRAME list
+($body:keyframes capture -- @scroll, @mouse, @load, @on hover/click/
+visible/focus with a `prop: a -> b;` body) placed as a step INSIDE a
+`@test { ... }` body (bare, or nested in @given/@fixture/@mount) compiles
+the ENTIRE enclosing test to `async () => {}` -- empty. No error, no
+warning; every step (before and after the directive, including @assert) is
+dropped; the runner reports a green PASS.
+
+* Minimal repro (confirmed via inspect --layer emit)
+  @test "x" {
+    @scroll d(start: 0, end: 1) { opacity: 0 -> 1; }
+    @assert (true) "never runs"
+  }
+Contrast that COMPILES CORRECTLY (isolates the trigger to the keyframes
+capture path specifically):
+  @test "x" { @on click d { $s <- true; } @assert (true) "runs" }
+
+* Blast radius (verified this session)
+ALL SIX tests in tests/unit/animations/mouse-tilt.test.st compile empty
+(every "@given .parent { @mouse driver(...) {...} } + assertions" shape) --
+the suite has never verified anything. Files sharing the vulnerable shape
+(individual tests may still be fine if their driver sits at file scope or
+they only use have_timeline):
+  tests/unit/animations/mouse-tilt.test.st
+  tests/unit/animations/on-visible-mutation.test.st
+  tests/unit/primitives/scroll-composition.test.st
+  tests/unit/primitives/scroll-driver.test.st
+  tests/unit/primitives/scroll-multi-keyframe.test.st
+  tests/unit/primitives/scroll-scope.test.st
+  tests/unit/primitives/scroll-velocity.test.st
+This also stacked with BUG-196 (no AbortController headless) to hide that
+interactive drivers never ran headless at all.
+
+* Workaround (used by BUG-192/BUG-195 pins)
+Declare the animated selector at FILE SCOPE (`.class { @scroll ... }` --
+how production .st writes it anyway) and keep only markup inside
+@fixture/@mount. Compiles and runs correctly.
+
+* Test pin (RED) -- Rust, emitted-JS level
+tests/bug_194_keyframe_directive_swallows_test_body_test.rs
+A runtime .test.st pin is IMPOSSIBLE for this bug (any @assert after the
+triggering directive is itself swallowed and would pass vacuously), so the
+pin compiles probe sources via Compiler::from_file and asserts the emitted
+register_test body between `try {` and `} finally {` contains its steps.
+- 3 RED: bare @scroll, bare @on hover, and the mouse-tilt @given+@mouse
+  shape.
+- 1 GREEN control: mutation-form @on click ($body:block) does NOT swallow.
+Run: `cargo test --test bug_194_keyframe_directive_swallows_test_body_test`
+(Note: E0909 is tolerated in the pin's compile assertion because the real
+test runner downgrades it to a warning.)
+
+* Suspected mechanism (needs root-cause dig)
+Shape-wise similar to fixed BUG-100/BUG-183 (captured-body reification
+corrupting the ENCLOSING structure's codegen). Likely in the test-body
+compilation's handling of $body:keyframes captures -- start in
+src/syntax/events/form_compiler.rs and the @test body pipeline in
+src/pipeline/expand.rs.
+
+* After the fix
+Re-run the seven affected suite files and expect REAL results for the first
+time -- some may newly fail (they've never actually executed); triage each.
+
+NOTE [2026-07-19]: FIXED (PLAN-078): root cause was convert_keyframe_body_to_js's lenient content-sniff in captured_to_js_with_registry (src/pipeline/expand.rs) — any captured body text containing `->` + `{`/`:` (e.g. a @test body containing a @scroll directive) was force-parsed as keyframes into garbage, which then failed the block-body fragment re-parse and silently emptied the WHOLE test. Fix: strict fallible try_convert_keyframe_body_to_js (full-grammar consumption required, CSS-ident property names, no @ in selectors) — non-keyframes content passes through raw. Pin 4/4 green. Suite triage: 6 files unvacuated to the file-scope driver shape (5 scroll + mouse-tilt, all green), BUG-200 (directive-in-markup silent drop) + BUG-201 (nested keyframes scopes dropped) filed from triage.

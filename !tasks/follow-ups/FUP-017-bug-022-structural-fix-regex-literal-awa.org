@@ -1,0 +1,37 @@
+#+TITLE: BUG-022 structural fix: regex-literal-aware lexer for %emit js bodies
+#+STATE: ITEM
+#+SESSION_ID: 14cb68a08c63888e
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-04-27T19-31-50-449Z_14cb68a08c63888e.jsonl]]
+#+CUSTOM_ID: FUP-017-bug-022-structural-fix-regex-literal-awa
+#+EFFORT: 3h
+#+LAYER: metasystem
+#+PRIORITY: #B
+
+PLAN-018 wave-3 settled BUG-022 with the loud-failure path (parse fails with a clear offset diagnostic, regression test pinned in =src/metasystem/tests.rs::grammar::test_brace_regex_in_emit_body_surfaces_diagnostic=, footgun documented in =.claude/skills/spacetime-design/references/compiler-debugging.md=). The structural fix below remains.
+
+* Scope
+
+In-scope:
+- Teach the CST lexer to recognize JS regex literals inside `%emit js { ... }` bodies so brace-bearing regexes round-trip without confusing the brace counter.
+- Cover regex flags `[gimsuyd]*`, character classes `[...]` (where `}` is literal), and escape sequences `\\X`.
+- Disambiguate `/` as division vs regex start using the standard precedes-token rule (regex starts after operators, `(`, `[`, `,`, `;`, `=`, `:`, `?`, `!`, `&`, `|`, `^`, `~`, return/typeof/delete/void/in/of/instanceof keywords; division otherwise).
+
+Out-of-scope:
+- Full JS lexing fidelity (we only need brace-depth correctness inside emit bodies).
+- Template literals with `${ ... }` interpolation — file separately if the body-counter mishandles those too.
+
+* Tests
+
+- Flip =src/metasystem/tests.rs::grammar::test_brace_regex_in_emit_body_surfaces_diagnostic= from `is_err()` to `is_ok()` and verify the emit body content round-trips both `styleRe` and `simpleRe`.
+- Add a positive test for character classes with literal `}` (e.g., `/[^}]/`).
+
+* Acceptance criteria
+
+- The flipped test passes.
+- =cargo run -- inspect --layer ir <fixture-with-brace-regex>= shows non-empty Expanded body for the affected primitive.
+- The Status section in =.claude/skills/spacetime-design/SKILL.md= drops the BUG-022 line under "Planned".
+
+* Carry-over from PLAN-018
+
+- Foot-gun documentation lives under "Brace-bearing regex literals in `%emit js` (BUG-022)" in =compiler-debugging.md=.
+- Workaround (string-based `new RegExp(...)`) is documented and used by =stdlib/__dev__/primitives/dev-review.st=.

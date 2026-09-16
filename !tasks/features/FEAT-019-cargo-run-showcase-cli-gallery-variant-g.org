@@ -1,0 +1,111 @@
+#+TITLE: cargo run -- showcase CLI (gallery + variant generator)
+#+STATE: BLOCKED
+#+SESSION_ID: 14cb55e291e3888a
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-04-27T18-09-57-319Z_14cb55e291e3888a.jsonl]]
+#+CUSTOM_ID: FEAT-019-cargo-run-showcase-cli-gallery-variant-g
+#+DEPENDS: FEAT-018-stdlib-showcases-tree-curated-patterns-i
+#+EFFORT: 5h
+#+LAYER: coding-agent
+#+PRIORITY: #B
+
+* Initial Message
+
+what can you learn from this https://github.com/alchaincyf/huashu-design
+
+to make a nice spell skill that helps with Spacetime? think about the skill + the features and improvements to the debugger that you can land
+
+* Scope
+
+In-scope:
+- New CLI subcommand: =cargo run -- showcase= with three forms:
+  1. =cargo run -- showcase= (no args): prints catalog table to stdout (scenario, style, description, file path).
+  2. =cargo run -- showcase serve [--port 4444]=: boots a minimal dev server that mounts =stdlib/showcases/index.st= and renders a one-page gallery (card grid, 24 thumbnails). Reuses existing serve infrastructure.
+  3. =cargo run -- showcase generate <scenario> [--styles minimal,editorial,maximal] --out <path>=: writes one file per requested style under `<path>/<scenario>__<style>.st`, each starting from the corresponding showcase template. Used by the skill's "fallback advisor" to spawn 3 differentiated variants.
+- Output formats: pretty (default) and JSON (=--format json= for skill consumption).
+- Reads catalog by parsing =stdlib/showcases/CATALOG.md= or, preferred, by parsing showcase doc comments via the same regex documented in FEAT-018's SCHEMA.md.
+
+Out-of-scope:
+- MP4/GIF export of showcases (huashu-design has it; not in our 80% target).
+- In-browser side-by-side variant comparison ("design canvas") — design canvas overlay is a separate FUP.
+- Editing showcases through the gallery (read-only browsing).
+
+* Existing Patterns
+
+- CLI subcommand registration: =src/main.rs= around lines 81-352 (existing `inspect` subcommand). Add `Showcase` variant to the enum and a `run_showcase()` dispatcher.
+- Serve subsystem: =src/server.rs= already serves a project directory; reuse `compile_from_site()` and the static-file fallback.
+- JSON output: existing =--format= flag in inspect (=src/cli/inspect.rs:37=). Mirror.
+- Templating for generate: read the showcase file's bytes, swap a small set of comment-marker placeholders (`/* st-showcase:START */ ... /* st-showcase:END */`) — declared in FEAT-018's SCHEMA.
+
+* Tests
+
+Unit (=src/cli/showcase.rs= new file):
+- T1: catalog parser produces 24 entries from a fixture catalog file.
+- T2: generate command writes correct number of files with correct content.
+
+Integration (=tests/integration_tests.rs= new module `showcase_cli`):
+- T3: `cargo run -- showcase --format json` produces parseable JSON with 24 entries.
+- T4: `cargo run -- showcase generate hero --styles minimal,editorial --out tests/tmp/sc/` writes 2 files; both `cargo run -- check` clean.
+
+Manual:
+- M1: `cargo run -- showcase serve` → http://localhost:4444 shows 24 cards with screenshots (or "no screenshot yet" placeholders).
+
+* Implementation
+
+** ITEM Wire Showcase subcommand stub
+:PROPERTIES:
+:CUSTOM_ID: FEAT-019-cargo-run-showcase-cli-gallery-variant-g::wire-subcommand
+:END:
+- File: =src/main.rs=.
+- Add Showcase enum variant; route to `run_showcase()` calling unimplemented! to fail loudly.
+- Verify `cargo run -- showcase --help` lists the subcommand.
+
+** ITEM Catalog parser + tests (TDD)
+:PROPERTIES:
+:CUSTOM_ID: FEAT-019-cargo-run-showcase-cli-gallery-variant-g::catalog-parser
+:DEPENDS: FEAT-019-cargo-run-showcase-cli-gallery-variant-g::wire-subcommand
+:END:
+- File: new =src/cli/showcase.rs=.
+- Parse showcase doc comments using SCHEMA-defined regex. Return `Vec<ShowcaseEntry>`.
+- Add T1 unit test using a fixture file pinned under =tests/fixtures/showcases-catalog/=.
+
+** ITEM Implement print + json modes
+:PROPERTIES:
+:CUSTOM_ID: FEAT-019-cargo-run-showcase-cli-gallery-variant-g::print-json
+:DEPENDS: FEAT-019-cargo-run-showcase-cli-gallery-variant-g::catalog-parser
+:END:
+- Pretty mode prints aligned table.
+- JSON mode `serde_json::to_string_pretty` of `Vec<ShowcaseEntry>`.
+- Add T3 integration test.
+
+** ITEM Implement generate
+:PROPERTIES:
+:CUSTOM_ID: FEAT-019-cargo-run-showcase-cli-gallery-variant-g::implement-generate
+:DEPENDS: FEAT-019-cargo-run-showcase-cli-gallery-variant-g::print-json
+:END:
+- Read source showcase, replace placeholder block with target name; write to out dir.
+- Add T2 unit + T4 integration tests.
+
+** ITEM Implement serve
+:PROPERTIES:
+:CUSTOM_ID: FEAT-019-cargo-run-showcase-cli-gallery-variant-g::implement-serve
+:DEPENDS: FEAT-019-cargo-run-showcase-cli-gallery-variant-g::implement-generate
+:END:
+- Boots existing server with =stdlib/showcases/= as the project root.
+- Renders gallery template (a tiny `.st` file =stdlib/showcases/_gallery.st= that uses `@each` over `@showcases`).
+- Manual M1.
+
+* Edge Cases
+
+- `generate` target dir doesn't exist: create it.
+- `generate` with style not in the catalog: error with helpful list of available styles.
+- `serve` with port already bound: print clear error referencing `--port`.
+- Catalog parse failure on one file: report which file and what field, continue parsing others.
+
+* Acceptance Criteria
+
+- `cargo run -- showcase --format json | jq '.|length'` outputs `24`.
+- `cargo run -- showcase generate hero --styles minimal,editorial,maximal --out scratch/sc/` writes 3 files, each compiles via `cargo run -- check`.
+- `cargo run -- showcase serve` starts; loading the index returns a gallery with 24 cards.
+- All unit + integration tests T1..T4 pass.
+
+NOTE [2026-04-27]: Deferred from PLAN-017 to FUP-011. Showcase tree shipped (FEAT-018 partial); CLI is its consumer.

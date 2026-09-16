@@ -1,0 +1,100 @@
+#+TITLE: spacetime CLI-native mix integration — compile .st from mix, auto-stage, dev hot-reload (NO NIF; AGPL-safe arms-length subprocess)
+#+STATE: ITEM
+#+SESSION_ID: 1510a559ccf03ced
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-20T14-12-20-403Z_1510a559ccf03ced.jsonl]]
+#+CUSTOM_ID: FEAT-138-spacetime-nif-rustler-compile-st-from-mi
+
+* Initial Message
+
+ok i want you to design a prototype a deep integration between Spacetime and elixir, especially Phoenix LiveView and it should be a la Djinn.LiveView (~/code/ora/monorepo).
+
+What could it look like? Show me your DSL design so we can think about it together. Look at the recent Spacetime $host improvements and whatnot, maybe you can extend it to a canonical host for Phoenix LiveView that makes the integration insanely seamless and self-aware (re-uses the power of Elixir macros/Spark and the introspectability of Spacetime to deliver an experience that leverages the best of both).
+
+* Parent: FEAT-136 (Wave C). Follow-up surfaced building the counter vertical.
+
+* Goal
+Wrap the verse compiler as a Rustler NIF (dirty scheduler) so a Phoenix app
+compiles its `priv/spacetime/<page>/` .st bundles from `mix compile` and auto-
+stages them into priv/static — removing the manual `cargo run -- build` + cp dance
+documented in elixir/spacetime_lv/README.md. Dev: register the .st with the
+Phoenix code reloader so a save recompiles + pushes the new bundle to the live
+socket (host-composition hot-swap, driven from Elixir not MCP).
+
+* Scope
+- spacetime_nif crate: compile(source_dir) -> {js, css, contract, diagnostics};
+  introspect(schema_json) -> contract (for the FEAT-139 macro-time check).
+- A mix compiler (:spacetime in the :compilers chain) that builds every page dir.
+- Port fallback (cargo run -- build) if the NIF route stalls (panic isolation).
+
+* Acceptance
+- `mix compile` in elixir/spacetime_lv produces priv/static/spacetime/*.{js,css}
+  with no manual cargo step.
+- Editing counter/index.st + reload re-renders without a full page reload (dev).
+- Prod: `mix spacetime.build` AOT, release ships bundles only (no compiler/NIF).
+
+* AMENDED 2026-07-24 — AGPL pivot: NO NIF. CLI-native, arms-length subprocess.
+Spacetime is going **AGPL**. A Rustler NIF links the AGPL compiler *into the
+BEAM VM* of the user's Phoenix app — a combined/derivative work that would push
+AGPL onto the whole host application. We refuse that footgun.
+
+The integration MUST treat the compiler as a **separate program** invoked at
+arm's length (OS subprocess / Erlang port), exactly like Phoenix already shells
+out to `esbuild` and `tailwind`. "Mere aggregation": the app EXECUTES the
+`spacetime` binary, it does not LINK it. No derivative-work question; AGPL stays
+contained to the compiler binary.
+
+** Consequence — the goal is unchanged, the mechanism changes
+Everything FEAT-138 promised (mix-driven build, auto-stage, dev hot-reload) is
+still in scope. It is now delivered through **the CLI's own surface + a thin
+Elixir mix compiler that spawns it** — never a NIF. Any capability the NIF would
+have given us that the CLI cannot yet express becomes a *CLI feature request*,
+not a reason to reach for a NIF.
+
+** Revised scope (supersedes the original ~spacetime_nif~ crate scope)
+- *CLI, verse side (new/confirmed subcommands):*
+  - ~spacetime build <dir>~ already compiles a page dir → confirm it can take a
+    project root and build EVERY page dir in one invocation (batch), emitting
+    each ~<page>/{spacetime.js,spacetime.css}~ + the skeleton artefact (FUP-121).
+  - ~spacetime build --watch~ (or reuse ~serve --dev~'s watcher): on ~.st~ save,
+    recompile the affected page and print a machine-readable line
+    (e.g. JSON on stdout: ~{"event":"built","page":"board","js":"…","css":"…"}~)
+    so an external supervisor (mix / phx reloader) can react. This is the
+    hot-reload signal WITHOUT a NIF or an in-VM callback.
+  - Exit codes + structured diagnostics on stdout (JSON) so the mix compiler can
+    surface ~.st~ errors as mix compile errors.
+- *Elixir, spacetime_lv side:*
+  - A ~Mix.Task.Compiler~ (`:spacetime` in the `:compilers` chain) that runs the
+    ~spacetime~ binary as a ~System.cmd/Port~ over the app's page dirs, stages
+    output into ~priv/static~, and maps structured diagnostics → mix errors.
+    Mirror `Mix.Tasks.Compile.Esbuild`/`Tailwind` — the canonical arms-length
+    pattern already blessed in the Phoenix ecosystem.
+  - Dev hot-reload: run ~spacetime build --watch~ under the app's supervision
+    tree (a `Port` in a `GenServer`, dev-only), and on each ~{"event":"built"}~
+    line trigger a live bundle push (host-composition hot-swap) over the socket.
+    All coordination is Elixir-side messages; the compiler stays a black-box
+    process.
+  - Binary discovery: resolve `spacetime` from PATH / a configured path /
+    `:os.find_executable`; document install (cargo install / released binary),
+    same story as esbuild's auto-download. Do NOT vendor the source into deps.
+- *Prod:* ~mix spacetime.build~ AOT stages bundles into the release; the release
+  ships bundles only (no compiler binary, no NIF) — unchanged from the original.
+
+** Licensing note (record for future agents)
+The reason this is NOT a NIF is legal, not technical: AGPL §13 + the FSF's
+position that a NIF/linked library forms a single combined work. Subprocess
+invocation is the FSF-sanctioned boundary ("mere aggregation" / "at arm's
+length"). If anyone proposes a NIF again for perf, the answer is: measure the
+subprocess cost first; a persistent `spacetime` daemon/port (still arm's length)
+recovers startup cost without crossing the linking boundary.
+
+** Revised acceptance
+- `mix compile` in elixir/spacetime_lv produces priv/static/spacetime/*.{js,css}
+  with NO manual cargo step and NO NIF (verify: `mix.exs` has no rustler dep;
+  compilation shells out to the `spacetime` binary).
+- Editing board.st / counter.st + reload re-renders without a full page reload
+  (dev), driven by `spacetime build --watch`'s structured build events.
+- `spacetime build <project-root>` builds all page dirs in one call and emits
+  the host skeleton artefact (couples to FUP-121).
+- Prod: `mix spacetime.build` AOT, release ships bundles only.
+- License audit: the produced Phoenix app has no AGPL-linked artefact; the only
+  AGPL code is the separately-invoked `spacetime` binary (mere aggregation).

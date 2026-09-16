@@ -1,0 +1,136 @@
+#+TITLE: @data signal/stream + @handle — reactive output via @data kinds 6 & 7
+#+STATE: ITEM
+#+SESSION_ID: 1507711255a45786
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-13T10-37-35-958Z_1507711255a45786.jsonl]]
+#+CUSTOM_ID: FEAT-110-signal-core-reactive-output-post-emit-th
+
+* Parent
+[[id:PLAN-038-signal-reactive-output-the-sibling-of-da]] — WAVE 1. Design of record:
+[[file:../../research/spacetime-signal-S0.org]] §S1 (FINAL MODEL). Depends on
+[[id:BUG-104-extend-match-patterns-type-sum-variants]] (W0 matcher + @type sums).
+
+* SUPERSEDES the earlier @signal design
+This FEAT was originally "@signal post/emit". The dialogue (2026-06-13) REJECTED a
+top-level @signal directive. The model is now: reactive output = TWO new @data
+kinds + ONE consumer directive, powered by the W0 matcher. See §S1 for the full
+rationale (PureScript Aff/Event split, Elixir case/with, @each:@handle analogy).
+
+* Why
+@data is reactive INPUT (5 kinds). The INTENT→OUT arc had no home — pages dropped
+to imperative `@on click { fetch() }`. @data signal/stream + @handle complete the
+loop AS @data's own machinery, not a parallel construct (harmony).
+
+* The five pillars (this FEAT builds pillars 1,2,4,5; pillar 3 = W0/BUG-104)
+1. @host $api : http(url) { headers: … }  /  @host $mcp : ws($sock)  /  : mcp
+   — transport+config binding; declares the wire ENVELOPE type that types the
+   decode subject `$.`. ONE owned %primitive per transport (http/ws), sibling of
+   dev-ws; demand-injected.
+2. @data signal $name(params) to $host { send; receive; policy; optimistic }
+   — kind 6 (ONE correlated reply). @data stream — kind 7 (MANY replies). Yields a
+   CALLABLE $name + $name.pending/$name.error/$name.cancel(), mirroring @data fetch's
+   $x/_loading/_error/_refetch.
+   - send: request builder (`POST "/url" { body }` http; `emit "type" { payload }` ws).
+   - receive [SumName] { pat => Variant(expr); }: DECODE — @match (W0) over `$.`,
+     each arm CONSTRUCTS a variant (with preprocessing); optional SumName publishes
+     the response @type (the introspectable interface).
+   - `final` arm-modifier marks a TERMINAL outcome (stream); one-shot signal =
+     all-arms-final implicitly.
+4. @handle $name { optimistic{}; receive{}; final{} } — the CONSUMER directive.
+   RE-OPENS the signal's @data clauses for THIS scope (nearest-scope cascade, like
+   CSS; a fire resolves to its nearest enclosing @handle, else def defaults).
+   receive here is @match over the VARIANT SUM → effect statements (bindings typed
+   by the carried types, decl↔use). final{} runs when a terminal arm fires / on
+   cancel/timeout (DRYs cleanup across terminal arms).
+   @each : collection-in-space  ::  @handle : signal-responses-in-time.
+5. policy latest|queue|parallel|drop [timeout T] [retry n] — race/lifecycle.
+   latest = killFiber in-flight; correlation id runtime-invisible (≈ makeAff fiber).
+
+* Typing (one optional knob, flows decl→use)
+`as Type` on send body / receive arm RHS / optimistic exprs; optional. The decode
+arm's output type BECOMES the @handle arm binding type (inferred, not restated).
+optional SumName after `receive` names the response @type. `Created(Todo)` is sugar
+for `Created($.body as Todo)`. See §S1 TYPING.
+
+* Verified ground truth
+- @data kind-word dispatch to mirror: stdlib/macros/data-kind.st (each kind a %macro
+  carrying the kind-word; %binds → primitive; %registers binding facts). Add `signal`
+  + `stream` as kinds 6 & 7 the SAME way.
+- transport-owning %primitive precedent: stdlib/__dev__/primitives/dev-ws.st
+  (window.__stDevWs singleton). @host's http/ws primitives mirror this.
+- callable+status yield precedent: @data fetch already yields $x_refetch() + _loading
+  /_error. signal generalizes (parameterized call + typed reply).
+- @data dispatch introspection (compiler.rs::inject_dispatch_data) = the rail the
+  signal registry reuses (W2/W3).
+- send()/@ws-on precedent: stdlib/macros/websocket.st (the ws transport substrate).
+
+* Scope (W1)
+IN: @host (http + ws + mcp); @data signal + @data stream macros (send/receive/
+policy/optimistic clauses, parsed + registered); ONE http + ONE ws %primitive;
+callable $sig + .pending/.error/.cancel; @handle consumer w/ nearest-scope cascade;
+`final` arm-modifier → block; `as` ascription + optional SumName; demand-inject +
+dedup. Reply re-enters via @handle receive (the full mutation loop).
+OUT (→W0/BUG-104): the matcher + @type sums (dependency). (→W2): window.__stHost
+MCP bridge + relay. (→W5): @data subscribe push + device hosts.
+
+* Edge cases
+- @data signal with NO receive: bare fire-and-forget (`$ping()` sends, ignores reply).
+- @handle absent at a fire site: def-level defaults apply (warn if def has no receive).
+- two @handle scopes for one signal: each owns optimistic/receive/final independently.
+- stream with no `final` arm: never terminates until cancel/timeout (document).
+- exhaustiveness: @handle receive missing a variant w/o `_` → compile error (W0 check).
+- http non-2xx with no matching arm → `_` arm (or Failed); never throws.
+- payload/body type violation at fire → arg type-check (reuse metasystem ArgTypeMismatch).
+- SSG page (no host bridge yet) → emit noop + console.debug, never throws.
+
+* Tests (docs/testing rails)
+- parse: @host (http/ws); @data signal + stream register binding facts (kind, host,
+  response sum); @handle registers per-scope clauses.
+- HTTP mutation (S1 example) end-to-end (logic backend + mock fetch): fire → optimistic
+  row appears → mock 2xx → @handle Created reconciles; mock 422 → Invalid; mock 5xx/
+  network → Failed rolls back. Assert $sig.pending toggles.
+- stream (ws, mock socket): multiple "previewed" → @handle runs per message; "chosen"
+  final → terminates + final{} runs once.
+- nearest-scope cascade: two @handle scopes, distinct optimistic; fire in each → right one.
+- policy latest: two rapid fires → first fiber killed, only latest reply handled.
+- typing: decode `as Todo` → @handle binding inferred Todo; missing-variant → E-code.
+- dedup: two @data signal uses of same host → ONE host primitive injection.
+
+* Acceptance (W1)
+- cargo build + cargo test --lib green.
+- @host + @data signal + @data stream + @handle compile; HTTP mutation loop works
+  end-to-end; stream runs per-message + terminates on final.
+- callable $sig + .pending/.error/.cancel yielded; policy latest kills in-flight.
+- ONE owned primitive per transport; demand-injected + deduped; ZERO hand-written
+  fetch in any .st.
+- `cargo run -- check` clean on a fixture using each construct.
+- harmony: NO @signal directive anywhere; reactive output is @data kinds + @handle.
+
+* Files (expected)
+- stdlib/macros/data-kind.st            (add `signal` + `stream` kinds 6 & 7)
+- stdlib/macros/host.st                  (NEW — @host binding macro)
+- stdlib/macros/handle.st                (NEW — @handle consumer macro)
+- stdlib/primitives/host/http.st         (NEW — http transport %primitive)
+- stdlib/primitives/host/ws.st           (NEW — ws transport %primitive)
+- stdlib/index.st                         (imports)
+- src/ binding registry (+ signal/stream facts: kind, host, response-sum)
+- src/ codegen (signal call-lowering, @handle scope cascade, primitive inject/dedup)
+- tests/fixtures + .st tests colocated
+
+NOTE [2026-06-20]: W1 SHIPPED [2026-06-20] (commits 170592c4 sum-@type, 7155fbda @host, 001cb6b5 @data signal/stream). Pillars 1+2+3 land:
+- PILLAR 1 @host: stdlib/macros/host.st — http/ws transport+config+envelope-type binding (3 kind-word macros). Registers host() fact.
+- PILLAR 2 @data signal (kind 6) + @data stream (kind 7): stdlib/macros/data-kind.st. Inline `$name($params) to $host`, DSL body (send/receive/policy/optimistic). Binds signal-call primitive (stdlib/primitives/signal.st) — HTTP transport drives request→decode→publish, policy:latest=AbortController. Yields callable + _pending/_error/_cancel.
+- PILLAR 3 receive matcher: stdlib/capture-types/signal-receive.st — receive_block/recv_arm/recv_pat/recv_cons/recv_variant/recv_final + send_clause/policy_clause. `to <Sum>` through-line head.
+- W0 sum @type: stdlib/capture-types/type-variants.st + TypeDef.variants.
+
+ENABLING FIXES (general): CST raw-body routing for @data signal/stream; empty-[] array marker; pattern_is_literal_led treats Custom captures as anchored; match_body_groups compiles with capture-type defs; is_form_param_optional recognizes optional body-group captures.
+
+47 type_system tests green, full lib 2405, integration 172. All parse+match+bind+emit verified via `cargo run -- check`/`build` (signal-call JS emits).
+
+DEFERRED to follow-ups (file these):
+1. ENVELOPE ALIAS left of `to` (`receive Response to AddResult`) — cosmetic, dropped from recv_head (the optional-leading-capture in a capture-type grammar needs more work). FUP.
+2. DECODE CODEGEN: signal-call currently publishes the raw envelope; the receive ARMS aren't yet compiled into a runtime decode table that constructs the actual variant. The arms ARE captured + registered; the JS variant-construction is the next step. FUP.
+3. WS transport + correlation id in signal-call (only HTTP wired). FUP.
+4. policy mode ($mode) captured but not yet threaded to runtime (primitive defaults latest). FUP.
+5. @type sum REGISTRATION from receive arms (scoped sum from decode arms per §S1 TYPE CREATION) — arms captured, not yet reified into a named registry sum. FUP.
+
+NEXT: PILLAR 4 @handle consumer directive (re-opens signal @data clauses per scope; receive over the variant sum → effect stmts; final{} block). This is the consumer half — needs the decode codegen (deferred #2) to carry typed variant bindings, so @handle + decode codegen are coupled.

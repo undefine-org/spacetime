@@ -1,0 +1,111 @@
+#+TITLE: Extend build command for full static site export
+#+STATE: DONE
+#+SESSION_ID: 14a73642dacc17e3
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-03-30T14-30-47-693Z_14a71735234c17b2/24-CreateFeat8.jsonl]]
+#+CUSTOM_ID: FEAT-011-extend-build-command-for-full-static-sit
+#+EFFORT: M
+#+PRIORITY: #B
+#+LAYER: cli
+#+BLOCKER: FEAT-005-collection-crud-sync-protocol-for-json-a FEAT-006-asset-upload-protocol-and-file-managemen FEAT-009-site-introspection-api-for-type-schemas
+
+NOTE [2026-03-30]: Created src/export.rs with export_site() function. process_html strips dev attributes, injects production links. Build command detects directory input and runs site export. 3 unit tests for HTML processing.
+
+* Scope
+
+** In scope
+- Extend existing ~spacetime build~ command to handle multi-page site export
+- Process HTML files: inject compiled JS/CSS links, strip dev-only attributes
+- Copy data/*.json files (edited content) to output
+- Copy assets/ directory (uploaded media) to output
+- Copy locale files and generate locale-prefixed HTML variants (if @locale used)
+- Output: self-contained directory deployable to any static host
+
+** Out of scope
+- SSR/pre-rendering of dynamic content (FUP)
+- CDN integration or deployment automation
+- Image optimization (FUP)
+- Incremental/differential builds
+
+** Boundary rationale
+~spacetime build~ currently handles single-file .st compilation. The delta is multi-page awareness + HTML processing + data/asset copying. This is "build but for a whole site" rather than a fundamentally new concept.
+* Tests
+
+** Rust unit tests (~src/export.rs~ or inline in main.rs)
+- Single page export: one HTML + one .st -> output dir has HTML with correct script/link tags
+- Multi-page export: pages/index.html + pages/about.html -> output has both with correct paths
+- Data copy: data/*.json files present in output
+- Asset copy: assets/uploads/ directory present in output
+- Locale export: @locale site produces /en/index.html + /fr/index.html
+- Dev attribute stripping: no data-st-id, data-st-origin, data-st-bind in output HTML
+- Minification: --minify flag produces minified JS/CSS
+
+** Integration test
+- Export site/dataiku to temp dir, verify:
+  - index.html present with correct <script>/<link> tags
+  - data/customers.json, data/industries.json present
+  - JS and CSS files present and non-empty
+  - No dev-mode attributes in HTML
+  - Directory is servable (~python -m http.server~)
+* Implementation
+
+** Step 1: Analyze existing build command (~src/main.rs~ run_build function)
+- Current build: takes single .st file, compiles to JS/CSS, outputs to directory
+- Existing capabilities: minification, source maps, asset copying, build script execution
+- Delta needed: site-level awareness (multi-page), HTML processing, data/locale copying
+
+** Step 2: Site export module (~src/export.rs~ new file)
+#+begin_src rust
+pub struct ExportConfig {
+    pub site_dir: PathBuf,
+    pub output_dir: PathBuf,
+    pub minify: bool,
+    pub sourcemap: bool,
+}
+
+pub fn export_site(config: ExportConfig) -> Result<ExportReport, ExportError> {
+    // 1. Discover pages (reuse loader::discover_pages)
+    // 2. For each page:
+    //    a. Compile paired .st file -> JS/CSS
+    //    b. Process HTML: inject links, strip dev attributes
+    //    c. Write to output_dir preserving path structure
+    // 3. Copy data/ directory to output_dir/data/
+    // 4. Copy assets/ directory to output_dir/assets/
+    // 5. Copy locales/ and generate variants (if @locale)
+    // 6. Copy spacetime.js and spacetime.css runtime
+    // 7. Return report: files written, sizes, warnings
+}
+#+end_src
+
+** Step 3: HTML processing
+- Use lol_html to strip dev-only attributes from output HTML:
+  - Remove: data-st-id, data-st-origin, data-st-bind, data-st-source, data-st-index, data-st-key
+  - Remove: dev-mode script/link tags (/__spacetime/dev/*)
+  - Inject: production script/link tags for compiled JS/CSS
+- Handle locale variants: if @locale is used, generate per-locale HTML (reuse locale-build logic)
+
+** Step 4: CLI integration (~src/main.rs~)
+- Extend Build subcommand or add Export subcommand:
+  ~spacetime build site/ --output dist/~ (site-level build vs current single-file build)
+- Detection: if argument is a directory with pages/ or index.html, use site export mode
+- Keep single-file build working for backwards compatibility
+
+** Key files
+- ~src/export.rs~ (new)
+- ~src/main.rs~ (extend Build or add Export subcommand)
+- ~src/loader.rs~ (reuse page discovery)
+- Uses existing: compiler.rs, emit/, lol_html
+* Edge Cases
+- Site with no pages/ directory: fall back to single-page export (index.html + index.st)
+- Missing paired .st file for a .html page: copy HTML as-is, warn
+- Build errors in .st compilation: report error, skip page, continue with others
+- Output directory exists: overwrite contents (with --clean flag?)
+- Relative paths in HTML (../../spacetime.js): rewrite to correct output-relative paths
+- @import chains in .st files: compiler already resolves these; export uses compiled output
+- Large sites (50+ pages): parallel compilation for performance
+* Acceptance Criteria
+- ~spacetime build site/dataiku --output /tmp/dataiku-export~ succeeds
+- Output directory contains: index.html, JS/CSS bundles, data/*.json, assets/
+- HTML has correct script/link tags, no dev-mode attributes
+- Output is servable from any static host (test with ~python -m http.server~)
+- ~cargo test --lib~ passes with export tests
+- Integration test: export + serve + verify page loads

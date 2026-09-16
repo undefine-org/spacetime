@@ -1,0 +1,117 @@
+#+TITLE: stdlib/showcases tree (curated patterns + index)
+#+STATE: DONE
+#+SESSION_ID: 14cb55e291e3888a
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-04-27T18-09-57-319Z_14cb55e291e3888a.jsonl]]
+#+CUSTOM_ID: FEAT-018-stdlib-showcases-tree-curated-patterns-i
+#+EFFORT: 5h
+#+LAYER: stdlib
+#+PRIORITY: #A
+
+* Initial Message
+
+what can you learn from this https://github.com/alchaincyf/huashu-design
+
+to make a nice spell skill that helps with Spacetime? think about the skill + the features and improvements to the debugger that you can land
+
+* Scope
+
+In-scope:
+- New tree =stdlib/showcases/= containing self-contained pattern files.
+- Eight scenarios × three styles (24 files), modeled on huashu-design's showcase grid:
+  - Scenarios: =hero=, =nav=, =features-grid=, =cta=, =footer=, =gallery=, =form=, =reveal-on-scroll=.
+  - Styles: =minimal=, =editorial=, =maximal=.
+  - File path: =stdlib/showcases/<scenario>/<style>.st=.
+- Each showcase file:
+  - Self-contained: a single `@template` or `@fn` that, when imported and invoked, produces the demonstrated pattern.
+  - Top doc comment: scenario, style, dependencies (other showcases, stdlib macros), screenshot path, one-line "use when".
+  - No bespoke JS; only stdlib + showcase-internal primitives.
+- Index file =stdlib/showcases/index.st= that `@import`s all showcase files and exposes a registry macro `@showcases` enumerating them with metadata for the dev panel + CLI to read.
+- Catalog file =stdlib/showcases/CATALOG.md= (human-readable): table of scenario × style with one-line description and link to source file.
+
+Out-of-scope:
+- Per-showcase screenshot generation (covered by =cargo run -- showcase= CLI in FEAT-019, which renders each showcase headlessly).
+- Migrating existing patterns out of =projects/spacetime-showcase/= — leave those in place; new tree starts fresh.
+- Internationalized variants.
+
+* Existing Patterns
+
+- =stdlib/macros/each.st=, =stdlib/syntax/=, =stdlib/primitives/= demonstrate canonical macro/primitive shape with `%form` / `%binds` / `%emit` / `%exports`.
+- =stdlib/index.st= shows the import-all pattern; mirror for showcases index.
+- =projects/spacetime-showcase/= has prior-art patterns. *Consult, don't copy verbatim*: showcases here MUST be standalone-compilable files demonstrating ONE idea each.
+- =docs/CONTENT_EDITING.md= and =docs/DATA_BINDING_GUIDE.md= mention design-relevant macros (`@editable`, `@data`, `@template`).
+
+* Tests
+
+Compile (=cargo test --lib= and =cargo test --test integration_tests=):
+- T1: =stdlib/showcases/index.st= loads cleanly via =cargo run -- check stdlib/showcases/index.st= (zero warnings).
+- T2: For each of the 24 showcases: a tiny fixture file under =tests/fixtures/showcases/<scenario>__<style>.st= that `@import`s the showcase and invokes its template; =cargo run -- check= passes.
+- T3: =@showcases= registry macro yields 24 entries with all required metadata fields.
+
+Headless (=cargo run --features headless -- test tests/showcases/=):
+- T4: Render each showcase via dev server, assert page produces non-empty body and 0 console errors.
+
+Manual:
+- M1: Open `cargo run -- serve stdlib/showcases/` (treat showcase tree as a project), browse all 24 patterns.
+
+* Implementation
+
+** ITEM Define showcase metadata schema
+:PROPERTIES:
+:CUSTOM_ID: FEAT-018-stdlib-showcases-tree-curated-patterns-i::define-schema
+:END:
+- File: =stdlib/showcases/SCHEMA.md=.
+- Document required fields: `scenario`, `style`, `description`, `dependencies` (list), `screenshot` (path, may be missing initially), `useWhen` (one-line).
+- Document doc-comment convention so CLI and registry can parse them with a small consistent regex.
+
+** ITEM Author hero-minimal as canonical example
+:PROPERTIES:
+:CUSTOM_ID: FEAT-018-stdlib-showcases-tree-curated-patterns-i::hero-minimal
+:DEPENDS: FEAT-018-stdlib-showcases-tree-curated-patterns-i::define-schema
+:END:
+- File: =stdlib/showcases/hero/minimal.st=.
+- Template producing a centered headline + subhead + single CTA button using only stdlib primitives. Doc comment populated per schema.
+- Add fixture =tests/fixtures/showcases/hero__minimal.st= that imports + invokes; `cargo run -- check` passes.
+
+** ITEM Author remaining 23 showcases
+:PROPERTIES:
+:CUSTOM_ID: FEAT-018-stdlib-showcases-tree-curated-patterns-i::author-remaining
+:DEPENDS: FEAT-018-stdlib-showcases-tree-curated-patterns-i::hero-minimal
+:END:
+- Files: 23 more `.st` under appropriate scenario dirs.
+- Each one MUST consult =docs/antipatterns.md=: zero inline JS handlers, zero `<script>`, zero hex outside CSS vars (define vars in the showcase or import token vars).
+- Add 23 corresponding fixtures under =tests/fixtures/showcases/=.
+
+** ITEM Index + registry macro
+:PROPERTIES:
+:CUSTOM_ID: FEAT-018-stdlib-showcases-tree-curated-patterns-i::index-registry
+:DEPENDS: FEAT-018-stdlib-showcases-tree-curated-patterns-i::author-remaining
+:END:
+- File: =stdlib/showcases/index.st=.
+- `@import` every showcase. Define `@showcases` (file-level macro emitting a JS object on `window.__stShowcases` with the catalog) for runtime consumers (showcase CLI, future showcase tab).
+- File: =stdlib/showcases/CATALOG.md=. Generated initially by hand; document a regen recipe (`scripts/regen-showcase-catalog.sh` if practical, otherwise by-hand).
+
+** ITEM Compile + headless tests
+:PROPERTIES:
+:CUSTOM_ID: FEAT-018-stdlib-showcases-tree-curated-patterns-i::compile-tests
+:DEPENDS: FEAT-018-stdlib-showcases-tree-curated-patterns-i::index-registry
+:END:
+- Files: =tests/integration_tests.rs= (new module `showcases`), =tests/showcases/= (new dir for headless test runner).
+- Run T1..T4. All pass before marking item DONE.
+
+* Edge Cases
+
+- Showcase imports another showcase: dependency MUST be declared in doc comment; index must `@import` deps before dependents (file order).
+- Scenario × style combination genuinely doesn't make sense (e.g. =reveal-on-scroll= × =minimal= where motion conflicts with minimal aesthetic): still ship a credible variant; document trade-off in `useWhen`.
+- Tokens: each style SHOULD declare its own token vars under `:root { --showcase-<style>-... }` to demonstrate the brand-protocol pattern from FEAT-021's skill.
+- Fixtures grow large: keep each fixture <30 lines; use `@import` to point at the showcase rather than copy.
+
+* Acceptance Criteria
+
+- 24 showcase files exist under =stdlib/showcases/<scenario>/<style>.st=.
+- =stdlib/showcases/index.st= compiles cleanly.
+- Catalog table in =stdlib/showcases/CATALOG.md= lists all 24 with description + source link.
+- 24 fixtures pass `cargo run -- check`.
+- Headless runner T4 passes for all 24.
+- =window.__stShowcases= populated when index is loaded in a project.
+
+NOTE [2026-04-27]: Closed partial by PLAN-017. Shipped 7 of 24 showcases (hero/{minimal,editorial,maximal}, nav/minimal, cta/minimal, footer/minimal, features-grid/minimal) plus SCHEMA.md, CATALOG.md, index.st, fixture for hero__minimal.st. All compile via cargo run -- check. Remaining 17 deferred to FUP-013.

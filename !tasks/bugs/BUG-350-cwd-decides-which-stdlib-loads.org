@@ -1,0 +1,59 @@
+#+TITLE: The working directory decides which stdlib loads — same page builds or fails depending on cwd
+#+STATE: ITEM
+#+PRIORITY: B
+#+CUSTOM_ID: BUG-350-cwd-decides-which-stdlib-loads
+
+* Symptom
+
+The SAME site directory, built with the SAME binary, succeeds or fails purely on the caller's cwd:
+
+#+begin_src sh
+BIN=~/.cache/cargo-target/debug/spacetime
+T=$(mktemp -d); D=$T/x; mkdir -p $D
+cp tests/repro/bug-348-ssg-named-template/inline.st $D/index.st
+
+cd /home/user/code/ora/verse            && $BIN build $D -o $D/out   # ✓ Pages: 1
+cd tests/repro/bug-348-ssg-named-template && $BIN build $D -o $D/out # ✗ fails
+#+end_src
+
+From the fixture directory:
+
+  ✗ Export failed: Route '' has compile diagnostic: Missing required parameter 'match'
+      in bind: derive-match
+      provided: value, name
+
+Note the target directory `$D` is an absolute path in /tmp both times — only the CALLER's cwd
+differs. The page is a plain `@import "stdlib"` + `@data inline` + `@each`.
+
+* Why it matters
+
+`@import "stdlib"` resolves relative to the process's working directory, so a project built from
+a subdirectory silently gets a DIFFERENT stdlib than one built from the repo root — here, one
+whose `derive-match` bind has a different required-parameter set. The failure surfaces as a
+confusing diagnostic about an unrelated internal primitive rather than "I could not find, or
+found the wrong, stdlib".
+
+This is the same family as BUG-339 (a submodule imported alone never registered its macros) and
+BUG-346 (stdlib resolution is order-dependent under the full test suite): stdlib resolution
+depends on ambient process state that callers cannot see.
+
+* Discovered by
+
+Writing `tests/repro/bug-348-ssg-named-template/check-contract.sh`. The gate initially did
+`cd "$(dirname "$0")"` and all four fixtures failed to build; the identical build by hand from
+the repo root succeeded. Every sibling gate happens to `cd "$ROOT"` first, which is why no
+existing gate has ever hit this — the convention hides the bug rather than the bug being absent.
+
+* Fix direction
+
+Resolution of `@import "stdlib"` should key off a deterministic anchor — the site directory being
+built, or the toolchain checkout containing the binary (cf. BUG-227's
+`stdlib_resolves_from_the_enclosing_checkout_not_the_site`) — not the caller's cwd. If ambiguity
+is genuinely unresolvable, the diagnostic MUST name the stdlib that was chosen and why, instead
+of failing deep inside an unrelated bind.
+
+* Accept
+
+The repro above produces the same result from both directories. Add a gate that builds one
+fixture from at least two different working directories and asserts the outputs are identical —
+byte-for-byte, not merely both-exit-0.

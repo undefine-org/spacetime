@@ -1,0 +1,50 @@
+#+TITLE: refresh wrong-kind values silently drop; zero sentinel rejected
+#+STATE: ITEM
+#+SESSION_ID: 1549efa91ae4f982
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-18T13-07-01-638Z_1534a2eae1903af0/72-P2BatchFix.jsonl]]
+#+CUSTOM_ID: BUG-266-refresh-wrong-kind-values-silently-drop
+
+* Found (reviewer 67.0) — two halves of the same strict-capture gap:
+
+1. refresh NON-F64 WRONG KINDS: the strict `:duration` capture guard
+   (is_bare_number_duration_reject, src/syntax/events/form_compiler.rs) only
+   rejected f64-PARSEABLE values, so `refresh: 5px` / `refresh: foo` /
+   `refresh: 5 ms` converted to Expr, bound cleanly, and silently DROPPED —
+   the timer never starts (or evaluates oddly). The productive
+   data-fetch-opts form refused them only when the guard rejected, and the
+   error sibling's report was itself suppressed by a value guard in
+   expand_optional_clause_error (src/pipeline/drivers.rs) that skipped E0955
+   unless the value parsed as f64.
+
+2. refresh ZERO RULING: `refresh: 0` (the stdlib's own no-auto-refresh
+   sentinel, data-kind.st:82,482) errored as a bare number. CSS convention:
+   zero needs no unit.
+
+* Fix (this wave)
+- Widened the strict predicate: reject ANY value for a :duration/:time
+  capture that neither parses as a duration NOR is a `$`-sigiled signal/
+  expr reference. `$every`/`$userInterval` still pass; `5px`/`foo`/`5 ms`
+  now reject (E0955 via the error sibling). Bare idents without `$` are the
+  near-miss drop case — the sigil is the contract's marker for "a signal".
+- Removed the obsolete f64-value guard in expand_optional_clause_error — it
+  encoded the old too-narrow contract and suppressed exactly the wrong-kind
+  reports item 1 requires. The refresh sibling now reports every near-miss.
+- Exempted bare ZERO (`0`, `0.0`) from the strict rejection so `refresh: 0`
+  binds cleanly as the explicit no-auto-refresh sentinel.
+- Updated the data-fetch-opts-invalid-refresh sibling comment + dropped the
+  now-inert `rule: "bare-number"`.
+
+* Gates
+- refresh: 5px / foo / 5 ms → E0955; refresh: $every / $userInterval / 5s /
+  300ms / 1m compile; refresh: 0 / 0.0 compile (explicit disable);
+  refresh: 5 still E0955.
+- Unit: wrong_kind_values_are_rejected_where_a_duration_is_expected,
+  zero_is_not_rejected_where_a_duration_is_expected,
+  real_durations_and_non_durations_are_not_rejected,
+  a_bare_number_is_rejected_where_a_duration_is_expected.
+- Integration (tests/optional_capture_audit_test.rs):
+  fetch_refresh_with_a_wrong_unit_length_is_refused_not_dropped,
+  fetch_refresh_with_a_bare_ident_is_refused_not_dropped,
+  fetch_refresh_with_a_signal_is_valid, fetch_refresh_with_zero_is_valid.
+- Regressions green: optional_capture_audit (8), guards_data (24),
+  guards_misc (10).

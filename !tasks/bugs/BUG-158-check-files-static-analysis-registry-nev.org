@@ -1,0 +1,94 @@
+#+TITLE: check_file's static analysis registry never sees a non-core stdlib module's macros — false E0405 on every non-core macro-yielded signal
+#+STATE: ITEM
+#+SESSION_ID: 15251010f7982b56
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-06T10-48-12-510Z_15251010f7982b56.jsonl]]
+#+CUSTOM_ID: BUG-158-check-files-static-analysis-registry-nev
+
+* Initial Message
+
+push the capabilities of the 3d module + the workbench mcp through a concrete idea of a user interface that talks directly to this very agent using the mcp tools. This is a pressure test against both the host apis and the 3d apis. Design the 3d mockups using generate_image and then implement whatever surfaces you need using the blender mcp. commit as you go
+
+* Found via
+Fixing BUG-155/BUG-156 (Forge Deck's `@each($mcpInput.steps as $step)`).
+After both runtime fixes landed, `cargo run -- check
+demos/mcp-forge/mission-control.st` STILL raised:
+#+begin_src
+error[E0405]: Binding in '.forge-steps' references 'mcpInput.steps', which does not exist
+error[E0405]: Binding in '.forge-log' references 'mcpInput.log', which does not exist
+#+end_src
+even though the file compiles and RUNS correctly (verified live) — a false
+positive purely in the `check` command's static analysis, unrelated to
+BUG-155's dotted-path fix (confirmed independently: a page-scope `@data
+inline $wrap` + `@each($wrap.items as $x)` checks clean; only an
+`@import`ed-module macro's yielded signal, like `@mcp-input`'s `$mcpInput`,
+false-positives).
+
+* Root cause (traced to source via targeted debug instrumentation, not guessed)
+`src/main.rs::check_file` builds its lint/analysis registry via:
+#+begin_src rust
+let (meta_registry, _) = spacetime::compiler::cached_stdlib_registry();
+analysis.analyze_dispatch(matches, &meta_registry);
+...
+analysis.register_macro_yield_signals(matches, &meta_registry);
+#+end_src
+`cached_stdlib_registry()` (`src/compiler.rs::load_stdlib_registry`) loads
+ONLY six CORE stdlib directories:
+#+begin_src rust
+let dirs = [
+  "stdlib/capture-types", "stdlib/runtime", "stdlib/primitives",
+  "stdlib/syntax", "stdlib/macros", "stdlib/testing",
+];
+#+end_src
+`stdlib/__mcp__` (and `stdlib/3d`, `stdlib/text`, every OTHER non-core
+module) is NOT in this list. So `@mcp-input` (defined in
+`stdlib/__mcp__/primitives/host.st`) is simply ABSENT from the registry
+`check_file` hands to `register_macro_yield_signals` — confirmed by
+instrumenting the lookup: `registry.get_macro_by_form_directive("mcp-input")`
+returned `None`, and a full registry dump showed 227 macros, none named
+`mcp-input` (only an unrelated `input-bind` macro matched a substring
+search).
+
+Meanwhile the REAL compile pipeline (`compiler.rs::compile_pipeline`)
+correctly registers every macro from `ast.meta_defs` — which INCLUDES
+`@import`ed modules, since `resolve_imports` (called earlier in `check_file`
+itself, and already used to build `ast`) folds imported meta-defs into
+`ast.meta_defs`. `check_file` already has everything it needs (`ast.meta_defs`
+post-`resolve_imports`) sitting right there — it just never registers it into
+the registry it hands to the dispatch/yield-signal analysis passes, using the
+bare CORE-only cached snapshot instead.
+
+* Fix (already applied, see this commit)
+`src/main.rs::check_file`, right before `analyze_dispatch`:
+#+begin_src rust
+let (mut meta_registry, _) = spacetime::compiler::cached_stdlib_registry();
+for def in ast.meta_defs.clone() {
+    let _ = meta_registry.register(def);
+}
+analysis.analyze_dispatch(matches, &meta_registry);
+#+end_src
+Mirrors exactly what `compile_pipeline` does with `ast.meta_defs` — one extra
+registration loop, no new registry-loading mechanism, no new stdlib-dir list
+to maintain in two places.
+
+* Verification
+- Isolated repro (`@import "stdlib/__mcp__"; @mcp-input; @each($mcpInput.steps
+  as $x)`) went from 1 false E0405 -> clean `check` pass.
+- `demos/mcp-forge/mission-control.st` + `forge-preview.st`: both now `check`
+  clean (previously 2 false E0405s on mission-control.st).
+- `cargo test --lib` (2562 passed), `cargo test --test integration_tests` (181
+  passed), `cargo run --features headless -- test tests/ --headless` (603
+  passed) — all green, no regressions from the registry-merge.
+- New unit test `analysis::tests::test_bug155_dotted_path_binding_source_resolves_via_head`
+  pins the RELATED (but distinct) dotted-path-vs-head-name logic in
+  `validate_binding_sources` at the `CompileAnalysis` level (this ticket's fix
+  is in `main.rs`, a binary-only function with no existing CLI-process test
+  harness in this repo — documented here as the manual verification instead of
+  forcing a mismatched test mechanism per the elegance-bar discipline).
+
+* Relationship to BUG-155 / BUG-156
+Independent bug, same investigation. BUG-155/156 are RUNTIME bugs (the
+compiled page's JS silently failing to render); this is a STATIC-ANALYSIS-ONLY
+bug (the `check` CLI command's lint pass, never affecting the actual compiled
+output — `cargo run -- serve`/`build` were never wrong, only `check`'s E0405
+diagnostic). All three needed fixing before Forge Deck's mission-control.st
+could both COMPILE CLEAN and RENDER CORRECTLY.

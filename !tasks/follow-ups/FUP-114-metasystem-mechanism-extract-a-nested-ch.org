@@ -1,0 +1,73 @@
+#+TITLE: Metasystem mechanism: extract a nested child directive's compiled output from $children* by macro name
+#+STATE: ITEM
+#+SESSION_ID: 15251010f7982b56
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-06T10-48-12-510Z_15251010f7982b56.jsonl]]
+#+CUSTOM_ID: FUP-114-metasystem-mechanism-extract-a-nested-ch
+
+* Initial Message
+
+push the capabilities of the 3d module + the workbench mcp through a concrete idea of a user interface that talks directly to this very agent using the mcp tools. This is a pressure test against both the host apis and the 3d apis. Design the 3d mockups using generate_image and then implement whatever surfaces you need using the blender mcp. commit as you go
+
+* Origin
+FEAT-152 (stdlib/3d pointer-pick). Needed so `@object(...) { @on click { … } }`
+can thread its nested `@on click`'s ALREADY-CORRECTLY-COMPILED mutation body
+into `@object`'s sibling `%binds three-object(...)` primitive call as a
+param — the `@on` child's own macro form (`on-mutation-dispatcher-simple`)
+already compiles its body correctly (`{js_statements:[...], macro_calls:[]}`
+via the trailing-body `mutation_actions` capture path,
+`src/syntax/events/form_compiler.rs` ~line 1472); the gap is PURELY that
+nothing lets `@object`'s `%binds` reach into its `$children*` Block and pull
+out "the compiled output of whichever child matched `@on click`".
+
+* Why this generalizes beyond FEAT-152
+This is a real, reusable metasystem gap, not FEAT-152-specific: ANY macro
+that accepts arbitrary `$children*` (procedural composition, e.g. `@object`,
+`@stage` itself, `dnd`'s `@drop-zone`) has no way to special-case ONE
+specific child directive among its children and route its compiled value
+to a `%binds` param. Today the only two body-capture shapes are (a) render
+ALL children uniformly via `%template { $children }`, or (b) a SEPARATE
+named-param-in-parens capture (which, per FEAT-152's finding, does NOT get
+the trailing-body-only structured conversion for capture types like
+`mutation_actions` that need it).
+
+* Design sketch (starting point, not a final answer — needs a plan pass)
+A new `%derives`-like clause or `$children*` sub-capture syntax:
+#+begin_src
+%form {
+  @object(...) {
+    $children*
+  }
+}
+
+%derives {
+  $onClickBody: $children | find(@on, event: "click")
+}
+
+%binds {
+  three-object(&self, ..., onClick: $onClickBody)
+}
+#+end_src
+Or, simpler: a capture-type MODIFIER on `$children*` itself —
+`$children:children(exclude: [on])` to split "renderable children" from
+"special-cased directives" — then a second capture
+`$onClick:mutation_actions? from $children[on click]` reads directly. The
+EXACT grammar is an open design question; whichever shape wins should reuse
+the EXISTING `$children*` Block infrastructure (never re-parse child source
+text) and the EXISTING `mutation_actions` structured-conversion logic
+(`js_statements`/`macro_calls`) already proven correct at the trailing-body
+site — don't invent a THIRD way to produce that shape.
+
+* Acceptance
+- A `plan`-mode design pass (or `oracle` consult) resolving the grammar
+  shape BEFORE implementation — this touches `src/parser/meta_ast.rs`,
+  `src/syntax/events/form_compiler.rs`, and the `%binds` resolution pipeline
+  (`src/pipeline/resolve.rs`), genuine compiler-core surface, not a stdlib-only
+  change.
+- Once landed: `@object(...) { @on click { $sig <- val; } }` and
+  `@object(...) { @on hover { … } }` compile to a WORKING click/hover handler
+  wired through FEAT-152's already-shipped `ctx.registerPick` (verify via a
+  live-browser puppeteer click test, mirroring FEAT-153's mesh-identity
+  verification approach).
+- A regression test at the `src/compiler.rs` snapshot-test layer (mirroring
+  `three_gltf_signal_src_binds_and_carries_raw_reference`'s convention)
+  pinning that the child's mutation body reaches the primitive intact.

@@ -1,0 +1,123 @@
+#+TITLE: A @data derive off an @mcp-input signal silently never republishes unless something ELSE in the page directly consumes that signal first
+#+STATE: DONE
+#+SESSION_ID: 15251010f7982b56
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-06T10-48-12-510Z_15251010f7982b56.jsonl]]
+#+CUSTOM_ID: BUG-156-a-data-derive-off-an-mcp-input-signal-si
+
+* Initial Message
+
+push the capabilities of the 3d module + the workbench mcp through a concrete idea of a user interface that talks directly to this very agent using the mcp tools. This is a pressure test against both the host apis and the 3d apis. Design the 3d mockups using generate_image and then implement whatever surfaces you need using the blender mcp. commit as you go
+
+* Found via
+FEAT-151 (Forge Deck). Working around BUG-155 (each dotted-path) by deriving
+=@data derive $forgeSteps array : $mcpInput.steps;= and =@each=-ing the plain
+=$forgeSteps= signal instead. This ALSO silently rendered nothing until an
+unrelated direct interpolation of =$mcpInput.steps= was added elsewhere on
+the same page — at which point it started working. That's not a fix, it's a
+load-bearing coincidence, and it means the bug is real and independent of
+BUG-155.
+
+* Repro (isolated + bisected to the exact trigger)
+Two files, byte-identical except one has an EXTRA unrelated interpolation
+line; kept at =scratch/repro-each-dotted/repro7-mcpinput-derive-array.st=
+(works, has the `<p class="interp">`$mcpInput.steps`</p>` line) vs
+=scratch/repro-each-dotted/repro9-bisect.st= / =repro-no-interp.st= (same
+derive+each, NO direct interpolation anywhere -> renders nothing).
+
+#+begin_src
+@import "stdlib/__mcp__";
+@mcp-input;
+@data derive $forgeSteps array : $mcpInput.steps;
+<div data-st-instance>
+  <p class="probe"></p>          <!-- WITHOUT a sibling `$mcpInput.steps` interpolation -->
+  <div class="eachtest"></div>
+</div>
+[data-st-instance] { @mcp-host }
+.probe { text: $forgeSteps; }                        // renders "" — BUG
+.eachtest { @each($forgeSteps as $step) { &row($step); } }  // renders nothing — BUG
+#+end_src
+
+Confirmed live: with the interp line present, =SpacetimeLocal.mcpInput= EXISTS
+and =$forgeSteps= derives correctly. Remove ONLY that line (nothing else
+changes) -> =SpacetimeLocal.mcpInput= is =undefined= entirely, and
+=$forgeSteps= never derives.
+
+* Root cause (traced to source)
+1. =@mcp-input='s primitive (=stdlib/__mcp__/primitives/host.st=, function
+   =setSource(name, value)= around line ~479) republishes via TWO calls:
+   =ST.set(body, name, value)= (element/body-scoped signal store) AND
+   =ST.setData(name, value)= (the =_dataRegistry= / =data:name:loaded= async
+   channel). NEITHER of these touches =window.SpacetimeLocal= or dispatches
+   =local:<name>:updated= UNLESS the name is in =ST._bridgedExports=
+   (checked inside =ST.set=, =public/runtime/st.js= line ~352).
+2. =ST._bridgedExports= is populated ONLY by =ST._bridgeExport(name)= calls,
+   which are emitted ONLY by the compiler's reactive-binding codegen
+   (=src/emit/html_hydrate.rs= line ~192, inside the interpolation/attribute
+   binding compiler) — i.e. ONLY when some markup on the page has an actual
+   `` `$name` `` / `` `$name.field` `` hole or reactive attribute bound to
+   that exact head signal name. =@data derive='s dependency-discovery regex
+   (=stdlib/primitives/data/derived-signal.st=) watches
+   =local:mcpInput:updated=, but that event is NEVER dispatched for
+   =mcpInput= unless a SEPARATE, unrelated binding elsewhere on the page
+   happened to bridge it first.
+3. So today: whether a `@data derive` off an =@mcp-input=-sourced signal
+   works AT ALL is accidental, contingent on unrelated markup existing
+   elsewhere in the same file that happens to interpolate the same signal
+   name directly. Remove that markup (a plausible refactor, e.g. a designer
+   deleting a debug `<p>`) and the derive silently goes dead with zero
+   diagnostic.
+
+* Fix options (pick one, don't half-fix)
+- A (targeted): =@mcp-input='s =setSource= should unconditionally
+  =ST._bridgeExport(name)= for every top-level key it publishes (it already
+  KNOWS the full key list — see =publishWorkbenchSources= /
+  =setSource('mcpInput', ...)= call site) BEFORE calling =ST.set=, so the
+  bridge is registered by the SOURCE, not accidentally by a consumer. This is
+  the smaller, more surgical fix — mirrors how =collection()='s
+  =ST.setData('entries', ...)= callers already know they need bridging
+  (=public/runtime/st.js= line ~1435 comment references this exact pattern).
+- B (systemic): any primitive that publishes via =ST.set(body, name, ...)=
+  for a name intended as a page-global reactive source should ALWAYS bridge
+  unconditionally — i.e. fold the bridge call into =ST.set= itself for
+  body-scoped writes, removing the whole =_bridgedExports= allowlist as a
+  concept. Larger blast-radius; needs a full audit of every =ST.set(body,
+  ...)= call site (there may be a reason the allowlist exists — check BUG-069
+  git history first, referenced in the =ST.set= comment).
+- Recommend A first (smaller, addresses the concrete failure) + file the
+  audit for B as a separate follow-up if A doesn't fully close the class of
+  bug.
+
+* Elegant target
+=@data derive $x : $mcpInput.field;= should behave IDENTICALLY regardless of
+whether =$mcpInput= (or any of its fields) is ALSO directly interpolated
+elsewhere on the page. A derived source's correctness must not depend on
+unrelated sibling markup. Once fixed, delete the workaround in FEAT-151's
+mission-control.st (the =@data derive $forgeSteps/$forgeLog/$forgeActiveId=
+block) — go back to the cleaner, more obvious `@each($mcpInput.steps as
+$step)` direct-dotted-path form once BUG-155 also lands, since that's the
+actually-idiomatic surface (no derive needed at all for a plain passthrough).
+
+* Acceptance
+- Regression test: mount a page with =@mcp-input= + a derive off a nested
+  field + NO other consumer of that signal anywhere else on the page; assert
+  the derive resolves correctly on initial mount (not just after some
+  unrelated re-render).
+- Re-verify FEAT-151 Forge Deck rail renders using the SIMPLER direct
+  =@each($mcpInput.steps as $step)= form once BOTH this and BUG-155 land, and
+  delete the =@data derive= workaround from mission-control.st.
+
+* Fixed (2026-07-06)
+`stdlib/__mcp__/primitives/host.st`'s `mcp-input` primitive now calls
+`ST._bridgeExport('mcpInput')` / `('mcpInputLoading')` / `('mcpInputError')`
+unconditionally, right before its first `yieldState()` call — the primitive
+bridges its OWN three exports itself rather than relying on some unrelated
+markup elsewhere on the page to trigger the compiler's codegen-side bridge
+(`src/emit/html_hydrate.rs`). Chose Fix A from the ticket (surgical,
+primitive-local) over Fix B (folding bridging into `ST.set` globally) —
+smaller blast radius, addresses the concrete failure without an audit of
+every `ST.set(body, ...)` call site in the runtime.
+
+Regression tests: `tests/unit/mcp/mcp-input-bridge.test.st` (2 tests,
+headless, RED-before/GREEN-after verified) — pins the EXACT FEAT-151 shape
+(a dotted-path `@each` over `$mcpInput.field` with NO other consumer of
+`$mcpInput` anywhere on the page). Full suite green (see BUG-155's record).

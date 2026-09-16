@@ -1,0 +1,153 @@
+#+TITLE: Preview link not web-reachable yet: edge worker scaffold + missing wildcard DNS + stale orchestrator
+#+STATE: DONE
+#+SESSION_ID: 153483dcc7307f91
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-18T10-51-20-732Z_153483dcc7307f91.jsonl]]
+#+CUSTOM_ID: FUP-118-preview-link-not-web-reachable-yet-edge
+
+* Initial Message
+
+ok perfect, but where can I see/copy the preview link?
+
+* Context
+
+User asked (2026-07-18, after BUG-197 push-feedback verification): "where can I see/copy the preview link?" Investigation answer: nowhere yet — pushes land content in R2 + flip the KV pointer (verified: 3 real pushes 200 OK today, deploy_hashes 9001db55…/78d14b75…/45166d4f…), but no edge serves it. Three independent gaps stack; all three must close before the widget's "Preview live at …" link (already built in verse stdlib/__host__/index.st, gated on status.json preview_url) can appear AND resolve.
+
+* The three gaps (dependency order)
+
+** 1. Edge worker is scaffold-only (BLOCKER)
+crates/spacetime-host-edge/wrangler.toml: `[[routes]]` commented out with "TODO: final domain, open question #1"; header says "NOT yet deployable". The worker (workers-rs, KV binding HOST_POINTERS id 49e99ffe1d8f4f048ffc28e2a0ad2e23, R2 bucket spacetime-host-assets) is the ONLY content-serving path (§D0 design: KV pointer table by hostname → R2 origin → Cache API). No API route on the orchestrator serves pushed content.
+TODO: finalize route pattern `*.preview.<HOST_BASE_DOMAIN>/*` + `*.<HOST_BASE_DOMAIN>/*` (zone undefine.org), worker-build + wrangler deploy.
+
+** 2. Wildcard DNS records missing
+environments/spacetime-host/prod/settings.toml: `provider = "manual"` — records are created by hand. Verified via dig (2026-07-18): `*.preview.spacetime.undefine.org` and `*.spacetime.undefine.org` both NXDOMAIN; only the bare `spacetime.undefine.org` A record exists (178.105.176.219).
+Needed: `*.preview.spacetime.undefine.org` and `*.spacetime.undefine.org` → Cloudflare (proxied, or worker-route-only placeholder record e.g. AAAA 100::).
+NB: the Cloudflare API token referenced in infra/beam flake.nix:152 has "worker:edit/read + zone:read on undefine.org (no dns:edit permission)" — DNS creation needs either the operator in the dash or a token with dns:edit.
+
+** 3. Deployed orchestrator predates preview_url
+status.json gains `preview_url`/`production_url` in f79e92b (2026-07-18 12:26, "status.json preview_url/production_url + redesigned widget bundle"). Live curl same day ~23:30 returned a body WITHOUT those keys → spacetime.undefine.org runs an older build. Redeploy via infra/beam `deploy-host`. Until then the widget's preview link stays hidden even once DNS+edge work (derive `$previewUrl` falls back to "").
+
+* URL scheme (already deterministic, deploy.rs owns it)
+
+- preview:    `https://<project_id>.preview.<HOST_BASE_DOMAIN>`
+- production: `https://<project_id>.<HOST_BASE_DOMAIN>`
+- HOST_BASE_DOMAIN = settings.dns.domain = "spacetime.undefine.org"
+- e.g. ora-ventures.com (project od8ibBpzFn6OxqwQwwSa7):
+  https://od8ibBpzFn6OxqwQwwSa7.preview.spacetime.undefine.org
+
+* Where the link surfaces once gaps close (already built, no work needed)
+
+- Host widget: "Preview live at <domain>" row (`$previewUrl`/`$previewUrlText` derives, auto-hidden until preview_url present). FEAT-155 shipped the machinery including the old-server fallback comment.
+- CLI: `spacetime host status` (crates/spacetime-host-cli).
+- Operator dashboard: /__spacetime/host-admin/.
+
+* Open anomaly (verify after gap-3 redeploy)
+
+status.json returned preview_hash == production_hash == d0047f58…, matching NONE of today's three push deploy_hashes. Either the old build's DB write lags/skips on push (deploy.rs comments discuss the KV-vs-DB ordering), or a publish ran later, or the DB was reset by a redeploy. If preview_hash still doesn't move on push after the redeploy, file a BUG against deploy::push.
+
+* Decision deliberately NOT taken
+
+Widget could derive `<id>.preview.<orchestrator-host>` client-side (it knows project_id + API origin at compile time) — rejected: deploy.rs OWNS the hostname scheme (status.rs's comment: "Derived from deploy.rs's OWN hostname helpers … never re-formatted here"); a client-side copy is a parallel implementation that rots. Server hands ready-made URLs (already merged, f79e92b) — just deploy it.
+
+* OVERNIGHT UPDATE (2026-07-18 ~01:00) — gap 1 CLOSED, verified live
+
+** DONE (by agent, no operator action needed)
+
+- Edge worker DEPLOYED with both wildcard routes:
+  `*.preview.spacetime.undefine.org/*` + `*.spacetime.undefine.org/*`
+  (zone be696ce36578c3359a004b7c06ec7f06). wrangler.toml finalized:
+  routes, account_id (8e6f4c1b…), `workers_dev = true` made EXPLICIT
+  (a bare `wrangler deploy` silently disables the workers.dev route —
+  the first deploy did exactly that; caught via the e2e tests' staging
+  dependency and fixed). Committed as commercial/host 15a56c8.
+- Live verification against the deployed worker (real Cloudflare, not
+  mocks):
+  - `cargo test -p spacetime-host-core --test live_edge_e2e --test
+    live_edge_cache_invalidation -- --ignored` → BOTH PASS (real R2 PUT
+    + KV pointer + HTTP through the edge; pointer-flip cache
+    invalidation confirmed).
+  - End-to-end smoke with the REAL ora-ventures deployment: seeded a KV
+    pointer for the workers.dev hostname →
+    `od8ibBpzFn6OxqwQwwSa7 @ d0047f58…`, GET / served the actual built
+    site (200, text/html, 15.3KB, widget included). Pointer removed
+    after; workers.dev back to 404.
+- preview_hash ANOMALY RESOLVED: KV pointer == DB preview_hash ==
+  production_hash == d0047f58… (read directly from KV API). The three
+  23:0x push hashes were simply superseded by a later push; KV and DB
+  are consistent. No deploy::push bug indicated.
+- Consistency verified across the whole chain: CF_R2_BUCKET
+  (spacetime-host-assets) == wrangler.toml bucket; CF_KV_NAMESPACE_ID
+  (49e99ffe…) == wrangler.toml id; worker object-key shape ==
+  archive.rs layout `{project_id}/{deploy_hash}/{path}`; pointer key
+  shape `pointer:{hostname}` == kv.rs.
+- Toolchain already on this machine: worker-build, wrangler, wasm32
+  target; sops age key at ~/.config/sops/age/keys.txt (sops binary used:
+  /nix/store/cfv6kmqpcb72lfqbz2qcfcfnqsfjb4lc-sops-3.12.2/bin/sops).
+
+** OPERATOR CHECKLIST (tomorrow morning, ~15 min)
+
+1. TLS (decide first — it gates everything): preview/production
+   hostnames are 4 levels deep (`<id>.preview.spacetime.undefine.org`);
+   Universal SSL covers only `*.undefine.org` (one label). Check the
+   zone dash → SSL/TLS → Edge Certificates. If no covering cert: order
+   Advanced Certificate Manager (or Total TLS) covering
+   `*.spacetime.undefine.org` and `*.preview.spacetime.undefine.org`.
+   (Token can't read cert packs — 9109 — so this needs the dash.)
+2. DNS (provider = "manual", token has no dns:edit): in the undefine.org
+   zone create BOTH, proxied (orange):
+   - AAAA `*.spacetime` → `100::`
+   - AAAA `*.preview.spacetime` → `100::`
+   (`100::` is the standard discard-address placeholder for worker-only
+   hostnames; the routes already exist, traffic arrives the moment DNS
+   resolves.)
+3. Orchestrator redeploy (gets status.json `preview_url` from f79e92b
+   onto spacetime.undefine.org — the widget's "Preview live at …" link
+   lights up): from infra/beam run `deploy-host` for spacetime-host.
+   The flake input is a LOCAL path input, tree is fully committed, so
+   the deploy picks up f79e92b + 15a56c8 + e704d50 as-is.
+4. Accept: `curl https://od8ibBpzFn6OxqwQwwSa7.preview.spacetime.undefine.org/`
+   → 200 with the site; then the widget on localhost shows "Preview
+   live at …" as a copyable link after the next push.
+5. Optional: re-push ora-ventures from the dev server to make the
+   preview bit-fresh (current deployment predates the latest local
+   dist).
+
+** Not tonight's scope (flagged, not dropped)
+- Custom customer domains (example.com) are Workers-for-Platforms /
+  SSL-for-SaaS territory — explicitly out of §D0 v1 scope; needs its
+  own plan when the domains feature ships.
+- A project_id literally "preview" would collide with the preview
+  wildcard under the production pattern; ids are generated, but a
+  reserved-id guard in project creation would be cheap insurance.
+
+* UPDATE 2 (2026-07-18 ~01:30) — LIVE, minus widget link; one real bug found + fixed
+
+Operator completed DNS + TLS (checklist steps 1-2) — requests reached the
+worker immediately. First real request surfaced a genuine platform bug:
+
+** BUG (fixed, commercial/host c527b51): case-sensitivity
+"no deployment is bound to od8ibbpzfn6oxqwqwwsa7.preview…" — DNS is
+case-insensitive (browsers lowercase the host) but KV keys are
+case-sensitive; pointers were written under the mixed-case project id,
+looked up under the lowercased Host → permanent miss for EVERY project
+(all ids are mixed-case). Fixed by canonicalizing to lowercase at every
+boundary of the store: kv.rs pointer_key (store), deploy.rs
+preview/production_hostname (public URL scheme), edge worker (wire).
+Existing pointers migrated live via KV API. Regression tests added;
+live e2e + cache-invalidation green against the redeployed worker.
+
+** NOW LIVE (verified 01:30):
+- https://od8ibbpzfn6oxqwqwwsa7.preview.spacetime.undefine.org/ → 200
+- https://od8ibbpzfn6oxqwqwwsa7.spacetime.undefine.org/ → 200
+
+** REMAINING OPERATOR STEP (order matters!):
+1. `deploy-host` from infra/beam — ships BOTH the preview_url status
+   field (f79e92b; widget link lights up) AND the lowercase pointer
+   writes (c527b51). MUST happen BEFORE the next push: the
+   currently-running orchestrator still writes mixed-case pointer keys,
+   which the fixed worker will never find (a push before the redeploy
+   re-breaks the site until migration/re-push).
+2. Then push once from the dev server → widget shows "Preview live at
+   od8ibbpzfn6oxqwqwwsa7.preview.spacetime.undefine.org" as a copyable
+   link. That closes this follow-up.
+
+NOTE [2026-07-20]: DONE 2026-07-20 (via host-repo PLAN-005 W0): preview link is web-reachable end-to-end. Root causes found + fixed: push tarred the SOURCE tree (no compiled assets, .st leak) → export-first packaging in both the dev-server route and the CLI; export's static set was a 3-dir allowlist → dev-serve parity; orchestrator pinned stale in beam's flake.lock → redeployed; CORS wildcard didn't cover Authorization → explicit allow-headers; R2 411 on zero-byte files → Content-Length pinned. Live-verified: deploy 652248b2, preview+production 200 on /spacetime.js /spacetime.css /fonts, index.st 404, status.json carries preview_url. Widget deploy-panel polish continues in PLAN-005 W3-2.

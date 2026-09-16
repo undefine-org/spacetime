@@ -1,0 +1,63 @@
+#+TITLE: Block-in-block nesting (list ul>li) + multi-region blocks (columns)
+#+STATE: DONE
+#+SESSION_ID: 1503ca05d05c0c62
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-10T14-32-18-497Z_1503ca05d05c0c62.jsonl]]
+#+CUSTOM_ID: FUP-042-block-in-block-nesting-list-ulli-multi-r
+#+COMPLETION_HASH: 72abe1a4fa08ee62
+
+* Initial Message
+
+due you're being very thick. HOLES ARE WRITTEN WITH BACKTICKS YOU FUCKING IDIOT
+THERE'S A WHOLE TEST INFRA BUILT ON CHROMEOXIDE
+
+
+How the f are you so thick.
+
+Parent: [[id:PLAN-031-editable-structured-rich-text-input-mult]]. Deferred from FEAT-101.
+
+The editable AST model (public/runtime/editable.js) currently has a FLAT block
+model: doc → Block[] → Inline[]. Two constructs need a deeper model:
+
+1. LIST nesting (ul>li, ol>li, nested lists): a block that CONTAINS blocks. The
+   position model (ProseMirror integer positions, docSize/resolve) assumes one
+   level of block nesting; a list needs recursive block content + the position
+   bridge (posFromDOM/domFromPos) extended to descend.
+2. MULTI-REGION blocks (&columns(&left, &right), &figure with editable caption AS
+   a nested editable region): blocks with MORE THAN ONE selection hole. The
+   schema/invertibility check already allows exactly-one &sel; multi-region needs
+   each &hole to be its own nested editable region with its own position subrange.
+
+Both are the "deferred hard part" called out in PLAN-031 round 3. The flat model
+covers paragraphs, headings, blockquote, figure (single nested caption),
+code blocks + all inline mark nesting — the 90% case. Lists + columns are the
+remaining 10% and need the recursive position-map work.
+
+Approach when picked up:
+- generalize Block.content to allow Block[] | Inline[] (a `blocks` vs `inlines`
+  content kind per block, from the schema)
+- make resolve/docSize/posFromDOM/domFromPos recursive over the block tree
+- extend liftHtml to recover ul>li nesting
+- @property fuzz: nested op sequences keep the tree valid + positions monotone
+
+* R0 DESIGN DOC (2026-06-10) — regions primitive
+Written: [[file:../../research/spacetime-editable-regions-R0.org]]. User chose the
+REGIONS primitive (a named, ordered editable sub-space) over two targeted extensions,
+and a separate R0 design round before code. The doc grounds the design in the real
+flat position model (editable.js resolve/docSize) and specifies: region model, the
+flat case as the one-region degenerate, recursive PATH positions, the five-consumer
+lockstep (4 client + validate.rs server), lists-then-multi-region ranking, the fuzz
+invariants, ecosystem fit (regions = named &sel; region≈template-slot harmony), and
+the R1-R3 execution arc with the regression floor (20 existing tests pass unchanged).
+Open R1 question: PATH-array vs flat-integer position encoding (lean PATH).
+Ready for R1 when picked up.
+
+NOTE [2026-06-11]: Implemented across R1-R3 + 2 review-driven hardening cuts (all reviewer-cleared).
+- R1 (cd71ced5): recursive region position model; flat block = byte-identical degenerate case; E.resolvePath PATH. 20 flat floor + 4 region tests.
+- R2 (32330cdf): client project/lift descend region hosts + server validate_block region content-model (fail-closed). 5 server + 4 client lockstep tests.
+- BUG-089 (a54e28d3): key flat-vs-region off the schema (not AST) so project/size/lift/server all agree (R2 reviewer P2).
+- R3 (c7b51d01): region derivation from body holes (&columns→2 inline, &list(&items[])→1 block region; collmark grammar + TemplateParamDef.collection; SchemaError::RegionHoleCount); showpieces in builtins.st (&item/&list/&columns); end-to-end-through-compiler test; nested-tree @property fuzz.
+- Fuzz hardening (9bea9c5c): real non-decreasing monotonicity + deep round-trip (R3 reviewer 2×P2). Surfaced+corrected an over-claim (boundary positions legitimately clamp to shared leaf → non-decreasing, not strict-distinct).
+
+Lib 2233, integration 170, 29 editable_model + 4 headless surface green. 12 v8 failures are the documented concurrent-session @media regression (BUG-087), not regions. Docs: research/spacetime-editable-regions-R0.org AS-BUILT section + sigil ledger (&name[] block-region marker) in docs/language/data-and-rendering.md.
+
+Deferred (next wave when live surface needs it): edit OPS through PATHs for in-region editing (AST+lens ready); cross-region selection needs CDP rung.

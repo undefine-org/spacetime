@@ -1,0 +1,104 @@
+#+TITLE: W0 grammar bedrock: fix %capture_type for @assert swap + @then/@eval/@let drop
+#+STATE: DONE
+#+SESSION_ID: 14f94e45c6c3f247
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-02T11-06-49-499Z_14f94e45c6c3f247.jsonl]]
+#+CUSTOM_ID: FEAT-056-w0-grammar-bedrock-fix-capture-type-for
+#+LAYER: compiler
+
+* Initial Message
+
+actually, Land the PLAN-026 core now (done/committed); file the testing-macro cluster (@assert swap, @then/@eval nested-match) as a new BUG/PLAN with the diagnosis captured, and STOP — .test.st gating remains blocked
+ on that follow-up. Don't register text tests yet.
+
+Put text tests as FEAT within the plan. Be comprehensive
+
+Wave 0 of [[id:PLAN-027-spacetime-testautomation-infra-fidelity]]. Fix the
+foundational grammar defects so directive bodies in =:block= captures emit
+correct, gating code. These are real bugs regardless of the redesign and unblock
+ALL later waves. Subsumes the old BUG-053 / FEAT-054 framing.
+
+* Emit-proven defect matrix (via =cargo run --bin extract_js -- <f>=)
+Inside a @test body, today:
+| directive            | emits? | defect                                                    |
+| @fixture {block}     | ✓      | (works — but W3 deletes it)                               |
+| @assert (c) "m"      | ✓ SWAP | __cond="m", __msg=""  ⇒ truthy ⇒ never throws             |
+| @then .x should …    | ✗ DROP | 0 matches in block-body rematch; CST DOT-break suspected  |
+| @eval (e)            | ✗ DROP | bare $expr:expr-led form not rematched                    |
+| @let (a)             | ✗ DROP | same                                                      |
+
+* Root causes (fix in the metasystem, NOT Rust special-cases — AGENTS.md)
+** RC1 — @assert paren eaten as arglist
+CST parse_directive (src/syntax/cst/parser.rs ~610) hits L_PAREN → parse_arg_list()
+consumes =(1===2)= as call-args BEFORE =$condition:expr= can bind; trailing string
+then binds to condition. Fix: the =expr= capture_type / directive parse must claim a
+leading parenthesized group as the expr value, not as an arglist, for directive
+forms whose first capture is =:expr=. Verify =@assert (1===2) "m"= ⇒ __cond is the
+boolean expr, __msg = "m".
+** RC2 — @then/@eval/@let dropped in block-body compile
+=compile_block_body_to_js= (src/emit/js.rs:998) parses the body fragment then calls
+=rematch_with_registry= (src/parser/mod.rs:597). =.=-led (@then .x) and bare
+=$expr:expr=-led (@eval/@let) forms produce 0 matches there. Investigate the CST
+=DOT= termination in the post-arglist loop (parser.rs ~628 breaks on DOT — treats
+=.x= as a nested scope, so =$target:selector= never captures) and the bare-expr
+rematch path. Fix so all three forms match + emit inside a block body.
+
+* Make full use of %capture_type
+Where a fix would otherwise be a Rust special-case, express it as a
+=%capture_type= correction (e.g. the =expr= terminal's paren handling). Capture
+types live in stdlib/capture-types/*.st and are a full PEG DSL (terminals,
+seq, =|=, =*=, =?=, sub-refs). Fix anything discovered about =%capture_type=
+mid-flight and note it here.
+
+* Tests (mutation-proven, the gate)
+- NEGATIVE GATE (must FAIL): =@assert (1===2) "x"= ; =@then .missing should exist=.
+  A deliberately-false test MUST report FAILED. (Today both wrongly pass.)
+- POSITIVE: a true assertion passes; a 42→999 mutation flips it to fail.
+- @eval/@let: =@eval (window.__x=1)= then =@assert (window.__x===1)= passes;
+  mutate to ===2= ⇒ fails.
+- Add the negative-gate as a permanent test (tests/ + a .test.st meta-test).
+
+* Acceptance
+- All four directives emit correct gating JS inside a @test/@try body (extract_js proof).
+- Negative gate passes (false ⇒ FAILED) and is locked by a committed test.
+- lib + integration + headless suites green; document any newly-exposed REAL
+  failures (assertions now gate) as their own BUGs (do not fix inline; file).
+- Any %capture_type fix documented; no new Rust hardcoded parser for stdlib constructs.
+
+* Parent
+[[id:PLAN-027-spacetime-testautomation-infra-fidelity]]
+
+* COMPLETED (commit 1f6710b8)
+Four root causes fixed (not the 3 originally diagnosed — a 4th, the load-bearing one):
+1. ASYNC TESTS NEVER AWAITED (the real top-level gate-breaker, src/main.rs): the
+   headless run loop did `test.fn(); passed++` with a `// run to completion` TODO
+   that was never implemented — every async test passed vacuously regardless of
+   thrown assertions. Now `await test.fn()` in an `async` run-IIFE (rustyscript
+   eval runs the event loop to completion).
+2. RC1 @assert (cond) swap: form matcher now splices the ARG_LIST `(cond)` back
+   into the inline token stream for forms with inline captures + NO params, so the
+   inline `$condition:expr` consumes `(cond)`; trailing string → `$message`. Both
+   `@assert (c) "m"` and bare `@assert c "m"` work. (Form-matcher fix, not stdlib.)
+3. RC2 @then/@when greedy selector: SelectorExtractor ate `.x should exist` whole;
+   match_capture now bounds greedy extractors at the next Literal AND next String
+   capture. @then now matches + emits.
+4. @then assertion ident double-quoted (`'%$assertion'` → `'"exist"'`): use
+   `%$assertion` raw since captured_to_js already quotes idents.
+Plus 3 `[1..len-1]` slice-panic guards in expand.rs (lone quote/bracket;
+pre-existing, surfaced by the now-running audit).
+
+NOTE on %capture_type: the fixes landed in the form MATCHER (form_compiler.rs)
+and emit, not in capture_type grammar files — the defects were in token routing
+(ARG_LIST vs inline) and extractor greediness, not the PEG productions. No Rust
+hardcoding of stdlib constructs added; stdlib change was 1 line (assertion quote).
+
+NEGATIVE GATE: proven + locked via tests/import_resolution_test.rs
+::w0_negative_gate_fails_false_assertions (2 false MUST fail, 2 true pass).
+
+AUDIT FALLOUT (the deliverable's honest result): full headless suite went
+606-vacuous-pass → 201 pass / 27 fail / 2 skip. The 27 are REAL exposures:
+- 12 real assertion failures (product behavior vs expectation / layout untestable in V8)
+- 6 "$X is not defined" → @let/$error cross-directive IIFE isolation → [[id:BUG-054-let-error-cross-directive-scope-per-dire]] (W3)
+- 1 Unknown assertion (a then-* kind missing from the switch)
+- ~6 layout/timing/signal (need W2 real browser, or timing-flaky in V8)
+These are the W8 triage backlog, not W0 regressions. Rust suites green
+(lib 2093 / integration 162 / import 13 / text 8).

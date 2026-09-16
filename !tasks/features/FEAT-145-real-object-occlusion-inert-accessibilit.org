@@ -1,0 +1,147 @@
+#+TITLE: Real-object occlusion + inert accessibility for @anchor labels (FEAT-142/144 continuation)
+#+STATE: DONE
+#+SESSION_ID: 152262b47a31ca42
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-04T08-53-49-160Z_152262b47a31ca42.jsonl]]
+#+CUSTOM_ID: FEAT-145-real-object-occlusion-inert-accessibilit
+#+PARENT: FEAT-142-spatial-ecs-scene-entities-as-named-sele
+
+* Initial Message
+
+look up the recent work on Spacetime ECS system and tell me how you would make the text feel even more stuf to the 3d, by enabling the perspective calculations opened up by the 3d module's facet system available to bind to the Spacetime text
+
+* Initial Message
+
+User, after FEAT-144 shipped: "what about the z-index? is there a blessed, accessible,
+standards-compliant way to hide text when it's behind a 3d object?" — with a screenshot of
+projects/spatial-showcase showing the "Prism"/"Flux"/"Damaged Helmet" tags all floating
+ON TOP of the octahedron mesh even though (from that camera angle) the mesh is clearly in
+front of two of them. Classic DOM-label-vs-WebGL-depth-buffer problem: a `position:fixed`
+DOM element has no participation in the 3D depth buffer, so it always paints above the
+canvas regardless of what's actually nearer the camera in the SCENE.
+
+* Parent
+FEAT-142 (spatial-ECS) → FEAT-144 (perspective facets). Same `three-anchor` primitive,
+same `visible` signal that already unifies opacity/pointer-events/scroll-window/frustum.
+
+* Research (verified via web_search, not guessed)
+Three ways this problem is commonly solved (three.js forum "Hide labels behind gltf" thread,
+drei's `<Html occlude>`, IGC's HTML/WebGL integration writeup):
+1. Depth-buffer readback / render-target comparison — heaviest, fights post-processing passes
+   (documented drei issue: occlude="blending" breaks with a composer in the pipeline).
+2. Canvas-texture text (render text to a plane/sprite, participates in real depth) — loses
+   "real, selectable DOM" which is a hard requirement of this whole spatial-ECS mechanism
+   (FEAT-142's stated goal: "real DOM that tracks its object").
+3. Camera→point RAYCAST against `scene.children` each frame — cheap (one ray, not a full
+   depth pass), doesn't touch post-processing, and is literally what drei's own occlude
+   implementation does under the hood. THIS is the blessed technique for our case (DOM
+   labels must stay real DOM).
+
+* The fix (small extension of the SAME `visible` signal, no parallel path)
+`three-anchor.st` (both projects): new `occlude:bool=false` + `selfRadius:number=0.15` params.
+When `occlude` is on, each frame: `raycaster.set(camera.position, dirTowardPoint)`,
+`raycaster.far = distanceToPoint - selfRadius` (the self-exclusion zone stops an object's OWN
+surface from occluding its OWN label), `raycaster.intersectObjects(scene.children, true)`. Any
+hit → `$occluded = true` → folds into the EXISTING `visible = inFrustum && windowOpacity>0.01 &&
+!occluded` expression (was already frustum ∧ window; now ∧ ¬occluded) — one boolean, same
+downstream consumers (opacity, pointer-events). Raycast is only run when the point is already
+in-frustum and in-window (skip when about to be hidden anyway) and only when `occlude:true` (a
+call site that doesn't need it pays zero raycast cost). New `$occluded` signal exported for
+forward use.
+
+* Accessibility bonus (found while in this code, same signal)
+Before this: `visible` only drove `opacity` + `pointer-events`. A screen reader still has the
+occluded/faded label in its accessibility tree and tab order — `opacity:0`/`pointer-events:none`
+alone is a purely VISUAL hide, not an accessibility hide (this is a well-known a11y footgun).
+Fix: `el.inert = !visible` — `inert` is Baseline since April 2023 (Chrome/Firefox/Safari/Edge,
+~96%+ coverage 2026), removes the element (and descendants) from BOTH the tab order AND the
+accessibility tree in one standards-compliant boolean, doing in one line what would otherwise
+need a per-child `aria-hidden` + `tabindex=-1` dance. Verified against MDN + the WHATWG HTML
+spec's `interaction.html#the-inert-attribute` section.
+
+* Elegance-bar check
+- Extends the EXISTING `visible` boolean (one more AND term) — no parallel visibility path,
+  no new subsystem. ✓
+- `occlude`/`selfRadius` are opt-in data (params with a false/small default) — every prior call
+  site (everswap-clone's 5 anchors, showcase's crown) is UNCHANGED. ✓
+- Deletes a real correctness gap (DOM labels ignore the depth buffer; opacity-only hide is not
+  an accessibility hide) rather than adding a parallel concept. ✓
+- Testable by the same CDP machinery (extend showcase.cdp.test.st: assert $occluded flips true
+  when the raycast should hit, assert `el.inert` mirrors `visible` inversely). ✓
+
+* Build
+- lib/three-anchor.st (BOTH projects): occlude/selfRadius params, raycaster (lazily allocated
+  only when occlude:true), $occluded export, `el.inert = !visible`.
+- lib/anchor.st (BOTH projects): %form + %binds passthrough.
+- projects/spatial-showcase/index.st: `occlude: true` on helmet/flux/prism tags (crown floats
+  above everything, doesn't need it); selfRadius tuned per object's own size (~0.6× the
+  @object/@gltf `size:` param) so an object's own label survives its own raycast.
+- Tests: extend tests/showcase.cdp.test.st — assert $occluded / el.inert / opacity go to
+  0/true/'0' together when a tag's world point is geometrically behind another mesh from the
+  current camera angle (sampled at a scripted camera position where this is known true),
+  and that a definitely-unoccluded tag (crown) stays visible/non-inert.
+
+* Acceptance
+- cargo check both projects green.
+- Extended CDP test green.
+- Visual: from the angle in the user's screenshot (Prism octahedron in front of Flux/Helmet
+  tags), the occluded tags fade/hide instead of floating on top. Screenshot captured.
+- everswap-clone: occlude stays false at all 5 call sites (default) — zero visual change.
+
+* Outcome (2026-07-04) — SHIPPED, verified end-to-end against the user's exact repro
+
+** three-anchor.st (BOTH projects, kept in sync)
+- New params: occlude:bool=false, selfRadius:number=0.15.
+- Per-frame (only when occlude:true AND the point is already in-frustum/in-window
+  — skip the raycast otherwise): `raycaster.set(camera.position, dirToPoint)`,
+  `raycaster.far = distanceToPoint - selfRadius`, `raycaster.intersectObjects(
+  scene.children, true)`. Any hit -> $occluded=true -> folds into the EXISTING
+  `visible = inFrustum && windowOpacity>0.01 && !occluded` (one more AND term,
+  no parallel visibility path).
+- `el.inert = !visible` — Baseline HTML attribute (April 2023+, all evergreen
+  browsers, verified via MDN + WHATWG spec) now travels alongside opacity/
+  pointer-events, closing a REAL a11y gap: opacity:0 alone is a visual-only
+  hide and leaves the label in the accessibility tree + tab order.
+- New $occluded export.
+
+** everswap-clone: capability added, ZERO cost, ZERO visual change
+occlude stays false at all 5 call sites — emitted JS confirms `OCCLUDE_ON =
+false` and `raycaster = null` (not even allocated). Existing anchor.cdp.test.st
+green, unchanged.
+
+** projects/spatial-showcase: the actual fix for the reported bug
+- occlude:true on helmet/flux/prism (crown floats above everything, doesn't
+  need it).
+- selfRadius EMPIRICALLY measured via a live Raycaster probe swept against each
+  object at close range in the running page (not guessed from `size × k` —
+  that guess was WRONG: 0.5/0.55 self-occluded flux/prism at some angles).
+  Final: flux 0.75, prism 0.70, helmet 1.6.
+- tests/showcase.cdp.test.st §5: freezes auto-orbit, places camera so prism's
+  real geometry sits between it and helmet (verified offline: prism dist 3.35
+  < helmet dist 6.70 along the same ray), asserts helmet -> opacity:0 +
+  inert:true + pointer-events:none, prism (closer, unoccluded) stays
+  opacity:1 + inert:false. Green.
+
+** Live verification against the user's EXACT reported scenario
+Reproduced camera angles matching the reported screenshot (Prism octahedron
+overlapping Flux/Helmet tags); confirmed BEFORE this fix a label would float
+over front-facing geometry, and AFTER, `document.querySelector('.tag[data-for
+="helmet"]')` genuinely goes opacity:0/inert:true when prism's real mesh sits
+between camera and helmet's world point (checked via direct DOM/JS inspection
+in a live puppeteer session, not just visually). Screenshot:
+scratch/feat145-occlusion-confirmed.png.
+
+** Verification
+- cargo check: both projects green (21 + 7 files).
+- cargo build: both green.
+- cargo run --features cdp -- test (both anchor.cdp.test.st and
+  showcase.cdp.test.st) --cdp: green (everswap unchanged 1/1; showcase now
+  5 sections, all green).
+- everswap-clone dist/spacetime.js: OCCLUDE_ON=false, raycaster=null at all
+  5 call sites — confirmed zero added runtime cost where unused.
+
+** Commits
+- everswap-clone 8781128: occlusion + inert facets added, unused (default
+  false) — zero visual/behavioral regression.
+- spatial-showcase 194211f: occlusion exercised on 3 tags (empirically tuned
+  selfRadius) + inert accessibility + extended CDP test (§5, 5 new
+  assertions) — fixes the exact bug in the user's screenshot.

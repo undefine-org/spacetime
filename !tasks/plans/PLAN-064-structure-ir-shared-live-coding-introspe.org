@@ -1,0 +1,222 @@
+#+TITLE: Structure IR — shared live-coding introspection substrate (workbench + dev-ws)
+#+STATE: DONE
+#+SESSION_ID: 1522aa9778a04732
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-04T14-07-53-826Z_1522aa9778a04732.jsonl]]
+#+CUSTOM_ID: PLAN-064-structure-ir-shared-live-coding-introspe
+#+COMPLETION_HASH: 33e210e921378fdc
+
+* Initial Message
+
+do a critical review of the workbench and bring in any usability issues. i want it to be a live environment that would make the Webflow and Squarespace and Framer execs scared SHITLESS. Deep deep investigation into its architecture and way of work
+
+Make Spacetime's live-coding environment scare Webflow/Squarespace/Framer/paper.design.
+Born from a critical review of the MCP workbench (FEAT-148); grew into a substrate refactor
+when we realized the CST introspection reachable at bundle time should be reachable through the
+dev-ws host too — and that TWO parallel, divergent introspection stacks exist today.
+
+Decisions locked (user-approved 2026-07-04):
+  DEC-spacetime-param-default-sigil (keep `=` as literal-default; B1 is a pure bugfix)
+  DEC-spacetime-structure-ir (ONE shared IR producer, both hosts consume; EditAst re-keyed to IR ids)
+
+═══════════════════════════════════════════════════════════════
+THE CORE INSIGHT
+═══════════════════════════════════════════════════════════════
+Webflow's layer tree can only show what HTML/CSS expresses: a static box tree. Its @each
+equivalent (CMS collection) is ONE opaque "Collection List" node, because HTML has no concept of
+"a repeated region bound to data." Spacetime's CST DOES. So we don't walk the DOM like Webflow —
+we walk the CST, which is strictly RICHER than the DOM, and render node kinds the DOM can't name.
+That is the differentiator: the navigator shows the GENERATIVE RULE (@each source+loopvar+body,
+@match all-arms), which is more informative than a flattened runtime list.
+
+═══════════════════════════════════════════════════════════════
+CURRENT STATE (what the code actually does — verified this session)
+═══════════════════════════════════════════════════════════════
+Two divergent introspection stacks:
+
+  Stack 1 — MCP bundle path (src/mcp/):
+    compile_to_bundle → TemplateBundle{ scope, html, refs, states, spans }
+    → stage_structure_from_bundle (live.rs:636) walks bundle.refs (TEMPLATE_REF only)
+    → workbench navigator. RESULT: a whole <section><h1><p><button> hero = 1 node ("main").
+    (Known limitation: FUP-061 "templates-only v1".)
+
+  Stack 2 — dev-ws host (src/sync/):
+    ClientMessage::InspectElement → handle_inspect_element (handlers.rs:1367) re-parses .st from
+    disk, returns ElementContext{ CSS property sections, data bindings, state machine },
+    CSS-SELECTOR-shaped (a rendered-DOM mental model — the Webflow limitation we want to transcend).
+    AND THE DISPATCH IS DEAD: handlers.rs:1591 → Reject("InspectElement not yet implemented").
+    170-line handler written, wire cut. It rotted precisely because it was parallel + unowned.
+
+  Write rail (already ahead of the read rail):
+    ClientMessage::EditAst{ file, selector, patch, op_id } — patches a .st node BY AD-HOC SELECTOR
+    STRING (".hero @scroll"), not by stable node id. Works, but lacks the addressing a read IR
+    should mint. The MCP path has its own write rails too (mcp_param frame override — VERIFIED
+    working live; mcp_node_param node-level — dead for the common case, see B4).
+
+The CST vocabulary is ALL there (src/syntax/cst/mod.rs, proven by reconstruct_template_body_html):
+    HTML_ELEMENT, HTML_HOLE (`$title` binding in markup), VARIABLE_REF, DIRECTIVE (@each/@match/@on),
+    SCOPE_BLOCK, TEMPLATE_REF (&card), TERNARY_EXPR — each with byte ranges. The scope object
+    (bundle.rs collect_template_bundles) carries scope.html + scope.refs + spans at bundle time.
+
+═══════════════════════════════════════════════════════════════
+TARGET ARCHITECTURE
+═══════════════════════════════════════════════════════════════
+ONE shared producer:  structure_ir(scope/CST) → StructureNode tree
+    StructureNode {
+      id: stable path id ("0.1.2" — position, survives re-walk),
+      kind: element | hole | each | match | arm | template | ternary,
+      label: "section.hero" | "@each $items" | "loading →",
+      source_span: (start,end),        // the WRITE address — the EditAst hook
+      bindings: [$title, $subtitle],   // holes/params this node reads (reactive edges)
+      data_source: $items,             // for each/match: the driving signal
+      children: [...],                 // walked (templates recursively, cycle-guarded)
+    }
+  Lives in a shared module (e.g. src/introspect/), NOT in src/mcp/. MCP is just the first consumer.
+
+Consumers (both hosts, zero divergence):
+  - MCP workbench: stage_structure_from_bundle → calls structure_ir(); navigator + inspector + B3.
+  - dev-ws host:   WIRE the dead InspectElement dispatch → structure_ir() (retire the CSS-section
+                   scanner); ADD InspectStructure{file,template} → Structure{nodes} whole-tree query
+                   (protocol lacks a whole-tree read today).
+
+One address space: EditAst re-keyed from selector-strings to IR node id + source_span, so
+INSPECT (read) + SELECT (B3) + EDIT (write) all speak the same ids. The AST node you inspect IS
+the node you edit. This is paper.design's "design↔code and back," richer because the IR carries
+generative + reactive nodes.
+
+Beat-Webflow capability table:
+  | capability            | Webflow layer tree      | Spacetime Structure IR                     |
+  | static elements       | ✓                       | ✓                                          |
+  | repeated region       | opaque "Collection List"| @each node: source signal + loop var + rule|
+  | conditional           | ✗ (runtime only)        | @match/ternary node: ALL arms visible      |
+  | binding on an element | ✗                       | hole chip: ←$title on the node             |
+  | composed component    | "Symbol" (flat)         | template node you walk INTO (recursive)    |
+  | reactive behavior     | ✗                       | @on/scope-block node attached to element   |
+
+═══════════════════════════════════════════════════════════════
+WAVES
+═══════════════════════════════════════════════════════════════
+** B1 — param-default bugfix (INDEPENDENT, ship first). See FEAT-148 B1 for full detail.
+   Decision K: keep `=` as the literal-default sigil (author + meta). NO grammar change.
+   1. src/pipeline/expand.rs ~1765: CapturedValue::ParamList serialization OMITS the `default`
+      field — ADD it. Runtime factory (buildTemplateFactory) already reads spec.default.
+   2. Autostage (registerBundle) passes regionInput as positional arg-0 → factory binds
+      data[param0]=object → renders [object Object]. Fix: pass NAMED args ({__stNamedArgs: input})
+      so unfilled params fall through to their defaults.
+   3. `:`-form in a param list SILENTLY swallows params after the first (`$a: "one", $b: "two"`
+      captures only a). Make it FAIL LOUD (compile error), not silent-drop.
+   4. Docs: rewrite data-and-rendering.md ~lines 25-28 — delete the "= should not appear in
+      end-user code / prefer :" apology; bless `=` = static literal default as a DISTINCT REGISTER
+      from `:` = reactive/typed value. Sigil table: $=decl, space=type, ==literal default (author
+      params + HTML attr), :=reactive/typed value (@data/state init, return type, meta capture), <-=reactive update.
+   Acceptance: `@template &main($a = "one", $b = "two")` composed with no args renders "one"+"two";
+   contract lists BOTH params; a bad `:`-form errors instead of dropping.
+
+** B2 — Structure IR shared producer (KEYSTONE). Blockers: none (independent of B1).
+   B2-IR:  structure_ir() module — CST walk, StructureNode tree, stable ids + source spans.
+   B2a:    node kinds element + hole (kills the 1-node-hero bug) — the visible win.
+   B2b:    generative node kinds @each / @match / arm / ternary (the beat-Webflow moment).
+   B2-mcp: stage_structure_from_bundle calls structure_ir() (replaces the refs-only walk).
+   B2-ws:  wire the dead InspectElement dispatch onto structure_ir(); add InspectStructure query;
+           retire the parallel CSS-section scanner in handle_inspect_element.
+   Acceptance: a hero projects section→h1(←$title)→p(←$subtitle)→button; an @each projects an
+   iterator node with source+loopvar+body subtree; dev-ws InspectStructure returns the same tree
+   the workbench navigator renders (byte-identical node ids).
+
+** B3 — node-addressed selection. Blocker: B2 (needs node ids + spans).
+   Root cause: the stage click handler sits on the region root and sets a single literal
+   $selected <- "stage" — no element identity. Fix (rides the navigator's proven $.dataset idiom):
+   1. Stamp node ids onto guest elements at mount: data-st-node="0.1.2" in the builder output
+      (emit_builder_root_scoped path), from the B2 walk.
+   2. One delegated stage handler reads the nearest id:
+      .mcp-stage { @on click { $selectedNode <- $.closest('[data-st-node]').dataset.node; } }
+      — SAME $selectedNode signal the navigator drives → ONE selection model (also kills U2).
+   3. Selection overlay: [data-st-node]{ .is-selected: $.dataset.node == $selectedNode } + an
+      absolutely-positioned outline box on the selected element's rect (the Webflow blue ring).
+   Frame-level $selected collapses into node-level $selectedNode (the root node IS the frame).
+   Acceptance: clicking the on-stage <h1> selects the h1 node in the navigator AND rings it on
+   the canvas; clicking a navigator row rings the element; one signal, both directions.
+
+** B4 — per-node live edit + EditAst re-key. Blocker: B2, B3.
+   B4 means: click an element on the canvas, edit ITS bound value in the inspector, it updates live.
+   Today node-level editing (mcp_node_param) projects [] for a normal component because it only
+   populates for &child() TEMPLATE invocations with an invoke_span — the root &main has none, and a
+   single-template hero has zero sub-invocations. Fix falls out of B2: every ELEMENT node gets a
+   source_span, so an element's bound holes (←$title) become editable at that element's span.
+   Re-key EditAst: from ad-hoc selector strings to IR node id + source_span. INSPECT+SELECT+EDIT
+   share one address space (the full EditAst-philosophy loop). Both hosts.
+   Acceptance: select a hero's <h1>, type in the inspector, the h1 updates live; the edit persists
+   to source at the h1's span; EditAst addresses it by the same id the navigator selected.
+
+** B5 — artboard surface. Independent, pure CSS.
+   Dark guests are invisible: measured hero bg rgb(26,20,16) vs stage rgb(36,30,25) = 1.1:1. No
+   artboard. Wrap the mounted region in a neutral-surfaced .mcp-artboard (border + elevation shadow)
+   between the warm stage and the guest; guest mounts onto the artboard, not the stage. At
+   tablet/mobile it becomes the device frame (true widths — B6). Optional light/dark artboard toggle.
+   Acceptance: a dark component reads clearly with visible bounds on the stage.
+
+** B6 — true device widths. Independent, cheap.
+   Mobile preview measured 181px; real mobile ≈ 375-390px, tablet ≈ 768px. Pin the breakpoint
+   frame to true device widths; show the px value.
+
+** U-wave — usability + a11y (mostly independent; U1/U2 ride B3). ALL pure Spacetime, no page JS.
+   U1 z-index: clear-stage (z6) + right rail (z6) paint OVER the open inspector (z5) and overlap
+      it (measured). When $drawer != "none", drop/shift same-side chrome z-index. Rides B3.
+   U2 dual selection model (selected node + selected frame shown at once) — DISSOLVED by B3
+      (collapsing $selected into $selectedNode → one selection, one inspector detail).
+   U3 keyboard: @on keydown:Escape { $drawer <- "none"; $selectedNode <- -1; } — FIRST-CLASS
+      Spacetime, documented (ARCHITECTURE.md:820, BEHAVIOR_SYSTEM.md:119). NO new primitive needed.
+      Arrow-key tree nav via @on keydown:ArrowDown cycling $selectedNode.
+   U4 a11y: aria-label on summon buttons (have title, add aria-label); role="dialog"+aria-modal on
+      drawers; reactive aria-hidden bound to .is-open; tabindex+role on selectable stage nodes.
+   U5 contrast: drawer labels rgb(122,107,84) ≈ 3.4:1 < WCAG AA 4.5:1. Lift the muted token in
+      styles.st to ≥4.5:1 (compute exact value against drawer bg at impl time).
+   U6 feedback: server-audience actions (compose/param/clear) show nothing (comms feed is
+      agent-audience only). Add an optimistic echo: $lastAction signal → transient "✓ composed
+      hero-card" toast, cleared on next poll. Pure signal.
+   U7 discoverability: 4 unlabeled edge glyphs. Hover-peek labels (CSS :hover reveals title as a
+      pill) or persistent micro-labels. Pure CSS.
+
+═══════════════════════════════════════════════════════════════
+SEQUENCE
+═══════════════════════════════════════════════════════════════
+1. B1 (independent, unblocks every demo) — pure bugfix, ship first.
+2. B2 (keystone, shared-first: structure_ir() + both consumers) — unblocks B3/B4.
+3. B3 (node selection, both hosts) + B5 (artboard) + B6 (widths) — the visible "holy shit" + U1/U2 free.
+4. B4 (per-node edit + EditAst re-key, both hosts) — closes the design↔code loop.
+5. U3/U4/U5/U6/U7 — a11y + polish wave (all authorable now).
+
+Evidence base: live session inst-1 (workbench), guests fn-2..fn-7, browser automation + curl signal
+probes + contrast math; source read: env.st, workbench/*.st, primitives/host.st, src/mcp/live.rs,
+src/mcp/bundle.rs, src/mcp/state.rs, src/pipeline/expand.rs, src/sync/protocol.rs, src/sync/handlers.rs,
+src/syntax/cst/mod.rs, src/syntax/form_match.rs, stdlib/capture-types/param_list.st, FUP-040,
+docs/language/data-and-rendering.md. Related: FEAT-148 (review), FUP-061 (templates-only v1),
+FUP-040 (type-on-space unification, DONE).
+
+NOTE [2026-07-05]: COMPLETE (2026-07-04, autonomous). All waves shipped + swarm-reviewed + remediated. Full test matrix green: lib 2552 · integration 181 · v8 437 · headless 598.
+
+WAVES DELIVERED:
+- B1 (ab5b0fb8): param-default bugfix — codegen default-field emit + autostage named-args + E0929 fail-loud on `:`-params + docs. Decision K (keep `=` as literal-default). VERIFIED LIVE: a composed hero with defaults now renders its title/subtitle/cta instead of [object Object].
+- B2-IR (b2f7ee3d, c785727a): shared Structure IR producer (src/introspect/) — CST walk into element/hole/template/extern nodes with stable dotted ids + reactive bindings. Kills the "1-node hero". Swarm P2: compound-hole bindings via canonical collect_signal_deps.
+- B2-hosts (cf034869, 5006ea2a): BOTH hosts consume the IR — MCP navigator injects the element tree; dev-ws InspectElement dispatch WIRED (was dead) + InspectStructure added. Swarm P2: cycle guard precedes element injection.
+- B3 (c8b83a25, 4498df69, da16c4f2, 0cc9b2e6): node-addressed selection (oracle D'). B3.1 killed the MCP integer-id divergence (canonical dotted ids across hosts). B3.2 stamps data-st-node on guest DOM via a SHARED html_ids allocator (unstamped path byte-identical — normal pages clean). B3.3 unified $selectedNode spine (navigator + delegated canvas click) + reactive selection ring. Swarm P1: absorb direct holes in the stamp walk (canvas==navigator ids in all cases); P2: keep frame inspector reachable.
+- B5+B6 (890bf001, 39b3cc9b): artboard (neutral surface so dark guests read) + true device widths. Swarm P2: no overflow:hidden (would clip guest overlays).
+- B4a (b4349231, e22ce072): per-element binding editing via PROVENANCE DISPATCH (oracle corrected the plan — a hole's value lives upstream in the param, not at the element span; no element source spans, no EditAst re-key). Element bindings editable via the existing mcp_param value rail. Swarm P2: setSource fingerprint-skip so the 1s poll doesn't reset a focused input (systemic win for ALL workbench editors).
+- U-wave (5b6ad4a8, 65e51032): U1 z-index recede, U3 Escape (on [data-st-instance] focus root), U4 aria-label+role=dialog+reactive aria-hidden, U5 WCAG-AA labels, U6 transient action-echo toast, U7 hover-peek glyph labels. U2 dissolved by B3. Swarm: 3 P2 a11y fixes (Escape scope, toast-transient, aria-modal-on-hidden). All pure Spacetime, zero page JS.
+
+DECISIONS: DEC-spacetime-param-default-sigil (K), DEC-spacetime-structure-ir (shared substrate), DEC-b3-node-addressed-selection (D'), DEC-b4-per-node-editing (provenance dispatch).
+
+DOCUMENTED FOLLOW-UPS (not blocking): composed-subtemplate element stamping (needs runtime invocation-base threading); generative @each/@match iterator-node labelling (needs bundle each-scope metadata); static-literal-text editing (mcp_node_text body-splice); param-default source persistence (needs param-list span metadata); EditAst revision+stale-span hardening; drawer focus-trap + arrow-key tree nav.
+
+NB: the live MCP server process (harness-managed) runs a stale binary; B3.2/B4/U-wave visual verification needs a server restart. All changes proven by the 3768-test matrix + 8 reviewer-swarm passes + 2 oracle consults.
+
+NOTE [2026-07-05]: LIVE VISUAL VERIFICATION (2026-07-05, fresh MCP server post-restart). Drove the running workbench with puppeteer + registered/composed a styled hero (fn-2 verify-hero, 3 params w/ defaults). CONFIRMED LIVE:
+- B1 contract flattening: st_fn_put returned all 3 params (title/subtitle/cta) → the fix is live.
+- Guest renders composed into the stage: full styled hero, NO [object Object] (the original faceplant).
+- B3.2 stamping: guest DOM carries data-st-node = "0.0"/"0.0.0"/"0.0.1"/"0.0.2"; navigator mcp-nav-node ids MATCH exactly → the canonical dotted-id invariant holds across hosts + guest DOM.
+- B3 selection (bidirectional): canvas h1 click → .is-selected-node ring + inspector header "h1.hero-title · ELEMENT · depth 2"; navigator node click → same ring on canvas. ONE $selectedNode drives both (nav uses data-active attr, canvas uses .is-selected-node class — both truthy on 0.0.0).
+- B4a live editing PROVEN end-to-end: editing the selected element's title binding set regionInput.title override → guest re-seeded → canvas updated to "Ship at lightspeed" (screenshot plan064-live-edit.png). The override value rendered CLEAN (no quotes) while unedited siblings still showed the default-seed quotes — isolating the one remaining bug precisely.
+- B5 artboard + B6 device toggles (desktop/tablet/mobile) + U4 aria drawers (role=dialog, Inspector/Structure/etc.) all functioning.
+
+BUG FOUND + FIXED THIS SESSION (commit 2a032acf): string-literal param DEFAULTS rendered WITH literal delimiter quotes ("Ship faster") on the canvas. The substring tests missed it (contains("Ship faster") is true even quoted). Root cause: ParamSpec.default carried the raw source token; the JSON-bundle serde path emitted the quotes as literal value content (JS-codegen path was correct). Fixed at the ONE contract boundary (ParamSpec::from → eval_param_default), deleting the redundant display-time unquote_default. +3 regression tests. lib 2555 green. Live re-confirmation of THIS fix pends the next server restart (running server compiles in-process on the pre-fix binary; a freshly-registered fn still showed the quoted default, proving the in-memory staleness).
+
+Frictions for the ruthless-polish round filed as FUP-108 (placeholder-vs-value in binding rows; two selection-highlight vocabularies; "0 param(s)" on element nodes; puppeteer open→about:blank; synthetic-event-vs-page-listener verification tax).

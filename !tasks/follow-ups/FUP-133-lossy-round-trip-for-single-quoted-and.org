@@ -1,0 +1,136 @@
+#+TITLE: Lossy round-trip for single-quoted and quoted-numeric param tokens
+#+STATE: DONE
+#+CUSTOM_ID: FUP-133-lossy-round-trip-for-single-quoted-and
+#+PRIORITY: #B
+
+* Summary
+
+Editing a template-invocation parameter through a source-writing surface (the
+inspector pill, the admin CMS, the MCP workbench) NORMALIZES the token's quoting
+and, in some cases, its apparent type. A param the author wrote as `'foo'`
+(single quotes) or `"42"` (a quoted numeric) does not survive an edit unchanged:
+it comes back as `"foo"` / `42`.
+
+* Blast radius (be precise)
+
+This is PRE-EXISTING in the server's value logic — it was NOT introduced by
+PLAN-112. What PLAN-112 changed is REACHABILITY: before the pill, the only way
+to hit it was the admin CMS on a `@data` collection; now every template param on
+every dev-served page is one click from an edit.
+
+Nothing is corrupted semantically — `'foo'` and `"foo"` are the same string to
+the compiler, and `"42"` vs `42` matters only where a param's declared type is
+`string`. The damage is to the SOURCE: a diff shows churn the author did not
+make, and a codebase with a single-quote convention gets silently rewritten a
+token at a time.
+
+* What to verify before fixing (do this first — the exact behaviour matters)
+
+Reproduce each case against a live dev server and record the actual before/after
+bytes:
+
+1. `&card(title: 'hello')`   → edit `title` → what is written?
+2. `&card(count: "42")`      → edit an UNRELATED param → does `count` survive?
+3. `&card(count: "42")`      → edit `count` itself → quoted or bare?
+4. `&card(flag: 'true')`     → edit → does it become bare `true` (type change)?
+5. A param NOT edited at all — confirm it is byte-identical afterwards (the write
+   should only ever touch the edited param's span).
+
+Case 2 and 5 are the important ones: an edit must never rewrite a token the user
+did not touch.
+
+* Where the logic lives
+
+- Quoting on write is owned by the patcher — `emit_patch_value` (introduced in
+  PLAN-112 W1, commit e1e4cb5a, which moved quoting OUT of the client so the
+  server owns it). Callers send BARE values.
+- The read side projects a param's current value into the editor descriptor via
+  `param_rows` in `src/introspect/project.rs`.
+- The round-trip therefore is: source token → projected value → editor → bare
+  value → `emit_patch_value` → source token. The loss is wherever the original
+  token's SHAPE (quote style, quotedness of a numeric) is discarded rather than
+  carried through.
+
+Read all three before proposing a fix, and cite the real function names/paths in
+the write-up of the fix.
+
+* Fix direction (not prescriptive — confirm against the code)
+
+The general shape: preserve the ORIGINAL token's form when the edited value is
+"the same kind of thing" as what was there. A row already carries `span_text`
+(the exact source bytes of the invocation, added in W1R for the agreement check),
+so the original quote style is recoverable without a new field.
+
+Guard rails:
+- Never let quote-preservation defeat correct ESCAPING. If the new value contains
+  the original quote character, re-quoting must switch style or escape — a
+  round-trip that produces invalid source is far worse than one that normalizes.
+- A value the user genuinely retyped as a different kind (string → number) SHOULD
+  change form. Preserve shape, not staleness.
+
+* Tests to write
+
+- A param written `'foo'`, edited to `'bar'`, is written back single-quoted.
+- A param written `"42"` on a `string`-typed param stays quoted after edit.
+- Editing param A leaves param B's bytes IDENTICAL (regression guard for the
+  "only touch the edited span" rule).
+- A new value containing a quote character produces valid, re-parseable source
+  (compile the result and assert it parses).
+
+Sabotage-verify each: with the preservation removed, the test must fail.
+
+* Non-goals
+
+Do not add a second write path or a "legacy quoting" mode. One patcher owns
+quoting (that consolidation was the point of W1); this fix extends it, it does
+not fork it.
+
+* RESOLVED (2026-07-25, PLAN-113 W2.3)
+
+** Verified first, as the item required
+
+The five cases, reproduced as tests before any fix:
+
+| # | case                                    | before        | after      |
+|---+-----------------------------------------+---------------+------------|
+| 1 | `title: 'hello'` → edit                 | quotes LOST   | `'goodbye'`|
+| 2 | edit another param, `count: "42"` idle  | byte-identical| unchanged  |
+| 3 | `title: "hello"` → edit                 | `"goodbye"`   | unchanged  |
+| 4 | new value contains the quote char       | invalid source| escaped    |
+| 5 | untouched bare `flag: true`             | byte-identical| unchanged  |
+
+Cases 2 and 5 — the ones the item flagged as most important — were ALREADY
+correct: the patcher only ever rewrites the edited param's span. Only cases 1 and
+4 were defective.
+
+** Cause
+
+`src/sync/handlers.rs:880` computed `original_was_quoted` as
+`old_value.trim_start().starts_with('"')`. A SINGLE-quoted token therefore read as
+UNQUOTED, so `emit_patch_value` returned the bare value and the quotes vanished
+entirely (in an object slot it became double-quoted JSON).
+
+** Fix
+
+`emit_patch_value` now takes `original_quote: Option<char>` rather than a bool, and
+re-quotes in the original style. Three guards:
+
+- An OBJECT ENTRY stays double-quoted whatever the surrounding source looked like —
+  single quotes there would produce invalid JSON.
+- If the new value contains the original quote character (or a backslash), fall
+  back to JSON escaping. Preserving the style blindly would emit `'it's here'`,
+  which terminates at the apostrophe and leaves trailing garbage. Source that no
+  longer parses is far worse than source that normalized a quote.
+- A value that is a complete source atom still passes through verbatim, unchanged.
+
+No second write path and no "legacy quoting" mode: one patcher owns quoting, as
+W1's consolidation intended. This extends it.
+
+** Tests
+
+5 in `src/sync/handlers.rs`, all RED before the fix and sabotage-verified after.
+The strongest is `fup133_round_tripped_source_still_parses`, which compiles the
+rewritten source for five value shapes (plain, apostrophe, embedded double quote,
+backslash, and a double-quoted original receiving an apostrophe) — a quote fix that
+produced plausible-looking but unparseable source would be worse than the churn it
+removes.

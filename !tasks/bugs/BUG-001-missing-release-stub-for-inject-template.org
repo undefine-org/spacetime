@@ -1,0 +1,62 @@
+#+TITLE: Missing release stub for inject_template_provenance breaks cargo install
+#+STATE: DONE
+#+SESSION_ID: 14a6ea821e598033
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-03-30T11-15-30-041Z_14a6ea821e598033.jsonl]]
+#+CUSTOM_ID: BUG-001-missing-release-stub-for-inject-template
+#+EFFORT: 1
+#+PRIORITY: #A
+#+LAYER: compiler
+
+NOTE [2026-03-30]: Added #[cfg(not(debug_assertions))] no-op stub for inject_template_provenance in src/syntax/form_match.rs. All three verification checks pass.
+
+* Initial Message
+
+error[E0432]: unresolved import `form_match::inject_template_provenance`
+    --> src/syntax/mod.rs:43:5
+     |
+  43 |     inject_template_provenance, resolve_bind_value_css_override,
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^ no `inject_template_provenance` in `syntax::form_match`
+     |
+
+
+
+
+during cargo install --path .
+
+* Problem
+~inject_template_provenance~ in ~src/syntax/form_match.rs:1290~ is gated with ~#[cfg(debug_assertions)]~ but has no ~#[cfg(not(debug_assertions))]~ no-op stub. Its sibling ~inject_provenance_into_matches~ (line 1381) correctly has both:
+- Debug impl at line 1381
+- Release no-op stub at line 1409
+
+The function is:
+- Re-exported unconditionally from ~src/syntax/mod.rs:43~
+- Called unconditionally from ~src/sync/handlers.rs:713~
+
+~cargo install --path .~ compiles in release mode, so the function doesn't exist and the import fails.
+
+* Fix
+Add a ~#[cfg(not(debug_assertions))]~ stub for ~inject_template_provenance~ in ~src/syntax/form_match.rs~, placed immediately after the debug-only definition (after line 1370, before the ~inject_provenance_into_matches~ block). The stub returns the input string unmodified:
+
+#+begin_src rust
+/// No-op provenance injection for release builds.
+#[cfg(not(debug_assertions))]
+pub fn inject_template_provenance(
+    html: &str,
+    _source_file: &str,
+    _scope_selector: &str,
+    _macro_name: &str,
+    _ast_offset: usize,
+) -> String {
+    html.to_string()
+}
+#+end_src
+
+No changes needed in ~mod.rs~ or ~sync/handlers.rs~ — the unconditional re-export and call are correct once both cfg variants exist.
+
+* Files
+- ~src/syntax/form_match.rs~ — add release stub after line 1370
+
+* Verification
+- ~cargo install --path .~ must succeed (was the failing command)
+- ~cargo test --lib~ must pass (existing tests are debug-mode only, unaffected)
+- ~cargo build --release~ must succeed

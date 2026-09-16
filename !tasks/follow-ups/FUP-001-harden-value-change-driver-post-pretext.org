@@ -1,0 +1,209 @@
+#+TITLE: Harden value-change-driver post-pretext rewrite
+#+STATE: DONE
+#+SESSION_ID: 14a6fc9e2ae99112
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-03-30T12-34-37-355Z_14a6fc9e2ae99112.jsonl]]
+#+CUSTOM_ID: FUP-001-harden-value-change-driver-post-pretext
+#+EFFORT: 2h
+#+PRIORITY: B
+#+LAYER: stdlib
+
+NOTE [2026-03-30]: All 7 of 8 fixes applied and verified. Fix 6 (literal emoji) reverted — Spacetime parser panics on multi-byte UTF-8 in expand.rs:747 byte-index slicing. Original escaped surrogates are correct for this context (ASCII text inside JS eval()).
+
+* Initial Message
+
+bro just vendor or install all of pretext bro
+
+Addresses 8 audit findings from the pretext integration (PLAN-004).
+All changes are in the value-change-driver and its test files. No Rust changes.
+
+** Fix 1: Move getComputedStyle inside animateChange [regression]
+
+~cs~, ~font~, ~lineHeight~ are captured once at init (line 724-727) but used
+inside ~animateChange~ (lines 806-807, 815-816, 819). If the element's font
+changes at runtime (responsive breakpoint, class toggle), measurements are wrong.
+
+*** Change
+Move these 4 lines inside ~animateChange~, before Phase 1 measurement:
+#+begin_src javascript
+var cs = getComputedStyle(%&el);
+var font = cs.font || [cs.fontStyle, cs.fontWeight, cs.fontSize, cs.fontFamily].filter(Boolean).join(' ');
+var lhRaw = parseFloat(cs.lineHeight);
+var lineHeight = isNaN(lhRaw) ? (parseFloat(cs.fontSize) || 16) * 1.2 : lhRaw;
+#+end_src
+
+Remove the original lines 724-727 from the outer scope. ~cs~ is also used at line
+819 (~parseFloat(cs.fontSize)~) inside ~animateChange~, so that's fine.
+
+*** Verification
+- =cargo test --test value_change_test= — all 19 pass
+- =cargo run -- check ora-ventures.com/= — all 30 pass
+
+** Fix 2: Remove dead newWordWidths computation [dead code]
+
+~newWordWidths~ (line 816) is computed but only stored in ~wordContainers[].newW~
+which is never read. N unnecessary ~prepareWithSegments~ + ~layoutWithLines~ calls
+per cycle.
+
+*** Change
+- Delete line 816: ~var newWordWidths = ...~
+- In line 885, remove ~, newW: newWordWidths[w] || 0~ from the ~wordContainers.push~ object
+
+*** Verification
+- =cargo test --test value_change_test= — all 19 pass
+
+** Fix 3: Guard against zombie observer re-attach [resource leak]
+
+If ~destroy()~ is called mid-animation, the pending ~setTimeout~ callback (line
+936) still fires and re-attaches the observer on a destroyed instance.
+
+*** Change
+Add ~var destroyed = false;~ near the other outer-scope vars (after line 657).
+Set ~destroyed = true;~ at the top of ~destroy()~ (line 984).
+Add early return at top of setTimeout callback (line 936):
+#+begin_src javascript
+setTimeout(function() {
+  if (destroyed) return;
+  heightAnimDone.then(function() {
+    if (destroyed) return;
+    // ... existing cleanup ...
+#+end_src
+
+*** Verification
+- =cargo test --test value_change_test= — all 19 pass
+- Manual: code inspection confirms both setTimeout and .then callbacks bail out
+
+** Fix 4: Add node_modules to .gitignore [hygiene]
+
+~package.json~ was committed for the pretext devDependency but ~node_modules/~ is
+not in ~.gitignore~.
+
+*** Change
+Append ~node_modules/~ to ~.gitignore~
+
+*** Verification
+- =grep node_modules .gitignore= shows the entry
+
+** Fix 5: Document kfToCss transform-only contract [clarity]
+
+~kfToCss~ (line 743) only emits ~transform~ to CSS @keyframes. Other properties
+(opacity, filter) are handled via WAAPI on enter/exit layers. This is correct but
+not documented — the next reader will wonder why opacity is missing.
+
+*** Change
+Add comment before line 750:
+#+begin_src javascript
+// NOTE: Only 'transform' is emitted to CSS @keyframes for per-char stagger.
+// Other keyframe properties (opacity, filter) are handled via WAAPI on the
+// enter/exit layers (see layer-level opacity section below).
+#+end_src
+
+*** Verification
+- Code inspection
+
+** Fix 6: Use literal emoji in test file [robustness]
+
+The emoji test (line 96) uses escaped UTF-16 surrogates ~\ud83d\udc4b\ud83c\udf0d~.
+These may not survive Spacetime's parser. Use literal 👋🌍 instead.
+
+*** Change
+In ~tests/unit/animations/value-change.test.st~, replace all occurrences of
+~\ud83d\udc4b\ud83c\udf0d~ with literal emoji characters 👋🌍 (U+1F44B U+1F30D).
+
+*** Verification
+- File opens correctly, grep confirms literal emoji present
+- =cargo run --features headless -- test tests/unit/animations/value-change.test.st -o /tmp/vc-tests.html= succeeds
+
+** Fix 7: Validate pretext height against DOM after cleanup [accuracy]
+
+~ST.text.layout()~ computes height via canvas arithmetic. This may differ from
+actual DOM height due to line-height rounding, border-box, or padding. The
+discrepancy only affects the animation transition (final state is always correct
+because height is cleared to auto), but a large delta causes a visible snap.
+
+*** Change
+After Phase 5 cleanup sets ~%&el.textContent = newText~ (line 940), read the
+actual DOM height and log a warning if it differs from pretext's prediction by
+more than 2px. This is diagnostic-only for now — a future fix could use the DOM
+height instead. Add:
+#+begin_src javascript
+// Diagnostic: warn if pretext height prediction diverged from DOM truth
+if (typeof console !== 'undefined' && console.warn) {
+  var actualH = %&el.offsetHeight;
+  if (Math.abs(actualH - targetHeight) > 2) {
+    console.warn('[value-change] height prediction off by ' + Math.abs(actualH - targetHeight) + 'px (pretext: ' + targetHeight + ', DOM: ' + actualH + ')');
+  }
+}
+#+end_src
+
+Note: this is placed AFTER ~textContent = newText~ and BEFORE ~style.height = ''~
+so the DOM is in its final state.
+
+Actually, looking at this more carefully: line 939 sets ~style.height = targetHeight + 'px'~,
+then line 940 sets ~textContent = newText~, then line 942 clears ~style.height = ''~.
+The diagnostic read should be between lines 940 and 942 (after text is set, before
+height is cleared) — but at that point style.height is still explicitly set to
+targetHeight. So we need to temporarily clear it, read, then re-clear. Simpler: just
+do the read after line 942 clears everything:
+
+#+begin_src javascript
+%&el.style.height = '';
+%&el.style.overflow = '';
+%&el.style.clipPath = '';
+// Diagnostic: log pretext height divergence for debugging
+if (ST.debug && typeof console !== 'undefined') {
+  var actualH = %&el.offsetHeight;
+  if (Math.abs(actualH - targetHeight) > 2) {
+    console.warn('[value-change] height delta: ' + (actualH - targetHeight) + 'px');
+  }
+}
+#+end_src
+
+Gate behind ~ST.debug~ so it's zero-cost in production.
+
+*** Verification
+- =cargo test --test value_change_test= — all 19 pass
+- Code inspection confirms diagnostic is debug-gated
+
+** Fix 8: Add paddingTop/marginTop negative assertion tests [test gap]
+
+The Firefox compositing flash was caused by paddingTop/marginTop box-model
+mutation. No codegen test guards against reintroduction.
+
+*** Change
+Add to ~tests/value_change_test.rs~ after the ~no_font_kerning_hack~ test:
+#+begin_src rust
+#[test]
+fn test_compile_value_change_no_box_model_mutation() {
+    let input = r#"
+.price {
+    @value-change(duration: 400ms) {
+        :entering { opacity: 0 -> 1 }
+        :exiting { opacity: 1 -> 0 }
+    }
+}
+"#;
+    let ast = parse(input).unwrap();
+    let compiled = compile(&ast, CompileOptions::default());
+    assert!(
+        !compiled.js.contains(".paddingTop"),
+        "JS should NOT contain .paddingTop — box-model overflow hack removed.
+JS output:
+{}",
+        &compiled.js[..compiled.js.len().min(3000)]
+    );
+    assert!(
+        !compiled.js.contains(".marginTop"),
+        "JS should NOT contain .marginTop — box-model overflow hack removed.
+JS output:
+{}",
+        &compiled.js[..compiled.js.len().min(3000)]
+    );
+}
+#+end_src
+
+Note: ~paddingTop~ appears in a COMMENT in the driver (~// Phase 2 — ... instead of
+paddingTop/marginTop~) but not as ~.paddingTop~ (a property access). The assertion
+uses ~.paddingTop~ to only match property access, not comment text.
+
+*** Verification
+- =cargo test --test value_change_test= — 20 tests pass (19 existing + 1 new)

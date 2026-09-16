@@ -1,0 +1,121 @@
+#+TITLE: @each dotted-path source ($sig.field) silently renders nothing — resolveSourceData never splits the path
+#+STATE: DONE
+#+SESSION_ID: 15251010f7982b56
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-06T10-48-12-510Z_15251010f7982b56.jsonl]]
+#+CUSTOM_ID: BUG-155-each-dotted-path-source-sig-field-silent
+
+* Initial Message
+
+push the capabilities of the 3d module + the workbench mcp through a concrete idea of a user interface that talks directly to this very agent using the mcp tools. This is a pressure test against both the host apis and the 3d apis. Design the 3d mockups using generate_image and then implement whatever surfaces you need using the blender mcp. commit as you go
+
+* Found via
+FEAT-151 (Forge Deck agent-driven MCP+3D control surface) — a directive rail
+whose `@each($mcpInput.steps as $step)` rendered an empty container, no error,
+no warning, no compile diagnostic.
+
+* Repro (isolated, MCP-independent — proves this is NOT an @mcp-input bug)
+File: =scratch/repro-each-dotted/repro2.st= (kept for reference; delete once
+fixed + regression-tested)
+
+#+begin_src
+@template &row($item) { <p>`$item`</p> }
+<div data-st-instance><div class="plain"></div><div class="dotted"></div></div>
+@data inline $wrap : { "items": ["p", "q", "r"] };
+.plain  { @each($wrap as $x) { &row($x); } }        // renders "p","q","r" ✓
+.dotted { @each($wrap.items as $x) { &row($x); } }  // renders NOTHING ✗
+#+end_src
+
+Verified live (spacetime/st_mount + puppeteer): =.plain= innerHTML has 3 `<p>`
+rows; =.dotted= innerHTML is the empty string. No console error either.
+
+* Root cause (traced to source, not guessed)
+1. Parse time: =BindingExtractor= (=src/syntax/events/extractors/reference.rs=
+   lines 12-41) intentionally bundles a dotted path into ONE token —
+   =$wrap.items= extracts as =CapturedValue::Binding("$wrap.items")=, a single
+   string. This part is BY DESIGN (comment: "Check for dotted path").
+2. Runtime: =each-with-templates= primitive (=stdlib/primitives/template.st=
+   lines ~380-390) calls:
+   #+begin_src js
+   const scoped = ST.resolve(containerEl, sourceName); // sourceName = "wrap.items"
+   #+end_src
+   =ST.resolve(el, name)= (=public/runtime/st.js= line ~418) does an EXACT
+   signal-name lookup per ancestor node (=s[name]=) and a =name in
+   SpacetimeLocal= fallback — it never splits =name= on `.`. So
+   =ST.resolve(el, "wrap.items")= always misses (no signal is literally named
+   ="wrap.items"=), and =resolveSourceData()= returns =undefined= ->
+   =render()= never runs -> container stays empty, silently.
+3. The fix already exists ADJACENT and unused: =ST.resolvePath(el, path)=
+   (=public/runtime/st.js= line ~436) does EXACTLY this — resolves the head
+   via =ST.resolve= then walks the remaining dotted segments as plain property
+   access. Confirmed live: =ST.resolve(el,'wrap.items')= -> =undefined=;
+   =ST.resolvePath(el,'wrap.items')= -> =["p","q","r"]=.
+4. Also missing: the reactive watch registration
+   (=document.addEventListener(`local:${sourceName}:updated`, ...)= and
+   =ST.watchScoped(containerEl, sourceName, ...)=) both key off the SAME
+   dotted =sourceName= string, so even after fixing initial resolution, a
+   LATER change to =$wrap= (the head signal, not a literally-named
+   "wrap.items" signal) would not re-trigger a re-render — the dotted case
+   needs to watch the HEAD name (="wrap"=), not the full dotted string.
+
+* Fix (surgical, no new mechanism — reuses existing =ST.resolvePath=)
+In =stdlib/primitives/template.st= 's =each-with-templates=:
+- =resolveSourceData()=: replace the =ST.resolve(containerEl, sourceName)=
+  call with =ST.resolvePath(containerEl, sourceName)= (drop-in; already
+  handles the no-dot case identically since it's a superset).
+- Dependency watch: split =sourceName= on the first `.` to get the HEAD
+  before wiring =local:${head}:updated= / =ST.watchScoped(..., head, ...)=,
+  but keep re-deriving the FULL dotted value (via resolvePath) on each fire —
+  mirrors how =derived-signal='s regex-discovered deps already work correctly
+  for `@data derive` (confirmed working in the same investigation, see
+  BUG-follow-up note below).
+- =each-inline.st= (the inline-HTML-body sibling of each-with-templates) may
+  share the identical =resolveSourceData=-style bug — check it in the same
+  pass (same primitive family, same =ST.resolve= vs =ST.resolvePath= pattern
+  is plausible; verify with a mirrored repro before assuming).
+
+* Elegant target (what "clean syntax, no workarounds" means here)
+No new grammar. =@each($sig.path.to.array as $x)= should just WORK — same as
+a plain top-level array signal — because the language's stated design
+(AGENTS.md: "The right primitive answers questions you never posed") already
+implies dotted-path sources are first-class (interpolation `` `$sig.path` ``
+and =@data derive $x : $sig.path;= both already support it correctly). =@each=
+is the ONE place in the reactive-source family that doesn't. Fixing
+=resolveSourceData= to use =ST.resolvePath= deletes the special case rather
+than adding one — bringing dotted-path handling to parity across ALL THREE
+consumers (interpolation, derive, each) via the SAME resolver.
+
+* Acceptance
+- New regression test in =stdlib/3d/tests/= or a core =tests/= location
+  exercising the exact repro2.st shape (plain array works today; dotted-path
+  array must render identically) — RED before the fix, GREEN after.
+- =cargo test --lib= and the headless Spacetime suite still pass.
+- Re-verify FEAT-151's Forge Deck rail renders once this lands (currently
+  blocked/worked around by NOT using dotted-path @each — see FEAT-151 update).
+
+* Fixed (2026-07-06)
+`stdlib/primitives/template.st::each-with-templates` now uses `ST.resolvePath`
+(head-name resolve + dotted-segment walk) instead of `ST.resolve` (exact-name
+lookup) in `resolveSourceData()`, and all three reactive channels (`local:*:
+updated`, `ST.afterData`, `data:*:empty`) now key off the HEAD signal name
+(`sourceName.split('.')[0]`) instead of the literal dotted string, re-deriving
+the full path via `resolveSourceData()` for a dotted source while trusting the
+channel's raw payload directly for a plain (non-dotted) source — preserving
+the exact prior behavior for every existing plain-source caller (regression
+caught + fixed: see `tests/unit/templates/each-data-drive.test.st`, which
+initially broke and was restored to green).
+
+Regression tests: `tests/unit/templates/each-dotted-path.test.st` (3 tests,
+headless, RED-before/GREEN-after verified against the original unpatched
+code). Full suite green: `cargo test --lib` (2562), `cargo test --test
+integration_tests` (181), `cargo run --features headless -- test tests/
+--headless` (603).
+
+A THIRD, independent bug surfaced fixing this one: `check_file`'s static
+analysis never saw `stdlib/__mcp__`'s macros at all (registry-scope gap, not
+a dotted-path issue) — filed separately as BUG-158, also fixed in the same
+commit.
+
+FEAT-151's Forge Deck `mission-control.st` un-blocked: the
+`@each($mcpInput.steps as $step)` annotation-as-blocked comment removed; the
+file now both compiles clean (BUG-158) and renders correctly (BUG-155 +
+BUG-156).

@@ -1,0 +1,33 @@
+#+TITLE: Client editor-session plane — inspector edits owned by client state, not the poll
+#+STATE: DONE
+#+SESSION_ID: 1522aa9778a04732
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-04T14-07-53-826Z_1522aa9778a04732.jsonl]]
+#+CUSTOM_ID: FEAT-150-client-editor-session-plane-inspector-ed
+#+COMPLETION_HASH: deb22874288a2181
+
+* Initial Message
+
+i have restarted the session, can you do the visual confirmation now?
+
+The structural half of the workbench rethink (PLAN-065): introduce a CLIENT-owned editor plane so inspector editing never races the server poll.
+
+** Model (three planes)
+- SERVER plane: $mcpSnapshot / published arrays = immutable remote read-model (poll-repainted). Read-only lists only.
+- CLIENT plane: $selectedNode, $activeEditorNode, $activeEditorFields (per-field draft/dirty/pending/error). Owns focus + in-progress edits. NEVER poll-repainted.
+- CANVAS plane: guest bundle seeded from COMMITTED overrides/source only.
+
+** W_session (kills BUG-151 primary)
+On selection, COPY the matching snapshot rows (mcpStageNodeBindings/mcpStageNodeParams for $selectedNode) into client-owned $activeEditorFields; render inspector inputs from THAT client array, not @each($mcpStageNodeBindings ... when ...). The poll can no longer replace a focused input. @on input updates the local draft immediately (optimistic-local-first).
+
+** W_commit (kills BUG-151 fully)
+On commit (blur/change), send mcp_param/mcp_node_param with {fieldKey,target,value,baseRevision}; mark field pending; ack updates base + clears dirty (canvas re-renders from committed state via the existing region-override rail); failure keeps draft + shows field error; NEVER blank the editor. Poll reconciles CLEAN fields only; a dirty/focused field is never overwritten; if the selected id disappears, show a stale-selection notice, don't clear mid-keystroke.
+
+** Constraint / risk
+No custom page JS. If Spacetime lacks a declarative "project the selected snapshot row into a client signal" primitive, add a small OWNED primitive/directive for it (same category as @mcp-input/@mcp-action — platform editing infra, NOT page JS). Confirm need before building; if a new primitive, note it. Per-field dynamic inputs MAY still use @each, but only over CLIENT-owned editor fields — the invariant is SOURCE OWNERSHIP, not absence of loops.
+
+** Keep
+The shared Structure IR + dotted-node selection spine is verified sound; do not rewrite it. This feature changes the edit LIFECYCLE, not the id model.
+
+Parent: PLAN-065. Oracle: agent://18-WorkbenchRedesign.
+
+NOTE [2026-07-05]: Delivered by PLAN-065 W_session (09bf4717) + W_hygiene (2c076ab4, bb71ccbc). The three-plane model is live: client-owned $activeBindings/$activeParams/$activeFrameParams own edit state; server arrays inform read-only lists; canvas renders committed state. W_commit's optimistic-reconcile machinery was correctly NOT built (oracle: W_session removed the poll-fights-input causal path; the machinery would be speculative complexity). All live-verified.

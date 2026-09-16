@@ -1,0 +1,122 @@
+#+TITLE: mask-position % uses background-position formula, not naive tiling — grid cells leave an unmasked (transparent) edge strip
+#+STATE: DONE
+#+SESSION_ID: 152262b47a31ca42
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-04T08-53-49-160Z_152262b47a31ca42.jsonl]]
+#+CUSTOM_ID: BUG-146-mask-position-uses-background-position-f
+#+PARENT: FEAT-147-shaped-occlusion-grid-material-aware-fro
+
+* Initial Message
+
+look up the recent work on Spacetime ECS system and tell me how you would make the text feel even more stuf to the 3d, by enabling the perspective calculations opened up by the 3d module's facet system available to bind to the Spacetime text
+
+* Reported
+User screenshot: every anchored tag in projects/spatial-showcase (Flux, Damaged Helmet,
+Prism — even ones without occlude:true) has its right ~15-20% edge visibly cropped/missing,
+independent of camera angle or occlusion state.
+
+* Root cause (verified via an isolated minimal repro, not guessed)
+FEAT-146's static 4x4 CSS mask-image grid (projects/spatial-showcase/index.st `.tag`) uses:
+  mask-size: 25% 25%;
+  mask-position: 0% 0%, 25% 0%, 50% 0%, 75% 0%, ... (16 positions, 0/25/50/75 per axis)
+intending 4 equal 25%-wide slots tiling the full 0-100% width/height.
+
+CSS `mask-position` percentages resolve with the SAME formula as `background-position`:
+  offset_px = (container_size - layer_size) * (percent / 100)
+NOT `offset_px = container_size * (percent/100)` (naive tiling), because a percentage
+`background-position`/`mask-position` value describes where a point on the LAYER aligns
+with the corresponding point on the container's background-positioning-area — it is NOT a
+plain fraction of the container.
+
+With mask-size:25% (layer_size = 25% of the box), plugging in the formula:
+  position(0%)  = (100%-25%) * 0.00 =  0%     -> covers   0.0% -  25%
+  position(25%) = (100%-25%) * 0.25 = 18.75%  -> covers 18.75% -  43.75%
+  position(50%) = (100%-25%) * 0.50 = 37.5%   -> covers 37.5%  -  62.5%
+  position(75%) = (100%-25%) * 0.75 = 56.25%  -> covers 56.25% -  81.25%
+The 4 cells only cover 0-81.25% of each axis — the final 18.75% of width AND height has NO
+mask layer positioned over it at all. mask-image treats any region not covered by ANY layer
+as fully transparent (masked OUT) by default — hence the visible crop on the right/bottom
+edge of every `.tag`, regardless of whether any --occ-<r>-<c> custom prop is even being
+written (confirmed: the "Spatial ECS" title tag, which has no @anchor occlude:true at all,
+shows the exact same crop -- proving this is a CSS-authoring bug in the static grid
+declaration, NOT a bug in the occlusion raycast/aggregation logic built in FEAT-146/147).
+
+Isolated repro (scratch/bug-isolated-repro.png, file:///tmp/mask-bug-test/index.html): a
+16-layer mask grid with EVERY cell fully opaque (mask-image: linear-gradient(black,black)
+repeated 16x, i.e. "fully visible" data) still shows the card's right/bottom edge cropped —
+proves the bug is in the STATIC position math, independent of any per-frame --occ-* value.
+
+* Fix (two equivalent options, either resolves it)
+1. Use `mask-position` percentages that account for the layer-size subtraction:
+   for an N-cell axis, cell i's position% = i / (N-1) * 100 IS what naive tiling assumes,
+   but since the browser subtracts layer_size first, the correct percent for cell i (0-indexed,
+   layer_size = 100/N %) to land at pixel offset (i * 100/N)% is:
+     percent_i = (i * 100/N) / (1 - 100/N/100) = (i / N) / (1 - 1/N) * 100  [in %ages]
+   Simpler equivalent: use `calc()` positions in absolute terms, e.g.
+     mask-position: calc(0% * 1) 0%, calc(100%/3) 0%, ... -- fragile, avoid.
+2. PREFERRED: switch each grid cell to explicit pixel/percent math via
+   `mask-position: <i>fr equivalent` is not supported for mask-position, so the clean fix is
+   to size each layer at exactly its cell fraction and position using the
+   `background-position` corner-anchoring trick: for the LAST column/row use `100%` (which
+   correctly anchors the layer's right/bottom edge to the container's right/bottom edge
+   regardless of layer size), and for interior columns use `mask-position-x: calc(N * (100%/COLS))`
+   style absolute offsets instead of bare percentages. Concretely: replace the naive
+   `0%, 25%, 50%, 75%` 4-step position list with pixel-independent CSS `calc()` expressions
+   that compute the true left-edge offset directly:
+     left_i = i * cellWidthFraction  (as a plain fraction of the box, NOT run through the
+     background-position subtraction formula) -- achieved by using
+     `mask-position: calc(i/N * 100%) calc(row/N * 100%)` is STILL subject to the same
+     formula bug UNLESS mask-size is 100% (single full-box layer) or the position is
+     expressed to already compensate. The simplest robust fix given N equal cells:
+        mask-size: calc(100%/N) calc(100%/N);
+        mask-position: calc(<i> * 100%/(N-1)) ... -- still wrong for the same reason.
+   ACTUAL simplest correct fix: use `background-position`-style edge keywords / calc that
+   targets the layer's TOP-LEFT corner directly via `mask-position: X Y` where X/Y are
+   defined in raw px/`calc()` against the KNOWN container size (requires a fixed .tag
+   width, breaking the "auto-sized card" flexibility) OR, cleanest and size-agnostic:
+   express each cell's position as `calc(<i>/<N> * 100% / (1 - 1/<N>))`-style corrected
+   percentage per the formula above, computed once per cell at author time (N=4 is static,
+   so these 16 numbers are simple constants to precompute and hardcode, same as the existing
+   16 var() layers).
+* Recommended concrete fix
+   For N=4 (current grid), the CORRECTED position percentages (using the formula
+   percent_corrected = (i/N) / (1 - 1/N) * 100) are:
+     i=0: 0%,  i=1: 33.333%,  i=2: 66.667%,  i=3: 100%
+   (verify: layer_size=25%; offset_px at 100% = (100%-25%)*1.0 = 75% = exactly where cell 3
+   needs to start to cover 75-100%. offset_px at 33.333% = 75%*0.33333 = 25% = exactly where
+   cell 1 needs to start. offset_px at 66.667% = 75%*0.66667 = 50% = cell 2's start. Confirms
+   the corrected list is 0%, 33.333%, 66.667%, 100% instead of the current WRONG
+   0%, 25%, 50%, 75%.)
+
+* Files affected
+  - projects/spatial-showcase/index.st (.tag mask-position declaration, both mask-position
+    and -webkit-mask-position)
+  - stdlib doc / three-anchor.st's FEAT-146 doc comment (the worked CSS grid example, if one
+    exists there, needs the same correction so future authors don't copy the wrong formula)
+
+* Acceptance
+  - Isolated repro (scratch/bug-isolated-repro.png scenario) shows NO cropped edge with all
+    cells opaque, after the position list is corrected to 0%, 33.333%, 66.667%, 100%.
+  - Live spatial-showcase: all 4 tags (crown/helmet/flux/prism) render with NO visible crop
+    at any camera angle, confirmed via screenshot + a getBoundingClientRect/visual diff of
+    the label's rendered content vs. its DOM rect.
+  - Existing showcase.cdp.test.st (8 sections) still green after the fix (position values
+    change but the mask MECHANISM and all --occ-*/--anchor-* signals are unaffected).
+
+* Fix shipped (2026-07-04)
+Corrected mask-position from naive `0%,25%,50%,75%` to the formula-correct
+`0%,33.333%,66.667%,100%` in projects/spatial-showcase/index.st (both `mask-position`
+and `-webkit-mask-position`). Verified via an isolated repro BEFORE and AFTER the fix
+(scratch/bug-isolated-repro.png shows the crop with all-cells-opaque; scratch/bug-fixed-repro.png
+confirms the corrected formula closes it). Live-verified in the actual showcase
+(scratch/bug146-fixed-live.png) — all 4 tags (crown/helmet/flux/prism) render with no
+cropped edge at the default camera angle.
+
+Added a regression guard: tests/showcase.cdp.test.st section 9 asserts the mask grid's
+final computed position is exactly `100% 100%` on `crown` (which never sets
+occlude:true) — isolates this as a static-CSS invariant independent of occlusion state,
+so a future re-introduction of the naive formula fails the test loud instead of silently
+cropping every tag again.
+
+Verified: cargo check green; cargo run --features cdp -- test --cdp green, all 9
+sections (fix is a pure static-position correction; occlusion logic and all FEAT-145/
+146/147 signals unaffected). Commit: spatial-showcase 160c732.

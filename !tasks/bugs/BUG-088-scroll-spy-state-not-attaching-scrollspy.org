@@ -1,0 +1,59 @@
+#+TITLE: @scroll-spy state not attaching (scrollSpy undefined on elements)
+#+STATE: DONE
+#+SESSION_ID: 15052f2e47ce81ee
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-11T16-32-45-343Z_15052f2e47ce81ee.jsonl]]
+#+CUSTOM_ID: BUG-088-scroll-spy-state-not-attaching-scrollspy
+#+COMPLETION_HASH: 84edab078ceaf862
+
+* Initial Message
+
+my dude, I want you to make a modular project in projects/backdesk-hospitality that follows the rough COPY of ~/code/ora/highlead/clients/backdesk-hospitality (JUST THE COPY), and then you make a FUCKING AMAZING mobile-ready landing page for our campaign, in French, that leverages the latest Spacetime features and has a really cool admin interface-ready code organisation and is super well modularised (not the _*.st bullshit you had before, I want you to use this as a testing ground for Spacetime as a fully fledged language and whatnot).
+
+You need to go through design inspirations. Please write a set of design specs in projects/backdesk-hospitality/design/ that cites specific WOW award-winning showcases from awwwards.com and other sources, that you have carefully studied for both the visual and the lead experience and the convertion potential. You'll include puppeteer screenshots in your research and explain all the facets that you intend on using from them for the backdesk hospitality website, and your reasoning and taste for why you went in a certain way. Then you'll show me how you will turn this in to a consistent experience with a clear CTA and quick form (we'll worry about hoking the form to a live server later, right now I want copy + style + experience)
+
+* Symptom
+`.section { @scroll-spy @when &self.scrollSpy.isActive { $state <- "x"; } }` (the
+ora-ventures pattern, copied verbatim) does not toggle state. In backdesk-hospitality,
+`$navSolid` and `$stickyShow` never flip; `ST.get(el, 'scrollSpy')` returns `undefined`
+on the spied elements (`.bd-hero`, `.bd-parcours`) at all scroll positions.
+
+The runtime DOES contain scroll-spy codegen (grep `scrollSpy` in runtime.js ≈ 69 hits)
+and the `$navSolid`/`$stickyShow` signals exist (6 hits), but the per-element scrollSpy
+sub-state is never populated, so the `@when` guard never becomes true.
+
+* Environment caveat
+Observed while running the WORKING PREBUILT binary `target/debug/spacetime` (mtime
+2026-06-11 18:32). The live `cargo build` is currently BROKEN by unrelated uncommitted
+compiler-source edits (duplicate `consume_type_term` / `TyperefExtractor` impl in
+src/syntax/events/extractors/simple.rs — E0119/E0428), so I could not test against a
+fresh build. This scroll-spy failure may be:
+  (a) a genuine regression in the prebuilt binary's scroll-spy init, or
+  (b) already fixed in the (currently un-compilable) working tree.
+Needs re-test once the compiler builds again.
+
+* Repro
+projects/backdesk-hospitality/index.st had:
+  .bd-hero     { @scroll-spy @when &self.scrollSpy.isActive { $navSolid <- false; $stickyShow <- false; } }
+  .bd-parcours { @scroll-spy @when &self.scrollSpy.isActive { $navSolid <- true;  $stickyShow <- true; } }
+Neither fired; nav stayed non-solid, sticky CTA stayed hidden.
+
+* Workaround (applied)
+Removed scroll-spy dependence: nav is always solid; the sticky mobile CTA is visible by
+default (mobile-only via a fluid max-height clamp, since @media is also unavailable —
+see BUG-087). Page is fully functional without scroll-spy.
+
+* Acceptance
+- `@scroll-spy @when &self.scrollSpy.isActive { … }` toggles state as the section enters/
+  leaves the viewport (verify `ST.get(el,'scrollSpy').isActive` becomes true in-view).
+- Re-test specifically against a freshly built compiler once src/syntax/events/extractors
+  compiles again.
+
+* Refs
+- ora-ventures.com/index.st:182-187 (the canonical working usage to diff against)
+- Related toolchain-state note: prebuilt binary in use; cargo build broken by uncommitted simple.rs/custom.rs edits.
+
+NOTE [2026-06-12]: RE-TESTED on fresh build (commit 8548b21f, cargo build now works). Sharpened diagnosis: the scroll-spy PRIMITIVE works correctly — IntersectionObserver fires, ST.set(el,"isActive",active) flips (verified in browser: secB.isActive=true after scrollIntoView). The REAL defect is the `@when &self.scrollSpy.isActive { $state <- ... }` GUARD: its mutation body NEVER emits. Confirmed by grep: in /tmp fixture AND in projects/ora-ventures.com/dist/spacetime.js (committed), the ONLY navTheme write is the init ("default"); there is NO @when-guard setter emitting `navTheme <- "dark"`. So this guard form has NEVER worked anywhere — it is a missing codegen feature, not a regression. Two mismatches: (1) the macro yields a FLAT signal `$isActive`, but usage references `&self.scrollSpy.isActive` (a `scrollSpy.` namespace prefix the runtime never stores); (2) the @when behavior block's body mutations are dropped during lowering. WORKAROUND for consumers: scroll-spy's working `isActive` signal can drive a reactive CLASS binding directly — `.sec { @scroll-spy; .sec--active: &self.isActive; }` compiles+checks clean (the reactive-prop path works); use that, or a static nav, instead of the @when→$state mutation. Remaining fix (future): wire @when condition `&self.<ns>.<field>` to a ST.watch on the yielded signal that runs the body mutations; decide whether scroll-spy should yield under a `scrollSpy` namespace or whether usage should be `&self.isActive`.
+
+NOTE [2026-06-12]: RE-TESTED on fresh build (commit 8548b21f). Scroll-spy PRIMITIVE works: IntersectionObserver fires, ST.set(el,"isActive",active) flips (browser-verified). The defect is the `@when &self.scrollSpy.isActive { $state <- ... }` GUARD: its mutation body NEVER emits. In projects/ora-ventures.com/dist (committed), the only navTheme write is the init — no @when-guard setter exists. So this guard form has NEVER worked = missing codegen feature. Implementing now.
+
+NOTE [2026-06-12]: FIXED (commit after 8548b21f). Implemented the @when reactive guard end-to-end. Four interlocking gaps fixed: (1) added stdlib when-guard primitive+macro — `@when &self.$sig:expr { $body:mutation_actions }` lowers to ST.watch(el,sig, v=>if(v) ST.runMutations(el,body)); (2) TokenCursor::eat_text now matches multi-token literals (`&self.` = & self .); (3) match_sink defers an ELEMENT_REF/VARIABLE_REF that is a directive inline-arg to the parent directive so @when's form consumes it instead of element-ref stealing the match; (4) added BodyBrace capture boundary + fixed ExprExtractor to end span at last non-trivia token (a trailing \n spliced the body into the signal capture). VERIFIED IN BROWSER: scrolling section A<->B flips $navTheme light<->dark bidirectionally, nav bg follows (rgb(0,0,0) at dark section, white at light). Regression test: when_guard_emits_signal_watch_and_mutation. All 264 parser + 172 integration tests green; the 9 v8 media_dedup/selector_init failures are the pre-existing BUG-039 cluster (baselined, unrelated — scope-nested @media macro path, untouched by this work).

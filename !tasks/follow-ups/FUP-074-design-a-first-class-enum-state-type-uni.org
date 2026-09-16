@@ -1,0 +1,112 @@
+#+TITLE: Design a first-class enum/state type unifying @state(when), @match, @view, reactive state — full cutover
+#+STATE: DONE
+#+SUPERSEDED_BY: PLAN-077-first-class-enum-union-types-match-value
+#+SESSION_ID: 150f475256d7192f
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-19T12-43-02-363Z_150f475256d7192f.jsonl]]
+#+CUSTOM_ID: FUP-074-design-a-first-class-enum-state-type-uni
+
+* Initial Message
+
+Verification: lib 2363 passed/0 failed · integration 172 · FUP-069 acceptance green · headless 456→513
+ passed.
+
+ Filed BUG-112 for the residual @try $error lowering bug ($error signal-lowers to ST.get(el,"error") =
+ __e) — out of FUP-072 scope, accounts for the remaining state/binding @try failures.
+
+ Notes (honesty):
+ - 9 v8_runtime failures (@media→JS, getSelection/DOMParser/IntersectionObserver, async initElement) are
+ pre-existing — st.js is byte-identical to HEAD, and @media("print") (no colon, real selector) fails
+ identically, ruling out all my changes.
+ - 4 non-test snapshots + part of test_and_fixture drift from the other session's concurrent
+ public/runtime/templates.js edit (FEAT-124/126 bundle code), embedded in compiled-JS snapshots — not my
+ logic. Left the test_and_fixture snapshot unstaged since it's entangled with their unstaged bundle.
+
+
+
+please review this owrk and what it was trying to achieve, and tell me what it did right and what the next steps are
+
+* Thesis
+The friction PLAN-047 hit when migrating state machines to $-signals is NOT
+incidental — it is a symptom of a missing first-class ENUM/STATE TYPE in the
+language. Today "a value that is one of N named states" is expressed four
+incompatible ways, each with its own lowering and gaps. They should converge on
+ONE enum type that all four reactive surfaces consume. This FUP is the design
+brief for that cutover (NOT to be done inside PLAN-047; PLAN-047 ships the
+pragmatic reactive-class/data-state migration).
+
+* The four incompatible surfaces today (evidence-grounded)
+1. `.cls: $bool` — boolean reactive class. Only 2-state. No exclusivity across
+   sibling classes (two `.a: $x` / `.b: $y` can both be true — the cross-fire
+   bug seen in W0). Lowers to classList.toggle + `!!`.
+2. `@state(when: "str") { css }` — renders `selector[data-st-state="x"] { css }`.
+   The CSS half WORKS, but NOTHING in the $-signal world SETS data-st-state
+   reactively. Verified 2026-06-19: `data-st-state <- $mode` does NOT emit a
+   reactive-attr binding (the emit shows only the union watchTypedUnion path at
+   st.js setAttribute; the hyphenated/reserved `data-st-state` attr does not
+   bridge to the generic `attr <- $sig` reactive-attribute model). So
+   @state(when:"str") is an ORPHAN after @state_machine is deleted — its state
+   carrier has no reactive writer.
+3. `@state(when: $x is Variant { $bindings })` — typed-union pattern match.
+   Lowers to `el[data-st-<sig>-type="Variant"]` + watchTypedUnion. THE RIGHT
+   MODEL (one attr, mutually exclusive, payload-carrying) but fed ONLY by
+   @socket (a primitive that yields a {type:...} union object). No author-facing
+   way to declare a plain local enum signal and flip it.
+4. `@match $x { "v" => &tpl() }` (render-once) and `@view $x { "v" => &tpl() }`
+   (reactive re-mount). Template/DOM dispatch by value. @view works with a plain
+   string signal, but mounts TEMPLATES (heavy for static markup) and has no
+   relationship to @state(when)'s CSS or the union attr.
+
+* The core lack
+There is no `@type Status = Idle | Running | Passed | Failed` (or
+`$status Status: Idle`) enum SIGNAL that:
+  - is exhaustively checkable (compiler knows the variant set),
+  - reflects its current variant to ONE attribute (data-st-<sig> / data-state)
+    for CSS dispatch — mutually exclusive by construction,
+  - can carry per-variant payload (the union `{ $send, $error }` case),
+  - feeds @state(when: $s is V) for CSS, @view/@match $s for DOM dispatch, and a
+    plain `.cls: $s == V` for a single class — ALL FROM ONE DECLARATION,
+  - is set by a plain mutation `$status <- Running` (no @socket, no @state_machine).
+The union machinery (#3) is 80% of this already — it just needs an author-facing
+enum-signal feeder (not only @socket) and a generic reactive writer for the
+data-st-<sig> attribute, plus unification so @state(when), @view/@match, and
+reactive class all resolve the SAME enum signal.
+
+* What a cutover would unify / DELETE (net-complexity reduction — AGENTS elegance bar)
+- DELETE the boolean-vs-union-vs-string-state fork: one enum type, one attr
+  reflection, one resolution path.
+- @state_machine/@transition (already retired in PLAN-047) stay dead; their
+  legitimate use (declarative N-state UI) is subsumed by enum + @state(when:
+  $s is V) for CSS or @view $s for DOM.
+- The `data-st-state` reserved-attr special case (state-css primitive) folds
+  into the generic enum-attr reflection — no bespoke state-css path.
+- @match (render-once) vs @view (reactive): clarify/merge — render-once is just
+  reactive with a constant subject; consider one construct with a reactivity
+  flag rather than two primitives.
+
+* Design questions to resolve
+1. Enum declaration surface: `@type Status = Idle | Running | ...` (sum type, cf
+   stdlib/macros/type-data.st string-union `"a" | "b"`) vs a typed local signal
+   `$status Status: Idle`. How does it compose with @data?
+2. Attribute reflection: generalize watchTypedUnion so ANY enum signal (not just
+   @socket unions) writes data-st-<sig>-type / data-state on change. Make the
+   generic `attr <- $sig` reactive-attr path handle hyphenated/reserved attrs so
+   `data-state <- $status` works (the gap proven above).
+3. Exhaustiveness: should @state(when: $s is V) / @match warn on a missing
+   variant arm? (The enum type makes this checkable.)
+4. Payload variants: keep the union `{ $send, $error }` destructuring; make it
+   work for author-declared enums, not only socket.
+5. @view vs @match unification (reactivity as a parameter, not two primitives).
+
+* Non-goals
+- Not reviving @state_machine/@transition (the imperative FSM is correctly dead).
+- Not blocking PLAN-047 (which ships reactive-class/data-state migration now).
+
+* Provenance
+Filed 2026-06-19 during PLAN-047 W4. The user identified that the migration
+friction "is probably a lack on the part of the enum type system and the @match
+system." Confirmed by evidence: @state(when:"str")'s data-st-state carrier has
+no reactive writer; the union model (#3) is the right shape but only @socket
+feeds it; @match/@view are disjoint from the CSS-state surfaces. Companion:
+PLAN-047 (retire @state_machine), BUG-117 (why the FSM was dead).
+
+NOTE [2026-07-20]: Implemented in full by PLAN-077 (all 8 waves W0–W7 + SWARM GATEs 0–7 complete, 2026-07-20): first-class @type sums, cond-mode @data derive @match, dispatch-mode unified @match/@view, <- variant construction, generalized @state reflection (one canonical ST.bindState writer), and the stdlib/__host__ badge machine migrated as the first real consumer. Marked DONE/superseded per PLAN-077's provenance instruction.

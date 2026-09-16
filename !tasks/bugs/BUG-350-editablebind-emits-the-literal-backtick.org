@@ -1,0 +1,113 @@
+#+TITLE: @editable(bind:) emits the literal backtick hole — the bind is not per-instance
+#+STATE: DONE
+#+SESSION_ID: 153497be379ff5cc
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-18T12-18-12-318Z_153497be379ff5cc.jsonl]]
+#+CUSTOM_ID: BUG-350-editablebind-emits-the-literal-backtick
+
+* Initial Message
+
+please review the failures now and tell me what is left open that will fix it, and let's plan the corresponding PLN
+
+* Symptom
+
+=v8_runtime::per_instance_compiled_tests::editable_bind_is_per_instance_across_two_compiled_instances=
+fails:
+
+: editable bind `$f.value` must lower to a scoped path read of the instance
+: param, not a literal backtick string
+
+Source under test \u2014 one template, two instances with different params:
+
+: .fld { @editable(bind: `$f.value`); }
+: \u2026
+: .a { &fld({value: "alpha"}); }
+: .b { &fld({value: "beta"}); }
+
+* What is wrong
+
+The hole `` `$f.value` `` reaches the emitted JS as a LITERAL backtick string
+instead of lowering to a per-instance scope read. The arg-value backtick unwrap
+(=src/emit/js.rs::parse_param_value=) is what should strip it so `$f` resolves
+against the invoking instance's params.
+
+Consequence: both instances read the same thing (or nothing) rather than "alpha"
+and "beta" respectively \u2014 the editable is not per-instance at all, which is the
+entire point of binding it to a template param.
+
+* Why it is filed rather than fixed here
+
+Found during PLAN-142's W5 tail triage. Unlike the rest of that plan (stale
+expectations and brittle string pins), this is a genuine emit-path capability
+gap: fixing it means changing how `parse_param_value` unwraps an arg-position
+hole, which touches every macro taking a backtick argument, not just
+`@editable`. It wants its own RED-first change with a per-instance behavior gate,
+not a triage-pass edit.
+
+* Acceptance
+
+- The existing test passes WITHOUT modification (it asserts both directions
+  already: a scoped read IS present, and the literal backtick hole is NOT).
+- A behavior gate under `--cdp`: two instances of the same template, edited
+  independently, keep distinct values. Source assertions alone do not close
+  this \u2014 the whole defect is that the string looked right in one place and
+  meant nothing at runtime.
+- Check sibling surfaces: any other macro taking `` `\u2026` `` in argument position
+  is likely affected the same way. Enumerate before fixing.
+
+* Provenance
+
+Pre-existing and long-standing \u2014 carried as a known residual failure across
+several prior arcs (noted as "`@editable` arg-unwrap,
+`src/emit/js.rs::parse_param_value`"). Unrelated to the @on cutover, the
+migration sweep, or PLAN-142.
+
+
+* RESOLVED (verified 2026-08-07)
+
+TWO independent defects, both found by the byte-comparison gate rather than by inspection.
+
+** 1. Relative STDLIB_DIRS resolved against the cwd
+
+`metasystem::registry::STDLIB_DIRS` are relative (`stdlib/primitives`, `stdlib/macros`, …).
+`IncrementalCache::from_full_load` mapped them with a bare `PathBuf::from`, then probed
+`dirs.iter().any(|d| d.exists())`. From the repo root they exist -> on-disk stdlib. From ANY
+subdirectory (`src/`, `tests/`, a fixture folder) none exist -> the probe says "no stdlib on
+disk" -> silent fallback to the EMBEDDED registry, whose grammar is frozen at the last
+`cargo build`. Hence `Missing required parameter 'match' in bind: derive-match` on a page that
+builds cleanly from the root.
+
+Fixed by anchoring the dirs to `toolchain::workspace_root_for(".")` (with the binary's own
+checkout as a last resort). Exactly what BUG-227 did for the SyntaxRegistry — the same class of
+bug, one layer down.
+
+** 2. `is_toolchain_root` accepted ANY directory named `stdlib`
+
+`dir.join("stdlib").is_dir()` is satisfied by `docs/stdlib/`, which contains one prose file
+(VENDORING.md). So building from `docs/` selected `docs/` as THE toolchain root and emitted a
+**zero-byte spacetime.js** — a successful, silent, empty build. This is the more dangerous half:
+it exits 0.
+
+Fixed by requiring a load-bearing member: `stdlib/primitives`. A root without it could never have
+served a compile. Two test fixtures that created a bare `stdlib/` were updated (toolchain's own
+tests and BUG-227's `stdlib_resolves_from_the_enclosing_checkout_not_the_site`).
+
+** Gate
+
+`tests/repro/bug-350-cwd-stdlib/check-contract.sh` builds ONE absolute site from five working
+directories and asserts the outputs are **byte-identical** (md5 of index.html + spacetime.js) —
+not merely both-exit-0, which two equally-wrong builds would satisfy. `docs/` is included
+deliberately, since its accidental pass is what located defect 2. A positive control asserts the
+SSG row is present, so the comparison cannot pass on a page that never exercised the stdlib.
+
+Polarity proven: against the unfixed cache the gate FAILS from `/src` with the original
+`derive-match` diagnostic; restored, it passes. `cargo test --lib` 3173 passed / 0 failed; 21/21
+repro gates GREEN.
+
+** Known remaining gap (pre-existing, NOT introduced here)
+
+`cd /tmp && spacetime build <site-outside-any-checkout>` still fails (`unknown primitive:
+each-inline`): with no toolchain root anywhere in scope, the dev binary lands on the embedded
+stdlib, which has drifted from the source tree. Verified pre-existing by rebuilding at HEAD
+before the fix and observing the identical failure. The real issue there is that the EMBEDDED
+stdlib is stale, which is its own item — this fix strictly enlarges the set of working
+directories that behave correctly.

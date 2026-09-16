@@ -1,0 +1,172 @@
+#+TITLE: Component holes, declarations-as-data, and a generated showcase
+#+STATE: DONE
+#+SESSION_ID: 1534a2eae1903af0
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-18T13-07-01-638Z_1534a2eae1903af0.jsonl]]
+#+CUSTOM_ID: PLAN-144-component-holes-declarations-as-data-and
+
+* Initial Message
+
+how do i see W2 and W3 and W4
+
+Three connected pieces, agreed with the user after a design pass. Sequenced so
+each wave's gates are trustworthy: W1 first because a silent template drop
+DEFEATS STRING GATES, so every gate written for W2/W3 is untrustworthy until
+W1 lands.
+
+* Decisions (settled with the user, do not re-litigate)
+
+- *Q1 -> option C, in full.* The hole form `` `&t(...)` `` MUST expand a
+  component. No half-measure that only refuses the wrong spellings.
+  Key finding that makes this cheap: `parse_hole_inner`
+  (src/syntax/cst/parser.rs:2472) ALREADY re-parses a hole as a full Spacetime
+  expression and emits `ELEMENT_REF`. So `` `&t("x")` `` already PARSES; it
+  renders nothing because the consumer stringifies the result as a value
+  instead of expanding it as a component. C is "teach the consumer", not "add
+  syntax".
+  Harmony holds: `` ` `` keeps ONE meaning — interpolate the thing named here.
+  Value -> value, component -> component. It gains no second role.
+- *Q2 -> refuse only the CALL shape `&ident(`.* A bare `&name` stays a scope /
+  score-subject reference and literal prose. `stdlib/showcases/_schools.st`
+  depends on this (`&showcase-hero-mtn__title for 35%`) and must keep working.
+- *Q3 -> option B.* Generalize to `@data declarations ... from <entity>` over
+  the existing `%registers` rail. NOT a parallel `@data templates` surface.
+- *Q4 -> option A.* Parse `/// key: value` doc fields into a `fields` map on
+  the row. Rationale: `///` is ALREADY consumed by the catalog (`"doc": m.doc`
+  in build_forms_json), so structuring it adds no second place to say the same
+  thing. A `meta { }` block (option B) would invent one, failing harmony.
+- *Q5 -> delete the fiction.* `stdlib/showcases/index.st` and SCHEMA.md
+  document a `cargo run -- showcase` CLI and an `@showcases` registry that do
+  not exist. Delete the claims; the gallery is a regular Spacetime site and
+  that is the point.
+- *Q6 -> W1 -> W2 -> W3.*
+
+* Evidence gathered during the design pass
+
+Four invocation spellings probed (scratch/probe, each built):
+
+| spelling                      | build | renders | result          |
+|-------------------------------+-------+---------+-----------------|
+| `.slot { &t("x"); }`          | ok    | yes     | correct         |
+| `<main>&t("x")</main>`        | ok    | no      | escaped text    |
+| `` <main>`&t("x")`</main> ``  | ok    | no      | vanishes        |
+| `&t("x")` at file scope       | ok    | no      | vanishes        |
+| `.slot { &no-such("x"); }`    | FAIL  | -       | E0402, correct  |
+| `<main>&no-such("x")</main>`  | ok    | no      | escaped text    |
+
+Two findings beyond the filed bug:
+1. TWO spellings produce NOTHING AT ALL (not even wrong text) — worse than
+   BUG-344 records.
+2. The refusal machinery ALREADY EXISTS and is correct
+   (`src/pipeline/mod.rs:797`, E0402 "Template '...' does not exist"). Markup
+   scope simply never consults it. So W1 is mostly ROUTING to an existing
+   diagnostic, not writing a new one.
+
+`%registers` is already the generic entity rail: 29 driver, 16 binding, 7 form,
+4 host, 2 template, 2 type. Templates are not excluded by design — the string
+`"form"` is HARDCODED IN 8 SITES (src/parser/mod.rs:2186,2192;
+src/pipeline/score.rs:1528; src/pipeline/drivers.rs:1404,2622;
+src/syntax/events/form_compiler.rs:4705; src/syntax/stdlib_registry.rs:120;
+src/compiler.rs:1705) and the catalog asks a form-shaped question of a generic
+registry. W2 DELETES that special-case rather than adding a sibling — which is
+what the elegance bar asks of a new mechanism.
+
+All 11 showcase files already carry 6 consistent `/// key: value` fields
+(scenario, style, school, description, dependencies, screenshot, useWhen), so
+W2 needs zero `.st` edits to light up.
+
+* W1 — a component hole expands; a call in markup refuses (BUG-344)
+
+** Gates FIRST, RED-checked before any fix
+- `` `&t("x")` `` in markup EXPANDS the component (behavior, not string).
+- `<main>&t("x")</main>` REFUSES, diagnostic in `@each`'s shape: name the
+  invocation, state that a directive binds through a selector, show the
+  selector-block spelling.
+- `&t("x")` at file scope refuses the same way.
+- `&no-such("x")` in markup refuses (unknown name, currently silent).
+- Bare `&name` with NO parens is untouched: a `_schools.st`-style score subject
+  still compiles and still scores. This is the regression that would break the
+  motion hero.
+- `.slot { &t("x"); }` keeps working (control).
+
+** Implementation
+- Teach the hole consumer to expand an `ELEMENT_REF` carrying a call shape.
+- Route markup/file-scope `&ident(` to the existing E0402-family refusal.
+- Scope strictly to `&ident(`; never to bare `&name`.
+
+** Acceptance
+- All four silent spellings are either CORRECT (hole) or REFUSED (markup, file
+  scope, unknown) — no spelling both builds green and renders nothing.
+- `demos/showcase-gallery` still renders 10/10 (it uses the selector form).
+- Full `.st` suite no worse than baseline.
+
+* W2 — declarations as data (BUG-343)
+
+** Gates FIRST
+- `@data declarations $p from template ;` yields the 10 showcase templates with
+  name / params / doc / source / origin.
+- `$p.fields.school` etc. are populated from the `/// key: value` block; all 11
+  patterns yield a non-empty `school` (guards the silent-typo risk: a misspelt
+  key lands in `fields` unnoticed and the rail goes empty).
+- `@data forms` keeps its exact current rows — it becomes sugar for
+  `entity form`, so the brand catalog's 46 rows and 12/34 origin split must be
+  byte-identical. RED-check by asserting the count and the origin split.
+- An unknown entity name refuses rather than returning an empty list (silent
+  empty is the banned class).
+
+** Implementation
+- Replace the hardcoded `r.name == "form"` predicate with an entity-parameterised
+  one; audit each of the 8 sites — some legitimately mean "form" and must KEEP
+  meaning form. Do not blanket-replace.
+- `@data forms` desugars to the general surface.
+- Parse `/// key: value` lines into `fields`; leave the full blob in `doc`.
+
+** Open sub-decision (user is open; default = plain map)
+Unknown-key refusal via a declared field list per entity would catch `schoool:`
+at compile time. Default is the plain map + the non-empty-school gate; fold in
+the stricter form only if it stays small.
+
+* W3 — the gallery generates itself, and the fiction goes
+
+- `demos/showcase-gallery/index.st` replaces its 10 hand-written `<section>`
+  blocks with `@each` over `@data declarations ... from template`, filtered by
+  `$school` — the specimen list stops being hand-maintained (the exact index
+  the `@data forms` rail exists to abolish).
+- Specimen ARGUMENTS stay authored (a pattern needs real, meaningful copy;
+  generated lorem would make the gallery useless). Only the LIST is generated.
+- Delete the `showcase` CLI / `@showcases` registry claims from
+  `stdlib/showcases/index.st` and SCHEMA.md.
+- Gate: adding a pattern file to the tree makes a specimen appear with NO page
+  edit. That is the whole point, so it is the acceptance test.
+
+* Risks
+
+- W1 touches the HTML hole path, which is load-bearing for every page. The
+  `_schools.st` bare-`&name` regression is the sharp edge — gate it first.
+- W2's 8 sites do not all mean the same thing; a blanket replace would silently
+  widen behavior. Audit individually, and keep `@data forms` byte-identical as
+  the proof.
+- Shared cargo target thrashes under the parallel lane; always `cargo build`
+  before trusting a CLI result (BUG-342 lineage).
+
+** NOTE COMPLETE — all three waves shipped
+
+W1 (087d42dc) BUG-344. The hole form expands a component; markup and file-scope
+calls refuse. Found en route that an orphan file-scope call SWALLOWS the rest of
+the file rather than merely vanishing.
+
+W2 (ec7eb087) BUG-343. `@data declarations … from <entity>` over the existing
+`%registers` rail, `@data forms` kept as sugar, rows gain `fields` from the
+`///` header, unknown entity refused. `file_header_doc` fallback was the
+unforeseen prerequisite.
+
+W3 (a9bf4a1d) The gallery generates its specimen list; the `showcase` CLI and
+`@showcases` registry fiction deleted from index.st, SCHEMA.md and CATALOG.md.
+
+Suites: lib 3173 passed / 0 failed. `.st` 720 passed / 20 failed / 104 skipped,
+up from 644/25 at the start of the session — every wave REDUCED the failure
+count.
+
+Deferred, documented in demos/showcase-gallery/README.md: a dynamic component
+name (`` `&$p.name("a")` ``) does not expand, so the gallery binds authored copy
+by slot class. Worth a follow-up — it would remove the last hand-maintained
+list on that page.

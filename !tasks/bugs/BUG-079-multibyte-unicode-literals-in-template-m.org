@@ -1,0 +1,47 @@
+#+TITLE: Multibyte unicode literals in template/markup text emit as mojibake
+#+STATE: DONE
+#+SESSION_ID: 14fc108ed3772fa8
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-04T14-32-37-965Z_14fc108ed3772fa8.jsonl]]
+#+CUSTOM_ID: BUG-079-multibyte-unicode-literals-in-template-m
+#+COMPLETION_HASH: 6852a7905930a185
+
+* Initial Message
+
+what do you need from me to implement FEAT-076 fully and in a Spacetime-y way? I am going to sleep so you'll auto-accept the most ambitious and Spacetime-y choice every time (unlimited budget). Ask me questions one last time, if needed, before going off
+
+* BUG — multibyte UTF-8 in file-scope/template markup text renders as mojibake
+
+** Parent
+Surfaced by FEAT-076 (CMS admin rebuild). Cosmetic but visible.
+
+** Symptom
+A literal multibyte Unicode char in EMITTED markup text \u2014 e.g. `\u2191` (U+2191, bytes
+e2 86 91), `\u22ee`, `\u00b7`, `\u2715`, `\u2026` \u2014 inside a `<button>\u2191</button>` template body or
+file-scope markup, renders in the browser as mojibake (`\u00e2\u00ae\u00e2\u00ae`, `\u00e2 \u00e2`). The .st source is
+correct UTF-8 (verified via hexdump: `e2 86 91`). HTML ENTITIES (`&times;`, `&uarr;`)
+render correctly \u2014 only literal multibyte chars are mangled.
+
+** Likely cause
+The template-text \u2192 createTextNode emitter (the reactive `builder` codegen, FEAT-077) or
+the file-scope HTML text path slices template text by BYTE offset rather than char
+boundary somewhere, splitting a multibyte sequence (or double-encoding it). The emitted JS
+shows the corrupted bytes in `document.createTextNode("\u2026")`. Compare with the entity path
+which passes through as ASCII and is decoded by the browser.
+
+** Workaround (in use)
+Use HTML entities (`&uarr;` `&darr;` `&times;` `&middot;` `&hellip;` `&vellip;`) instead
+of literal multibyte chars in admin markup.
+
+** Fix plan
+1. RED: a compile test \u2014 a `@template &t() { <span>\u2191\u00b7\u2026</span> }` (or file-scope `<span>\u2191</span>`)
+   must emit a createTextNode whose bytes round-trip to U+2191 etc. (assert the emitted JS
+   string equals the original, not mojibake).
+2. GREEN: find the byte-offset slice in the template-text/builder emitter (src/emit or the
+   component-body \u2192 builder codegen) and make it char-boundary-safe (operate on chars/grapheme
+   or carry UTF-8 through verbatim).
+
+** Acceptance
+- [ ] Literal multibyte Unicode in template + file-scope markup text renders correctly.
+- [ ] Admin can drop the entity workaround (optional).
+
+NOTE [2026-06-10]: FIXED. Root cause: the reactive-builder hole-normalizer (normalize_bare_holes, src/emit/html_reactive.rs ~56) scanned the markup as BYTES (for the ASCII sentinels $/&/</>/quotes) but rebuilt the skeleton with `out.push(c as char)` per byte — splitting a multibyte UTF-8 char into separate bogus code points (↑ e2 86 91 → \u00e2\u0086\u0091 mojibake). The static-HTML path was fine; only the FEAT-077 reactive builder corrupted it. Fix: when the byte is ASCII (<0x80) push directly; otherwise copy the WHOLE char from the original valid-UTF-8 &str (html[i..].chars().next()) and advance by its len_utf8(). RED→GREEN: normalize_preserves_multibyte_utf8 (src/emit/html_reactive.rs). Verified end-to-end in browser: the admin's ↑/↓ reorder arrows render as literal U+2191/U+2193 (charCode 8593) — the HTML-entity workaround was REVERTED to literal Unicode. lib 2162/0.

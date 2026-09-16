@@ -1,0 +1,95 @@
+#+TITLE: Optional body-group captures report as REQUIRED (`@each` `:entering`/`:exiting`/`:move`)
+#+STATE: ITEM
+#+CUSTOM_ID: BUG-367-optional-body-group-captures-report-as-req
+#+PRIORITY: #C
+
+* Found by
+
+PLAN-148 W2 (the EDN corpus round-trip). The pattern-driven printer walks each
+form's `%form` and substitutes captures; it fails LOUD when a capture the pattern
+marks REQUIRED is absent from the match. That gate fired 34 times across the
+corpus, all on one shape.
+
+Not a printer bug: the printer is reporting a genuine disagreement between what
+the pattern DECLARES and what the parser PRODUCES.
+
+* The disagreement
+
+`stdlib/macros/each.st:43-49`:
+
+#+begin_src
+%macro each {
+  %form {
+    @each($source:binding as $item:binding, key: $key:expr? = undefined) {
+      $invocations:template_invocation+
+      (:entering { $_enterAnim:keyframes })?
+      (:exiting  { $_exitAnim:keyframes  })?
+      (:move     { $_moveAnim:keyframes  })?
+    }
+  }
+}
+#+end_src
+
+The three clauses are each wrapped in `( ... )?` — an OPTIONAL inline group, the
+same "optionality as data" mechanism PLAN-137 introduced for `@wait_until`.
+
+But the captures INSIDE those groups (`$_enterAnim`, `$_exitAnim`, `$_moveAnim`)
+carry `CaptureModifier::Required` and no `ParamDefault`. The group's `?` is not
+propagated inward. So anything reading the registry to decide "may this capture
+be absent?" answers NO, while every real `@each` without an `:entering` clause
+produces a match with no such capture.
+
+* Reproduce
+
+#+begin_src rust
+let ast = spacetime::parse("@each($items as $i) { &row($i); }").unwrap();
+let m = ast.matches.iter()
+    .find(|m| m.matched_macro.as_deref() == Some("each")).unwrap();
+assert!(!m.captures.contains_key("_enterAnim"));   // absent, correctly
+
+let form = STDLIB_REGISTRY.get_by_macro_name("each").unwrap();
+// ...walk form.inline_elements / body_groups: the `$_enterAnim` capture
+// reports modifier == Required, default == None.
+#+end_src
+
+Corpus counts (403 files): `each` x33, `each-filtered` x1.
+
+* Why it matters beyond the printer
+
+Anything that consults the registry to reason about a form's shape inherits the
+wrong answer:
+
+- completion/snippets may present an optional clause as mandatory;
+- a validator built on "required captures must be present" would reject valid
+  source, or (worse) a validator built the other way would accept invalid source;
+- the EDN reader (PLAN-148 W3) must decide arity from the registry, and would
+  demand a clause the language treats as optional.
+
+The `%form` IS the language's self-description. Where it disagrees with the
+parser, the self-description is wrong, and every consumer inherits the error.
+
+* Expected
+
+A capture inside an optional inline group is itself optional. Either:
+
+1. propagate the group's `CaptureModifier` to its member captures when the
+   registry is built (narrow, local to registry construction); or
+2. expose the enclosing group's modifier so consumers can resolve effective
+   optionality themselves (no data change, more work per consumer).
+
+(1) is preferred: it makes the registry answer the question directly, and
+"optionality is data" then means the same thing at every level of nesting.
+
+* Workaround in place
+
+`src/edn/print.rs::body_is_all_optional` treats a body whose groups are all
+optional as legitimately absent, so the printer does not fail on the BODY case.
+It does NOT cover the inline-group case, which is why the 34 failures remain and
+are reported honestly rather than suppressed.
+
+* Acceptance
+
+- `@each` without `:entering`/`:exiting`/`:move` prints and round-trips.
+- The PLAN-148 corpus report loses the `each` (33) and `each-filtered` (1)
+  entries with no new failures elsewhere.
+- A test asserts that a capture inside `( ... )?` reports as optional.

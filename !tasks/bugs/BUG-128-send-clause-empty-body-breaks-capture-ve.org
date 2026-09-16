@@ -1,0 +1,48 @@
+#+TITLE: send_clause empty body { } breaks capture — verb/target dropped when send emit has an empty object body
+#+STATE: ITEM
+#+SESSION_ID: 1510a559ccf03ced
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-20T14-12-20-403Z_1510a559ccf03ced.jsonl]]
+#+CUSTOM_ID: BUG-128-send-clause-empty-body-breaks-capture-ve
+
+* Initial Message
+
+ok i want you to design a prototype a deep integration between Spacetime and elixir, especially Phoenix LiveView and it should be a la Djinn.LiveView (~/code/ora/monorepo).
+
+What could it look like? Show me your DSL design so we can think about it together. Look at the recent Spacetime $host improvements and whatnot, maybe you can extend it to a canonical host for Phoenix LiveView that makes the integration insanely seamless and self-aware (re-uses the power of Elixir macros/Spark and the introspectability of Spacetime to deliver an experience that leverages the best of both).
+
+* Symptom
+In a `@data signal`/`@data stream`, a `send` clause with an EMPTY body block
+drops the whole clause's captures (verb, target, body all absent):
+
+  send emit "inc" { }        // ← verb/target NOT captured
+  send emit "inc"            // ← works (no body)
+  send emit "inc" { x: 1 }   // ← works (non-empty body)
+
+Downstream: the signal's emitted request loses method/target, and the Wave-B
+LiveView contract check (E0928) silently can't see the event (no target → no
+PageIntent → no check). Discovered building demos/liveview-counter (FEAT-135).
+
+* Root cause (suspected)
+`%capture_type send_clause` (stdlib/capture-types/signal-receive.st):
+    "send" $verb:ident $target:string ( "{" $body:balanced('}') "}" )?
+`balanced('}')` over an EMPTY run returns None (BalancedExtractor: "Returns None
+if no non-whitespace content precedes the delimiter/EOF"). Inside the optional
+group that None appears to fail the group such that already-matched verb/target
+are rolled back, not the body treated as empty. Confirm in form_compiler
+body-group matching + BalancedExtractor empty handling.
+
+* Fix direction
+Prefer making `balanced(delim)` yield an EMPTY Expr (not None) for an empty run,
+so the optional body matches with an empty body. Other optional balanced bodies
+(`optimistic { }`, etc.) likely share the bug. Alt: make the optional group's
+inner failure not roll back preceding leaves.
+
+* Acceptance
+- `send emit "inc" { }` captures verb=emit, target=inc, body="" (empty).
+- Wave-B E0928 fires for an empty-body emit with a bad event name.
+- RED→GREEN unit test on send_clause (or BalancedExtractor empty run).
+- cargo test --lib green.
+
+* Workaround in place
+demos/liveview-counter uses the no-body form (`send emit "inc"`) so Wave B is
+active there today.

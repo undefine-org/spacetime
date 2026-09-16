@@ -1,0 +1,37 @@
+#+TITLE: each-inline nested @each double-substitution: outer hole-pass re-scans and eats backticked inner-row data
+#+STATE: DONE
+#+SESSION_ID: 1534a246b3aa1d15
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-18T13-04-13-518Z_1534a246b3aa1d15.jsonl]]
+#+CUSTOM_ID: BUG-203-each-inline-nested-each-double-substitut
+
+* Initial Message
+
+i want us to design a system where the stdlib has 'migrations', i.e. a macro that takes old st syntax and turns it to new st syntax. the macro should include the date so that we can order the migrations by syntax and apply syntax waves. It should be shown in all dev environments next to the current host pill, in the same style as the host pill
+
+* Found
+During PLAN-076 W5 live verification (migrations pill): the manual row's
+%hint text lost its backticked segments in the DOM — "e.g. `.hidden:
+!$condition;` — plus a `.hidden { display: none }` rule" rendered as
+"e.g.  — plus a  rule", while `` `visibility` `` and `` `text <- $x;` ``
+survived.
+
+* Root cause (stdlib/primitives/data/each-inline.st)
+`fillHoles(rawHtml, item, i) = fillHolesOnly(expandNested(rawHtml, …), …)`.
+expandNested substitutes inner rows FIRST (inner fillHolesOnly with the
+inner item's data), then the OUTER fillHolesOnly scans the combined result
+— re-treating any backticked run in the already-substituted DATA as a hole.
+Runs resolving to a property path (`.hidden …` → `$.hidden …`) come back
+empty and are erased; runs that look like non-item refs (`$x`,
+`$visibility`) are left verbatim — hence the selective mangling.
+
+The outer-after-inner order EXISTS so nested rows can reference the outer
+item ($wave.x left verbatim by the inner pass, filled by the outer) — but
+it makes substituted data hole-unsafe at any nesting depth ≥ 1.
+
+* Fix (this session)
+Protect substituted values, not the template: fillHolesOnly's substitution
+now emits data text with backticks sentinel-protected (\uE000), and makeRow
+restores them after the final outer pass (before ST.parseHtml). Template
+holes left verbatim (outer-item refs) still resolve as designed; data can
+never be re-scanned. Regression tests in tests/integration (nested each
+with backticked values).

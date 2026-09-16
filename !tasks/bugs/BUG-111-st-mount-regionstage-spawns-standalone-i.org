@@ -1,0 +1,55 @@
+#+TITLE: st_mount region:"stage" spawns standalone instance instead of composing into host stage
+#+STATE: DONE
+#+SESSION_ID: 150f02eff2cc2dd6
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-19T07-44-15-819Z_150f02eff2cc2dd6.jsonl]]
+#+CUSTOM_ID: BUG-111-st-mount-regionstage-spawns-standalone-i
+#+COMPLETION_HASH: a9986c86a8cee6f5
+
+* Initial Message
+
+Test drive the Spacetime MCP workbench and list all the actions and their expected vs. actual output. The workbench should end up feeling like a mix of Spacetime+Squarespace+Figma/Framer in the end, and it doesn't. This is a REVIEW+DESIGN+BRAINSTORM session
+
+* Summary
+`st_mount {name, region:"stage"}` returns a NEW standalone instance URL (inst-2) rather than composing the function as a bundle into the already-open workbench host's `stage` region. The central promise of PLAN-041 — "live content mounted on the STAGE of the one persistent page" — is not reachable through the MCP mount tool.
+
+* Evidence (2026-06-19)
+- `st_mount {name:"greeter", region:"stage"}` → "Mounted fn-2 r3 as inst-2: .../instance/inst-2/" (a fresh page).
+- Workbench inst-1 `stage` region still shows the "Begin here" empty state after the mount.
+- inst-1 `/bundles` returns a SINGLE bundle (the host itself); no composition array, no greeter bundle. Top keys: schema_version, instance_id, region_id, origin, css, templates, diagnostics, has_errors.
+- inst-2 renders the greeter standalone, UNSTYLED (white page) — no host design-system inheritance.
+
+* Expected
+Per PLAN-041 (FEAT-126 keystone, "region mount + bundle transport + registerBundle") and region-model-unified-mcp.org: mounting into a region of an existing host should register the bundle INTO that host instance's region set; the host page composes it (region-namespaced templates + scoped CSS) and repaints via the bundles/poll transport. One DOM, one runtime.
+
+* Actual
+Mount is per-function-page only. `region` arg appears ignored (no host targeting parameter — st_mount has no `host`/`into_instance` arg to say WHICH instance's region).
+
+* Gap analysis
+The mount tool models "mount a function → its own instance page". The region-composition pipeline (registerBundle into a host) exists (bundles endpoint, region-namespacing per PLAN-041 notes) but the MCP `st_mount` surface doesn't expose a "compose into host instance X's region R" path. Missing: a host/target-instance parameter and the tool-side call into registerBundle for that host.
+
+* Fix scope
+- Extend st_mount with an explicit target (e.g. `host: "inst-1", region: "stage"`); when present, registerBundle into that instance + region instead of spawning a page.
+- Standalone mount (no host) stays as-is for quick preview.
+- Mounted bundle must inherit host CSS context (or carry origin-scoped CSS) so it is not unstyled.
+- Verify host `/bundles` then returns ≥2 bundles and the stage repaints.
+
+* Relates
+Parent FEAT-124. Keystone for the "organic interface birthplace" feel. Pairs with BUG-110 (without live input.json/bundle repaint, even a correct mount wouldn't show).
+
+NOTE [2026-06-19]: FIXED + live-verified 2026-06-19. Added host-composition: st_mount gains a `host` param → composes the function INTO that host instance's named region (default "stage") instead of spawning a standalone page.
+
+Implementation:
+- InstanceRecord.region_mounts: HashMap<region_id, function_id> (guests composed into a host's regions).
+- LiveServer::mount_into_host(host_id, region, fn_key) — gates on compile + (FUP-061 v1) rejects file-scope-only guests (no @template → empty bundle) with an actionable message.
+- /__mcp/instance/{id}/bundles?region={r} — region-aware: serves region_mounts[r]'s guest bundle; empty bundle when nothing mounted (stage stays on empty-state, no 404 poll churn).
+- pollBundles() appends ?region={regionId} so the host fetches the guest, not its own fn.
+- st_mount tool: `host` branch returns {composed:true, region, host:{region_mounts}}; standalone path unchanged.
+- env.st stage region: `.mcp-stage[data-st-region="stage"] { @mcp-region @view $stageTpl { _ => &$stageTpl(); } }` — poll + reactive mount on the SAME root so @view's ST.get(host,'stageTpl') reads what registerBundle writes. Empty-state is the region's initial child; CSS `.mcp-stage[...]:has(> :not(.mcp-stage-empty)) .mcp-stage-empty { display:none }` hides it once a guest sibling mounts. Pure Spacetime, no page JS.
+
+Live proof: drove the freshly-built MCP over stdio (st_workbench → st_fn_put template guest → st_mount host=inst-1 region=stage), opened the host page in a browser: guest `.guest-mark` mounted as a sibling inside `.mcp-stage`, empty-state display:none, chrome intact. Screenshot scratch/wb-09-composed-guest.png.
+
+Gotcha resolved: `@data inline $stageTpl` would have shadowed the element-store write (resolveValue checks SpacetimeLocal first) — so the signal is NOT declared; @view reads it from the region-root element store exactly as registerBundle sets it (canonical FEAT-126 pattern, matches feat126_register_bundle test).
+
+Tests: mount_into_host_records_region_mount, _rejects_unknown_host, _rejects_unknown_function, _rejects_file_scope_only_guest (live.rs); st_mount_host_composes_guest_into_stage_region (protocol.rs integration). lib mcp 62/0, integration 172/0, v8 428/9 (pre-existing BUG-039 baseline, 0 regressions).
+
+Deferred (correctly out of scope, tracked): file-scope/whole-page guest mounts → FUP-061; house-style for newborn content (guest renders unstyled) → design brainstorm D4.

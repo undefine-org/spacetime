@@ -1,0 +1,64 @@
+#+TITLE: Duplicate .st-host-widget__form CSS rule after .is-hidden wins the cascade, leaking domains form in no-project state
+#+STATE: DONE
+#+SESSION_ID: 153115a0b151f3c0
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse-commercial-host/2026-07-15T18-54-16-774Z_153115a0b151f3c0.jsonl]]
+#+CUSTOM_ID: BUG-184-duplicate-st-host-widget-form-css-cascade
+
+* Initial Message
+
+it got reloaded and i saw the code but it still says log in or sign up after reload
+
+* Found by
+Live user report this session, with screenshots: after creating a
+project from the widget's no-project state, a SECOND click on
+"Create project" showed "That project name is unavailable -- try
+another" (expected, real 409 from the server -- not itself a bug) but
+underneath, the Domains section's "app.example.com" input + "Add
+domain" button were ALSO visibly rendered, despite `$isNoProject`
+correctly gating them via `.is-hidden`.
+
+* Root cause (confirmed via direct DOM inspection, not guessed)
+`stdlib/__host__/index.st` defined `.st-host-widget__form` (the
+add-domain input+button wrapper) TWICE:
+- once near the top of the file's CSS region, correctly placed BEFORE
+  `.is-hidden { display: none; }` in source order (this file's own
+  documented convention for any selector that sets its own `display:`)
+- once again ~200 lines later, AFTER `.is-hidden`, ALSO setting
+  `display: flex`
+
+Equal specificity, later source order wins -- the second definition's
+`display: flex` overrode `.is-hidden`'s `display: none` whenever both
+classes were present on the same element. Confirmed live via
+`getComputedStyle`: the element correctly carried `is-hidden` in its
+`className`, but rendered `display: flex` anyway.
+
+This is the EXACT SAME class of bug as the `.st-host-widget__create-
+project-form`/`.st-host-widget__device-code` cascade bug already fixed
+earlier this session (documented inline in the file) -- but at a
+DIFFERENT selector the earlier fix pass didn't check for duplicates
+across the whole file.
+
+* Fix applied
+Removed the duplicate (post-`.is-hidden`) `.st-host-widget__form`
+definition entirely, along with its bundled `.st-host-widget__input`/
+`.st-host-widget__error` duplicates (harmless -- neither sets
+`display` nor is ever `.is-hidden`-gated itself -- but removed for
+hygiene, leaving exactly one definition per selector). The FIRST
+definition (correctly placed before `.is-hidden`) is the one that
+remains.
+
+* Verification
+Live browser test against a fresh no-project site: the domains
+input/button no longer render in the no-project state (confirmed via
+screenshot + `getComputedStyle` before/after).
+
+* Follow-up recommendation
+This file (`stdlib/__host__/index.st`) has grown two overlapping CSS
+"sections" over several sessions (a minimal original block + a later
+"complete" one) with several duplicate selectors beyond just this one
+(`.st-host-widget__list`, `.st-host-widget__error`, `.st-host-widget__
+title`, `.st-host-widget` itself for the CONTAINER style, though these
+others happen not to set `display` and are therefore not currently
+buggy). A follow-up consolidation pass merging this file's CSS into
+ONE section, one definition per selector, would remove the recurring
+risk of this exact bug class resurfacing at yet another selector.

@@ -1,0 +1,264 @@
+#+TITLE: Bare-name template collisions between page and dock bundles need a namespacing policy
+#+STATE: DONE
+#+CUSTOM_ID: FUP-134-bare-name-template-collisions-between
+#+PRIORITY: #A
+
+* Summary
+
+Spacetime's global template registry is keyed only by the bare template name. A dev-served page loads its page bundle and multiple dock-related bundles into one =window.Spacetime= runtime. If two of those bundles define the same template name, such as =@template &card()=, the later registration silently replaces the earlier factory. Subsequent =invokeTemplate= calls then render the wrong markup, while the displaced template is no longer available.
+
+BUG-211 removed the separate wholesale-registry failure: later runtime copies now reuse the existing =Map= instead of replacing it. That preserves entries from earlier bundles, but it does not make an individual =Map.set(name, factory)= collision safe. This follow-up is a design decision for bundle-aware template identity and resolution, not a request to add an ad-hoc patch.
+
+* Why this matters
+
+This is a latent but high-severity correctness failure in dev-served pages. The failure is silent: registration emits neither a warning nor a diagnostic, and a template lookup returns a valid function belonging to the wrong owner. Consequently, a page can appear partially functional while rendering dock markup in page content or page markup in a dock widget.
+
+COLLISION OBSERVED LIVE (2026-07-25, PLAN-113 W1.3). The earlier statement that
+no live collision existed was wrong — it had not been tried. A page declaring
+`@template &field-text($x) { <p class="page-owned">PAGE-VERSION</p> }`, served with
+`spacetime serve` and loaded in Chromium:
+
+: Spacetime.templateNames()
+:   -> ["field-text", "inspector-widget", "field-number", ...]
+: Spacetime.invokeTemplate('field-text', 'x').outerHTML
+:   -> '<div class="st-fld-field" ...>'   // the DOCK's widget
+: document.querySelector('.host').innerHTML
+:   -> ''                                   // the page's own list renders NOTHING
+
+The page's factory is not shadowed-but-present; it is absent. The dock bundle
+registered `field-text` last, `Map.set` replaced the page's entry, and the page's
+`@each ... { &field-text($i) }` produced empty output. The page is silently broken
+on any dev-served page, with no console error.
+
+This is therefore an ACTIVE defect on the dev surface, not a latent one. It is
+still not an enforceable safety property either. A page author may legally declare =&field-text= today, which conflicts with the shared typed-field template. The current inventory also shows that the claimed prefix convention is incomplete: =deployment-row=, =domain-row=, =kit-field=, and =kit-option= are not owner-prefixed. The present safety is therefore naming luck, not a contract.
+
+* Evidence
+
+** Global registry uses bare names
+
+=public/runtime/templates.js:68= initializes one process-global registry:
+
+#+begin_src js
+Spacetime.templates = Spacetime.templates || new Map();
+#+end_src
+
+At =public/runtime/templates.js:75-80=, =registerTemplate= accepts a =name= and unconditionally writes it as the key:
+
+#+begin_src js
+Spacetime.registerTemplate = function(name, factory) {
+  if (typeof factory !== 'function') {
+    console.error(`Spacetime: Template "${name}" factory must be a function`);
+    return;
+  }
+  Spacetime.templates.set(name, factory);
+};
+#+end_src
+
+=public/runtime/templates.js:89= returns =Spacetime.templates.get(name)=, and =:99= uses the same bare =name= for =invokeTemplate=. =Map.set= replaces an existing value for the same key, so this registration path has last-writer-wins semantics.
+
+** BUG-211 fixed map replacement, not duplicate names
+
+=!tasks/bugs/BUG-211-second-runtime-bundle-clobbers-live-st.org:12-27= documents the prior failure: each injected full runtime bundle reset stateful registries, including the template map, so the last bundle wiped all templates registered before it. Its fix section at =:29-31= requires =X || fallback= guards across runtime registries.
+
+The template-specific implementation now exists at =public/runtime/templates.js:57-68=. Its comment explicitly describes several runtime bundles sharing one =Spacetime= global and says that resetting the map wiped earlier templates; the implementation is now =Spacetime.templates || new Map()=. This is idempotent initialization only. The following =.set(name, factory)= at =:80= still overwrites an occupied bare key without checking its previous owner.
+
+** Actual dock template inventory
+
+The following declarations were found with =@template &= searches. =stdlib/migrations/**/*.st= had no matching declaration.
+
+- =stdlib/__host__/index.st:1239= declares =&deployment-row($d)=; =:1400= declares =&domain-row($d)=.
+- =stdlib/__inspector__/index.st:91= declares =&inspector-widget()=.
+- =stdlib/fields/macros/widgets.st:11,18,25,32,50,59= declare =&field-text=, =&field-number=, =&field-toggle=, =&field-color=, =&field-range-length=, and =&field-range-duration= respectively.
+- =stdlib/__mcp__/kit/form.st:32= declares =&kit-field($field)=; =stdlib/__mcp__/kit/picker.st:32= declares =&kit-option($opt)=.
+- =stdlib/__mcp__/workbench/cards.st:6,15,32,45,63,80,87,105,118,141,155,174,188= declare =&mcp-env-card=, =&mcp-open-env-card=, =&mcp-frame-chip=, =&mcp-structure-node=, =&mcp-node-detail=, =&mcp-entry-card=, =&mcp-tab-card=, =&mcp-function-card=, =&mcp-instance-card=, =&mcp-event-card=, =&mcp-param-card=, =&mcp-gallery-card=, and =&mcp-param-edit=.
+
+Most checked declarations are visibly owner-prefixed (=field-=, =mcp-=, =inspector-=), but the host and kit names above demonstrate that the prefix pattern is neither universal nor enforced.
+
+** No duplicate-registration protection
+
+A search of =public/runtime/**/*.js= for duplicate/collision/already-registered diagnostics found no duplicate-template-registration warning or error. The only related compiler diagnostic found is =E0919= in =src/diagnostics/codes.rs:352= and =src/pipeline/mod.rs:2775-2838=; it detects duplicate *template instance/ref names in one template scope*, not duplicate factory keys registered by separately loaded bundles. It cannot prevent this runtime collision.
+
+** Minimal reproduction
+
+1. Create a dev-served page that declares =@template &field-text($x) { <p class="page-field">page</p> }= and invokes it.
+2. Load that page with the dock bundles that include =stdlib/fields/macros/widgets.st=, whose =:11= declaration registers the existing =&field-text= factory into the same runtime.
+3. Observe registration order in =Spacetime.templateNames()= and invoke =&field-text=. Whichever bundle registered last supplies the sole factory because =public/runtime/templates.js:80= stores exactly one value under ="field-text"=.
+4. Reverse bundle order. The rendered factory changes, proving that this is an ownership collision rather than a template-body error.
+
+* Root cause
+
+The established mechanism is a mismatch between composition and identity. Runtime bundles compose into a single global =Spacetime.templates= map, while template identity is only the source-level bare name. Registration has no bundle owner/provenance field, no duplicate guard, and no caller-context lookup. A later =set(name, factory)= therefore replaces a same-name template from any earlier bundle.
+
+Region mounting has a separate =regionId/name= mechanism in =public/runtime/templates.js=, but that mechanism is limited to =registerBundle= region payloads. It does not change the bare-key path used by ordinary dev-served page and dock bundles, so it is not a solution for this issue.
+
+* Design options
+
+** A. Namespace runtime keys by owning bundle and resolve local references first
+
+At registration, assign every compiled bundle a stable owner identifier and store its factory under a qualified key such as =bundle-id:card=. Carry the owner identifier into the compiled template factory. A nested or direct template invocation resolves =owner:bare-name= first; explicit cross-bundle references, if supported, use a qualified identifier. The public runtime registry, rather than a Rust special-case, owns the key and resolution policy.
+
+This is the recommended direction. It makes composed bundles correct by construction and allows a page and dock widget to both own =&card= without ambiguity. It is the largest change: all factory registration and every =invokeTemplate= / nested-ref resolution path must receive or retain caller owner context, and existing intentional sharing must become explicit. The design must use one registry-aware implementation, delete the unqualified registration/resolution path after cutover, and avoid parallel legacy lookup behavior.
+
+** B. Reserve prefixes for stdlib and dock templates, rejecting user claims
+
+Define reserved prefixes such as =field-=, =mcp-=, =st-=, and =inspector-=. During compile or bundle assembly, reject a page template whose bare name claims one. Rename the current unprefixed dock names to an agreed prefix.
+
+This is cheap and prevents the currently known =field-text= case. It is not a composition solution: two pages or two bundles can still collide under any non-reserved name, and naming policy becomes an ongoing maintenance burden. It is acceptable only as a short-term guard if option A needs staged delivery, not as the final architecture.
+
+** C. Detect duplicate registration and fail loudly in development
+
+Keep bare keys, but make registration record the first owner and emit a build/dev-server error on a different owner attempting the same key. Include both source paths and bundle identifiers in the diagnostic; do not silently retain either factory.
+
+This is the smallest safe containment. It turns silent wrong markup into an actionable failure but does not allow valid composition of independently authored bundles that intentionally reuse common names. It is a useful diagnostic companion to option A and a defensible interim measure, but not the complete design.
+
+** Recommendation and design constraint
+
+Choose option A, with option C's owner-aware duplicate diagnostic retained for invalid/ambiguous qualified registrations. Bundle ownership and its resolution table should be registry/stdlib data carried by compiled bundles, not a new Rust match arm for dock categories. Before implementation, show that the mechanism clears the AGENTS.md elegance bar: it must extend the existing registry, reduce net complexity, delete the bare global path it supersedes, and be testable by the same template registration/invocation machinery. Do not introduce a separate special-case for =__host__=, migrations, inspector, MCP, or fields.
+
+* Fix plan
+
+1. Trace all ordinary bundle registration emitters and all lookup paths, including =registerTemplate=, =invokeTemplate=, template-body refs, =@each= template invocations, and dynamic dispatch. Record the current owner information available at each boundary.
+2. Define one stable bundle-owner identifier in compiled bundle metadata. Specify key syntax, the meaning of a bare source reference, explicit cross-owner syntax if needed, and backward-compatible migration behavior. Keep the definition as registry/stdlib data rather than dock-specific Rust branches.
+3. Change the shared runtime factory/registration path to register qualified keys and retain owner provenance. Change lookup to resolve the current factory's owner first and reject ambiguity rather than falling back silently to an unrelated global name.
+4. Update code generation and runtime call sites together so every invocation has caller owner context. Remove the old unqualified global registration/lookup implementation at cutover; do not leave two competing registries or fallback policies.
+5. Add an owner-aware duplicate diagnostic for attempts to register the same qualified key from distinct sources. In dev, include both bundle IDs, source locations, and the requested template name.
+6. Migrate the dock declarations to stable owner metadata. Rename the currently unprefixed =deployment-row=, =domain-row=, =kit-field=, and =kit-option= only if the final source-level policy requires it; namespacing must not rely on those renames for correctness.
+7. Document author-facing resolution and cross-bundle reference rules, then exercise page-plus-dock composition in the first-party test harness.
+
+* Tests to write
+
+1. Add a runtime test that registers two owners with a same bare template name, for example =page:card= and =fields:card=. Invoke from each owner and assert that each returns its own unique marker. Before the fix, sabotage by replacing qualified local resolution with the old bare =templates.get(name)= lookup; the test must fail because both invocations resolve to the last registration.
+2. Add a compile-plus-runtime fixture with a page =&field-text= and the fields dock's =&field-text=. Assert that page content renders the page marker and the dock editor renders the fields marker in the same served runtime. Before the fix, sabotage by registering both factories through the old bare =registerTemplate(name, factory)= path; one marker must disappear or be wrong.
+3. Add a nested-reference test: owner A's =&card= invokes =&row= while owner B defines another =&row=. Assert A's card receives A's row. Before the fix, sabotage by dropping caller owner context from the nested-ref lookup; B's last-registered row must render instead.
+4. Add a diagnostic test for two distinct sources claiming the same fully qualified owner/name key. Assert the diagnostic names both sources, owner, and template name, and that dev compilation/serving fails. Before the fix, sabotage by removing the duplicate-owner check; the test must fail because it becomes last-writer-wins.
+5. Add a non-collision regression: independently owned unique names and an explicit permitted cross-owner reference still render. Before the fix, sabotage the explicit-reference resolution; the test must fail rather than silently falling back to a bare key.
+
+Use the repository's first-party Spacetime test vocabulary and include the RED-to-GREEN sabotage evidence in the implementation record. Do not claim a test is sufficient merely because the fixed implementation passes; each test must demonstrably fail under its stated reintroduction of old behavior.
+
+* Non-goals and risks
+
+- This follow-up does not change template syntax, add page JavaScript, or add a Rust parser/fallback for a stdlib construct.
+- Do not solve this by retaining both a qualified map and an unqualified compatibility map. That creates parallel implementations and reintroduces ambiguous lookup.
+- Do not special-case dock directories or template prefixes in Rust. Such a list will drift as new bundles are introduced.
+- Owner identity must remain stable across hot reloads. An unstable/generated identifier can leak stale factories or cause false collisions.
+- Dynamic template dispatch must follow the same owner-aware resolver. Leaving it bare would preserve a hidden collision path.
+- Explicit cross-owner imports/references need a clear authorization and diagnostics policy; otherwise local-first lookup can mask an intended external dependency.
+- Region-mounted bundles already use region-qualified keys; integrate that existing scope deliberately rather than stacking incompatible =region/name= and =bundle:name= conventions.
+
+* RESOLVED (2026-07-25, PLAN-113 W1.3)
+
+Option A, implemented by GENERALISING the mechanism that already existed rather
+than building a second one.
+
+** The key insight
+
+Region mounts (FEAT-126) had already solved this exact problem: `buildTemplateFactory`
+takes a `regionId`, keys templates `regionId/name`, and `resolveRefFactory` looks
+region-first then falls back to the bare name. The design work was therefore not
+"invent bundle identity" but "extend that rail from regions to bundles" — same key
+shape, same local-first policy, one resolver. That is what clears the elegance bar:
+no new subsystem, no Rust match arm per dock category, and the `owner` is a plain
+string carried on a global rather than a compiled-in table.
+
+** Policy
+
+- An OWNED bundle (a dock widget) registers `owner/name`, and claims the bare name
+  only if it is FREE. The opportunistic bare claim is what keeps the shared
+  `field-*` widgets reachable from a page that legitimately wants them — but it can
+  no longer DISPLACE anything.
+- An UNOWNED bundle (an ordinary page) takes the bare name outright. The page is
+  what the user is looking at; silently blanking its content is the failure being
+  fixed.
+- Lookup resolves `owner/name` first, then bare, so a dock widget always finds its
+  own template even when a page holds the bare name.
+
+Resolution is therefore independent of LOAD ORDER, which was the whole defect.
+
+** Implementation
+
+- `public/runtime/templates.js` — `registerOwnedTemplate` / `resolveTemplate` /
+  `_templateOwnerOf` alongside the existing registry.
+- `stdlib/primitives/template.st` — `register-template` registers through the owner
+  path; `invoke-template` resolves through it.
+- `src/server.rs` — `scope_bundle_to_owner` wraps each dock bundle so
+  `window.__ST_BUNDLE_OWNER__` names it for the duration of its own evaluation and
+  is RESTORED afterwards. Set/restore, not a permanent assignment: bundles evaluate
+  one after another on the same global, and a leaked owner would misattribute every
+  later registration, including the page's. Applied to inspector, host, migrations.
+
+** Verified live
+
+Before (Chromium, `spacetime serve`): page's `&field-text` ABSENT, `invokeTemplate`
+returned the dock widget, page content empty.
+After: `templates.keys()` holds BOTH `field-text` (page) and `inspector/field-text`
+(dock); the page renders `PAGE-VERSION`; the dock's own widget still builds from
+its owner scope. Both halves confirmed in the same runtime.
+
+** Tests
+
+5 in `tests/v8_runtime_test.rs` (`fup134_*`): two owners sharing a bare name; a dock
+not evicting a page; resolution independent of load order; an owned bundle still
+claiming a FREE bare name (the sharing case — a fix that broke this would be worse
+than the bug); owner lookup falling back to global.
+
+Both directions sabotage-verified. One test initially sabotage-PASSED because it
+registered the page LAST, which lets a broken implementation succeed by accident;
+it now registers the dock last, which is the order that actually failed in the
+observed defect.
+
+** Deferred from the original fix plan
+
+Item 5's compile-time duplicate diagnostic for two sources claiming the same
+QUALIFIED key is not implemented — with owner scoping in place there is no known
+way to produce that collision (each dock bundle has a distinct owner, and a page has
+none). Adding a diagnostic for an unreachable state would be speculative. Item 6's
+renames (`deployment-row`, `domain-row`, `kit-field`, `kit-option`) are likewise
+unnecessary: correctness no longer depends on prefixes, which was the stated
+requirement — "namespacing must not rely on those renames for correctness".
+
+** W1.3 REVIEW FOLLOW-UP — the first implementation fixed registration, not USE
+
+The reviewer swarm found the fix half-working, and it was right.
+`__ST_BUNDLE_OWNER__` is live only while a bundle EVALUATES and is restored
+afterwards. But essentially every real invocation happens LATER — an event
+handler, an `@each` re-render, any async callback — by which time the global is
+`undefined` and owner-first lookup silently degrades to bare lookup. That is
+exactly the collision the fix exists to prevent.
+
+Confirmed live on a dev-served page before fixing:
+
+: window.__ST_BUNDLE_OWNER__                                  -> undefined
+: Spacetime.resolveTemplate('field-text', window.__ST_BUNDLE_OWNER__)
+:   -> the PAGE's factory, returned to the DOCK
+
+So registration was correct and lookup was not. The V8 tests all passed because
+each registered and resolved inside one synchronous block — never crossing the
+boundary that mattered.
+
+*** Fix
+
+Owner identity now rides on the FACTORY, not on the moment it runs:
+
+- `buildTemplateFactory` receives the owner in the SAME 5th-argument slot region
+  mounts already used, and stamps it on the built factory as a non-enumerable
+  `__stOwner`.
+- The factory publishes that owner as `__ST_INVOKE_OWNER__` for the DURATION of
+  each call (set/restore), so an `invoke-template` nested inside a template body
+  resolves against THAT template's owner rather than whatever bundle happens to be
+  evaluating. This closes the nested-ref path the reviewer flagged separately.
+- `invoke-template` prefers the bundle-evaluation owner when present and falls back
+  to the invoke-time owner otherwise.
+
+Verified live: the dock factory carries `__stOwner: "inspector"` permanently, the
+page renders its own template, and the dock's widget still builds from its own
+scope. 2 tests added (`fup134_owner_survives_after_the_bundle_finishes_evaluating`,
+`fup134_a_factory_publishes_its_owner_while_it_builds`), the first
+sabotage-verified by dropping the stamp.
+
+*** Lesson
+
+The original 5 tests were all synchronous: register, then resolve, in one block.
+They could not observe a defect that only appears once the bundle's evaluation
+ends. A test must cross the boundary the mechanism depends on — the same lesson as
+FUP-138 (layer tests agreeing is not evidence the layers compose).

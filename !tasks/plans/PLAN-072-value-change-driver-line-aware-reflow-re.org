@@ -1,0 +1,272 @@
+#+TITLE: value-change-driver line-aware reflow rewrite — real pretext line layout replaces box-hack heuristics
+#+STATE: DONE
+#+SESSION_ID: 152939d2e5b25e66
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-09T16-24-34-454Z_152939d2e5b25e66.jsonl]]
+#+CUSTOM_ID: PLAN-072-value-change-driver-line-aware-reflow-re
+
+* Initial Message
+
+bro the chagne in sizing still does and i think it's from letter spacing, and i'm talking about vertical height overall. please observe properly
+
+* Origin
+
+User request (verbatim, after 3 rounds of box-hack patches this session —
+BUG-172, BUG-175, BUG-176 — each fixing a symptom of the same missing
+foundation): "please look at the text module in the stdlib and please think
+about what the value-change syntax tried to achieve... now that you have
+access to the full strength of the vendored pretext module, how would you
+re-implement this to work properly? For example, text that ends up changing
+from one line to two should know that it's going to be two lines and
+smoothly reorganise the text around it in a lean way. Same thing for the
+vice-versa."
+
+* Diagnosis
+
+`value-change-driver` (`stdlib/primitives/animation/drivers.st`, 55+ commits
+of history, oldest predates `pretext` entirely) animates text CONTENT
+changes character-by-character (split-flap style), but had ZERO concept of
+LINE layout — it always called pretext's line-breaker at `containerWidth =
+Infinity` (forcing single-line), and reshaped its box reactively via
+box-level WAAPI height/width tricks whenever content happened to wrap. Every
+bug fixed earlier this session (BUG-172 false-wrap + width-snap, BUG-175
+baseline-toggle height-shift, BUG-176 letter-spacing-blind measurement) was
+a symptom of this SAME missing foundation: the driver never asked "how many
+lines will this text take against the real container width," so it could
+never distinguish "a persisting word relocated to a new line" (should
+GLIDE) from "a word's characters actually changed" (should split-flap).
+
+Additionally traced: the driver embedded its OWN private, frozen copy of
+pretext (~700 lines of minified JS inlined via `%emit prelude-js`), while
+`stdlib/text` already vendors the SAME engine's CURRENT build — with native
+`letterSpacing` support the driver's stale copy lacked entirely. Two pretext
+copies drifting independently is exactly the "no parallel implementations"
+antipattern AGENTS.md's elegance bar exists to prevent.
+
+* Design: line-aware FLIP reflow
+
+Two DISTINCT, purpose-matched transitions, chosen automatically per change:
+
+1. **REFLOW** (a persisting word's LINE POSITION changed, e.g. 1→2 lines): the
+   word GLIDES via a real 2D WAAPI `transform: translate` from its old
+   (line, x, y) to its new (line, x, y) — lean, bounded duration, NOT
+   staggered per-character (a relocating word is a single visual unit
+   moving, not new content appearing).
+2. **CONTENT CHANGE** (a word's TEXT itself changed): the proven
+   per-character split-flap — old graphemes exit, new graphemes enter,
+   staggered — unchanged from the original, validated architecture.
+
+Both driven by REAL line layout computed BEFORE any DOM mutation, via the
+SHARED `stdlib/text` vendored `pretext` engine (`pretext.layoutWithLines`,
+`pretext.prepareWithSegments` with native `{ letterSpacing }` option) — the
+"will this wrap to two lines" question is ANSWERED via `oldLayout`/
+`newLayout` computed from the actual `oldText`/`newText` strings against the
+real `clientWidth`, not inferred after the fact from box-level side effects.
+
+* What was deleted (net complexity reduction)
+
+- ~700 lines of stale, private, inlined pretext bundle (`__Pretext = (() =>
+  {...})()`) — replaced by referencing the shared `pretext` global.
+- The `ST.text` measurement-wrapper namespace (`measureWord`,
+  `measureNaturalWidth`, the `letterSpacingCorrection` arithmetic hack from
+  BUG-176) — replaced by direct `pretext.prepareWithSegments(text, font, {
+  letterSpacing })` calls using pretext's OWN native letter-spacing support.
+- `containerWidth = elIsBlockLevel ? offsetWidth : Infinity` (BUG-172's
+  fix) → still present in SHAPE (block-level classification retained) but
+  now feeds a REAL line-layout question (`layoutLines`) instead of a
+  single Infinity-width call — `clientWidth` used instead of `offsetWidth`
+  for accuracy (see bugs found below).
+
+* What was added
+
+- `layoutLines(text, font, maxWidth, lineHeight, letterSpacingPx)` — real
+  per-line `{text, width}` breakdown via `pretext.layoutWithLines`.
+- `measureNatural(text, font, letterSpacingPx)` — natural width via
+  `pretext.prepareWithSegments` + `pretext.measureNaturalWidth`, letter-
+  spacing-correct natively.
+- `positionWords(lines, font, lineHeight, letterSpacingPx)` — per-word
+  (line, x, y) coordinates within a laid-out multi-line block, via prefix-
+  width re-measurement against the SAME pretext pipeline the line layout
+  used (pixel-exact match).
+- `diffWordSequence(oldWords, newWords)` — classic O(n·m) LCS word-sequence
+  diff, tagging each word `keep` (persists, may have relocated), `remove`
+  (split-flap exit), or `add` (split-flap enter).
+- A branch in `animateChange`: `if (oldLayout.lineCount <= 1 &&
+  newLayout.lineCount <= 1)` → proven single-line fast path (unchanged
+  logic); else → new multi-line reflow path.
+- Lead/trail trimming of maximal UNMOVED-`keep` runs to plain text nodes
+  (mirrors the single-line path's prefix/suffix optimization) — a paragraph
+  whose first two lines never change pays zero span/animation cost for them.
+
+* stdlib/macros/timeline.st wiring
+
+`@value-change`'s macro definition now `@import "stdlib/text"` (previously
+ONLY reachable via the always-loaded base `stdlib` dirs, never pulling in
+the opt-in `stdlib/text` module) — so any site using `@value-change`
+transitively gets the shared `pretext` global registered, with ZERO action
+needed from site authors, while the demand-emit rail still gates actual
+bytes shipped (a page never using `@value-change`/`@measure`/`@balance`/
+`@fit` still ships zero pretext bytes).
+
+* Bugs discovered and fixed during implementation (all verified live)
+
+** Import resolver: bare "stdlib" import had no cwd fallback
+
+`src/lsp/workspace/import_resolver.rs`'s bare `"stdlib"` aggregate-import
+branch only checked the configured `stdlib_path` (workspace-root derived);
+on failure it dropped to the embedded-stdlib dead end
+(`ResolvedImport::Stdlib`, which `resolve_imports` NEVER recurses into —
+`Stdlib { .. } => continue`). `resolve_stdlib` (the `stdlib/X` module-path
+branch) already had a `<cwd>/stdlib` fallback for exactly this reason
+(`workspace_root` is frequently a SITE directory, e.g. `spacetime serve
+projects/<name>/`), but the bare-aggregate branch didn't mirror it. Result:
+`stdlib/macros/timeline.st`'s own `@import "stdlib/text"` line silently
+never got followed when `stdlib` was reached via bare `@import "stdlib"`
+under `spacetime serve <site-dir>` — even though the EXACT SAME import
+string resolved fine from a file that imported `stdlib/text` directly (as
+ora-ventures.com always did, masking the gap all session). Fixed:
+mirrored `resolve_stdlib`'s cwd-fallback into the bare-`"stdlib"` branch.
+Regression test: `test_bare_stdlib_import_falls_back_to_cwd`
+(`src/lsp/workspace/import_resolver.rs`).
+
+** %emit js braceless-if statement-boundary mangling (BUG-177, filed separately, NOT fixed this session)
+
+The lightweight (non-full-AST) JS statement parser in `src/emit/js_parser.rs`
+silently produced INVALID JS (zero compiler diagnostics) when a braceless
+`if (cond) stmt;` appeared inside a sufficiently complex surrounding scope
+(a `for` loop with nested object-literal `.push({...})` calls). Root cause
+not fully isolated (deprioritized to ship the rewrite); worked around by
+bracing every `if` statement in the new driver code (`if (cond) { stmt; }`)
+— semantically identical, zero cost, always safe. Filed as BUG-177 for a
+dedicated debugging session — this is a genuine compiler robustness gap
+with broad blast radius (any stdlib primitive's `%emit js` body could hit
+the same shape).
+
+** MutationObserver read-after-mutation timing (new architecture's own bug, not pre-existing)
+
+`animateChange` runs FROM a `MutationObserver` callback, which by
+definition only fires AFTER the DOM mutation (textContent -> newText) has
+ALREADY happened. The rewrite's initial version read `currentHeight =
+%&el.offsetHeight` / `currentWidth = %&el.offsetWidth` live at that point —
+silently measuring the NEW text's box while the code intended to read the
+OLD (pre-change) box. Reproduced live: a 2-line→1-line transition SNAPPED
+instantly to the 1-line height instead of easing down from the 2-line
+height. The ORIGINAL (pre-rewrite) driver had this exact same
+read-after-mutation pattern but never surfaced it — its flap was ALWAYS
+single-line, and a single line's height never changes with CONTENT (only
+line COUNT changes height), so reading "too late" never returned a
+different value; this rewrite's reflow path is the first code path to
+genuinely need accurate PRE-mutation box geometry. Fixed: derive
+`currentHeight`/`currentWidth` from `oldLayout`/`measureNatural(oldText,
+...)` (pure functions of the `oldText` STRING, immune to DOM timing),
+falling back to a live DOM read only for degenerate (0-height) layouts.
+Regression test:
+`test_value_change_driver_measures_old_geometry_from_computed_layout_not_live_dom`.
+
+** Reflow-path stagger scaled with character count, not word count
+
+Initial reflow-path implementation reused the single-line path's flat
+per-character stagger array across ALL changed words combined — for a large
+content change (many words differing at once), `totalAnimDur` scaled with
+total changed CHARACTERS (a 66-character, 15-word sentence rewrite took
+2.5+ seconds to settle) instead of the intended "lean, bounded duration."
+Fixed: stagger each changed word's own characters relative to a per-WORD
+delay offset (`changedWordIndex * stagger`, incremented once per add/remove
+op, NOT per character) — total duration now scales with WORD count, a much
+smaller and more meaningful bound. Regression test:
+`test_value_change_driver_bounds_reflow_stagger_by_word_count_not_character_count`.
+
+** Reflow-path add/remove words missing layer-level opacity fade
+
+Initial implementation gave reflow-path added/removed words the
+per-character CSS `@keyframes` transform animation but NO layer-level WAAPI
+opacity fade (the single-line path always paired both — `kfToCss` only ever
+emits `transform` to CSS keyframes; opacity is ALWAYS a separate WAAPI
+layer animation per that function's own comment). Fixed: added matching
+`enterLayer.animate([opacity...])` / `exitLayer.animate([opacity...])`
+calls to the reflow path's add/remove branches, using the author's
+`enterKf`/`exitKf` opacity values exactly as the single-line path does.
+
+* Verification (all live, on real dev server, via puppeteer DOM sampling)
+
+- Single-line fast path (counter/price-style): unchanged behavior, settles
+  cleanly to plain text, no leftover spans.
+- 1→2 line reflow (`"short"` → 14-word sentence): height eases smoothly
+  28.8px → 58.1px → 86.4px → 84px; no discontinuous jumps.
+- 2→1 line reflow (reverse direction, the bug this session's timing fix
+  addressed): height eases smoothly 86.4px → 56.4px → 28.8px → 28px.
+- Genuine glide case (`"zzz aaa bbb"` → `"zzz <longword> aaa bbb"`, forcing
+  "aaa"/"bbb" onto a new line): confirmed via captured WAAPI `animate()`
+  calls — "aaa" and "bbb" get `transform: translate(...)` animations
+  starting at their OLD offset and easing to `translate(0,0)` at their NEW
+  position — the literal "text should know it's going to wrap and smoothly
+  reorganize" behavior requested.
+- Lead/trail trim optimization confirmed: unmoved leading words render as a
+  single plain text node, zero span/animation overhead.
+- ora-ventures.com (single-line flap, real production consumer): full
+  6-second, 362-frame sample post-rewrite — `titleH` rock-solid at 315.3px
+  (BUG-175 fix holds), `letterSpacing` constant `-1.911px` (BUG-176 fix
+  holds via NEW native mechanism), zero width jumps >15px anywhere (BUG-172
+  fix holds). Screenshot-verified clean settled state.
+
+* Test suite (all run this session, all green)
+
+- `cargo test --lib`: 2599 passed, 0 failed (was 2594 before this session's
+  8 new regression tests: 6 for the rewrite architecture, 1 for the import
+  resolver fix, 1 letter-spacing test rewritten to assert the new
+  mechanism instead of the deleted one).
+- `cargo test --test integration_tests`: 189 passed, 0 failed, 1 ignored.
+- `cargo test --test value_change_test`: 20 passed, 0 failed (1 test
+  updated to assert `pretext.prepareWithSegments`/`pretext.layoutWithLines`
+  instead of the deleted `ST.text.prepare`/`ST.text.layout`).
+- `cargo test --test memory_cleanup_test`: 2 passed, 4 ignored (pre-existing
+  INIT-038 ignores, unrelated).
+- `cargo run --features headless -- test tests/ --headless`: 617 passed, 0
+  failed, 19 skipped (includes all 5 `tests/unit/animations/value-change.test.st`
+  tests: staying-chars, exit/enter-concurrency, plain-text-restore,
+  no-flash, emoji-graphemes — all still pass with the rewritten driver).
+- `cargo run --features cdp -- test tests/fixtures/native-template/value-change-inline-width-wrap.test.st --cdp`:
+  1 passed, 0 failed.
+
+* Files touched
+
+- `stdlib/primitives/animation/drivers.st` — full `value-change-driver`
+  rewrite (~670 lines, replacing the prior ~584-line box-hack version;
+  net line count similar despite deleting 700 lines of embedded pretext,
+  because the reflow path + its documentation is substantial new capability).
+- `stdlib/macros/timeline.st` — added `@import "stdlib/text"` so
+  `@value-change` transitively gets the shared pretext module.
+- `src/lsp/workspace/import_resolver.rs` — bare-`"stdlib"` cwd-fallback fix
+  + new regression test.
+- `src/pipeline/integration_tests.rs` — 1 test rewritten
+  (`test_value_change_driver_uses_native_pretext_letter_spacing`,
+  superseding the deleted `ST.text` arithmetic-correction test), 5 new
+  tests for the rewrite's architecture and its own discovered bugs.
+- `tests/value_change_test.rs` — 1 test updated
+  (`test_compile_value_change_uses_pretext_measurement`) to assert the new
+  `pretext.*` call sites instead of the deleted `ST.text.*` ones.
+
+* Consumers verified compatible (no changes needed to their .st source)
+
+- `projects/ora-ventures.com/index.st` — already `@import "stdlib/text"`
+  directly; live-verified extensively (see Verification above).
+- `projects/zeystudios/zeystudios.st` — a fragment file (animations-only,
+  no complete page), pre-existing unrelated compile errors (missing
+  selectors) confirmed via `git status`/`git diff` to predate this session
+  entirely — not a regression.
+- `examples/value_change_demo.st` — a documentation snippet (no `@import`,
+  not meant to compile standalone) — unaffected.
+
+* Follow-ups (not blocking, filed/noted separately)
+
+- BUG-177 (compiler `%emit js` braceless-if mangling) — filed, NOT fixed,
+  needs a dedicated debugging session to isolate the exact trigger in
+  `src/emit/js_parser.rs`.
+- The reflow path's word-diff is LCS-based on EXACT word-string equality —
+  does not (yet) attempt any "similar word" fuzzy matching (e.g. a plural
+  change "cat" -> "cats" is treated as remove+add, not a content-change
+  glide) — this matches the ORIGINAL single-line path's behavior
+  (character-level diff within a word position) is actually MORE granular
+  for that case; the reflow path intentionally trades some granularity for
+  correctness/simplicity at the word-sequence level. Not filed as a gap —
+  a deliberate design tradeoff, documented in the primitive's own doc
+  comment.

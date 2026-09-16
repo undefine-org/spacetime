@@ -1,0 +1,219 @@
+#+TITLE: Retire @state_machine/@transition construct: migrate 3 projects to $-signals, delete stdlib subsystem + tests
+#+STATE: DONE
+#+SESSION_ID: 150f475256d7192f
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-19T12-43-02-363Z_150f475256d7192f.jsonl]]
+#+CUSTOM_ID: PLAN-047-retire-state-machine-transition-construc
+#+COMPLETION_HASH: f49542432cf5a8fd
+
+* Initial Message
+
+Verification: lib 2363 passed/0 failed · integration 172 · FUP-069 acceptance green · headless 456→513
+ passed.
+
+ Filed BUG-112 for the residual @try $error lowering bug ($error signal-lowers to ST.get(el,"error") =
+ __e) — out of FUP-072 scope, accounts for the remaining state/binding @try failures.
+
+ Notes (honesty):
+ - 9 v8_runtime failures (@media→JS, getSelection/DOMParser/IntersectionObserver, async initElement) are
+ pre-existing — st.js is byte-identical to HEAD, and @media("print") (no colon, real selector) fails
+ identically, ruling out all my changes.
+ - 4 non-test snapshots + part of test_and_fixture drift from the other session's concurrent
+ public/runtime/templates.js edit (FEAT-124/126 bundle code), embedded in compiled-JS snapshots — not my
+ logic. Left the test_and_fixture snapshot unstaged since it's entangled with their unstaged bundle.
+
+
+
+please review this owrk and what it was trying to achieve, and tell me what it did right and what the next steps are
+
+* Mandate (user decision, 2026-06-19)
+Migrate the 3 production projects that use @state_machine/@transition to the
+canonical $-signal idiom, then FULLY DELETE the stdlib state-machine construct
++ its tests/assertions. The construct is BROKEN (emits no event listeners — see
+BUG-113) and the user has chosen replacement over repair.
+
+This removes ~37 headless failures (SM-transition 19 + SM-classtoggle 7 +
+SM-mutate 6 + SM-scoped 5) by deleting the tests that exercise a deleted
+construct — NOT by faking green. The behavior moves to $-signals, proven by new
+per-project .test.st probes.
+
+* Why delete, not fix (root cause — see BUG-117)
+@state_machine(initial){ @transition(from,to,on) } compiles to a `setState`
+closure + state-init bookkeeping but emits ZERO addEventListener. The
+`state-transition` primitive (stdlib/primitives/state.st:123) DOES contain
+`%&el.addEventListener(%on, handler)`, but the block dispatcher
+(stdlib/macros/state-machine.st `state-machine-block` %for $transitions) never
+expands the %binds → primitive, so no listener reaches the output. Verified via
+`inspect --layer emit`: 0 occurrences of setState INVOCATION or
+addEventListener for the transition. Broken in production builds too, not just
+headless.
+
+* The canonical $-signal replacement idiom (confirmed from examples/)
+- MUTATE: `.trigger { @on click { $open <- !$open; } }`  (examples/cart-demo, value-declarations-demo)
+- REACT (class): `.drawer { .is-open: $open; }`           (examples/data-binding/styles.st `.has-items: $cartCount > 0`)
+- REACT (text/attr): `text <- $sig;` / `&.href <- $url;`
+- REACT (visibility): drive a class, style it in CSS (`.drawer.is-open { opacity:1; visibility:visible; }`)
+NB: BUG-119 (test-harness can't PROVE reactive `.cls: $sig`) is the W0 BLOCKER
+for verifying the REACT-class half. The primitive itself WORKS in production for
+declared signals (confirmed by diagnosis); the blocker is harness fidelity, not
+a broken runtime. Fix BUG-119 first so migration probes can go green.
+
+* CAUTION — surgical deletion, NOT a file `rm`
+stdlib/macros/state-machine.st defines MULTIPLE constructs; only the
+state-machine ones get deleted. PRESERVE:
+- @state-match / @state-match-simple — `@state(when: $ws is Variant { $b })`
+  typed-union renderer (used by stdlib/primitives/socket.st + examples/socket-demo).
+- @state(when: "str") { ...css }   — the WORKING data-st-state→CSS renderer
+  (used by reporter, focusable, toggle, jallete). KEEP this; it's the
+  presentation half and works.
+DELETE: @state-machine, @state-machine-block, @transition-* (event/run/timed/
+debounced/debounced-run/scroll-threshold), @async-transition, and the
+primitives state-transition / timed-transition / debounced-transition /
+scroll-direction-transition / async-transition in stdlib/primitives/state.st.
+Decide per-construct whether @state(when:"str") can stand alone without the
+state-machine init (it reads data-st-state; something must SET data-st-state —
+under $-signals that becomes a reactive attr/class, so @state(when:"str") may
+also retire in favor of `.cls: $sig`. Resolve during W1 design.)
+
+* Internal stdlib consumers to migrate (or the "full delete" breaks stdlib)
+- stdlib/toggle.st          — @toggle-switch wraps @state_machine on/off → reimplement as $bool + .cls
+- stdlib/focusable.st       — @state_machine focused/blurred → $focused signal + @on focus/blur
+- stdlib/testing/reporter.st — summary panel state machine idle/running/passed/failed → $status signal + reactive class
+  (reporter drives its OWN test-result UI; verify it still renders after migration)
+
+* Affected projects (the migration targets)
+1. projects/jallete/index.st  (lines ~418-456)
+   - .jal-cart: state_machine closed/open + @state(when) CSS + @transition open_cart/close_cart
+   - .jal-configurator: same + add_to_cart close
+   - Triggers TODAY: `.jal-pack-card { @on click { ...; @emit open_configurator; } }`,
+     `[data-trigger=add-to-cart] { @on click { $cart<-...; @emit add_to_cart; } }`.
+   - Migrate: replace @emit open_configurator → `$cfgOpen <- true;`; close handlers → `$cfgOpen <- false;`
+     `.jal-configurator { .is-open: $cfgOpen; }` and CSS `.jal-configurator.is-open { ... }`.
+     Same for `$cartOpen` on .jal-cart.
+   - NB FEATURE_PARITY.md notes "Cart drawer opening handled by JS controller for now" — this migration
+     REMOVES that gap (no JS controller needed once $cartOpen drives it).
+2. projects/jeton/index.st  (lines ~591-657) + projects/jeton/tests/walkthrough.test.st
+   - .walkthrough: block state_machine step1..step5 with per-step CSS blocks (.wf-N/.ws-N display) + @transition next/restart
+   - Triggers: `[data-step-btn=N] { @on click stepN-click { scale ... } }` (animation only; no state advance today → that's the bug)
+   - Migrate: `$step number` (init 1). Step buttons: `@on click { $step <- $step + 1; }` (or set N). Restart: `$step <- 1;`.
+     Per-step visibility: `.wf-1 { .is-shown: $step == 1; }` … or a single `&.dataset.step <- $step` + CSS attribute selectors `[data-step="1"] .wf-1 { display:block }`.
+     Resolve the cleanest form in W1 (5 steps × 10 selectors = verbose; prefer a data-attr on the section + CSS).
+   - walkthrough.test.st must be rewritten to the new idiom (it currently drives @transition).
+3. projects/playground/playground.st  (lines ~46-68)
+   - .tab: state_machine inactive/active with `a -> b: on click` arrow syntax (a THIRD transition surface!) + @state active/inactive CSS
+   - ALSO uses `@transition { background 200ms ease-out; border-color 200ms }` — this is the CSS-PROPERTY transition, a SEPARATE construct that MUST SURVIVE. Do not touch it.
+   - Migrate the state machine: `$activeTab` + `.tab { .is-active: $activeTab == <id>; }` + `@on click { $activeTab <- <id>; }`. Keep the css @transition.
+
+* Build sequence (waves)
+W0 (BLOCKER): Fix BUG-119 (test-harness fidelity for reactive .cls:$sig). The
+feature WORKS in production for declared signals — the blocker is that the
+harness can't PROVE it: (1) @given drops nested reactive CSS scopes, (2) test
+file-scope binding JS is emitted AFTER @when directives so the listener attaches
+too late. Both are pure test-path fixes. Until green, the per-project migration
+probes can't turn green even though migrated pages work. (Item (3) in BUG-119 —
+undeclared-signal mutation throw — is a real but narrow production fix; jallete/
+jeton declare their signals so they're unaffected; do it opportunistically.)
+Gate: the reactive .cls:$sig minimal repro test passes headless.
+W1 (design): Resolve the per-project idiom choices above (jeton step visibility form; whether @state(when:"str") retires; reporter migration shape). Produce the exact before/after for each project. No code yet.
+W2 (project migration, parallelizable once W0+W1 done): jallete, jeton, playground — each: rewrite .st, add/rewrite a .test.st probe proving open/advance/switch via @when click → @then has class / signal value. Gate per project: `cargo run -- check projects/<p>/` clean + the probe passes headless.
+W3 (stdlib internal consumers): migrate toggle.st, focusable.st, testing/reporter.st off the construct. Gate: reporter still renders; toggle/focusable demos compile.
+W4 (deletion): surgically remove the state-machine macros + primitives (PRESERVING @state-match + css @transition), remove tests/unit/macros/state-machine.test.st + tests/unit/assertions/state.test.st + stdlib/testing/assertions/state.st have_state* assertions, update stdlib/index.st import + comment. Gate: `cargo test --lib` green, headless suite has NO state-machine references and the ~37 failures are GONE (not skipped — the files are deleted).
+W5 (docs): purge @state_machine/@transition(state) from docs/, examples/ (cart-demo/index.st still has stale @transition!), stdlib doc-comments. Verify no dangling references via grep.
+
+
+
+** W1 DESIGN RESOLVED (2026-06-19) — construct choice per project
+
+*** Construct survey (all four evaluated against real lowering + the projects' actual structure)
+- `.cls: $bool` / `.cls: $expr` (reactive class) — element stays, class flips; CSS owns visibility. Cheapest. W0 made it provable + total.
+- `@state(when: $x is Variant)` — attr `data-st-<sig>-type` + CSS; mutually-exclusive by construction, payload-carrying. BUT fed only by @socket today (watchTypedUnion needs a {type} union object); no author-facing local enum-signal rail. PRESERVED by W4, not used for migration.
+- `@match $x { "v" => &tpl() }` — RENDER-ONCE (match-render primitive, mount-time dispatch, NO signal subscription). Cannot react to a click that advances state. Wrong tool for any of these migrations. (Confirmed from stdlib/primitives/match-render.st doc + emit: no local:updated listener.)
+- `@view $x { "v" => &tpl() }` — the REACTIVE sibling of @match (view-mount subscribes + re-mounts on change). Verified working with a plain `$tab string` local signal (no @socket). BUT it mounts TEMPLATES into a host → using it requires extracting static HTML into `@template`s.
+
+*** Decisive fact: ALL THREE projects are static-HTML hybrids
+jallete/index.html, jeton/index.html, playground/index.html are static markup; the .st file styles + drives behavior. The walkthrough/tab/drawer DOM ALREADY EXISTS in HTML. Therefore:
+- @view would force extracting that static markup into @template definitions (heavy; jeton has TWO parallel columns .wf-N + .ws-N keyed on one step → two @view hosts + 10 templates). Not warranted.
+- The lightest CORRECT migration that preserves the static markup is: a $-signal + reactive class/attr on the element + CSS fan-out. The element stays put; the signal flips; CSS shows/hides. This is the canonical idiom W0 fixed and proved.
+
+*** Per-project final shapes
+**jallete** (drawer toggles, genuine 2-state):
+  $cartOpen bool: false;  $cfgOpen bool: false;
+  .jal-cart { .is-open: $cartOpen; }   .jal-configurator { .is-open: $cfgOpen; }
+  triggers (already @on click): replace `@emit open_configurator` → `$cfgOpen <- true;`,
+  close handlers → `$cfgOpen <- false;`; cart `@emit add_to_cart` → also `$cfgOpen <- false; $cartOpen <- true;`.
+  CSS: `.jal-cart.is-open { /* visible state, lifted from the old @state(when:"open") block */ }`.
+  Removes the FEATURE_PARITY.md "cart drawer opening handled by JS controller" gap.
+
+**jeton** (5-step wizard, n-state, two parallel columns, NO stateful inputs in steps — verified):
+  $step number: 1;
+  Replace the @state_machine block with reactive class on the walkthrough container:
+    .walkthrough { .at-1: $step == 1; .at-2: $step == 2; .at-3: $step == 3; .at-4: $step == 4; .at-5: $step == 5; }
+  and CSS fan-out (lifted from the old per-step blocks):
+    .walkthrough.at-1 .wf-1, .walkthrough.at-1 .ws-1 { display: block; }  (etc; default .wf-*/.ws-* display:none)
+  Step buttons (already @on click stepN-click animations): add `$step <- N;` (1..5).
+  Restart control: `$step <- 1;`.
+  NB chose container-class + CSS fan-out over 10 per-element bindings: ONE signal, ONE reactive
+  binding site, exclusivity via the single `.at-N` class; CSS already expresses the 10-element
+  show/hide. (@view rejected: would require 10 @templates + 2 hosts for static markup that already exists.)
+  walkthrough.test.st: rewrite to drive `[data-step-btn=N]` clicks → assert `.walkthrough` has `.at-N` and
+  the right `.wf-N`/`.ws-N` is visible (computed display is a CDP concern; assert the class on --headless,
+  visibility on --cdp).
+
+**playground** (tabs, n-state + a SEPARATE css @transition to preserve):
+  $activeTab string: <first-tab-id>;   (ids from the existing .tab markup / data attr)
+  .tab { .is-active: $activeTab == <thisId>; }  — but tabs are multiple elements; use a data attr the
+  markup already carries: `.tab { .is-active: $activeTab == &.dataset.tab; }` is NOT expressible (reactive
+  binding compares to a signal, not per-element attr). RESOLUTION: emit one binding per tab id keyed on the
+  tab's own selector, OR (cleaner) drive a container attr `[data-active-tab]` + CSS
+  `[data-active-tab="code"] .tab[data-tab="code"] { active styles }`. Decide at W2 start by reading the exact
+  .tab markup in index.html; prefer the container-attr form (one signal, CSS fan-out, mirrors jeton).
+  Triggers: `.tab { @on click { $activeTab <- &.dataset.tab; } }` (or per-tab literal).
+  PRESERVE the css-property `@transition { background 200ms; border-color 200ms }` — it is NOT the state
+  machine; it is a CSS transition and must remain untouched. Also retire the `@state active/inactive` CSS
+  blocks into plain `.tab.is-active { ... }` / `.tab { ... }`.
+
+*** Probe pattern (W0-proven, file-scope authoring matches production)
+File-scope `.sel { @on click { $sig <- v; } }` triggers + file-scope `.sel { .cls: $sig; }` bindings, then
+`@when .trigger click` → `@then .target should have_class "..."`. Verified green end-to-end in W0.
+
+*** Why NOT @match (answering the design question directly)
+@match is render-once by primitive design (its own doc: "@match dispatches a single time when the host
+mounts"; @view "keeps the host in sync ... for the page's lifetime"). A wizard/tab advance is a live signal
+change, so @match cannot express it. @view could, but forces static-HTML→@template extraction not justified
+here. The reactive-class+CSS path is the harmonious choice for static-HTML pages and is what W0 hardened.
+* Acceptance
+- [ ] BUG-119 fixed (W0 gate — harness can prove reactive .cls:$sig).
+- [ ] jallete cart + configurator open/close via $-signals, proven by projects/jallete/tests/*.test.st (headless green).
+- [ ] jeton wizard advances step1→step5 + restart via $-signals, walkthrough.test.st rewritten + green.
+- [ ] playground tabs switch via $-signals; css @transition{} preserved + still compiles.
+- [ ] stdlib toggle.st / focusable.st / testing/reporter.st migrated; reporter UI still renders.
+- [ ] state-machine macros + primitives deleted; @state-match (union) + css @transition PRESERVED and still working (socket-demo compiles).
+- [ ] tests/unit/macros/state-machine.test.st + tests/unit/assertions/state.test.st + have_state* assertions removed.
+- [ ] `cargo test --lib` green; `cargo test --test integration_tests` green.
+- [ ] headless suite: ~37 SM failures gone; no `@state_machine`/state `@transition` anywhere outside the preserved constructs (grep-verified).
+- [ ] docs/examples purged of the dead construct.
+
+* Provenance
+Filed 2026-06-19 from the headless 91-failure deep triage (post-BUG-112). User
+explicitly chose: migrate 3 projects + fully delete the construct + its tests,
+prove via per-project headless probes. Companion items: BUG-117 (root-cause of
+the dead construct), BUG-119 (reactive .cls:$sig harness-fidelity blocker).
+
+NOTE [2026-06-20]: COMPLETE 2026-06-19. All waves shipped + verified.
+
+W0 (commit da2de9c0) — BUG-119: made reactive `.cls:$sig` provable + total. Three fixes: (1) ST.runMutations ensures the SpacetimeLocal proxy before eval so undeclared-signal mutations no longer silently throw; (2) `bindings_first` compile flag so test-body reactive listeners register before @when fires; (3) `%$body.scoped_js` so @given's CSS-scope bodies compile as a real scope; plus local-state init now dispatches local:updated so initial values reach pre-registered bindings. on-click-bool-toggle 3→6, reactive-props 1→5, headless 527→533.
+
+W1 — design resolved: reactive class/data-state for static-HTML pages (all 3 projects are static-HTML hybrids; @view rejected as it mounts templates; @match rejected as render-once). @view IS the reactive match-arm form (verified) but unwarranted here. Recorded in the PLAN body's W1 section.
+
+W2 — 3 production projects migrated + probed: jallete (cart/cfg @state_machine → $cartOpen/$cfgOpen + .is-open + open/close/ESC handlers + checkout href<-$checkoutUrl; overlay-state.test.st 2/2; full JS-controller rewrite deferred to FEAT-134 — pre-existing @compute($params) + configurator gaps are orthogonal); jeton (5-step wizard → $step + .at-N container class + CSS fan-out; walkthrough.test.st 5/5); playground (tabs → $activeTab + per-tab .is-active; css @transition preserved; tabs.test.st 1/1).
+
+W3 — stdlib: toggle.st + focusable.st deleted (dead @pattern, imported nowhere); reporter.st 3 state machines → reactive class / data-state attr. (commit fd5e6194)
+
+W5 — 8 example demos migrated (cart-demo, data-binding, responsive-layout, tutorial, mobile-tasks×4; mobile-tasks test 7/7); state-machine.test.st deleted (31 tests); have_state* assertions KEPT (generic data-st-state readers); cycle.test.st clean (separate construct).
+
+W4 (commit 986532b0, −1727 lines) — deleted the macros (state-machine.st: @state_machine/@state_machine_block/@transition family/@async-transition/@mutate) + primitives (state.st: state-transition/timed/debounced/scroll-direction/state-mutation/async-transition) + the parser test. PRESERVED @state(when:str)+state-css, @state-match (typed-union), @socket, the `state` primitive, css @transition. Consumers migrated FIRST (incl. web/ accordion + test-runner fixture) so deletion broke nothing.
+
+W6 (commit 175c7998) — purged 16 docs + 6 READMEs + 2 stdlib doc-comments + 2 parser fixtures. Only labeled-history remains.
+
+FINAL GATES: cargo test --lib 2379/0; integration 172/0; snapshots 13/0; headless 528/59 with ZERO state-machine/transition/have_state failures remaining (the 59 are pre-existing CDP-ceiling/E0909-content-injection/debug-hook/BUG-085 clusters tracked in BUG-120, plus the concurrent-session BUG-121 `<-` warnings). @state_machine now degrades to an unrecognized no-op; zero consumers remain repo-wide.
+
+Companion items filed: BUG-117 (root cause: FSM emitted no listeners), BUG-119 (W0 harness fidelity, fixed), FEAT-134 (jallete full JS→Spacetime migration), FUP-074 (enum/state type unification — the deeper design this points toward), FUP-075 (per-item independent state on @each rows). The user's insight that the migration friction reflects "a lack on the part of the enum type system and the @match system" is captured in FUP-074 as the principled next step.

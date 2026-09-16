@@ -1,0 +1,168 @@
+#+TITLE: @if inside a @template body is emitted as literal text
+#+STATE: ITEM
+#+SESSION_ID: 153497be379ff5cc
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-18T12-18-12-318Z_153497be379ff5cc.jsonl]]
+#+CUSTOM_ID: BUG-358-if-inside-a-template-body-is-emitted-as
+
+* Initial Message
+
+where is edit-toggle  used? and besides that, I would like all remianing erors to be fixed
+
+* Summary
+
+A `@template` body does not expand directives. `@if(&slot) { … }` written inside
+one is copied into the template's HTML as LITERAL TEXT, and the `<div>` it was
+meant to guard is emitted unconditionally.
+
+This is silent: `spacetime check` reports no error, the template registers, and
+the page renders — just with a stray `@if(&slot) {` string in the markup and no
+conditional behavior.
+
+* Evidence
+
+Page (`scratch/tf2/index.st`):
+
+#+begin_src spacetime
+@template &card($t, &slot?) {
+  <article class="card">
+    <h2>`$t`</h2>
+    @if(&slot) { <div class="card__actions">`&slot`</div> }
+  </article>
+}
+#+end_src
+
+The emitted template record contains the directive verbatim:
+
+#+begin_example
+html: "<article class=\"card\">
+    <h2 …>`$t`</h2>
+
+       @if(&slot) { <div class=\"card__actions\">`&slot`</div> }
+  </article>"
+#+end_example
+
+and the compiled builder creates a TEXT NODE for it:
+
+#+begin_example
+const __t5 = document.createTextNode("
+    @if(&slot) { ");
+… __n6 = document.createElement("div") …           // emitted unconditionally
+const __t10 = document.createTextNode(" }
+  ");
+#+end_example
+
+An A/B build against the same page with the `@if` line deleted differs ONLY in
+those three fragments — no conditional machinery is generated in either.
+
+* Scope: which forms work where
+
+| form           | page scope | inside @template |
+|----------------+------------+------------------|
+| ~@if $cond {~  | works      | works            |
+| ~@if($cond) {~ | works      | LITERAL TEXT     |
+
+Both spellings are real: `%macro conditional` in `stdlib/macros/each.st:255`
+declares `@if($_condition:expr) { … }`, and the space form parses via the CST
+path (`src/parser/ast.rs:343` — `@if $condition { body }`).
+
+So the defect is not "parens are wrong". It is that the template-body path
+never runs form-matching, so only the form the CST parser handles directly
+survives inside a template.
+
+* Why it matters
+
+`stdlib/macros/template.st` DOCUMENTS the paren form inside template bodies, in
+three separate examples (lines 19, 59, 78):
+
+#+begin_src spacetime
+@template &modal($title, &content, &footer?) {
+  <div class="modal">
+    <div class="modal__body">`&content`</div>
+    @if(&footer) {
+      <div class="modal__footer">`&footer`</div>
+    }
+  </div>
+}
+#+end_src
+
+An author following the stdlib documentation gets literal text in their markup
+and no diagnostic. `tests/fixtures/native-template/*.test.st` was written from
+those docs and failed for exactly this reason — the tests were right about the
+documented contract and the implementation never met it.
+
+* Fix
+
+Two candidates, in preference order:
+
+1. Expand directives in the template-body path so BOTH spellings work inside a
+   template, matching page scope. This is the "learnable by pattern" outcome:
+   `@if` means the same thing everywhere.
+2. If the template body is deliberately markup-only, then a directive appearing
+   there must be REFUSED with a diagnostic naming the supported form — never
+   copied into the output as text. Silence is what made this survive.
+
+Option 1 is preferred; option 2 is the floor. Until either lands, the stdlib
+docs teach a form that does not work — see the doc-correction note below.
+
+* Interim
+
+`stdlib/macros/template.st`'s examples should use the space form (`@if &footer`)
+so the documentation matches what compiles. Doing that WITHOUT fixing the
+underlying gap leaves two spellings with different reach, which is the real
+smell.
+
+* Verify
+
+#+begin_src sh
+cargo run --features headless -q -- test tests/fixtures/native-template/ --headless
+#+end_src
+
+Done when a `@if(&param)` inside a template body either renders conditionally or
+produces a diagnostic — and no build emits `@if` as page text.
+
+NOTE [2026-08-10]: CORRECTIONS after further measurement — two claims in the original body were wrong, and the scope is wider than filed.
+
+1. "The space form works inside a template" — WRONG. `@if &slot { … }` leaks its source into the template HTML exactly like `@if(&slot)`. The earlier probe only asserted the HOST element existed, which was true either way. A direct behavior gate (`textContent.indexOf('@if') === -1`) shows the directive's source RENDERS AS VISIBLE PAGE TEXT. Both spellings leak.
+
+2. "Wrap it in a selector scope inside the template body" — NOT a workaround. Measured: `.card { @if &actions { > .card__actions { … } } }` inside a template body produces NO output at all. The stdlib docs briefly carried this advice during the fix and it was removed before commit; docs must not teach an unverified pattern.
+
+3. Mechanism, confirmed: HTML content is lexed into flat HTML_RAW TOKENS (`src/syntax/cst/parser.rs:2438`), not child nodes. So a directive nested in markup is never a CST child of the template body, and `reconstruct_template_body_html`'s construct-cut — which walks `node.children()` — cannot see it by construction. A recursive walk was tried and does nothing, for this reason. The real fix belongs in the HTML region scanner, which must recognise and delimit a directive; that is a design change, not a patch.
+
+4. The class is wider than `@if`. `@each($items as $i)` nested in template markup leaks identically. W0712 already covered `@each(`/`@view(` as DIRECT body children; the same marker check now also covers `@if(` and `@if `.
+
+WHAT SHIPPED (the floor, not the fix): the leak is now REPORTED via W0712 rather than silently rendered, with an `@if`-specific hint. Gates in `tests/template_body_directive_test.rs` (5, canaried: removing `@if` from the marker list fails exactly the two `@if` gates and leaves `@each` passing). Over-widening companions assert the host markup and a literal `@` in page text both survive.
+
+Also fixed alongside: `stdlib/macros/template.st` documented the paren form inside template markup in THREE examples — the shape an author following the docs would write. Corrected to render the slot unconditionally, with an explicit note that conditional rendering in a template is BUG-358 and that the scope workaround does not work either.
+
+STILL OPEN (the actual fix): make a directive nested in template markup either execute or refuse at parse time. Until then a template cannot render conditionally.
+
+Separately observed, not yet filed: body-slot CONTENT does not reach an element param. `&card("A") { <button class="bt">E</button> }` with `<div class="acts">\`&slot\`</div>` renders `.acts` but not `.bt` inside it. Needs its own ticket after this one.
+
+NOTE [2026-08-11]: ROOT CAUSE FOUND — this ticket is a SYMPTOM. See BUG-362.
+
+`@if` has no implementation at all. `%macro conditional` (stdlib/macros/each.st) declares a `%form` and a `%when` clause but NO `%emit` block and no primitive behind it. The compiler says so plainly at page level, outside any template:
+
+  error[E0956]: unknown primitive: conditional
+    = hint: neither a registered `%primitive` nor a macro with an `%emit` block
+
+The control that makes this conclusive: `@each`, the identically-shaped macro in the SAME file, compiles clean in the same position. It is `conditional` specifically that is unimplemented.
+
+Measured across every position and spelling, from zero assumptions:
+- in a template's markup      -> leaks as page TEXT (what this ticket recorded)
+- in a selector scope, page level -> renders NOTHING (E0956)
+- paren form `@if($x)`        -> NOTHING
+- space form `@if $x`         -> NOTHING
+- literal `@if(true)`         -> NOTHING
+
+The literal-true case is the tell. A hardcoded true rendering nothing cannot be a scope-resolution or lexing failure — there is no emit path for a conditional anywhere.
+
+CONSEQUENCE FOR THIS TICKET'S SCOPE. The proposed fix (teach the HTML region scanner to delimit a nested directive) would convert a visible text leak into a clean E0956. That is a real improvement — a silent wrong render becoming a refusal — and the W0712 report already shipped is the interim floor. But it must not be described as making `@if` work in templates, because nothing makes `@if` work anywhere.
+
+Dead plumbing behind it, for whoever picks up BUG-362:
+- `%when` IS evaluated (src/pipeline/evaluate.rs:373) but at COMPILE time against captured macro bindings; it cannot see a runtime signal.
+- `CaptureType::Template` (the `$_thenTemplate:template` capture) reaches only parsing and LSP hover; its extractor delegates to `ExprExtractor`, capturing the block as an expression STRING. Nothing reifies it as renderable content.
+- `%macro conditional-else` is in the same state; its comment claims "compiler handles pairing" for pairing logic that does not exist.
+
+Why nobody noticed: `@if` has ZERO usages in stdlib, demos, and examples. Its only occurrences are its own `@example` blocks, the template.st examples (now corrected), and two failing test fixtures. And a conditional that renders nothing PASSES every `should not_exist` assertion, so the false branch always looked right.
+
+Recommend: keep this ticket for the scanner hardening (leak -> refusal), and track the actual feature on BUG-362.

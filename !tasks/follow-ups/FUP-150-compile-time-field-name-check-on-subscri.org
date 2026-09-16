@@ -1,0 +1,64 @@
+#+TITLE: Compile-time field-name check on subscribed/typed reads (E0928 sibling for assign shapes)
+#+STATE: DONE
+#+SESSION_ID: 153c9c68ea93c166
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-24T17-46-26-602Z_153c9c68ea93c166.jsonl]]
+#+CUSTOM_ID: FUP-150-compile-time-field-name-check-on-subscri
+#+COMPLETION_HASH: 9667d44fdb7e67ab
+
+* Initial Message
+
+please exlain all you deferred and file with root causes and impacts and fix steps and opportunities
+
+Deferred from FUP-144 / PLAN-142 (FUP-142 OQ2 / SPIKE-5). Filed 2026-07-24.
+
+* The opportunity
+FUP-144 made `@data subscribe $form FormEnvelope …` register the binding WITH
+its type. That is the SUBSTRATE for a check that does not exist yet: a read like
+`$form.errors.emial` (typo) or `$form.nope` should be a COMPILE error, because
+FormEnvelope's shape is known. Today the type is registered but reads are NOT
+validated against it — a misspelled field silently emits `undefined` at runtime.
+
+This is the exact mirror of E0928 (which checks `send emit "name"` against the
+server contract): E0928 proves the EVENT names cross the seam; this would prove
+the FIELD names within a typed assign are real.
+
+* Root cause
+The read-lowering path (dotted-path access on a signal binding) does not consult
+the binding's registered type. It lowers `$form.errors.email` to a guarded
+runtime read without asking TypeRegistry "does FormEnvelope have .errors, and
+does that have .email?". Pre-FUP-144 it COULDN'T (bindings were untyped); now it
+can, but the check is unwritten.
+
+* Impact of NOT having it
+- Typos in field paths (`.emial`, `.valid` vs `.isValid`) surface only in the
+  browser as undefined/blank — the precise "disagreement only surfaces at
+  runtime = a missing check" failure the bridge thesis condemns.
+- Refactor hazard: rename a field in a `@type`, every stale read keeps compiling
+  and silently breaks. No compiler help.
+
+* Fix steps
+1. In the dotted-path read lowering, when the base binding has a registered type,
+   walk the path against TypeRegistry: each segment must be a field of the
+   current record type; array index requires an array type; unknown field →
+   raise E09xx "field `emial` not in type FormEnvelope { values, errors, valid }".
+2. Degrade GRACEFULLY for untyped bindings (no type → no check, today's
+   behavior) so this is purely additive.
+3. Interaction with nested reads: the check should run REGARDLESS of the
+   try/catch guard (the guard is about null-safety before first diff, not about
+   field validity) — so it applies even to the still-guarded nested forms reads.
+4. RED→GREEN: a typed subscribe + a read of a non-existent field fails check; a
+   read of a real field passes; an untyped subscribe read still passes (no
+   regression).
+
+* Open question (from FUP-142 OQ2)
+Where does the check live — the same static-analysis pass as E0928, or the
+read-lowering pass? Prefer wherever binding types are already in scope. SPIKE
+which pass sees both the binding's registered type AND the read paths.
+
+* Relation
+E0928 (sibling — event-name half of the same "prove the seam" thesis). FUP-144
+(shipped the typed binding this reads). FUP-142 (forms — the win: field typos in
+a signup form caught at compile time). FUP-143 (Erlang-side seam — together the
+three make the seam total in both directions AND within a typed payload).
+
+NOTE [2026-07-26]: DONE 2026-07-24 via PLAN-119 W2 (commit f41458a9). Wired the previously dead-in-prod TypeRegistry::validate_property_path into a new production pass: analysis::validate_typed_reads walks every dotted read whose base is a typed @data source (FUP-144 binding type) against its type via check_read_path → E0401 + did-you-mean. New path-preserving extractor collect_dotted_signal_reads (collect_signal_deps truncated to head). Additive: untyped base skipped, bare base valid. RED→GREEN on real signup.st: $form.errors.emial → E0401 "did you mean email?" at the exact line; clean signup.st passes. The within-payload sibling of E0928. 6 unit tests. OQ (which pass) resolved: the analysis pass (main.rs check path), where binding types are already assembled.

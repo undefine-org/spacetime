@@ -1,0 +1,82 @@
+#+TITLE: Blender MCP bootstrap.py set_face_material crashes on a boolean-union'd object's empty material slot
+#+STATE: DONE
+#+SESSION_ID: 15251010f7982b56
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-06T10-48-12-510Z_15251010f7982b56.jsonl]]
+#+CUSTOM_ID: BUG-157-blender-mcp-bootstrap-py-set-face-materi
+
+* Initial Message
+
+push the capabilities of the 3d module + the workbench mcp through a concrete idea of a user interface that talks directly to this very agent using the mcp tools. This is a pressure test against both the host apis and the 3d apis. Design the 3d mockups using generate_image and then implement whatever surfaces you need using the blender mcp. commit as you go
+
+* Found via
+FEAT-151 (Forge Deck) build-step-4 script, driving the headless Blender MCP
+(=tools/blender-mcp/bootstrap.py= via =python3 tools/blender-mcp/drive.py
+script <path>= against a real Blender 5.1.2 =--background= process).
+
+* Repro
+#+begin_src json
+[
+  {"tool": "create_primitive", "args": {"shape": "cylinder", "name": "Coin"}},
+  {"tool": "create_primitive", "args": {"shape": "cylinder", "name": "Boss"}},
+  {"tool": "boolean_op", "args": {"target": "Coin", "tool": "Boss", "op": "union"}},
+  {"tool": "assign_material", "args": {"object": "Coin", "material_name": "Bronze", "color": [0.68,0.46,0.2], "roughness": 0.16, "metalness": 1.0}},
+  {"tool": "set_face_material", "args": {"object": "Coin", "material_name": "Bronze", "faces": "all"}}
+]
+#+end_src
+Fails:
+#+begin_src
+[set_face_material] {"error": "'NoneType' object has no attribute 'name'",
+"trace": "...bootstrap.py\", line 378, in _dispatch
+    slot_index = next((i for
+i, m in enumerate(obj.data.materials) if m.name == mat_name), None)
+ ...
+AttributeError: 'NoneType' object has no attribute 'name'
+"}
+#+end_src
+=export_glb= after the failure still succeeds (non-fatal), so this is a
+papercut, not a blocker — filed at #C.
+
+* Root cause (not yet fully traced into bootstrap.py's boolean_op impl, needs
+  a follow-up read)
+The boolean union (Blender's Boolean modifier applied then collapsed) appears
+to leave an EMPTY material slot (index 0, =None=) on the resulting mesh
+alongside the real "Bronze" slot added by =assign_material=. The doc comment
+at =set_face_material='s definition already anticipates a version of this
+("Assign a second (or Nth) material slot... Call assign_material first to
+create the material, THEN this to place it on a face subset") but the slot
+list it enumerates isn't guarded against a =None= entry from the boolean op's
+own slot management.
+
+* Fix
+In =tools/blender-mcp/bootstrap.py='s =_dispatch= handler for
+=set_face_material= (around line 378), guard the slot search:
+#+begin_src python
+slot_index = next((i for i, m in enumerate(obj.data.materials) if m is not None and m.name == mat_name), None)
+#+end_src
+And separately: investigate whether =boolean_op='s union path should be
+CLEANING UP empty/None material slots on the result mesh as part of the
+operation (the more correct fix — a boolean result shouldn't carry a stray
+empty slot at all), vs just guarding the read site. Read =boolean_op='s impl
+first before picking; don't guess.
+
+* Acceptance
+- Re-run the FEAT-151 build-step-4 script (or a minimal repro) with the guard
+  in place; =set_face_material= after a union no longer raises.
+- If the slot-cleanup fix is chosen instead/also, verify no regression in
+  =tools/blender-mcp='s existing test/example scripts (check for any e2e
+  script under =tools/blender-mcp/= first).
+
+* Fixed (2026-07-06)
+Applied the guard fix directly (`tools/blender-mcp/bootstrap.py`'s
+`set_face_material` handler): `m is not None and m.name == mat_name` in the
+slot search, mirroring `assign_material`'s existing empty-slot guard for its
+OWN slot handling. Chose the read-site guard over a boolean_op-level
+slot-cleanup fix (per the ticket's two options) — simpler, matches the
+existing precedent already in the same file, and doesn't risk changing
+`boolean_op`'s output shape for other callers.
+
+Verified: re-ran the exact repro (cylinder + boolean union + assign_material
++ set_face_material + export_glb) against a real Blender 5.1.2 --background
+process via `tools/blender-mcp/drive.py` — `set_face_material` now succeeds
+(`slot: 1`, correctly skipping the stray empty slot 0) instead of raising
+`AttributeError: 'NoneType' object has no attribute 'name'`.

@@ -1,0 +1,84 @@
+#+TITLE: Nested stamped invocations draw overlapping hover outlines in pick mode
+#+STATE: DONE
+#+CUSTOM_ID: FUP-136-nested-stamped-invocations-draw-overlap
+#+PRIORITY: #C
+
+* Summary
+
+In the inspector pill's pick mode (PLAN-112 W4, commit aedb846c), hovering the
+page outlines the element that would be selected. When a stamped template
+invocation is NESTED inside another stamped invocation, both outlines draw at
+once, so the hover highlight reads as two boxes rather than one target.
+
+* Severity: cosmetic only
+
+There is NO wrong-target risk. Pick resolution takes the topmost/innermost
+stamped node, and W4R (commit 06966827) additionally made an accepted pick call
+`preventDefault()`/`stopPropagation()` so the page's own action does not fire.
+Selection is correct; only the visual feedback is ambiguous.
+
+Filed at `#C` deliberately: it is a polish item on a dev-only surface, and it
+should not be fixed by weakening the stamping or the resolution rules that make
+selection correct.
+
+* Where it lives
+
+- Pick mode: `stdlib/__inspector__/primitives/inspect-pick.st` — owns the page
+  listener (it is not registered at all while pick mode is OFF) and the hover
+  outline.
+- Stamping: `data-st-node` attributes, dev-only, applied via `invoke-template`'s
+  optional `node` arg in `stdlib/primitives/template.st`; the stamp map is built
+  in `src/compiler.rs` (`inspector_node_stamps`) and threaded through
+  `src/pipeline/mod.rs` as `invocation_node_ids`.
+
+Verify these paths before working — they are cited from the W4 commit, and the
+pick primitive is the only file that should need to change.
+
+* Fix direction
+
+Resolve the hover target to exactly ONE node before drawing: from the hovered
+element, walk up to the nearest ancestor carrying `data-st-node` and outline only
+that. Ancestors that also carry a stamp are not the target and must not draw.
+
+Prefer doing this with the outline itself (one highlight element that is
+positioned over the resolved target) rather than a CSS rule that happens to match
+every stamped ancestor — the latter is what produces the stack today.
+
+* Tests to write
+
+Build a fixture with a template invoked INSIDE another template's body, both
+stamped. With pick mode on and the inner element hovered:
+- exactly one outline element is present/visible;
+- the outlined node's id equals the id that a click then selects (this is the
+  property that actually matters — the highlight must not lie about the target).
+
+Sabotage-verify: with the single-target resolution removed, the count assertion
+must fail.
+
+* Non-goals
+
+Do not change the stamping rules, the ambiguity-dropping fix from W4R (a span
+claimed by two nodes is deliberately left unstamped rather than guessed), or the
+pick-mode listener lifecycle. This is a rendering fix in one file.
+
+* RESOLVED (2026-07-25, PLAN-113 W3.1)
+
+Fixed in CSS, in the one file the item named. The hover rule now excludes any
+stamped element that CONTAINS a hovered stamped element:
+
+: [data-st-node]:hover:not(:has([data-st-node]:hover))
+
+so exactly the INNERMOST stamped ancestor of the pointer draws — which is also the
+node `closest('[data-st-node]')` resolves for a click. The same guard is applied to
+the `@data` row rule so a row does not outline alongside its own field.
+
+No change to stamping, to W4R's ambiguity-dropping, or to the pick listener
+lifecycle, as the item required.
+
+** Test
+
+`stdlib/__inspector__/tests/pill.test.st` — a fixture nesting two stamped
+invocations asserts (a) exactly one node satisfies the draw predicate, and (b) that
+node is the one a click selects. The second assertion is the one that matters: a
+count alone would pass even if the single outlined node were the WRONG one, and a
+highlight that names a different node than the click lies about the gesture.

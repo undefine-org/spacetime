@@ -1,0 +1,64 @@
+#+TITLE: @on inside nested selector block hoists binding to the outer element (one click fires every nested handler)
+#+STATE: ITEM
+#+SESSION_ID: 1539989eb44441ea
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-22T09-34-26-513Z_1539989eb44441ea.jsonl]]
+#+CUSTOM_ID: BUG-206-on-inside-nested-selector-block-hoists-b
+
+* Initial Message
+
+we are going to work on the integration between Spacetime and Elixir. look at the match and the handle macros, and tell me hwo they are translated currently from and to Phoenix LiveView-like constructs, and how they ought to be. I would like the experience to be as seamless as possible: its own `src/` or `frontend` or sth to put the .st files like a proper project (most likely), and a $hosts file that files import (for now, just give them special enough names that importing them is fine).
+
+ok?
+
+* Surfaced by
+FEAT-137 (native live transport vertical, elixir/spacetime_lv/frontend/counter.st).
+
+* Symptom
+An `@on click { … }` inside a NESTED selector block does not bind to the nested
+selector's elements — the emitted `registerSelectorInit` targets the OUTER
+block's selector. With two siblings each carrying their own @on:
+
+#+begin_src spacetime
+.counter {
+  > .controls {
+    > button.inc { "+" @on click { $inc() } }
+    > button.dec { "−" @on click { $dec() } }
+  }
+}
+#+end_src
+
+…both handlers compiled to `registerSelectorInit('.counter', …)` with
+`delegateSelector = null`, so ONE click anywhere inside `.counter` bubbled to the
+outer element and fired BOTH mutations (server log: one click → HANDLE EVENT
+"inc" AND "dec"; the count never moved: +1 then −1).
+
+Also note: one nesting level that produces a compiled descendant selector works
+for OTHER surfaces — `> .value { text: $count; }` inside `.counter { }` correctly
+emits `querySelectorAll(".counter > .value")`. The hoist is specific to the @on
+event-binding lowering through nested selector blocks.
+
+* Expected
+The @on binding registers on the FULLY-RESOLVED nested selector
+(`.counter > .controls > button.inc`), exactly as a top-level compound selector
+block does today:
+
+#+begin_src spacetime
+.counter > .controls > button.inc { "+" @on click { $inc() } }
+#+end_src
+
+→ `registerSelectorInit('.counter > .controls > button.inc', …)` ✓ (verified:
+this is the workaround FEAT-137 shipped).
+
+* Reproduction
+1. Nested form above in any page; build; inspect the bundle: both inits register
+   on the outer selector.
+2. Click one button → both handlers fire (trace `signal:<name>:fire` events).
+
+* Workaround (shipped in counter.st)
+Keep @on in TOP-LEVEL selector blocks (compound selectors fine). Nested blocks
+remain safe for text:/style surfaces.
+
+* Suspected layer
+The @on/event-binding lowering's selector resolution for nested blocks (it loses
+the nested path and falls back to the enclosing block's selector), vs the
+text/style lowering which composes the full descendant path correctly.

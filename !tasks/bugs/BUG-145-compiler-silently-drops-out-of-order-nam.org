@@ -1,0 +1,174 @@
+#+TITLE: Compiler silently drops out-of-order named macro args (match_params lockstep bug)
+#+STATE: DONE
+#+SESSION_ID: 15219c677c4613e6
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-03T18-27-25-809Z_15219c677c4613e6.jsonl]]
+#+CUSTOM_ID: BUG-145-compiler-silently-drops-out-of-order-nam
+
+* Initial Message
+
+that video was not faithful at all. please give me an in-chat report of the full complete specs of the actual video with step-by-step instructions. it needs to be shape-exact
+
+* Symptom
+
+Calling a `%macro`/directive with named arguments in a DIFFERENT order than the
+macro's `%form` declares them silently drops the reordered args — the primitive
+receives its OWN DEFAULT instead of the caller's value. No compile error, no
+warning. Confirmed with `stdlib/3d`'s `@stage`:
+
+#+begin_src st
+@stage(camZ: 5.5, camY: 0, fov: 99, tone: "aces", exposure: 1.0) { … }
+#+end_src
+
+`%form` declares `fov` BEFORE `camZ`/`camY`. Because the call puts `camZ`/`camY`
+first, `fov: 99` binds to the WRONG lockstep slot and the primitive falls back to
+its default `fov: 50` — the whole scene renders at the wrong FOV with no error
+anywhere in the pipeline. Reordering the call to match declaration order
+(`fov: 99, ...camZ: 5.5...`) fixes it immediately, confirming the root cause.
+
+Also independently confirmed at `demos/3d/scroll-tunnel/index.st`'s
+`@object(... emissive: #7b2cff, emissiveIntensity: 1.6 ...)` — `emissiveIntensity`
+compiles to the primitive default `1`, not the authored `1.6`, because of
+argument-order mismatch vs `%object`'s declared param order. This is a
+LANGUAGE-WIDE defect, not specific to 3D — any macro call whose author writes
+named args out of %form-declaration-order silently loses those values.
+
+* Root cause (verified in source)
+
+`src/syntax/events/form_compiler.rs::match_params` (called from
+`PsrFormCompiler::match_param`, ~line 886-975) walks the macro's declared
+`params` list AND the call's token cursor IN LOCKSTEP:
+
+#+begin_src rust
+for (i, param) in params.iter().enumerate() {
+    cursor.skip_trivia();
+    if i > 0 { cursor.eat_kind(SyntaxKind::COMMA); }
+    self.match_param(param, cursor, ...)?;
+}
+#+end_src
+
+`match_param` then checks `cursor.peek_text(source) == Some(param.name)` — i.e.
+it expects the NEXT comma-separated token in the call to be THIS declared
+param's name. When the call supplies args out of order, that string comparison
+fails, and `match_param`'s fallback path (name-not-found → apply default) fires
+SILENTLY:
+
+#+begin_src rust
+} else {
+    // Named param not found in tokens — use default or skip
+    if let Some(default) = &param.default {
+        // ... insert CapturedValue::from_default(default) ...
+        return Ok(());
+    }
+    ...
+}
+#+end_src
+
+This is architecturally wrong for a NAMED-argument calling convention: named
+args should be matchable in ANY order (the whole point of naming them), but the
+matcher treats the call's arg list as if it were positional-with-labels,
+requiring the labels to appear in a fixed sequence.
+
+* Impact
+
+- Silent, not loud: no compiler error/warning anywhere — a scene builder can
+  spend hours tuning a param that has zero effect because the compiler is
+  quietly using the primitive's default instead.
+- Affects EVERY macro with >1 param where callers reorder named args — this is
+  extremely common (most authors don't memorize %form declaration order).
+- Discovered while building `projects/zellijist-2` (measured re-timing of a
+  reference video's zellige tile arc) — `@stage(camZ:…, camY:…, fov:…, tone:…,
+  exposure:…)` silently rendered at fov=50 instead of the authored fov=32,
+  which nearly derailed the whole visual-fidelity verification pass (the scene
+  was unusably washed out / wrong-framed with no error to point at).
+
+* Repro (minimal)
+
+#+begin_src st
+@import "stdlib/3d"
+body { margin: 0; }
+canvas.stage {
+  @stage(camZ: 42, fov: 77) {
+    @light(type: "ambient", intensity: 0.9)
+  }
+}
+#+end_src
+
+`three-stage`'s `%form` declares `fov` before `camZ`. Compiled output:
+`new THREE.PerspectiveCamera(50, 1, 0.1, 100)` — fov defaulted to 50, NOT 77.
+Reordering to `@stage(fov: 77, camZ: 42)` (matching `%form` order) fixes it:
+`new THREE.PerspectiveCamera(77, 1, 0.1, 100)`.
+
+* Fix direction (not yet implemented — filed for scheduling)
+
+`match_params`/`match_param` needs to become order-independent for NAMED args:
+scan ALL remaining un-consumed tokens in the arg list for a `name:` prefix
+matching each declared param (a proper unordered key lookup), rather than
+requiring the Nth token group to be the Nth declared param's name. Positional
+(unnamed) args can keep the lockstep/positional path — only named args need the
+order-independence fix. A targeted RED test: two `%form` params in declared
+order A,B; a call site with args in order B,A; assert BOTH captured values
+equal the call's (not the defaults).
+
+* Workaround (in use today)
+
+Author every macro/directive call with named args in the SAME ORDER the
+`%form` declares them. Verified reliable in `projects/zellijist-2/index.st`
+(`@stage`, `@env`, `@light`, `@tile-field` calls all reordered to match their
+`%form`s — params thread through correctly, confirmed via
+`inspect --layer expansion` + reading the compiled runtime.js output). This is
+brittle (any %form param reorder in stdlib silently breaks caller sites again)
+but unblocks work until the real fix lands.
+
+* Status
+
+OPEN — filed from projects/zellijist-2 build (FEAT-143 follow-on). Not
+scheduled. Recommend #A priority: this is a silent correctness bug in the core
+macro-call binding path, affecting all of stdlib, not a 3D-specific issue.
+
+* FIXED [2026-07-04]
+
+Root cause confirmed exactly as diagnosed: `src/syntax/events/form_compiler.rs::match_params`
+walked declared `%form` params and the call's ARG_LIST tokens IN LOCKSTEP, assuming the Nth
+declared param was the Nth comma-separated group in the call. Any named arg supplied out of
+declaration order silently fell back to that param's own default, with zero diagnostic.
+
+** Fix
+
+Rewrote `match_params` as two passes over the SAME top-level (bracket-depth-0)
+comma-separated token groups (new helper `split_top_level_groups`, depth-aware so a comma
+inside a nested call/array/object literal doesn't split its enclosing group):
+
+1. *Named pass*: every declared param with a non-empty `name` searches ALL groups (any
+   position) for the one whose leading token equals that name, and binds from it — order
+   is now irrelevant. A claimed group is EXCISED from the pool so nothing double-binds.
+2. *Unnamed/positional pass*: whatever groups the named pass didn't claim are REFLOWED back
+   into one contiguous token stream (rejoined with a REAL comma token borrowed from the
+   original call — not a synthetic zero-width one, which a first attempt got wrong and broke
+   `param_list`-style captures that match a comma by TEXT, not just SyntaxKind), and the
+   ORIGINAL lockstep matcher runs over that unmodified for the unnamed params, in their
+   declared order. This preserves `@each`'s exact shape (`source`/`item` positional, `key:`
+   named, THEN an unnamed literal-prefixed `when $filter:expr` — proving the naive
+   "positional-prefix, named-suffix" assumption a first draft made was WRONG; no declared
+   %form is that simple, so the fix had to be genuinely name-independent of position, not
+   just "handle a fixed prefix/suffix split").
+
+** Verification
+
+- 4 new unit tests in `form_compiler.rs` (`bug145_*`), including the EXACT `@stage`-shaped
+  repro from this bug's own filing (`camZ` before `fov` in the call, `fov` before `camZ` in
+  the declaration) — all green.
+- Full `cargo test --lib`: 2520/2525 pass. The 5 residual failures are confirmed, via
+  isolated `git stash` bisection (stashing ONLY `form_compiler.rs` and re-running), to be
+  100% pre-existing and unrelated: another concurrent session's UNCOMMITTED changes
+  (`public/runtime/templates.js` BUG-131 fix baked into 5 snapshot fixtures; an `E0929`
+  diagnostic addition in `src/parser/mod.rs` correctly flagging a stale test fixture's
+  invalid `$label: string` colon syntax in 4 `template_refs` integration tests). Confirmed
+  by running with `form_compiler.rs` alone reverted to baseline (all other uncommitted files
+  left in place): the exact same 9 failures persist unchanged — proving zero relation to
+  this fix.
+- `cargo check` clean throughout (only pre-existing unrelated warnings).
+
+** Files changed
+
+`src/syntax/events/form_compiler.rs` only — `match_params` rewritten, `split_top_level_groups`
+added, 4 new tests.

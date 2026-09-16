@@ -1,0 +1,189 @@
+#+TITLE: Spacetime App Platform — declarative schema-driven apps
+#+STATE: DOING
+#+SESSION_ID: 14fc108ed3772fa8
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-04T14-32-37-965Z_14fc108ed3772fa8.jsonl]]
+#+CUSTOM_ID: PLAN-030-spacetime-app-platform-declarative-schem
+
+* Goal
+Make Spacetime able to express a real schema-driven app (the CMS admin) multi-file
+and DECLARATIVELY, eliminating the hand-written JS monolith. Acceptance proof:
+=stdlib/__admin__/admin-app.st= (today ONE %primitive with a single ~1330-line
+%emit js block, lines 19-1348) is replaced by a multi-file Spacetime tree where
+only a tiny WebSocket-bridge primitive keeps %emit js.
+
+* Design refs
+- [[file:../../@research/spacetime-app-platform.org]] — construct list + file hierarchy
+- [[file:../../@research/spacetime-editable-spec.org]] — @editable multi-phase spec
+- [[file:../../@research/template-component-model.org]] — prior component-model design (PROJ-101..109)
+
+* VERIFIED ground truth (2026-06-06, by reading EMITTED JS, not check exit codes)
+CRITICAL METHODOLOGY (binding for every agent on this plan): =cargo run -- check=
+passing proves NOTHING. Unrecognized constructs inside a template body are SWALLOWED
+into the template's =html= field as literal text and silently no-op. A fixture is GREEN
+only when its EMITTED JS is asserted (unit/snapshot/V8/headless), never on check exit
+alone. Reviewers MUST reject any "it compiles" evidence.
+
+| Claim (docs/notes)           | Verified reality                                              |
+|------------------------------+--------------------------------------------------------------|
+| check passes ⇒ works         | FALSE — unknown constructs swallowed into html field          |
+| scoped state DONE (1-line)   | FALSE — state-before-HTML ⇒ html:"" + directives:[] (dropped) |
+| scoped state multiline       | BROKEN — E0806 "undefined state variable" (same root bug)    |
+| dynamic dispatch &$w()        | ABSENT — swallowed as html text, zero codegen                |
+| recursion &self()             | ABSENT — swallowed as html text                              |
+| @match as render              | ABSENT — swallowed as html text                              |
+| [slot]<-$x in body            | PARSE ERROR "expected '{' after selector"                    |
+| @exports / &x &c() / &x.$count| parse + some runtime exists; UNTRUSTED until emitted-JS audit |
+| @bind blast radius            | 20 files, 68 occurrences                                     |
+
+* Root cause (single keystone)
+=parse_component_body()= (=src/syntax/events/form_compiler.rs:1701=) segments template
+bodies with LINE-ORIENTED first-token heuristics instead of the brace/tag-aware
+tokenizer used elsewhere. Once a state decl is seen, subsequent HTML is mis-segmented
+and lost; multiline desyncs =html_tag_depth=; unrecognized constructs fall through into
+the HTML string. This one parser is why the component model "exists" on paper but
+collapses on any real component — and thus why the admin is still hand-written JS.
+Tracked as [[id:BUG-059-parse-component-body-drops-html-after-st]].
+
+* Decisions (user-confirmed 2026-06-06)
+- Dispatch (#4): BOTH =&$expr(args)= value-named invocation AND =@match $x { v => &t(..) }=
+  render form; @match LOWERS to dispatch. Most general. Implemented in Spacetime
+  (stdlib macros + meta-compiler capture), extending the meta-compiler as needed.
+- Kill @bind (#2): HARD cutover. Replace all 68 uses across 20 files with : / <- and
+  DELETE @bind/@show/@input/@if-block macros in the same wave. No back-compat.
+- @editable (#10): its own multi-phase plan [[id:PLAN-031-editable-structured-rich-text-input-mult]];
+  marks/blocks are &elem-ref fns.
+- Scope: write all !tasks/ files (DONE), then implement FEAT-071..076 + admin rebuild.
+
+* =========================================================================
+* EXECUTION MODEL — main-thread orchestration + swarm review between waves
+* =========================================================================
+The architectural/keystone work is done ON THE MAIN THREAD (this orchestrator), because
+it is deep, cross-cutting, and not safely parallelizable. Implementation waves alternate
+with REVIEW waves. Unlimited time budget — correctness and taste over speed.
+
+** Roles
+- *Main thread (orchestrator)*: owns the keystone (BUG-059) and every architectural
+  decision; writes the load-bearing parser/codegen changes; runs the global gates;
+  drives the cutover. Does NOT hand the architecture to subagents.
+- *Reviewer swarm*: between each implementation wave (I-wave) and before the next, a set
+  of PARALLEL reviewer subagents (agent type =reviewer=) audit the wave's diff.
+
+** The alternating cadence (MANDATORY between every pair of I-waves)
+For each wave N:
+1. *I-wave N*: main thread implements wave N's FEAT/BUG to its acceptance criteria,
+   asserting EMITTED JS (never check-only). Commit.
+2. *R-wave N* (swarm): dispatch parallel reviewer subagents over the wave-N diff. Each
+   reviewer has a distinct lens (below). Reviewers may FILE new BUG/FEAT items
+   (bugs/, features/) AND propose fixes. Unlimited budget — review until the diff is
+   clean, not until a timer.
+3. *Triage + mid-flight fix*: main thread reads all reviewer findings, files/links any
+   new BUG/FEAT under PLAN-030, and FIXES them mid-flight (inline if small; as a linked
+   BUG resolved before the next wave if larger). No wave N+1 starts until R-wave N's
+   findings are resolved or explicitly deferred with a linked item.
+4. Re-run global gates. Commit. Proceed to I-wave N+1.
+
+** Reviewer lenses (dispatch in parallel each R-wave; scope each to ≤3-5 files of the diff)
+- *codegen-truth*: does the EMITTED JS actually implement the construct? Re-build the
+  wave's fixtures, read dist/spacetime.js, reject any swallowed-into-html no-ops.
+- *parser-edge*: feed adversarial bodies (R1-R3 + the BUG-059 edge-case list) and confirm
+  segmentation holds; hunt new desync/swallow regressions.
+- *test-rigor*: are tests asserting emitted JS + DOM behavior, or just check/compile?
+  Flag every check-only green. Confirm negative gates (deliberately-false test FAILS).
+- *DRY/architecture*: duplication, leaky abstractions, parallel implementations; does the
+  change reduce cognitive load and compose with existing constructs (AGENTS.md).
+- *cutover-completeness*: for deletion waves (e.g. @bind kill), confirm ZERO residue via
+  repo grep invariants; no dead macros, no stragglers.
+- *regression*: full insta/snapshot audit — every diff is intended reactive-arc/emit,
+  no stale or accidental snapshot churn.
+
+** Reviewer output contract
+Each reviewer returns findings as {file, line, severity, what, why, fix, effort}. Main
+thread converts each actionable finding into a bugs/BUG-NNN or features/FEAT-NNN linked
+to PLAN-030 and to the originating wave, then resolves it before advancing.
+
+* Execution waves (each = I-wave then R-wave then triage/fix then gates)
+- Wave 0 — KEYSTONE [[id:BUG-059-parse-component-body-drops-html-after-st]] (main thread)
+- Wave 1 — [[id:FEAT-071-scoped-state-codegen-emit-html-states-di]]
+           (+ run [[id:FUP-037-audit-emitted-js-of-exports-ref-cards-be]] here)
+- Wave 2 — [[id:FEAT-072-reactive-properties-lt-as-sole-surface-h]]
+- Wave 3 — [[id:FEAT-073-composition-dynamic-dispatch-ampexpr-mat]]
+- Wave 4 — [[id:FEAT-074-app-shell-view-portal-effect-orchestrati]]
+- Wave 5 — [[id:FEAT-075-mutable-collections-data-collection-via]]
+- Wave 6 — [[id:FEAT-076-rebuild-the-cms-admin-multi-file-the-pro]] (the proof)
+- Parallel — [[id:PLAN-031-editable-structured-rich-text-input-mult]] (@editable)
+
+* Global gates (every wave ends green on ALL — reviewers verify, not just main thread)
+- cargo test --lib
+- cargo test --test integration_tests
+- cargo test --test v8_runtime_test
+- cargo run --features headless -- test tests/ --headless
+- A real site served and verified in-browser (not just check)
+- Emitted-JS asserted for every new construct (no check-only greens)
+
+* Status log
+- 2026-06-06: PLAN + all children written (BUG-059, FEAT-071..076, PLAN-031, FUP-037).
+  Ground truth verified by reading emitted JS. Starting Wave 0 (keystone) on main thread.
+
+* R-WAVE 0/1 (reviewer swarm, 2026-06-07)
+Dispatched 2 parallel reviewer subagents over commits c84559b4..HEAD (BUG-059 +
+FEAT-071). Findings + main-thread remediation (commit 80a37483):
+
+- *P1 CRITICAL (ReviewSegmenterCorrectness, conf 0.92)*: behavior block mixing @on
+  with sibling class-toggle/property/content bindings silently dropped the siblings
+  (handled_on guard). FIXED: single segmentation-pass dispatch capturing all inner
+  constructs; tightened classify_construct_start $-arm (expression value vs decl) +
+  decl head bounded at newline. Regression test added.
+- *P3 DRY (ReviewRuntimeAndCstAndArchitecture, conf 0.88)*: triplicated selector
+  ternary in template.st. FIXED: extracted resolveScoped() helper.
+- *P3 loud->silent (conf 0.74)*: no-space [slot]<-$x swallowed to html. FIXED:
+  whitespace-tolerant split_arrow(); routing guards match "<-".
+
+Reviewer verdict on the rest: segmenter robust across an extensive adversarial set
+(quoted attrs with {}/</;/<-, a<b text, void/nested elements, multiple @on, string
+defaults, ${} interpolation, dotted paths, @exports); CST [attr]<- change + matches-
+aware selector resolution behaviorally sound (descendant selectors still bind to
+descendants — no silent @on rebind). No critical issues beyond P1.
+
+Gates after remediation: lib 2131/0, integration 162/0, v8 298/12 (12 pre-existing
+media, BUG-039). Wave 0 + Wave 1 DONE + reviewed.
+
+* PRE-EXISTING FAILURE CLEANUP (parallel, 2026-06-07)
+- BUG-038 (lib 8 failures): root cause was NOT stale snapshots but a duplicate
+  `%macro wait-for` (automation.st vs test.st) poisoning the shared registry (E0812).
+  Renamed to wait-for-appears. lib 8->0. State REVIEW.
+- BUG-039 (v8 12 failures): root-caused (media primitive's dead %emit css path +
+  unparenthesised matchMedia query). Orthogonal to PLAN-030; deferred with full
+  diagnosis. Excluded from wave gates.
+
+* SESSION CHECKPOINT (2026-06-08) — keystone renderer + FEAT-073 done; O2 cutover in progress
+
+** Shipped this session (all reviewer-hardened, gates green)
+- FEAT-077 reactive HtmlExpr->DOM renderer (THE keystone, completes PLAN-023 W3/W4):
+  emit_builder lowers HtmlExpr -> reactive JS DOM builder (text/attr/&element holes,
+  Element/Global scope). Templates render via it; PARAMS reactive (strict upgrade);
+  &param element subst; multi-root via display:contents; element-params threaded from
+  :param_list. 2 reviewer swarms (6 findings fixed). Fleet (unkn 17pg, ora-ventures
+  &links/&body) builds. Sub-waves 1-3 + &param DONE.
+- FEAT-073 composition COMPLETE: &$expr dispatch (grammar ext + .st), recursion (depth
+  guard .st), @match (PURE stdlib %capture_type grammar + generic engine + reifier + .st
+  runtime). Multi-token literals (B-Wave 1) unblocked it. Malformed @match now diagnoses
+  (E0922) + body-diagnostics bridge (fixes broader silent-swallow).
+- BUG-038 (lib 8->0), BUG-059 keystone, FEAT-071 scoped state \u2014 all earlier this session.
+
+** Known debt (tracked)
+- BUG-060: Rust still special-cases @match (reifier/structs/branch). DEFERRED to Phase B
+  with HARD exit gate: zero \"@match\"/ComponentMatch/MatchArm in src/ by Phase B end.
+- BUG-039: 12 v8 media failures (pre-existing, orthogonal, diagnosed).
+
+** Remaining for full O2 (each its own wave + swarm)
+1. File-scope HTML -> reactive builder (Global scope; needs hydration mode for SSG DOM).
+2. @each + HtmlExpr per-item builder (PLAN-023 W4 remaining).
+3. CUTOVER: delete factory regex interpolation + SSG emit_hole (currently fallback-only).
+4. Phase B: component_body self-describing (retires parse_component_body per-construct Rust
+   + the @match special-case per BUG-060). The proper full cutover.
+5. FEAT-072 (kill @bind), FEAT-074/075/076 (app shell / mutable collections / admin rebuild).
+
+** Gates (session end): lib 2151/0, integration 162/0, v8 308/12 (pre-existing) +10 ignored,
+headless 355/254 (pre-existing baseline, zero regressions). ~20 commits.
+
+NOTE [2026-06-09]: Killer-feature progress (this autonomous session): FEAT-072 (kill @bind → :/<- sole reactive surface) DONE; FEAT-074 (app shell @view/@portal/@effect) DONE; FEAT-075 (@data collection mutable arrays w/ optimistic CRUD+revert) DONE. Plus BUG-068 (selector-scope class toggle), BUG-071 (selector-scope <- injection), FUP-039 (file-scope hydration + SSG export) closed. Each RED-first, V8/browser-verified, reviewer-swarm-audited, fixes applied mid-flight. Gates now FULLY GREEN: lib 2158/0, integration 168/0, v8 333/12 (12 = pre-existing BUG-039 media/selector cluster, orthogonal). REMAINING: FEAT-076 (admin rebuild — the acceptance PROOF, rebuild the 1349-line %emit js monolith as a declarative multi-file tree using all platform constructs; ~20 files; depends on all of 071-075 which are now solid) + PLAN-031 (@editable rich-text, separate track). The platform constructs are all in place; FEAT-076 is the integration capstone that proves feature parity with zero hand-written UI JS.

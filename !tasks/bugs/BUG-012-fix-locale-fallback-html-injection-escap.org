@@ -1,0 +1,218 @@
+#+TITLE: Fix locale fallback HTML injection escaped quotes double compile missing test
+#+STATE: DONE
+#+SESSION_ID: 14aef9c617fc29ee
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-04-05T17-30-02-719Z_14aef9c617fc29ee.jsonl]]
+#+CUSTOM_ID: BUG-012-fix-locale-fallback-html-injection-escap
+#+EFFORT: S
+#+PRIORITY: #A
+#+LAYER: server
+
+NOTE [2026-04-05]: Fixed: replaced compile_from_site + get_or_compile double compilation with single get_or_compile call; fixed escaped quotes in 3 raw string blocks; removed dead compile_from_site function; added test_locale_fallback_inject_no_escaped_quotes test. All 20 server tests pass.
+
+* Initial Message
+
+Run a full audit of the ora-ventures.com/ website at localhost:9416. A lot of stuff is broken. Please be thorough and list the issues.
+
+* Problem
+
+The locale fallback path in =try_serve_locale= (=src/server.rs=, the =if compiled.build_scripts.is_empty()= branch starting ~line 615) has three issues:
+
+** Issue 1: Escaped quotes in raw strings produce broken HTML (Critical)
+
+The =validation_inject=, =debugger_inject=, and =spacetime_inject= format strings use =r#"..."#= raw strings (correct), but contain =\"  inside them (wrong). In Rust raw strings, =\\\"= is literal — it emits a backslash followed by a quote. This produces broken HTML:
+
+#+begin_example
+<link rel=\"stylesheet\" href=\"/__spacetime/dev/styles.css\" />
+#+end_example
+
+instead of the correct:
+
+#+begin_example
+<link rel="stylesheet" href="/__spacetime/dev/styles.css" />
+#+end_example
+
+Affected lines (current offsets, may shift slightly):
+- Line ~664: =<script src=\"/__spacetime/validation-ui.js\"></script>=
+- Lines ~675-676: =<link rel=\"stylesheet\"...= and =<script src=\"...=
+- Lines ~691-692: =<link rel=\"stylesheet\"...= and =<script src=\"...=
+
+Every other injection path in the same file uses unescaped quotes in =r#"..."#= raw strings. See lines 781-797 for the correct pattern to copy.
+
+** Issue 2: Double compilation of .st file
+
+Line 605 calls =compile_from_site()= to get =compiled= and check =build_scripts.is_empty()=. Then line 642 calls =get_or_compile()= to get diagnostics. These are two separate compilations of the same .st file.
+
+=get_or_compile()= returns =(CompiledSpacetime, Vec<ValidationDiagnostic>, bool)=. It should be used from the start, replacing =compile_from_site()=.
+
+** Issue 3: No test coverage for locale fallback injection
+
+The 19 server tests cover provenance injection, dev tools ordering, and debugger toggle — but none test the locale fallback injection path. The escaped-quotes bug would be caught by any basic test.
+
+* Implementation
+
+** File: =src/server.rs=
+
+*** Step 1: Replace double compilation with single =get_or_compile= call
+
+Replace lines ~604-655 (the =compile_from_site()= call through the =diagnostics_json= block) with:
+
+#+begin_src rust
+// Compile (or get from cache)
+let (compiled, diagnostics, _has_errors) = get_or_compile(
+    &st_path,
+    site_dir,
+    trace,
+    debug_config,
+    cache_stdlib,
+    compile_cache,
+    dev_compile_cache,
+)
+.ok()?;
+
+if compiled.build_scripts.is_empty() {
+    let mut content = std::fs::read_to_string(&html_path).ok()?;
+
+    if debug {
+        content = inject_content_provenance(&content, &base_html);
+    }
+
+    // Locale-aware base href so relative paths resolve from root
+    if let Some(pos) = content.find("<head>") {
+        content.insert_str(
+            pos + "<head>".len(),
+            &format!("
+    <base href=\"/{}/\">", prefix),
+        );
+    }
+
+    // FOUC prevention
+    if let Some(pos) = content.find("</head>") {
+        let fouc_inject = r#"
+    <!-- Spacetime FOUC Prevention -->
+    <style>:not(:defined){visibility:hidden}</style>
+"#;
+        content.insert_str(pos, fouc_inject);
+    }
+
+    let diagnostics_json = if !diagnostics.is_empty() {
+        serde_json::to_string(&diagnostics).unwrap_or_default()
+    } else {
+        String::new()
+    };
+#+end_src
+
+*** Step 2: Fix escaped quotes in raw strings
+
+In the same =build_scripts.is_empty()= branch, fix all =r#"..."#= raw strings to use plain ="= instead of =\"=. Copy the exact pattern from the working path at lines 778-820. The corrected blocks should look like:
+
+#+begin_src rust
+let validation_inject = if !diagnostics_json.is_empty() {
+    format!(
+        r#"
+    <!-- Spacetime Validation -->
+    <script>window.__SPACETIME_DIAGNOSTICS__ = {};</script>
+    <script src="/__spacetime/validation-ui.js"></script>
+"#,
+        diagnostics_json
+    )
+} else {
+    String::new()
+};
+
+let debugger_inject = if debug_config.map_or(false, |c| c.enabled && c.show_panel) {
+    r#"
+    <!-- Spacetime Dev Tools -->
+    <link rel="stylesheet" href="/__spacetime/dev/styles.css" />
+    <script src="/__spacetime/dev/runtime.js"></script>
+"#
+    .to_string()
+} else {
+    String::new()
+};
+
+// ... entry_param ...
+
+let spacetime_inject = format!(
+    r#"
+    {}<!-- Spacetime Runtime -->
+    <link rel="stylesheet" href="/__spacetime/styles.css?entry={}" />
+    <script src="/__spacetime/runtime.js?entry={}"></script>
+    {}{}
+"#,
+    debugger_inject, entry_param, entry_param, validation_inject, LIVE_RELOAD_SCRIPT
+);
+#+end_src
+
+*** Step 3: Add locale fallback injection test
+
+Add to the =mod tests= block at the bottom of =src/server.rs= (the =#[cfg(test)] mod tests= starting ~line 3037):
+
+#+begin_src rust
+#[test]
+fn test_locale_fallback_inject_no_escaped_quotes() {
+    // Simulate the locale fallback injection (same format strings as try_serve_locale
+    // when build_scripts is empty)
+    let diagnostics_json = r#"[{"message":"test"}]"#;
+    let validation_inject = format!(
+        r#"
+    <!-- Spacetime Validation -->
+    <script>window.__SPACETIME_DIAGNOSTICS__ = {};</script>
+    <script src="/__spacetime/validation-ui.js"></script>
+"#,
+        diagnostics_json
+    );
+
+    let debugger_inject = r#"
+    <!-- Spacetime Dev Tools -->
+    <link rel="stylesheet" href="/__spacetime/dev/styles.css" />
+    <script src="/__spacetime/dev/runtime.js"></script>
+"#
+    .to_string();
+
+    let entry_param = "index.st";
+    let spacetime_inject = format!(
+        r#"
+    {}<!-- Spacetime Runtime -->
+    <link rel="stylesheet" href="/__spacetime/styles.css?entry={}" />
+    <script src="/__spacetime/runtime.js?entry={}"></script>
+    {}{}
+"#,
+        debugger_inject, entry_param, entry_param, validation_inject, LIVE_RELOAD_SCRIPT
+    );
+
+    // No literal backslash-quote sequences in the output
+    assert!(
+        !spacetime_inject.contains(r#"\""#),
+        "Output must not contain escaped quotes. Got: {}",
+        spacetime_inject
+    );
+    // Valid HTML attribute quotes
+    assert!(
+        spacetime_inject.contains(r#"rel="stylesheet""#),
+        "Must contain valid rel attribute"
+    );
+    assert!(
+        spacetime_inject.contains("runtime.js"),
+        "Must contain runtime script"
+    );
+    assert!(
+        spacetime_inject.contains("validation-ui.js"),
+        "Must contain validation script when diagnostics present"
+    );
+    assert!(
+        spacetime_inject.contains("dev/runtime.js"),
+        "Must contain dev tools when debug enabled"
+    );
+}
+#+end_src
+
+* Edge Cases
+- The =format!("
+    <base href=\"/{}/\">", prefix)= on line ~628 uses a regular string (not raw), so =\\\"= correctly produces ="=. Do NOT change this line.
+- =LIVE_RELOAD_SCRIPT= is a const defined elsewhere; verify it's accessible in test context (it's in =super::*=).
+
+* Acceptance Criteria
+1. =cargo test --lib -- server::tests::test_locale_fallback_inject_no_escaped_quotes= passes
+2. =cargo test --lib -- server::tests= — all 20 tests pass (19 existing + 1 new)
+3. Manual spot-check: read the locale fallback branch and confirm no =\\\"= remains inside any =r#"..."#= raw string
+4. =compile_from_site= is no longer called from =try_serve_locale= — only =get_or_compile=

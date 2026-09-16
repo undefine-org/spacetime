@@ -1,0 +1,44 @@
+#+TITLE: animate-color primitive calls ST.lerpColor, which does not exist in the runtime (TypeError on tick)
+#+STATE: DONE
+#+SESSION_ID: 153497c78a510229
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-18T12-18-21-865Z_153497c78a510229.jsonl]]
+#+CUSTOM_ID: BUG-202-animate-color-primitive-calls-st-lerpcol
+#+COMPLETION_HASH: a99caed53cf14cc4
+
+* Initial Message
+
+continue
+
+* Found by
+BUG-192 fix agent (PLAN-078 wave 3, 2026-07-19) while routing the animation
+engine's color interpolation through the runtime OKLCH-first parsers.
+
+* Symptom
+stdlib/primitives/animation/animate.st L116 (%primitive animate-color)
+calls `ST.lerpColor(fromColor, toColor, p, '%colorSpace')` — but
+public/runtime/color.js exposes only ST.parseColor, ST.interpolateColor,
+and ST.interpolateColorRgb. `ST.lerpColor` does not exist, so any use of
+animate-color throws a runtime TypeError when the animation ticks.
+
+* Fix direction
+Route animate-color through ST.interpolateColor(c1, c2, t) /
+ST.interpolateColorRgb (honoring its colorSpace param the same way
+apply-animations.st now does post-BUG-192), or alias ST.lerpColor =
+ST.interpolateColor in color.js if the signature matches. Prefer the former
+(one interpolation API, harmony). Add a small .test.st pin exercising
+animate-color so the gap can't regress silently.
+
+* Related
+BUG-192 (the oklch parser fix that surfaced it), PLAN-078.
+
+NOTE [2026-08-02]: FIXED + GATED 2026-07-31, commit 6de67b4e (first step of FUP-160).
+
+Confirmed live before fixing: `ST.lerpColor` appears in exactly one place in the repo (stdlib/primitives/animation/animate.st:117) and is defined in NONE — not in any dist bundle, not in public/runtime/st.js, not in any example runtime. Every tick of animate-color threw a TypeError and the animation silently did nothing. No caller exists anywhere in stdlib/tests/demos/examples, which is why it stayed latent; found by reading, not by failing.
+
+Fix: dispatch by colour SPACE across the two entry points that actually exist — `ST.interpolateColor` (OKLCH) and `ST.interpolateColorRgb` (sRGB) — which is precisely what the keyframe path already does at stdlib/primitives/animation/interpolate.st:76-84 and apply-animations.st:186-192. The change is not "call a different function": it makes the fourth colour-blending site use the SAME rule as the other three. A per-primitive spelling is how this one drifted into naming a function nobody wrote. Also added a null guard so an unparseable endpoint skips the tick rather than assigning `null` to a style property.
+
+Gate: tests/unit/animation/color-interpolation.test.st, 4 headless tests, all green. It asserts the API surface exists AND that `ST.lerpColor` is `undefined` — the negative assertion is the one that would have caught this bug, since the positive half was always true. Plus: endpoints differ, midpoints differ from both ends in BOTH spaces (a blend that silently returns an endpoint is the failure mode a weaker test would miss), and a malformed colour yields null rather than throwing.
+
+Discovered en route: BUG-254 (a multi-line object literal inside `@eval` truncates at the first `key:` and emits broken JS). The test uses scalar globals to avoid it, documented in its header rather than left as folklore.
+
+REMAINING (FUP-160 proper, blocked on FEAT-165): move this dispatch into a `%scalar_type interpolate:` column so the runtime reads the lerp from the registry — colour→OKLCH, length→unit-compatibility check, angle→shortest-arc, keyword→discrete snap — so adding a new animatable type stops meaning "write a new primitive". This commit fixes the live break and pins the contract that table will absorb.

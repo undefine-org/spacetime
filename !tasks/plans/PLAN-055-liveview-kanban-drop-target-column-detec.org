@@ -1,0 +1,81 @@
+#+TITLE: liveview-kanban: drop-target column detection (on-drop $.closest('.col') always returns source)
+#+STATE: DONE
+#+SESSION_ID: 1511009590860ad7
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-20T20-50-56-706Z_1511009590860ad7.jsonl]]
+#+CUSTOM_ID: PLAN-055-liveview-kanban-drop-target-column-detec
+
+* Initial Message
+
+why is drag and drop not even being triggered in @demos/liveview-kanban/
+
+* Follow-up from PLAN-053
+
+With PLAN-053, dragging a kanban card now FIRES `$move` on drop (the trigger bug
+is fixed). But the payload's `to` column is wrong: the drop always reports the
+card's SOURCE column, not the column it was dropped over.
+
+** Cause
+demos/liveview-kanban/index.st on-drop:
+  on-drop: $move({ card: $.dataset.id, to: $.closest('.col').dataset.col })
+
+`@drag` uses a CSS transform to move the card (it does NOT reparent the DOM
+node). So at drop time `$` (the dragged card) is still a DOM child of its
+original `.col`, and `$.closest('.col')` returns the SOURCE column regardless of
+where the cursor released. Observed: drag c1 (todo) onto the Done column →
+fires `{card:"c1", to:"todo"}` instead of `to:"done"`.
+
+** Fix options
+1. Hit-test at drop: resolve the target column from the release POINT
+   (document.elementFromPoint(x, y).closest('.col')) rather than the dragged
+   node's ancestor. Needs the drop coords exposed to the on-drop action (the
+   gesture has $finalVelocity but not release x/y as a column resolver).
+2. A drop-zone abstraction: columns register as @drop targets; the drag resolves
+   the hovered zone. (Larger — a new macro surface.)
+
+Option 1 is the minimal fix and likely wants the gesture/drag macro to expose
+the release client coords (or a resolved `$dropTarget`) to the on-drop action.
+
+** Depends on
+This is most natural AFTER PLAN-054 (%animates), since a reparenting/zone model
+may change how the card's position maps to a column.
+
+** Acceptance
+Dragging a card onto a different column fires `$move` with `to` = the column
+under the release point. Headless can assert via a stubbed elementFromPoint;
+CDP can assert with real geometry.
+
+Files: demos/liveview-kanban/index.st, possibly stdlib/macros/drag.st +
+stdlib/primitives/gesture.st (expose release coords).
+
+* RESOLUTION (DONE)
+
+The @drag on-drop now resolves the drop target from the RELEASE POINT, not the
+card's source ancestor.
+
+** Gesture release coords (stdlib/primitives/gesture.st)
+- onPointerUp yields $dropX/$dropY (viewport coords at release) BEFORE
+  $active -> false, so a drop handler watching that transition sees them set
+  when it runs. Added to %exports. $active is now yielded LAST.
+
+** Runtime helper (public/runtime/st.js)
+- ST.dropTarget(el, selector): reads el's $dropX/$dropY, makes el
+  pointer-transparent, document.elementFromPoint(x, y), restores pointerEvents,
+  returns the topmost element's nearest `selector` ancestor (or null). The
+  pointer-transparency is what lets the element BELOW the dragged card be found.
+
+** Demo (demos/liveview-kanban/index.st)
+- on-drop now: `to: (ST.dropTarget($, '.col') || $.closest('.col')).dataset.col`
+  — hit-test the release point, fall back to the source column when released
+  outside any column (so `to` is never undefined and the action never throws).
+
+** Verification
+- Live demo: drag c1 (todo) onto Done -> fires $move {card:"c1", to:"done"};
+  onto Doing -> to:"doing"; off-target -> falls back to source. CONFIRMED.
+- Tests: drop-target.test.st (4, headless w/ mocked elementFromPoint: resolves
+  zone, null when no coords, null off-target, hides dragged el during hit-test),
+  drag-on-drop release-coords yield (1). Full lib + integration green.
+
+** Follow-up filed
+- PLAN-056: the --cdp (Chromium) test backend harness never loads in this env
+  (known-good tests fail too), so a REAL geometric hit-test test is blocked;
+  covered here by a LinkeDOM mock + the live demo until CDP is fixed.

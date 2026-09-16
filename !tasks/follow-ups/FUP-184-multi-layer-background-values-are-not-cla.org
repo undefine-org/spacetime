@@ -1,0 +1,169 @@
+#+TITLE: Multi-layer background values are not claimed by background_route
+#+STATE: DONE
+#+CUSTOM_ID: FUP-184-multi-layer-background-values-are-not-cla
+#+PARENT: BUG-279
+
+* Context
+
+BUG-279 (fixed, =03f6b8a1=) made a reactive `background:` route to the longhand
+its VALUE belongs to, so an inline shorthand stops resetting the static
+longhands the author wrote beside it. The routing table is a GRAMMAR, not Rust:
+
+#+begin_src st
+%capture_type background_route {
+    ( $background_image:image_core ) | ( $background_color:color_core )
+}
+#+end_src
+
+Each arm is a value kind; the arm's capture NAME is the longhand to apply.
+
+* What is not claimed
+
+`image_core` matches ONE image. CSS allows a comma-separated LAYER LIST:
+
+#+begin_src css
+background: url("noise.png"), linear-gradient(red, blue);
+/*            ^ top layer      ^ bottom layer            */
+#+end_src
+
+A two-layer value matches NEITHER arm, so it falls through unrouted and stays a
+`background` shorthand — i.e. the original BUG-279 symptom, for that one input
+shape.
+
+** This is safe, not broken
+
+The router only ever NARROWS a value it can positively identify. Anything it
+cannot recognise behaves exactly as it did before BUG-279. Nothing regressed;
+there is a shape it does not yet rescue. Same class as `inherit` and a bare
+`$sig`, which fall through DELIBERATELY and must keep doing so (see BUG-279
+"Falls through" table — do not "fix" those while here).
+
+* The change
+
+One production in =stdlib/capture-types/css-values.st=:
+
+#+begin_src st
+%capture_type image_list {
+    $first:image_core ( "," $rest:image_core )*
+}
+#+end_src
+
+then swap the arm:
+
+#+begin_src st
+%capture_type background_route {
+    ( $background_image:image_list ) | ( $background_color:color_core )
+}
+#+end_src
+
+NO Rust. `route_reactive_shorthand` (src/compiler.rs) asks the grammar and reads
+the matched arm's name; changing the grammar changes the answer. If this needs a
+compiler edit, something is wrong — stop and re-read the seam.
+
+* Two things to get right
+
+1. *Commas inside functions must not split layers.* `linear-gradient(red, blue)`
+   contains a comma but is ONE image. `image_core` uses `balanced(')')`, which
+   consumes to the matching close-paren, so the inner comma is eaten before the
+   list separator is considered. Verified empirically on the live matcher during
+   BUG-279 (nesting `rgb(calc(1 + 2), 2, 3)` and holes `rgb($brand.r, 2, 3)`
+   both consume correctly) — but re-probe rather than trust this note.
+
+2. *Layer COUNT must line up.* If a page sets 3 image layers and a static
+   `background-position` lists 3 positions, routing to `background-image`
+   preserves them. That is the intent — but it is a claim, and a claim needs a
+   browser to be true.
+
+* Gate (non-negotiable — AGENTS.md, BUG-252)
+
+This feature's job is to change what a browser RENDERS, so it needs a `--cdp`
+test. Asserting the compiler emitted a string proves a string was written.
+
+#+begin_src sh
+cargo run --features cdp -- test tests/bugs/BUG-279-reactive-background-shorthand-resets-longhands.test.st --cdp
+#+end_src
+
+Add a multi-layer case to that file, WATCH IT FAIL FIRST, then change the
+grammar. Include a NEGATIVE: the layers must still RENDER (else the longhands
+survive for the wrong reason — because nothing was applied at all).
+
+WARNING: under `--headless` these claims are SKIPPED and the run still exits 0.
+Measured on this exact file: `0 passed, 0 failed, 4 skipped` → exit 0. A dead
+file reads exactly like a green one. Only a seen-to-fail `--cdp` run is proof.
+
+* Why deferred
+
+House rule: a grammar arm is earned by a real value existing. No page in the
+corpus writes a multi-layer reactive background. Shipping a production with no
+caller means an untested path that LOOKS supported. When a page needs it, that
+page writes the test.
+
+* Sibling extensions (same shape, same file, no Rust)
+
+`font_route`, `border_route`, `grid_route` — every shorthand with the same
+destructive-inline problem is a paragraph in css-values.st. If one is filed
+later, it is this work, not new work.
+
+* DONE [2026-08-07]
+
+Implemented exactly as filed — one production, no Rust.
+
+*** The caller that earned it
+
+=demos/effect-gallery/snippets/layered-vignette.st.md= ("Layered vignette",
+redoing =title-scrim-sweep=): a title over artwork needs a SCRIM to stay
+readable and a SHEEN travelling under it. Two layers on one element is the
+honest way to write that — not a fixture in demo clothing. The per-layer
+=background-size: 100% 100%, 260% 100%= is what makes the sweep possible (the
+sheen needs an oversized gradient to travel across), which is precisely the
+longhand the unrouted shorthand was resetting to =auto=.
+
+*** The change
+
+#+begin_src st
+%capture_type image_list {
+    $first:image_core ( "," $rest:image_core )*
+}
+#+end_src
+
+plus the arm swap =image_core= → =image_list= in =background_route=. Zero Rust,
+as predicted — =route_reactive_shorthand= asks the grammar and reads the matched
+arm, so changing the grammar changed the answer.
+
+The comma trap needed no special handling, for the reason recorded above:
+=image_core= ends in =balanced(')')=, which consumes through the matching
+close-paren, so a gradient's own argument commas are eaten before the list
+separator is considered. Confirmed by a dedicated contract test rather than
+assumed.
+
+*** Gates — watched failing first
+
+BEHAVIOR (=--cdp=), 3 claims appended to the BUG-279 gate file:
+- test 5 layer longhands survive — *SEEN RED*: =6 passed, 1 failed=, the
+  computed =background-size= read =auto=, exactly the BUG-279 defect for the
+  unclaimed shape. GREEN 7/7 after.
+- test 6 BOTH layers still paint (=gradient= count === 2). The negative: 0 would
+  mean the value stopped applying and test 5 would pass for the wrong reason; >2
+  would mean a comma inside a gradient split a layer.
+- test 7 layer-count parity: 2 image layers against 2 authored sizes, so the
+  routed value and the static per-layer longhand cannot drift (CSS would cycle
+  the shorter list against the longer one).
+
+CONTRACT (Rust), 3 cases in =tests/integration/reactive_properties.rs=:
+multi-layer routes to =background-image=; commas inside ONE gradient do not
+split layers; a comma list of COLOURS (=$brand.ink, #fff=) stays a shorthand —
+the router still only narrows what it can positively identify.
+
+LIVE PAGE (real Chromium, built =dist=, not just a compile check):
+=.g-layer .plate= computes 2 gradient layers, =background-size: 100% 100%, 260%
+100%=, and its inline style is =background-image: …= — the routed longhand, not
+the destructive shorthand — with =--sweep= mid-animation.
+
+*** Regression
+
+=.st= suite A-B with the arm on =image_list= and back on =image_core=:
+=635 passed, 24 failed, 76 skipped= BOTH ways — identical, so this change causes
+zero regressions. (The 24 failures are a concurrent agent's in-flight work in
+this same worktree, not this change; the same worktree also broke =cargo build=
+twice mid-run from their unsaved edits.)
+

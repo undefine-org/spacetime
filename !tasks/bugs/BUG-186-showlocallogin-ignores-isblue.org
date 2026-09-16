@@ -1,0 +1,57 @@
+#+TITLE: $showLocalLogin/$showBridgeLogin never checked $isBlue, so the login button stayed visible with a real authenticated session
+#+STATE: DONE
+#+SESSION_ID: 153115a0b151f3c0
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse-commercial-host/2026-07-15T18-54-16-774Z_153115a0b151f3c0.jsonl]]
+#+CUSTOM_ID: BUG-186-showlocallogin-ignores-isblue
+
+* Initial Message
+
+it got reloaded and i saw the code but it still says log in or sign up after reload
+
+* Found by
+Live user report this session ("host pin doesn't update to the host
+being saved") -- reproduced live against a real running spacetime-host-
+server with a real seeded account/project/token row: after creating a
+project via the widget (a real, successful, authenticated flow, `POST
+/api/v1/projects` returning 200, a real `@deploy{}` written back to
+disk, a real page reload), the widget's badge STILL showed a "Log in"
+button, despite `$hasAccountToken` being `true` and a real
+`GET .../status.json` returning `200`.
+
+* Root cause (confirmed by reading the derivation directly)
+`stdlib/__host__/index.st`:
+
+#+begin_src text
+@data derive $showLocalLogin bool : (!$isDeployedContext && !$isNoProject);
+@data derive $showBridgeLogin bool : ($isDeployedContext && !$isNoProject);
+#+end_src
+
+Neither derivation ever consulted `$isBlue` (the widget's own real
+"no valid session" signal, per V1_IMPLEMENTATION_PLAN.org §5's state
+table: "Blue state's click target is [...] login"). `!$isDeployedContext
+&& !$isNoProject` is TRUE in every non-deployed, has-a-project state --
+including Turquoise/Green/Orange (a real, valid, currently-
+authenticated session) -- so the login button showed UNCONDITIONALLY
+whenever the widget wasn't in the no-project or deployed-bridge state,
+regardless of whether a real session existed.
+
+This bug was COMPOUNDED by (and only became reliably reproducible
+after fixing) BUG-185, this same session's other real finding: before
+BUG-185's fix, `$isBlue` never even got a real value at all (the
+widget's own status check never fired on mount), so this bug's effect
+was masked by a DIFFERENT bug that happened to also result in "Log in"
+staying visible. Both had to be found and fixed together for the badge
+to ever correctly reflect a real logged-in session.
+
+* Fix applied
+#+begin_src text
+@data derive $showLocalLogin bool : ($isBlue && !$isDeployedContext && !$isNoProject);
+@data derive $showBridgeLogin bool : ($isBlue && $isDeployedContext && !$isNoProject);
+#+end_src
+
+* Verification
+Live browser test against a real running spacetime-host-server with a
+real seeded account/project/token row and BUG-185's fix also applied:
+after project creation + reload, `$showLocalLogin` correctly resolves
+to `false` (screenshot-verified: "Log in" gone, "Promote to
+production" correctly shown instead).

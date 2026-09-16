@@ -1,0 +1,49 @@
+#+TITLE: @light directive ambiguous: scene light macro shadows responsive light-mode
+#+STATE: DONE
+#+SESSION_ID: 14f48ced503111a7
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-05-29T18-28-09-664Z_14f48ced503111a7.jsonl]]
+#+CUSTOM_ID: BUG-037-light-directive-ambiguous-scene-light-ma
+#+COMPLETION_HASH: 81d3b61ef10395d5
+
+* Initial Message
+
+Ok do me a full summary of the spec. Now we're PLANNING, and once the plan is valid, we ORCHESTRATE. Get yourself ready and pumped
+
+* Symptom
+integration test responsive_nested_directives::light_with_nested_loop_emits_guarded_js FAILS:
+`@light { @loop pulse(3s) { ... } }` does NOT emit a matchMedia('(prefers-color-scheme: ...)')
+guard. The sibling `@dark { @loop ... }` (dark_with_nested_loop) PASSES with identical structure.
+
+* Root cause
+`@light` is bound by TWO macros:
+- stdlib/macros/scene/light.st  `%macro light`      form: `@light $type:light_type($params:light_params*)`  (3D scene light source)
+- stdlib/macros/responsive.st   `%macro light-mode`  form: `@light { $styles:properties $children* }`         (prefers-color-scheme: light)
+The brace-body form `@light { ... }` is being dispatched to (or ambiguously resolved against)
+the scene `%macro light`, so the responsive color-scheme guard is never emitted. `@dark` has
+no scene-namespace collision, so it resolves cleanly → asymmetry in the test results.
+
+* Pre-existing
+Reproduces at HEAD (verified via clean `git worktree add /tmp/verse-head2 HEAD`), independent
+of PLAN-023 W0 CST work. Surfaced while gating PLAN-023 Wave 0.
+
+* Fix direction (to confirm)
+Form-based disambiguation: the two `@light` forms are structurally distinct (`@light IDENT(...)`
+vs `@light { ... }`). Macro dispatch SHOULD pick by form shape, not first-registered. Either:
+(a) make form-matching prefer the form whose shape matches the call site (brace vs call), or
+(b) rename/namespace the scene macro so `@light` color-scheme is unambiguous at file scope.
+Prefer (a) — it is the general fix (form shape is the discriminator the metasystem already has).
+
+* Acceptance
+- responsive_nested_directives::light_with_nested_loop_emits_guarded_js GREEN
+- scene @light (ambient/directional/point/spot) still compiles (scene tests GREEN)
+- no other regressions in cargo test --test integration_tests
+
+NOTE [2026-06-01]: FIXED + ENSHRINED. Fix: commit 4545f86b (find_macro_by_directive gates the named-macro fast-path on score_macro_form). Enshrining test: commit cfda83c7 (test_find_macro_by_directive_named_collision_bug037, verified RED→GREEN — fails on the exact BUG-037 assertion when the score-gate is removed). Integration regression test responsive_nested_directives::light_with_nested_loop_emits_guarded_js also green (8→9). Acceptance met: scene @light ambient/directional still resolves; full lib+integration+headless green.
+
+NOTE [2026-06-20]: STILL OPEN [2026-06-20]: integration test `integration::responsive_nested_directives::light_with_nested_loop_emits_guarded_js` FAILS (no matchMedia guard emitted) while its identical twin `dark_with_nested_loop_emits_guarded_js` PASSES — direct evidence the `@light` scene-macro still shadows responsive `@light-mode`. Confirmed unrelated to PLAN-038 W0 sum-`@type` work (W0 touches only @type/variant grammar + a CST empty-`[]` fix + body-capture specificity; @light/@loop use $styles:properties/$body:keyframes, both permissive — no reorder). 8/9 responsive_nested_directives pass; only the `@light` case is red. This is the canonical repro for BUG-037.
+
+NOTE [2026-06-20]: RESOLVED [2026-06-20]: re-verified `integration::responsive_nested_directives::light_with_nested_loop_emits_guarded_js` now PASSES (and its @dark twin). Root cause removed: the scene `@light` macro that shadowed responsive `@light-mode` is GONE — `stdlib/macros/scene/*` were deleted (PLAN-050 retired the hand-rolled WebGL engine; 3D is now the opt-in stdlib/3d module). Only `stdlib/macros/responsive.st:77 %macro light-mode` defines `@light` now, so `@light { @loop }` resolves to the responsive macro and emits the matchMedia guard. Full integration suite 172/0. The earlier red was a stale build before the scene deletions took effect. Consider this bug DONE — the ambiguity no longer exists.
+
+NOTE [2026-06-20]: CORRECTION supersedes the immediately-preceding STILL-OPEN note. Re-ran the suite 2026-06-20 after the scene-macro deletions propagated into the build: both `light_with_nested_loop_emits_guarded_js` AND `dark_with_nested_loop_emits_guarded_js` now PASS; whole responsive_nested_directives group 9/9; full integration 172/0. grep confirms NO scene `@light` macro remains (stdlib/macros/scene/* deleted, PLAN-050) — only stdlib/macros/responsive.st:77 `%macro light-mode` owns `@light`. The shadowing ambiguity that defined this bug no longer exists. Flipping state to DONE.
+
+NOTE [2026-06-20]: Resolved: scene @light macro deleted (PLAN-050 retired WebGL engine), so the responsive @light-mode no longer shadowed. light_with_nested_loop + dark twin pass; integration 172/0. grep confirms only responsive.st defines @light.

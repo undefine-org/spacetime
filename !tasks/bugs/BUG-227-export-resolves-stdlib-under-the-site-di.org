@@ -1,0 +1,136 @@
+#+TITLE: Export resolves stdlib under the SITE dir — building from any other CWD ships empty bundles
+#+STATE: DONE
+#+SESSION_ID: 153d8ede25f7aff7
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-25T11-25-45-495Z_153d8ede25f7aff7.jsonl]]
+#+CUSTOM_ID: BUG-227-export-resolves-stdlib-under-the-site-di
+
+* Initial Message
+
+https://ys2olone710qdtvpcgfny.preview.spacetime.undefine.org/brand isn't owkring but it is there in local. Why?
+
+* Symptom
+`spacetime-host push` produced a deployment whose `/spacetime.js` was ZERO
+BYTES. The site 200'd, served HTML, and did nothing. The push printed a
+success line and a deploy hash.
+
+Reproduced without the network, which is the important part:
+
+    cd projects/backdesk-new
+    cargo run --manifest-path ../../Cargo.toml -- build .
+    ->   Pages: 1
+         Warning: Route '' has compile diagnostic: Compile failed:
+           Import resolution failed: Could not resolve import 'macros/deploy'
+           from ./index.st. Searched:
+             ["./stdlib/macros/deploy.st",
+              "./stdlib/macros/deploy/index.st",
+              ".../projects/backdesk-new/stdlib/macros/deploy.st",
+              ".../projects/backdesk-new/stdlib/macros/deploy/index.st"]
+         dist/spacetime.js   0 bytes
+         dist/spacetime.css  0 bytes
+
+The SAME site built from the repo root is correct (Pages: 3, 767830-byte
+bundle). The only difference is the process CWD.
+
+* Root cause
+`src/export/bundle.rs::compile_bundles` calls
+
+    Compiler::from_file(&st_path, site_dir)
+
+whose second parameter is the WORKSPACE ROOT, not the site. It flows to
+`parser::resolve_imports`, which sets
+
+    stdlib_path: Some(workspace_root.join("stdlib"))      (parser/mod.rs:7389)
+
+So the export looks for the toolchain's stdlib INSIDE the user's site
+directory — `projects/backdesk-new/stdlib/md/index.st` — which of course does
+not exist. Every `@import "stdlib/..."` then fails, each route's compile
+returns `Err`, and `compile_bundles` degrades that to a diagnostic with EMPTY
+js/css (by design, so one bad route cannot abort the build).
+
+It only ever worked because `.` also happens to be searched, so a build run
+from the verse repo root finds `./stdlib`. The export has been CWD-dependent
+all along; nothing declared that dependency.
+
+* Why it shipped silently (the part that actually hurt)
+Three independent softenings compose into a green build of an empty site:
+1. a failed route compile becomes a WARNING, not an error;
+2. `pages_exported` counts a page whose bundle is empty;
+3. `spacetime build` exits 0 with warnings on stdout.
+And `spacetime-host push` calls `export_site` and packages whatever comes
+back, so the CLI happily uploaded 160KB of nothing and reported success.
+
+`push` is the worst possible caller to have this bug: it necessarily runs from
+the user's project directory, never from the toolchain root. So the ONE code
+path that must be CWD-independent is the one that was most exposed.
+
+* Fix (two parts, both needed)
+1. Resolve the stdlib root independently of the site dir. There is already a
+   precedent to reuse rather than invent: `mcp::stdlib_source::
+   candidate_stdlib_roots` honours `SPACETIME_STDLIB_DIR` first, then
+   `<workspace_root>/stdlib`. Export should use the same rail so there is ONE
+   stdlib-resolution rule, plus the embedded stdlib as the final fallback (a
+   distributed binary has no on-disk stdlib at all — this is exactly the case
+   a shipped `spacetime` CLI hits).
+2. Make an empty bundle a hard failure of the build, not a warning. If every
+   route compiles to zero bytes of JS, the export must exit non-zero. Without
+   this, part 1 fixes today's instance and the next resolution bug ships
+   silently again.
+
+* Acceptance
+- `cd projects/backdesk-new && cargo run --manifest-path ../../Cargo.toml -- build .`
+  produces the SAME dist/ as building from the repo root: Pages: 3, non-empty
+  spacetime.js in each of ./, brand/, process/.
+- A unit test builds a fixture site from a DIFFERENT cwd and asserts the
+  emitted bundle is non-empty — the test must fail if the workspace root is
+  passed as the site dir again.
+- A unit test asserts a build whose routes all compile empty exits non-zero.
+- `spacetime-host push` from the project dir uploads a working artifact:
+  deployed /spacetime.js length equals the local dist/ file's length.
+
+* Related
+BUG-218 / BUG-219 / BUG-220 — same investigation, same class (dev and deploy
+disagreeing), but distinct root causes. This one is the most severe: those
+three lost or corrupted a PAGE, this one silently empties the ENTIRE runtime
+for every user who runs `build` or `push` from their own project directory.
+FUP-138 — the general "build-time failure should reach the build's warning
+channel" follow-up; part 2 here is the stronger form for this case.
+
+NOTE [2026-07-25]: DONE. Two independent CWD dependencies, both fixed:
+
+1. `export::bundle::compile_bundles` passed `site_dir` where `from_file` wants
+   the WORKSPACE ROOT. New `src/toolchain.rs::workspace_root_for` resolves it
+   from the SITE's own location (nearest ancestor holding `stdlib/`), falling
+   back to the CWD's ancestors, then to the embedded stdlib. The site's
+   location is a fact about the site; the CWD is a fact about the shell.
+
+2. `syntax::stdlib_registry::STDLIB_REGISTRY` hardcoded a CWD-relative
+   "stdlib" and, failing, fell back to the EMBEDDED grammar — silently, with a
+   %form set frozen at the last cargo build. MEASURED: 346 forms from the repo
+   root vs 200 embedded. That gap is what produced 19 phantom parse errors on
+   files that compile cleanly, each route degrading to an empty bundle.
+
+Deliberately NOT keyed off SPACETIME_STDLIB_DIR: that is the MCP workbench's
+__mcp__ overlay switch, a narrower question than "which toolchain am I". An
+earlier revision consumed it and the full suite caught the consequence — the
+overlay tests point it at a grammar-less temp dir, and because the registry is
+a one-shot LazyLock the first such test poisoned every later parse (7 failures,
+green in isolation). Two knobs, two meanings.
+
+Tests: `bug227_toolchain_root_tests` (a site nested in a checkout resolves
+stdlib from the checkout; a standalone site still builds via embedded) plus
+`toolchain::tests` (3). Gates: lib 2820/0, integration 202/0, v8 445/0.
+
+Live proof — the deployment that started this: `spacetime-host push` from the
+repo root shipped an 887KB artifact (was 161KB of nothing), and
+https://ys2olone710qdtvpcgfny.preview.spacetime.undefine.org/brand now 200s
+and renders (prose 3514 chars, 11 live specimens, --bn-verm #FF3B24 applied);
+/process renders its four @doc panels at [3476,2678,3191,4705] — byte-identical
+to dev.
+
+RESIDUAL (not fixed here, deliberately): building from a directory OUTSIDE any
+checkout still hits the stale embedded grammar, because the registry is a
+process-global LazyLock with no site context and export cannot safely anchor it
+without a global env write (tried; it leaked across tests and was reverted).
+The honest fix is to thread the stdlib root through the registry instead of
+resolving it globally, or to regenerate the embedded stdlib at build time so
+the fallback is never stale. Filed as FUP-141.

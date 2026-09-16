@@ -1,0 +1,106 @@
+#+TITLE: Debounce content tree sitejson re-fetches on DataUpdate
+#+STATE: ITEM
+#+SESSION_ID: 14a73ce5470c17e5
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-03-30T17-15-27-388Z_14a73ce5470c17e5.jsonl]]
+#+CUSTOM_ID: FUP-004-debounce-content-tree-site-json-re-fetch
+#+EFFORT: S
+#+PRIORITY: #C
+#+LAYER: stdlib
+
+* Initial Message
+
+Implement these audit recommendations from org://AUD-002-audit-implementation:
+
+There it is — the old `/__spacetime/styles.css` link is NOT removed by `process_html()`. The lol_html removal only targets `link[href*='__spacetime/dev']` (with `/dev/` in the path), but the production-mode compiled CSS is at `/__spacetime/styles.css` (no `/dev/`). This means the exported HTML has a broken link to a non-existent asset.
+
+Let me finalize. I've found enough material for a thorough report.
+
+---
+
+## Audit Findings
+
+### Critical Bugs
+
+**1. Data editor fetches from non-existent route**
+- **Where**: `stdlib/__dev__/primitives/dev-data-editor.st` line 103
+- **What**: `fetch('/__spacetime/dev/data/' + name + '.json')` — no such route exists. The dev server's fallback serves from the site root, so `data/customers.json` would work as `/data/customers.json`, but `/__spacetime/dev/data/customers.json` will 404.
+- **Why**: The data editor tab will always show "Failed to load data source" — the core feature is broken.
+- **Effort**: `trivial` — change URL to `/data/` + name + `.json` or `'/' + name` (since `name` already contains `data/` prefix from site.json).
+
+**2. Data editor sends EditJson without `op_id` — server will reject**
+- **Where**: `stdlib/__dev__/primitives/dev-data-editor.st` lines 353-375
+- **What**: The `sendEdit` function builds an EditJson message missing the required `op_id` field. The Rust serde deserialization will fail because `op_id: String` is not optional in the protocol.
+- **Why**: All form edits will fail to parse server-side and be silently dropped (unparseable messages logged as "Failed to parse client message").
+- **Effort**: `trivial` — add `op_id: 'edit_' + Date.now() + '_' + Math.random().toString(36).substr(2,6)` to the message.
+
+**3. Data editor calls `onAck`/`onReject` with wrong signature**
+- **Where**: `stdlib/__dev__/primitives/dev-data-editor.st` lines 363-374
+- **What**: Calls `window.__stDevWs.onAck(function() {...})` — but the API is `onAck(opId, callback)`. Without an opId, the callback is registered at key `undefined`, never matching any response.
+- **Why**: Save feedback (green/red flash) will never fire. Compounds with finding #2.
+- **Effort**: `trivial` — generate opId, pass it to both the message and the callbacks.
+
+**4. Media picker sends EditJson without `op_id`**
+- **Where**: `stdlib/__dev__/primitives/dev-media-picker.st` lines 146-160
+- **What**: Same issue as finding #2 — EditJson messages lack `op_id`, so the server will reject deserialization.
+- **Why**: Image replacement uploads succeed but the JSON path update is silently dropped.
+- **Effort**: `trivial` — add `op_id` field to both EditJson messages.
+
+**5. Export leaves non-dev `/__spacetime/` asset links in HTML**
+- **Where**: `src/export.rs` line 173-174
+- **What**: `process_html` only removes `script/link` tags matching `*__spacetime/dev*`. The production CSS link `/__spacetime/styles.css` and the live-reload script survive into the export. Verified in `/tmp/dataiku-export/index.html`.
+- **Why**: Exported HTML has broken asset links to `/__spacetime/styles.css` (returns 404 on a static host), and may contain the live-reload script that tries to open a WebSocket.
+- **Effort**: `small` — widen the lol_html selector to also match `__spacetime/styles.css`, `__spacetime/runtime.js`, and inline scripts containing `__spacetime`.
+
+### Moderate Issues
+
+**6. `DefaultBodyLimit` of 11MB applied to all routes**
+- **Where**: `src/server.rs` line 158
+- **What**: The 11MB body limit layer is applied to the entire router, not just the upload route.
+- **Why**: All endpoints (including JSON ones that should accept small bodies) now accept 11MB payloads. Low risk since this is a dev server, but wasteful.
+- **Effort**: `small` — apply the limit only to the upload route using a nested Router or route-specific layer.
+
+**7. `ExportConfig.minify` is a dead field**
+- **Where**: `src/export.rs` line 16
+- **What**: `pub minify: bool` is defined in `ExportConfig` and set from CLI args, but `export_site()` never reads it. Compiled JS/CSS output is never minified.
+- **Why**: Users who pass `--minify` to `build` get unminified output with no warning.
+- **Effort**: `small` — either implement minification or remove the field and warn if `--minify` is passed with a directory target.
+
+**8. Data editor type schema lookup keyed by source name, not type name**
+- **Where**: `stdlib/__dev__/primitives/dev-data-editor.st` line 120
+- **What**: `var schema = typeSchemas ? typeSchemas[currentSource] : null;` — `currentSource` is the data source filename (e.g., `data/customers.json`), but `typeSchemas` keys are `@type` names (e.g., `Customer`). These never match.
+- **Why**: Schema-driven forms will never render — falls back to raw JSON mode for all sources. The core value proposition of the admin panel (schema-driven forms) is inoperative.
+- **Effort**: `medium` — requires mapping from data source filenames to @type names, which needs either a naming convention or CompileAnalysis tracking of `@data` → `@type` relationships.
+
+### Low-Impact Issues
+
+**9. Content tree re-fetches site.json on every DataUpdate**
+- **Where**: `stdlib/__dev__/primitives/dev-content-tree.st` line 130-132
+- **What**: Every DataUpdate message triggers a fetch to `/__spacetime/dev/site.json`, even for data edits that don't change site structure.
+- **Why**: Unnecessary network requests. Low severity but noisy.
+- **Effort**: `trivial` — only re-fetch on file system changes, or debounce.
+
+**10. Collection CRUD doesn't clean up `add` buttons on DataUpdate reset**
+- **Where**: `stdlib/__dev__/primitives/dev-collection-crud.st` lines 149-161
+- **What**: On DataUpdate, old overlays and `__stCrudSetup` flags are cleaned, but the `add` buttons (inserted after the container via `insertBefore`) are not removed. Multiple DataUpdates produce duplicate "Add item" buttons.
+- **Why**: Visual bug — multiple add buttons pile up after data changes.
+- **Effort**: `small` — track add buttons and remove them during reset, or tag them with a data attribute for cleanup.
+
+**11. `dev_types_handler` re-parses index.st on every request**
+- **Where**: `src/server.rs` lines 2632-2640
+- **What**: Every GET to `/dev/types.json` reads and parses `index.st` from disk. The existing `DevCompileCache` is not used.
+- **Why**: Performance. Each request incurs a file read + parse. Low priority since it's a dev endpoint.
+- **Effort**: `small` — piggyback on `get_or_compile` or cache the TypeRegistry in DevCompileCache.
+
+**12. `dev_types_handler` doesn't see types from `@import`-ed files**
+- **Where**: `src/server.rs` line 2640
+- **What**: `TypeRegistry::from_form_matches(&ast.matches)` only sees @type definitions in `index.st` itself, not in imported files. The parse function doesn't resolve imports.
+- **Why**: Sites that define @type in imported .st files (which is common) will show empty types.
+- **Effort**: `medium` — need to use the full compiler pipeline (which resolves imports) rather than raw parsing.
+
+**13. No `%exports` on content-tree and data-editor primitives**
+- **Where**: `stdlib/__dev__/primitives/dev-content-tree.st`, `dev-data-editor.st`
+- **What**: These primitives have no `%exports` block, unlike other dev primitives that export state variables.
+- **Why**: Other components cannot reactively observe admin panel state (selected source, editor status). Cosmetic — current consumers use the global API instead.
+- **Effort**: `trivial`
+
+~dev-content-tree.st~ line 130 triggers ~fetchAndRender()~ on every DataUpdate message, even for data edits that don't change site structure. Add a 2s debounce or only re-fetch on file system structure changes (not data content changes).

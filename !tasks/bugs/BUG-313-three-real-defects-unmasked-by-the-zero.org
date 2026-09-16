@@ -1,0 +1,72 @@
+#+TITLE: Three real defects unmasked by the zero-assertion rule (were hidden by vacuous tests)
+#+STATE: ITEM
+#+SESSION_ID: 154d0baaa942d918
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-08-06T12-08-13-733Z_154d0baaa942d918.jsonl]]
+#+CUSTOM_ID: BUG-313-three-real-defects-unmasked-by-the-zero
+
+* Initial Message
+
+please look at all open issues in the github and compare to main. Cluster them by category, root-cause, impact, and ways to solve. See if any work that's been done on main in the past two weeks addresses them. Then give me practical next steps, and give me an instructional explanation of each issue that an intern would benefit from
+
+#+STATE: ITEM
+#+PRIORITY: A
+
+* Context
+
+BUG-309's zero-assertion rule (committed fcb70f9e) makes a test that asserts nothing FAIL.
+It immediately surfaced defects that vacuous tests had been concealing. None of these is
+caused by the rule; each was already broken and silently green.
+
+Filed together because they share one lesson: **the tests that hid them were the tests
+written specifically to catch them.**
+
+* 1. @wait_for_signal silently drops in headless — ~8 test files assert NOTHING
+
+`tests/on-sig-change-semantics.test.st` uses `@wait_for_signal` 6 times and `@assert`/
+`@then` ZERO times. Verified 2026-08-06: it now reports `0 passed, 3 failed` with
+"Test made no assertions". Before the rule it reported green.
+
+`@wait_for_signal` / `@wait_for_signal_truthy` do not dispatch in the headless backend even
+with the binding assertions module prepended, while `@then $sig on $sel` from the SAME
+module expands fine. So every test whose only assertion mechanism is wait-for-signal has
+been verifying nothing.
+
+Affected (approx 8): on-sig-change-semantics, on-sig-change-mutation, on-sig-change-head,
+and others using the same idiom — audit with
+`grep -rln "@wait_for_signal" --include="*.test.st"`.
+
+This is W3's consume-or-refuse class: a directive whose shape matches no form is dropped
+instead of diagnosed. Fix there, then re-run these files; do NOT mark them skipped.
+
+NB this is doubly serious: `@on $sig.change` shipped DEAD once before (BUG-252, three
+stacked silent breaks) and these are the very tests meant to prevent a recurrence.
+
+* 2. A comment containing `::` inside a @handle receive arm still corrupts the body
+
+`tests/integration/handle-arm-comment-corruption.test.st` test 3 FAILS once it genuinely
+runs: "comment-containing handle arm must set $insideArmSecondRan true". Isolated probe
+confirms firstRan=true, secondRan=false — the trailing statement after the comment is
+dropped. This is the BUG-183/BUG-100 corruption, still live, previously masked.
+
+Owner: the balanced-extractor / custom capture path (`src/syntax/events/extractors/`).
+
+* 3. Headless V8 has a frozen clock — real-time deadlines never fire
+
+`tests/bugs/BUG-213-*.test.st` test 4 fails on a 100ms deadline abort: `Date.now()`
+advances ~2ms across the run and `setTimeout(N>0)` never fires. Verified the logic is
+correct (parseMs('100ms')=100, AbortController wiring works) — only real time is missing.
+Same root behind `tests/dev-editable-text-duplication.test.st`'s debounce failure.
+
+This is a RUNG question, not a bug in the code under test: a real-time deadline needs the
+timing rung. Route these to `--cdp` with an explicit `needs timing` declaration so the
+logic backend REFUSES rather than fails misleadingly (the BUG-253 pattern). Per
+FIDELITY_LADDER that refusal is the correct outcome.
+
+* Why this matters beyond the three
+
+Every one of these was a test written to prove a specific behavior, which then stopped
+proving it without anyone noticing. The zero-assertion rule converts that failure mode from
+invisible to loud — but only for tests with zero assertions. A test with ONE live assertion
+and three dropped ones still over-reports. Worth considering a follow-up: report per-test
+assertion COUNTS in the runner's verbose output, so a sudden drop from 4 to 1 is visible in
+review.

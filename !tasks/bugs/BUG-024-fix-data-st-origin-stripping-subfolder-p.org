@@ -1,0 +1,420 @@
+#+TITLE: Fix data-st-origin stripping subfolder paths in template provenance
+#+STATE: DONE
+#+SESSION_ID: 14d059b2d0d17c1f
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-05-01T15-39-01-315Z_14d059b2d0d17c1f.jsonl]]
+#+CUSTOM_ID: BUG-024-fix-data-st-origin-stripping-subfolder-p
+#+EFFORT: S
+#+LAYER: compiler
+#+PRIORITY: #A
+
+* Initial Message
+
+sync] Received EditAst for _work.st
+[sync] EditAst for _work.st: rejected — File not found: _work.st
+[sync] Received EditAst for _work.st
+[sync] EditAst for _work.st: rejected — File not found: _work.st
+
+
+i think EditAst has a bug with files that are in subfolders thank you
+
+* Initial Message
+
+User reports the dev sync log:
+
+#+begin_example
+[sync] Received EditAst for _work.st
+[sync] EditAst for _work.st: rejected — File not found: _work.st
+#+end_example
+
+Their hypothesis: =EditAst= has a bug with files that are in subfolders. They are correct.
+
+* Intention & Purpose
+
+Inline content edits originating in =.st= files that live in subdirectories of the site root (e.g. =projects/unkn/modules/_work.st=, =projects/undefine.org/modules/_work.st=) MUST round-trip through the =EditAst= sync protocol and successfully update the on-disk file.
+
+Today they fail at the very first step because the compiler emits =data-st-origin= attributes containing only the *basename* of the source file, so the dev panel sends =EditAst { file: "_work.st", ... }=, and the server's =validate_file_path(site_dir, "_work.st")= cannot find the file (it lives at =modules/_work.st= relative to =site_dir=).
+
+* Context & Narrative
+
+** Sync protocol contract
+
+The server-side handler =sync::handlers::handle_edit_ast= validates =file= via =validate_file_path(site_dir, relative_path)= (=src/sync/handlers.rs= ~124–140~). The function joins =site_dir= with the supplied relative path and canonicalizes; failure ⇒ =Err(format!("File not found: {}", relative_path))=. So the protocol REQUIRES =file= to be a path relative to =site_dir=.
+
+** HTML files (already correct)
+
+For =.html= files, =inject_content_provenance(html, file_path)= is invoked from =src/server.rs= ~607, 712, 844, 1071, 1187~ with a path that is already relative to =site_dir= (e.g. =subdir/page.html=, =index.html=). The dev panel echoes that string back as =EditAst.file=. Server resolves correctly.
+
+** =.st= files (broken)
+
+For =.st= files, the template body HTML is annotated at compile time by =inject_template_provenance= via =inject_provenance_into_matches= (=src/syntax/form_match.rs= ~1394–1418~). The injected attribute format is:
+
+#+begin_example
+data-st-origin="{source_file}::{scope_selector} §{macro_name} {tag_name}"
+#+end_example
+
+The =source_file= portion is computed as:
+
+#+begin_src rust
+let source_file_raw = fm.source_file.as_deref().unwrap_or(default_source_file);
+let source_file = extract_filename(source_file_raw);  // ← BUG
+#+end_src
+
+=extract_filename= (=src/syntax/form_match.rs= ~1376–1382~) returns *only the basename*. =fm.source_file= contains the absolute path of the originating =.st= file (set by =resolve_imports= at =src/parser/mod.rs:4602= and =merge_ast= at ~4725~). So a file at =/abs/.../projects/unkn/modules/_work.st= becomes =_work.st= in the origin attribute.
+
+** Client → server flow
+
+=stdlib/__dev__/primitives/dev-editable.st= ~64–91~ reads =data-st-origin=, splits on the first =::=, takes the left half as =file=, and the right half as =locator= (= the selector for =.st= files). =stdlib/__dev__/primitives/dev-save.st= ~141, 186~ assigns =filePath = editEvent.file= and ships it as the =EditAst.file= field.
+
+So the client faithfully forwards whatever the compiler put in =data-st-origin=. The server cannot correct this — it has no way to know the basename =_work.st= is supposed to mean =modules/_work.st=. The compiler MUST emit the relative path.
+
+** Why HTML works and =.st= doesn't
+
+=inject_content_provenance= already takes a caller-supplied =file_path: &str= argument that the dev server populates with the URL/relative path. =inject_template_provenance= is called from inside the compile pipeline where only the absolute path is known, and the original implementation chose to flatten it via =extract_filename=. We must instead carry =workspace_root= into the injection pass so it can compute a true relative path.
+
+** Inspect-element flow (already correct, do not touch)
+
+=src/sync/handlers.rs::handle_inspect_element= ~1177–1181~ already emits =rel_path = file_path.strip_prefix(site_dir)= for its =source_files= response and =PropertyNode.source_file= entries, which is what the dev panel's animation-properties macro echoes back as =EditAst.file= (=stdlib/__dev__/primitives/dev-panel.st:564=). That path is correct. This bug only affects the *content edit* flow (=editType === 'content'=) where the file is read from =data-st-origin=.
+
+* Scope
+
+** In scope
+- =src/syntax/form_match.rs= — change =inject_provenance_into_matches= to compute a workspace-root-relative path, and update both =#[cfg(debug_assertions)]= and =#[cfg(not(debug_assertions))]= signatures.
+- =src/compiler.rs= — pass =workspace_root= at the single call site in =Compiler::from_file= (line 296).
+- =src/syntax/form_match.rs= unit tests — refresh the existing pass test so its expected =data-st-origin= reflects a relative path; add subfolder + outside-workspace coverage.
+- =tests/integration/provenance_tests.rs= — update the two integration tests calling =inject_provenance_into_matches= to pass the new =workspace_root= argument.
+- =tests/integration/= (NEW) — round-trip test confirming an =EditAst { file: "modules/<name>.st" }= against a site whose entry imports a subfolder file is =Ack=ed and the file is rewritten on disk.
+
+** Out of scope
+- =inject_content_provenance= for =.html= files (already passes a relative path).
+- =handle_inspect_element= and the dev-panel animation-property edit flow (already uses =strip_prefix(site_dir)=).
+- =stdlib/__dev__= JS and =.test.st= fixtures whose hard-coded sample =data-st-origin= values use bare filenames — those test the JS parser, not the compiler emission, and the parser logic (=indexOf('::')=) is unchanged.
+- The =data-st-origin= format itself (still =file::scope §macro tag=); only the =file= portion's *content* changes.
+- =metasystem/registry.rs= =source_file= assignments to macro definitions — those are not =template=/=template-inline= =FormMatch=es processed by =inject_provenance_into_matches=.
+
+* Existing Patterns
+
+- =src/sync/handlers.rs::validate_file_path= (~124–140~): joins =site_dir + relative_path=, canonicalizes, returns =File not found: {relative_path}= on failure. This is the contract the emitted =data-st-origin= must satisfy.
+- =src/sync/handlers.rs::handle_inspect_element= (~1177–1181~): the canonical pattern for computing a relative path inside the server is =file_path.strip_prefix(site_dir).unwrap_or(file_path).to_string_lossy().to_string()=. Mirror this on the compiler side.
+- =src/server.rs::inject_content_provenance= (~2152–2218~): callers already pass a relative path string (=path=, =index_file=, ="index.html"=); we are bringing =.st= flow in line with this.
+- =src/parser/mod.rs::resolve_imports= (~4600–4606~) and =merge_ast= (~4724–4727~): set =fm.source_file = Some(path.to_string_lossy().to_string())= where =path= comes from the import resolver. Paths may be canonical (=ImportResolver::resolve_path= calls =canonicalize= when possible) or non-canonical (fallback when the file does not exist on disk yet).
+- =src/syntax/form_match.rs::extract_filename= (~1376–1382~): KEEP. It remains the safe last-resort fallback when the source file lives outside the workspace.
+
+* Tests
+
+All tests live in Rust unit/integration suites; the JS-level =.test.st= files are unaffected.
+
+** Test scenarios (all must be covered)
+
+1. *Subfolder file emits relative path* — entry compiles a =.st= file at =<workspace_root>/modules/_work.st= (either as the entry itself or imported); resulting =data-st-origin= MUST contain =modules/_work.st::= (NOT =_work.st::=).
+2. *Top-level file unchanged* — entry at =<workspace_root>/index.st= still emits =index.st::=.
+3. *Outside-workspace fallback* — when =fm.source_file= is an absolute path that does not start with =workspace_root=, fall back to bare filename (preserves current behavior for orphan paths and stdlib loaded from elsewhere).
+4. *Canonicalize tolerance* — when =workspace_root= is relative (e.g. =Path::new(".")=) and =fm.source_file= is absolute, the strip MUST still succeed (use =canonicalize= where possible).
+5. *Round-trip EditAst on subfolder file* — integration: write an entry =index.st= and a subfolder =modules/_work.st= containing a =%template= macro (or any template-bearing macro), compile in a temp site dir, extract a =data-st-origin= from the rendered HTML, send =EditAst { file: extracted_file, selector: extracted_selector, patch: { "__content": "..." } }= via =handle_message=, assert =Ack=, assert the on-disk file is updated.
+6. *Release-mode no-op stub still compiles* — =cargo build --release= must succeed with the new signature.
+
+** Existing tests requiring update
+- =src/syntax/form_match.rs::tests::test_inject_provenance_into_matches_pass= (~1944–1986~): currently asserts =body.html.contains("card.st::.card §template h2")= with the comment ="origin uses filename, not full path"=. After the fix, restructure to use a temp workspace and assert the *relative-from-workspace* path.
+- =tests/integration/provenance_tests.rs::test_template_provenance_injected_in_debug= (~37–64~) and =test_template_provenance_no_op_in_release= (~66–80~) and =test_template_instances_share_same_origin= (~82–124~): update calls to =inject_provenance_into_matches(&mut matches, "card.st")= → =inject_provenance_into_matches(&mut matches, &workspace_root, "card.st")=. Use a tmpdir as workspace_root; place =card.st= directly in it so the existing =card.st::= assertions still hold.
+
+* Implementation
+
+** ITEM Add failing tests for subfolder + outside-workspace + round-trip (TDD)
+:PROPERTIES:
+:CUSTOM_ID: BUG-024::failing-tests
+:END:
+
+- File: =src/syntax/form_match.rs= (unit, in =mod tests=)
+- File: =tests/integration/provenance_tests.rs= (integration)
+- File: =tests/integration/edit_ast_subfolder_roundtrip.rs= (NEW integration)
+
+Add the following tests, all designed to *fail* against the current code:
+
+1. =test_inject_provenance_subfolder_relative_path_preserved= (unit, =form_match.rs=) — Scenario 1.
+
+   #+begin_src rust
+   #[test]
+   #[cfg(debug_assertions)]
+   fn test_inject_provenance_subfolder_relative_path_preserved() {
+       let workspace = tempfile::tempdir().unwrap();
+       let abs_st = workspace.path().join("modules").join("_work.st");
+       // No need to create file on disk; we only exercise the path-rewriting logic.
+
+       let mut matches = vec![FormMatch {
+           macro_name: "template".to_string(),
+           captures: {
+               let mut c = HashMap::new();
+               c.insert(
+                   "body".to_string(),
+                   CapturedValue::ComponentBody(ComponentBodyDef {
+                       html: "<h2>Title</h2>".to_string(),
+                       states: vec![], directives: vec![], injections: vec![],
+                       exports: vec![], css_rules: vec![], refs: vec![],
+                       selector_refs: vec![], diagnostics: vec![],
+                       section_transitions: 0,
+                   }),
+               );
+               c
+           },
+           capture_spans: HashMap::new(),
+           selector: Some(".work".to_string()),
+           span: SourceSpan::new(0, 100),
+           source_file: Some(abs_st.to_string_lossy().to_string()),
+       }];
+
+       inject_provenance_into_matches(&mut matches, workspace.path(), "fallback.st");
+
+       let body = match matches[0].captures.get("body") {
+           Some(CapturedValue::ComponentBody(b)) => b,
+           _ => panic!("expected ComponentBody"),
+       };
+       assert!(
+           body.html.contains("modules/_work.st::.work §template h2"),
+           "subfolder path must be preserved in data-st-origin, got: {}",
+           body.html
+       );
+       assert!(
+           !body.html.contains("\"_work.st::"),
+           "must not strip the subfolder, got: {}",
+           body.html
+       );
+   }
+   #+end_src
+
+2. =test_inject_provenance_outside_workspace_falls_back_to_filename= (unit, =form_match.rs=) — Scenario 3. Build a =FormMatch= with =source_file = "/tmp/elsewhere/foo.st".to_string()= and a different =workspace= tempdir. Assert origin contains =foo.st::= (bare filename fallback) — confirms the safety net.
+
+3. =test_inject_provenance_canonicalizes_when_workspace_relative= (unit, =form_match.rs=) — Scenario 4. =workspace_root = Path::new(".")=, =source_file= = absolute path under CWD. Assert the resulting origin uses a relative path (no leading slash, no full prefix). If canonicalize is unavailable, falls back to filename — the test asserts on the *invariant* (no absolute path leak), not on a specific representation.
+
+4. =test_edit_ast_subfolder_st_file_roundtrip= (NEW integration test, =tests/integration/edit_ast_subfolder_roundtrip.rs=):
+
+   - Create temp site dir.
+   - Write =site/index.st= importing =modules/_work.st= (use the simplest valid =@import "modules/_work.st"= form supported by the parser; if the parser only accepts relative paths from the entry, this is exactly that).
+   - Write =site/modules/_work.st= containing a =%template= invocation that produces text-bearing HTML (e.g. =h2=) — model after =tests/integration/provenance_tests.rs::make_template_match= but compile via =Compiler::from_file=.
+   - Compile with =Compiler::from_file(&entry, site_dir)= and capture the rendered HTML.
+   - Extract the first =data-st-origin= value via the same regex used by =test_template_instances_share_same_origin=.
+   - Split on =::= (first occurrence), take left half as =file= and right half as =selector= (mirrors =stdlib/__dev__/primitives/dev-editable.st:70-82=).
+   - Assert =file == "modules/_work.st"=.
+   - Send the message via =handle_message(site_dir, ClientMessage::EditAst { file, selector, patch: json!({ "__content": "Updated" }), op_id: "test_op".into() })=.
+   - Assert =result.response= matches =ServerMessage::Ack { op_id: "test_op", .. }=.
+   - Read =site/modules/_work.st= back and assert it now contains ="Updated"= (and not the original placeholder).
+
+   If standing up a full =Compiler::from_file= round trip is impractical because of import-resolution requirements not yet covered in the test corpus, downgrade this case to a *protocol-only* test: write =site/modules/_work.st= directly with a template body, call =handle_edit_ast(site_dir, "modules/_work.st", "...", &patch, "op")= explicitly, and assert =Ack=. The validate-file-path layer is what the user is hitting; this still proves the relative-path contract once the compiler emits it.
+
+Both unit cases live next to existing =test_inject_provenance_into_matches_pass= so they share the =FormMatch= construction idiom. The new integration file mirrors the layout of =tests/integration/provenance_tests.rs=.
+
+These tests MUST fail under the current implementation:
+- (1) fails because =extract_filename= strips =modules/=.
+- (4) fails because the server rejects =modules/_work.st= → wait, actually it would PASS at the server layer since validate_file_path resolves correctly. The point of (4) is the *compiler* must emit =modules/_work.st= so the dev panel sends it. So (4) fails because the data-st-origin value would be =_work.st= and the test extracts the wrong file. Document this in a comment.
+
+** ITEM Update inject_provenance_into_matches signature and helper
+:PROPERTIES:
+:CUSTOM_ID: BUG-024::update-injection-fn
+:DEPENDS: BUG-024::failing-tests
+:END:
+
+- File: =src/syntax/form_match.rs=
+
+Change the public signature from:
+
+#+begin_src rust
+pub fn inject_provenance_into_matches(matches: &mut [FormMatch], default_source_file: &str)
+#+end_src
+
+to:
+
+#+begin_src rust
+pub fn inject_provenance_into_matches(
+    matches: &mut [FormMatch],
+    workspace_root: &Path,
+    default_source_file: &str,
+)
+#+end_src
+
+Apply the same change to the =#[cfg(not(debug_assertions))]= no-op stub (at =form_match.rs:1422=); add =_workspace_root: &Path= parameter so both variants stay interface-compatible.
+
+Add a private helper next to =extract_filename=:
+
+#+begin_src rust
+/// Convert an absolute (or possibly relative) source-file path into a path
+/// relative to `workspace_root`, suitable for the `EditAst` sync protocol.
+///
+/// Falls back to the bare filename when the source file lives outside
+/// `workspace_root` (canonical equality cannot be established) — this preserves
+/// the historical behavior for stdlib / orphan paths while fixing the common
+/// case of project-local subfolders.
+fn workspace_relative_path(source_file_raw: &str, workspace_root: &Path) -> String {
+    use std::path::Path;
+    let p = Path::new(source_file_raw);
+
+    // Prefer canonical comparison when both sides are accessible.
+    if let (Ok(canon_file), Ok(canon_root)) = (p.canonicalize(), workspace_root.canonicalize()) {
+        if let Ok(rel) = canon_file.strip_prefix(&canon_root) {
+            return rel.to_string_lossy().to_string();
+        }
+    }
+
+    // Fast path: if the raw value is already relative under workspace_root,
+    // strip directly without touching the filesystem (covers tests and tmpdirs
+    // where canonicalize is fine but we want to avoid double work).
+    if let Ok(rel) = p.strip_prefix(workspace_root) {
+        return rel.to_string_lossy().to_string();
+    }
+
+    // Safety net: bare filename. Prevents emitting an absolute path into
+    // data-st-origin (which would still break the protocol downstream).
+    extract_filename(source_file_raw).to_string()
+}
+#+end_src
+
+Inside =inject_provenance_into_matches= (debug variant), replace:
+
+#+begin_src rust
+let source_file_raw = fm.source_file.as_deref().unwrap_or(default_source_file);
+let source_file = extract_filename(source_file_raw);
+#+end_src
+
+with:
+
+#+begin_src rust
+let source_file_raw = fm.source_file.as_deref().unwrap_or(default_source_file);
+let source_file_owned = workspace_relative_path(source_file_raw, workspace_root);
+let source_file = source_file_owned.as_str();
+#+end_src
+
+(Two-step binding because =inject_template_provenance= takes =&str= and we need the =String= to live for the function call.)
+
+Add a =use std::path::Path;= import at the top of the file if not already present (it should be via existing prelude — verify; if not, scope-import inside =workspace_relative_path= as shown).
+
+Do not delete =extract_filename= — it stays as the fallback backbone.
+
+** ITEM Update Compiler::from_file call site
+:PROPERTIES:
+:CUSTOM_ID: BUG-024::update-call-site
+:DEPENDS: BUG-024::update-injection-fn
+:END:
+
+- File: =src/compiler.rs= (line 296)
+
+Change:
+
+#+begin_src rust
+crate::syntax::inject_provenance_into_matches(&mut ast.matches, &path.to_string_lossy());
+#+end_src
+
+To:
+
+#+begin_src rust
+crate::syntax::inject_provenance_into_matches(
+    &mut ast.matches,
+    workspace_root,
+    &path.to_string_lossy(),
+);
+#+end_src
+
+=workspace_root: &Path= is already a parameter of =Compiler::from_file= (line 270); no surrounding change needed.
+
+** ITEM Update existing tests to new signature and expectations
+:PROPERTIES:
+:CUSTOM_ID: BUG-024::update-existing-tests
+:DEPENDS: BUG-024::update-call-site
+:END:
+
+- File: =src/syntax/form_match.rs= (unit, in =mod tests=)
+- File: =tests/integration/provenance_tests.rs= (integration)
+
+*** =src/syntax/form_match.rs::tests::test_inject_provenance_into_matches_pass= (~1944–1986~)
+
+Replace the body so it (a) passes the new =workspace_root= argument and (b) asserts a workspace-relative origin instead of a basename. Concretely:
+
+1. Construct a =tempfile::tempdir()=.
+2. Set =source_file: Some(workspace.path().join("subdir/card.st").to_string_lossy().to_string())=.
+3. Call =inject_provenance_into_matches(&mut matches, workspace.path(), "fallback.st")=.
+4. Assert =body.html.contains("subdir/card.st::.card §template h2")= and replace the now-misleading comment ="origin uses filename, not full path"= with ="origin uses workspace-relative path"=.
+
+*** =src/syntax/form_match.rs::tests::test_inject_provenance_skips_non_template= (~1989–2002~)
+
+Add the new =workspace_root= argument:
+
+#+begin_src rust
+inject_provenance_into_matches(&mut matches, std::path::Path::new("."), "test.st");
+#+end_src
+
+The assertion is unchanged; this test is a no-op smoke check.
+
+*** =tests/integration/provenance_tests.rs= (~37–124~)
+
+For each call site:
+
+- =test_template_provenance_injected_in_debug= (line 46): switch to =inject_provenance_into_matches(&mut matches, workspace.path(), "card.st")= where =workspace= is a fresh =tempfile::tempdir()=, and set =source_file= on the =FormMatch= to =workspace.path().join("card.st").to_string_lossy().to_string()= so the existing assertion ="card.st::.card §template"= still holds (the file is *at* the workspace root, not in a subfolder).
+- =test_template_provenance_no_op_in_release= (line 71): same shape — pass workspace_root and adjust source_file. The release stub asserts the HTML is untouched, which is still true.
+- =test_template_instances_share_same_origin= (lines 91, 92): same shape. Both invocations must use *the same* workspace_root and source_file string so the canonical-relative computation produces identical strings.
+
+Update =make_template_match= helper signature only if needed (it currently sets =source_file= from a parameter; pass the absolute path string in from each caller).
+
+Add =use tempfile;= import at the top of =tests/integration/provenance_tests.rs= (verify =tempfile= is in =[dev-dependencies]= of =Cargo.toml=; the existing =src/sync/handlers.rs= test module already uses it).
+
+** ITEM Verify build, lint, and protocol round-trip
+:PROPERTIES:
+:CUSTOM_ID: BUG-024::verify
+:DEPENDS: BUG-024::update-existing-tests
+:END:
+
+Run, in order, all from repo root:
+
+1. =cargo build= — must succeed (debug).
+2. =cargo build --release= — must succeed (proves release stub signature is consistent).
+3. =cargo test --lib= — must pass; specifically the new =form_match.rs= unit tests.
+4. =cargo test --test integration_tests= — must pass; specifically the updated =provenance_tests.rs= and the new =edit_ast_subfolder_roundtrip.rs= (or =subfolder_edit_protocol_test.rs= if the round-trip is downgraded as noted in the failing-tests item).
+5. Manual smoke (optional but recommended):
+   - =cargo run -- serve projects/unkn/= (or =projects/undefine.org/=).
+   - Open any page that uses a template defined in =modules/_work.st=.
+   - Inspect a text element from that template in the browser and verify its =data-st-origin= now reads =modules/_work.st::...= (NOT =_work.st::...=).
+   - Use the dev panel to inline-edit that element. Confirm the server log no longer prints =EditAst for _work.st: rejected — File not found= and instead writes to =projects/<name>/modules/_work.st=.
+
+* Edge Cases
+
+- *Source file is =None=* — covered by =default_source_file=, which itself is now passed through =workspace_relative_path=. If the entry path is absolute under workspace_root, it resolves to a relative path; otherwise falls back to filename.
+- *Workspace root cannot be canonicalized* (e.g. user passed a non-existent path) — =canonicalize= fails, the =strip_prefix= attempt may still succeed if both inputs share a common literal prefix; otherwise we fall back to filename. No panic.
+- *Source file has been deleted between parse and provenance injection* — =canonicalize(p)= fails, =strip_prefix= against raw path may still succeed (paths are pure strings here). Worst case: filename fallback. Same observable behavior as today for the affected file; no regression.
+- *Stdlib FormMatches* — stdlib macro definitions live under a different root (=stdlib/__dev__/...=) than the user workspace. Their =source_file= won't =strip_prefix(workspace_root)=. The fallback yields the bare filename — same as today, so dev-panel editing of stdlib templates is unaffected (and was never expected to write back to stdlib anyway).
+- *Imports from outside workspace_root* (e.g. via absolute path) — same fallback; preserves current behavior. If a user wants such imports to be editable, that is a separate (unsupported) use case.
+- *Path on Windows* — =to_string_lossy()= on a stripped =Path= yields backslashes on Windows. The server's =site_dir.join(relative_path)= handles both separators. =data-st-origin= would expose =modules\_work.st= on Windows, which =stdlib/__dev__/primitives/dev-editable.st='s =indexOf('::')= still parses correctly. NOT a regression vs. today (the field has never been Windows-tested), and out-of-scope for this bug; record as a follow-up if needed.
+- *Path traversal* — =validate_file_path= already rejects =..= escapes via its =starts_with(canonical_site)= check (=src/sync/handlers.rs:135=). The compiler-side relative-path emission cannot introduce =..= because =strip_prefix= only succeeds when the file is *inside* the workspace.
+
+* Acceptance Criteria
+
+1. =cargo build= and =cargo build --release= both succeed.
+2. =cargo test --lib= passes including the four new =form_match.rs= unit tests.
+3. =cargo test --test integration_tests= passes including the new round-trip test (or its protocol-only downgrade) and the updated existing =provenance_tests.rs= cases.
+4. Editing inline content sourced from =projects/<name>/modules/_work.st= via the dev panel writes back to =projects/<name>/modules/_work.st= without producing =EditAst for _work.st: rejected — File not found: _work.st= in the server log.
+5. Inspecting a text-bearing element rendered from a subfolder =.st= file shows =data-st-origin="modules/_work.st::..."= (or analogous subfolder path) in the live DOM.
+6. No regression: editing inline content sourced from a top-level =.st= file (e.g. =index.st=) continues to work; its =data-st-origin= reads =index.st::...=.
+7. =extract_filename= remains the safe fallback for files outside =workspace_root= (verified by =test_inject_provenance_outside_workspace_falls_back_to_filename=).
+
+* Files Touched (summary)
+
+- =src/syntax/form_match.rs= — signature, helper, tests.
+- =src/compiler.rs= — call site (line 296).
+- =tests/integration/provenance_tests.rs= — three test updates.
+- =tests/integration/edit_ast_subfolder_roundtrip.rs= — NEW file (or downgrade name as noted).
+
+** Verification [2026-05-01]
+1. cargo build — ✓ debug build succeeds
+2. cargo build --release — ✓ release build succeeds (no-op variant signature matches)
+3. cargo test --lib — 2002 passed, 1 pre-existing failure (snapshot_data_directive insta snapshot), 0 new failures
+4. cargo test --test integration_tests — 123 passed, 1 pre-existing failure (light primitive), 1 ignored, 0 new failures
+5. cargo run -- check projects/unkn/ — ✓ all 30 files pass including modules/_work.st
+
+Unit test results (50 in form_match::tests, all pass):
+- test_inject_provenance_subfolder_relative_path_preserved — PASS (was FAILING before fix)
+- test_inject_provenance_outside_workspace_falls_back_to_filename — PASS
+- test_inject_provenance_null_source_file_uses_default — PASS
+- test_inject_provenance_into_matches_pass — PASS (updated)
+- test_inject_provenance_skips_non_template — PASS (updated)
+
+Integration test results (4 in provenance_tests.rs, all pass):
+- test_template_provenance_injected_in_debug — PASS
+- test_template_provenance_no_op_in_release — PASS (compiled under cfg(not(debug_assertions)))
+- test_template_instances_share_same_origin — PASS
+- test_subfolder_template_uses_basename_only_current_bug — PASS (was FAILING before fix)
+
+NOTE [2026-05-01]: Fix implemented. inject_provenance_into_matches now accepts workspace_root: &Path and uses workspace_relative_path() helper that strips workspace prefix; falls back to extract_filename for outside-workspace paths. Call site in compiler.rs:296 passes workspace_root through.

@@ -1,0 +1,104 @@
+#+TITLE: Template-only agent_control mount is inert: autostage drops directives + no @mcp-host bridge
+#+STATE: ITEM
+#+SESSION_ID: 150fc68a85585789
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-19T21-58-52-181Z_150fc68a85585789.jsonl]]
+#+CUSTOM_ID: BUG-124-template-only-agent-control-mount-is-ine
+
+* Initial Message
+
+Check that latest few plans around the MCP/the workbench and the BUG-121 and BUG-122. Can you do another round of checking whether it achieves the Squarespace/Framer/Figma/etc killer vision? Showcase then tell me the gaps that you see.
+
+* Initial Message
+MCP workbench round-4 test-drive (2026-06-19, post PLAN-048/BUG-121/BUG-122).
+
+* Summary
+A TEMPLATE-ONLY function mounted standalone with `agent_control:true` renders its
+button (BUG-116 autostage fix holds) but the button is INERT: the emitted JS has
+ZERO `click` listeners, no `@mcp-host` bridge (`__stHost`), and no `mcp-action`
+wiring. So `st_await` can NEVER drain an event — the agent↔human co-edit story
+(the whole reason agent_control exists, PLAN-046 M5) is unreachable through the
+DOCUMENTED template-only path.
+
+This is the SAME "declared capability silently degrades to a no-op" shape as
+BUG-121 — but one level up: the mount SUCCEEDS, the page PAINTS, and only a live
+st_await (which times out) reveals the panel is dead. No diagnostic at any layer.
+
+* Live repro (verified 2026-06-19 against the running MCP server)
+DEAD (template-only, autostage):
+  st_mount(
+    source: '@template &main() {
+               <section class="panel">
+                 <h2>Approve this change?</h2>
+                 <button class="approve">Approve</button>
+               </section>
+             }
+             .approve { @mcp-action(action: "approve") }',
+    agent_control: true)
+→ inst-2 renders the button (server-rendered &main via autostage shell).
+  Click .approve → st_await(inst-2) → "No event after 6s".
+  Emitted /js: addEventListener only for 'change','DOMContentLoaded','keydown'
+  — NO 'click'; grep '__stHost' / 'mcp-action' wiring → ABSENT.
+
+WORKS (file-scope HTML form — the correct authoring, verified inst-3):
+  st_mount(
+    source: '@import "stdlib/__mcp__";
+             <main class="panel" data-st-instance>
+               <h2>Approve this change?</h2>
+               <button class="approve">Approve</button>
+             </main>
+             [data-st-instance] { @mcp-host }
+             .approve { @mcp-action(action: "approve") }',
+    agent_control: true)
+→ inst-3: button renders, __stHost present, click → st_await drained
+  "mcp-action#5". ✓
+
+* Root cause (source-traced)
+TWO compounding gaps, both in the autostage path:
+1. FUP-061 (templates-only v1): bundles carry @template bodies + css + contract
+   ONLY — file-scope selector rules (`.approve { @mcp-action }`) are NOT included.
+   So in the template-only case the directive that wires the click is dropped on
+   the floor.
+2. The autostage shell (src/mcp/live.rs::instance_page, the
+   `data-st-mcp-autostage` <main>) mounts `&main` but NEVER installs `@mcp-host`
+   on the region root — unlike the workbench host page (actions.st:
+   `[data-st-instance] { @mcp-host }`) and the kit pages (each declares its own
+   `[data-st-instance] { @mcp-host }`). So even if the directive survived, there'd
+   be no bridge for it to resolve (`closest('[data-st-instance]').__stHost`).
+
+* The invariant being violated
+agent_control:true PROMISES "this page's mcp-actions route to the agent." A mount
+that paints an action button which cannot emit is the promise silently broken.
+Either the path WORKS or the mount REFUSES — never "paints a dead button."
+
+* FIX (options — implementer decides; prefer the one that makes it WORK)
+A. Make the autostage shell self-sufficient for agent_control: inject
+   `@mcp-host` onto the autostage region root (it already has data-st-instance),
+   AND carry file-scope selector-scoped behaviours into the autostage bundle for
+   agent_control mounts (a scoped lift of FUP-061 — directives only, not arbitrary
+   file-scope HTML). Then the template-only form in the repro WORKS.
+B. If A is too broad for now: REFUSE a template-only agent_control mount whose
+   source declares `@mcp-action`/`@mcp-host` only at file scope (or declares NO
+   `data-st-instance`), with an actionable error steering to the file-scope-HTML
+   form (the inst-3 shape that works) — the BUG-121 refuse-don't-fake floor.
+C. Minimum: document + lint that agent_control panels MUST use the file-scope
+   `<main data-st-instance> + @mcp-host` form, and have st_mount WARN when an
+   agent_control source has @mcp-action but no resolvable bridge.
+
+Prefer A (make the documented path work); B is the acceptable safety floor if A
+slips; C alone is insufficient (still silent at runtime).
+
+* Acceptance
+- A template-only `st_mount(agent_control:true)` with a `.cls { @mcp-action }`
+  rule EITHER wires the click + bridge so st_await drains the event, OR refuses
+  at mount with a diagnostic naming the directive + the working form.
+- The file-scope-HTML form (inst-3) keeps working (no regression).
+- A test: mount the RED template-only source → assert either (A) emitted JS has a
+  click listener + __stHost install, or (B) st_mount returns a refusal diagnostic.
+
+* Provenance
+- Autostage shell: src/mcp/live.rs::instance_page (`data-st-mcp-autostage`).
+- Bridge install idiom: stdlib/__mcp__/workbench/actions.st
+  (`[data-st-instance] { @mcp-host }`); kit pages each declare it too.
+- Templates-only restriction: FUP-061.
+- Refuse-don't-fake precedent: BUG-121 (E0930 inline-directive refusal).
+- Round-4 test-drive; memory EP-6f819249d9ac1617.

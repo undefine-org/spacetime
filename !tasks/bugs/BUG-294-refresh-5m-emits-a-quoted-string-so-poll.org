@@ -1,0 +1,129 @@
+#+TITLE: refresh: 5m emits a quoted string, so polling never starts
+#+STATE: DONE
+#+SESSION_ID: 153f5ed0617636c7
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-26T21-12-46-213Z_153f5ed0617636c7.jsonl]]
+#+CUSTOM_ID: BUG-294-refresh-5m-emits-a-quoted-string-so-poll
+#+COMPLETION_HASH: b6b4aa1a5bcdd61a
+
+* Initial Message
+
+please show all the waves and all the work there is to do, write it in the todo, and act atuonomously to implement it until the end
+
+* Symptom
+
+#+begin_example
+@data fetch $products Product[] : "/data/products.json" { refresh: 5m }
+#+end_example
+
+emits =const refreshInterval = "5m";= where it must emit =300000=.
+
+=stdlib/primitives/data/source.st:206= guards with =if (refreshInterval > 0)=,
+and =("5m" > 0)= is =false= in JS, so the =setInterval= on the next line never
+runs. **The polling silently never starts** — no error, no warning, a data
+source that simply never refreshes.
+
+Failing tests (both pre-existing before this session? NO — see attribution):
+- =tests/v8_runtime/data_source_tests.rs::test_data_fetch_refresh_duration_converts_to_ms=
+- =tests/v8_runtime/data_source_tests.rs::test_data_fetch_refresh_units=
+
+* Attribution: this is a PLAN-122 W1.2 regression (mine)
+
+Before the wave, =$refresh:duration= resolved to the Rust =TimeExtractor=, which
+produced =CapturedValue::Time(ms)= — already converted to a number, and codegen
+emits =Time= UNQUOTED (=src/pipeline/expand.rs=, =CapturedValue::Time(ms) =>
+ms.to_string()=).
+
+PLAN-122 made a scalar's captured value its SOURCE TEXT (=CapturedValue::String=),
+per the plan's representation decision. Codegen quotes a =String=. So the value
+became =\"5m\"=.
+
+The wave's own gate did not catch it because =cargo test --test v8_runtime_test=
+was not in the verification set I ran during the cutover — a real gap in my
+process, not just in the code.
+
+* Two fixes, both attempted and BOTH BACKED OUT
+
+** A. Convert in the reifier (=DurationExtractor= wrapping =ScalarSourceTextExtractor=)
+
+Reify =duration=/=time= to =CapturedValue::Time(ms)= at capture time, where the
+grammar has just certified the value IS a duration.
+
+REJECTED because it did not work and it broke a working contract:
+- The =refresh:= tests STILL failed, so the =refresh:= value does not flow
+  through =wrap_reifier= at all — it reaches codegen by a different path that
+  needs finding first.
+- It broke =src/pipeline/integration_tests.rs::test_loop_*_duration= (3 tests),
+  which assert the source-text contract PLAN-122 chose. Making duration the one
+  scalar with a different representation needs to be a deliberate decision, not
+  a side effect of fixing =refresh:=.
+
+** B. Sniff the string downstream in =captured_to_js=
+
+REJECTED on principle: re-deriving a value's TYPE from its SPELLING at the
+codegen boundary is exactly the five-shadow-classifier pattern this whole arc
+removes. It would work and it would be wrong.
+
+* What the fix needs
+
+1. Find the actual path =refresh:= takes to =%refresh= in
+   =stdlib/primitives/data/source.st:32=. It is NOT =wrap_reifier=; trace from
+   the =@data fetch= form's =$refresh:duration?= capture through
+   =resolve_via_binds_with_decls= to the primitive's param substitution.
+2. Decide the REPRESENTATION QUESTION deliberately: is a duration's captured
+   value its source text (consistent with every other scalar, and what
+   =test_loop_*_duration= now asserts) with conversion at each consumer, or is
+   it =Time(ms)= (convenient for the arithmetic consumers, inconsistent with the
+   rest)? PLAN-122 chose source text. If that holds, the consumers that need a
+   number must convert — and the place to do it is where the primitive's params
+   are substituted, which knows the declared capture type.
+3. Whatever is chosen must keep BOTH gates green simultaneously:
+   =test_data_fetch_refresh_*= (wants =300000=, unquoted) and
+   =test_loop_*_duration= (wants the source spelling preserved).
+
+* Already fixed on the way (kept)
+
+=src/utils.rs::parse_time_to_ms= carried its OWN two-unit implementation (=ms=
+and =s= only) while =src/syntax/conversions.rs= knew the full set (=ms s us m h
+fps=). A SIXTH duplicate answer to "how long is this?". It now delegates to
+=conversions=, so =5m= and =1h= parse wherever it is called. This did not fix
+the bug above (that value never reaches this function) but it removes a real
+duplicate and is committed separately.
+
+* Related
+- PLAN-122 / FEAT-165 (the scalar cutover that caused this)
+- =src/syntax/conversions.rs= — THE duration converter
+- =stdlib/capture-types/css-values.st= — =time_unit= (=ms s m h us fps=)
+
+NOTE [2026-08-05]: FIXED in cb3b820a, same session it was filed.
+
+The fix is neither of the two options this item recorded as rejected. Both were
+tried and backed out for the reasons above; the third seam is the right one:
+
+**Coerce at the primitive-argument boundary**, in `resolved_to_primitive_args`
+and its sibling call site (`src/pipeline/expand.rs`). That is the ONE place that
+knows both halves — what the value IS (a duration's source text) and what the
+receiver DECLARED it should be (`source.st:20`: `refresh: number = 0`). Neither
+the extractor (which knows the value but not the receiver) nor codegen (which
+knows neither, and would have to sniff the spelling) can answer it.
+
+Found by INSTRUMENTING rather than guessing. Two call sites were patched on the
+assumption the value was a `String`, and both still failed; a one-line probe
+showed it arrives as `Expr("300ms")`, because a body-param capture
+(`{ refresh: 5m }`) is an unparsed expression rather than a typed scalar. The
+declared param type is what makes it a number either way — which is also why the
+fix generalizes: any duration landing in any `number`-typed primitive param now
+converts, not just `refresh`.
+
+Only a value the duration converter RECOGNISES is rewritten. Anything else falls
+through unchanged, so a genuinely non-numeric value still reaches codegen as
+itself instead of being coerced into a plausible lie.
+
+Verified: v8_runtime_test 452 passed/3 failed -> 454 passed/1 failed (the
+remaining `editable_bind_is_per_instance` failure is pre-existing and
+unrelated). css_scalar_acceptance 7/7, clip_driver 4/4, test_loop_* 4/4, full
+lib+integration unchanged at 3062/10 and 188/15.
+
+PROCESS NOTE worth keeping: this was caught only because the final verification
+added `cargo test --test v8_runtime_test`, which had not been in my per-wave
+gate set. AGENTS lists four suites; running three of them is how a silent
+regression ships.

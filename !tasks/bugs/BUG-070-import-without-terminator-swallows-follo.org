@@ -1,0 +1,53 @@
+#+TITLE: @import without terminator swallows following file-scope markup (empty page)
+#+STATE: DONE
+#+SESSION_ID: 14f94e45c6c3f247
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-02T11-06-49-499Z_14f94e45c6c3f247.jsonl]]
+#+CUSTOM_ID: BUG-070-import-without-terminator-swallows-follo
+#+LAYER: parser
+#+COMPLETION_HASH: e24e6899fb49bd47
+
+* Initial Message
+
+can you write docs for them and feature the link to that prominently in AGENTS.md?
+
+first do a markdown version (in .md files) for the content. keep it short and concise, but complete, and focused on the testing infra for now.
+
+then tell me how you'd make a Spacetime-based documentation generator that also acts as a showcase for the features of Spacetime. I want something that really slaps. You can use the latest %capture_type, %primitive, %form, and %macro and whatnot to really really slap (give me your ideas). you can test drive that
+
+A `.st`-only page that opens with `@import "x"` (no semicolon) IMMEDIATELY followed by file-scope `<tag>` markup compiles to an EMPTY body — the served page is blank.
+
+REPRO (minimal):
+  @import "stdlib/text"
+  <main><p class="x">hi</p></main>
+  .x { color: red; }
+→ served <body> has NO markup (0 elements). The dev page is completely blank.
+
+BISECTED (matrix):
+  A: `@import "x"`  then `<main>`              → EMPTY   (bug)
+  B: `@import "x";` then `<main>` (semicolon)  → renders ✓
+  C: `@import "x"` + `// comment` + `<main>`   → EMPTY   (comment does not terminate)
+  D: `<main>` first, then `@import "x"`        → renders ✓ (import is last; nothing after to swallow)
+  E: `@import "x"` + `@type`/`@data`/`@template` decl + `<main>` → renders ✓ (decl terminates)
+
+∴ a terminator-less `@import` directive's argument span extends to consume the
+following file-scope HTML element literal. A semicolon, or any intervening
+directive/decl, bounds it correctly. This is why demos/spacetime-docs renders
+(it has @type/@data/@template between the import and the markup) but a bare
+import-then-markup page is blank.
+
+IMPACT (#A): silent, total — a blank page with no diagnostic. Bites the simplest
+possible `.st`-only page (import a module, then write markup), which is exactly
+the first thing a new user / a generated doc page does. Discovered while building
+the @measure probe for BUG-069.
+
+FIX DIRECTION: in the grammar/parser, `@import` (a directive with a single string
+arg and NO block) must terminate at end-of-line / next top-level construct, not
+greedily extend across the following `<tag>` literal. Likely the tree-sitter
+directive-argument rule or the CST→AST directive boundary. Fix in the grammar /
+metasystem (AGENTS.md: no Rust special-case). Add a parse/emit regression: bare
+`@import` + file-scope markup must yield the markup in body_html.
+
+WORKAROUND until fixed: terminate the import with `;` or place a declaration
+(or the markup itself) before it.
+
+NOTE [2026-06-09]: Fixed (commit e3f81987). Root: parse_directive post-arglist token loop (cst/parser.rs) broke on DOT/HASH but not LT, so newline-led <main> after a bare @import was bumped into ARG nodes. Fix: add LT to post-arglist + inline-args guards + events-parser twin. CST regression test added; comparisons unaffected (newline-gated). The 5 snapshot + 3 import_resolution failures are pre-existing foreign CMS (proven via HEAD parser swap).

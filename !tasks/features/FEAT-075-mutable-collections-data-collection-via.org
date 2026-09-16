@@ -1,0 +1,81 @@
+#+TITLE: Mutable collections: @data collection … via dev-ws (declarative CRUD)
+#+STATE: DONE
+#+SESSION_ID: 14fc108ed3772fa8
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-04T14-32-37-965Z_14fc108ed3772fa8.jsonl]]
+#+CUSTOM_ID: FEAT-075-mutable-collections-data-collection-via
+#+COMPLETION_HASH: 248953f7ec721521
+
+* Initial Message
+
+hey what would it look like if the admin app were done multi-file? what reactive primitives and modular programming principles (and other missing constructs that you find) do you need to make this an amazing DX for developing this kind of app?
+
+* Parent
+[[id:PLAN-030-spacetime-app-platform-declarative-schem]] — Wave 5.
+DEPENDS: [[id:FEAT-071-scoped-state-codegen-emit-html-states-di]] (reactive arrays + each).
+
+* Summary
+The admin's add/delete/reorder each call =window.__stDevSave.saveArray*= imperatively
+(4× hand-wired, each with optimistic apply + ack/reject + revert). Collapse that
+PATTERN into one declarative construct over a collection signal, wrapping the ONE
+legitimate JS primitive (the dev WebSocket bridge), which stays =%emit js= per AGENTS.md.
+
+#+begin_src spacetime
+@data collection $rows Product[] from "/data/products.json" via dev-ws {
+  initial: [];
+}
+// exposes mutators that auto-persist with optimistic apply + ack/reject + revert:
+.add  { @on click { $rows.insert(newItem); } }
+.del  { @on click [data-i] { $rows.delete($.dataset.i | int); } }
+.move { @on drop  { $rows.reorder($from, $to); } }
+#+end_src
+
+* Why a new kind (not a primitive call site)
+The optimistic-apply → persist → ack/reject → revert loop is identical at every CRUD
+site. It deserves ONE construct so the 4 hand-wired sites collapse and the revert logic
+lives in one place. =via <bridge>= names the persistence transport (=dev-ws= here;
+extensible to others later).
+
+* Design
+- New =@data collection= kind alongside inline/fetch/derive/fold/query (data-kind.st).
+- Binds a reactive array signal PLUS three mutators on it: =.insert(x)=,
+  =.delete(indexOrPredicate)=, =.reorder(from, to)=. Each:
+  1. optimistically applies to the local signal (UI updates immediately via @each),
+  2. sends the corresponding EditJsonArray op over the named bridge with an =op_id=,
+  3. on ack: confirm; on reject/timeout: REVERT the local signal to pre-op state and
+     surface an error signal (=$rows_error=).
+- Reuses =stdlib/__dev__/primitives/dev-save.st= (saveArray*) as the dev-ws transport.
+  Do NOT duplicate the WS logic; this construct ORCHESTRATES it.
+- The =via= transport is a named capability; =dev-ws= is the first. Keep the seam so a
+  production transport (REST/PATCH) can be added without changing author syntax.
+
+* Files
+- =stdlib/macros/data-kind.st= — NEW =@data collection … from … via … { initial: }= macro.
+- =stdlib/primitives/data/collection.st= — NEW: reactive array + insert/delete/reorder +
+  optimistic/ack/reject/revert orchestration over a transport handle.
+- =stdlib/__dev__/primitives/dev-save.st= — REUSED transport (audit op_id correctness;
+  AUD-002 found missing op_id bugs in adjacent code — ensure THIS path is correct).
+- =src/pipeline/*= — binding registration for the new kind (mirror data-fetch-opts).
+
+* Edge cases
+- reject/timeout → revert to EXACT pre-op array (snapshot before optimistic apply).
+- concurrent ops (two inserts before first ack) → queue/serialize op_ids; revert only
+  the failed op, not the whole queue.
+- delete by predicate vs index; reorder bounds (from/to out of range → no-op + warn).
+- empty/initial load races (mutate before first load) → buffer or reject with clear error.
+- op_id REQUIRED on every EditJson message (server rejects without it — see AUD-002).
+
+* Test plan (emitted-JS asserted + behavioral)
+- UNIT/SNAPSHOT: the macro emits the array signal + three mutator bindings; each mutator
+  emits optimistic-apply + send(op_id) + onAck/onReject(revert).
+- V8: insert/delete/reorder update the signal; a simulated reject reverts.
+- HEADLESS (with a mock WS or the dev server): add/delete/reorder persist; a forced
+  reject reverts the UI to pre-op state and shows the error.
+- FULL SUITE green.
+
+* Acceptance criteria
+- [ ] one =@data collection= construct replaces the 4 hand-wired CRUD sites' pattern.
+- [ ] optimistic apply + ack/reject + revert all verified (incl forced reject).
+- [ ] op_id present on every message; concurrent ops revert independently.
+- [ ] emitted JS asserted; full suite green; only the WS bridge keeps %emit js.
+
+NOTE [2026-06-09]: DONE (commits d80ab436 impl, 4bd30a68 reviewer fixes). @data collection $name T[] from url via dev-ws { initial } — reactive array + ST._collections[name].{insert,delete,reorder} mutators. Each: snapshot -> optimistic apply (ST.setData re-renders @each) -> send EditJsonArray(op_id) over window.__stDevWs -> on Reject revert via INVERSE op applied to CURRENT array (independent concurrent revert) + raise $name_error. Pure stdlib (data-kind.st macro + collection.st primitive) + runtime: ST.runMutations $coll.method(args) dispatch branch (makes signal_call grammar executable; honors | filter pipes), NEW ST.getData(name). Reuses dev-ws bridge (no WS dup); transport seam for prod REST. Collapses the 4 hand-wired admin CRUD sites (which had NO client revert — strictly more correct). Reviewer swarm: P1 concurrent-revert-clobber FIXED (inverse-op revert), P2 filter-pipe-arg-eval + string-dataset-index + warn-noise FIXED. Gates: v8 333/12 (pre-existing media cluster), lib 2153/5 (pre-existing BUG-069 snapshots), integration 168/0. No Rust change needed.

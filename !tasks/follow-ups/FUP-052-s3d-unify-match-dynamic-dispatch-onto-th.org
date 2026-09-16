@@ -1,0 +1,82 @@
+#+TITLE: S3d: unify @match + dynamic dispatch onto the scope path (the last mile to reify deletion)
+#+STATE: DOING
+#+SESSION_ID: 1503ca05d05c0c62
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-10T14-32-18-497Z_1503ca05d05c0c62.jsonl]]
+#+CUSTOM_ID: FUP-052-s3d-unify-match-dynamic-dispatch-onto-th
+
+* Initial Message
+
+Please explain FEAT-115, FEAT-116, FEAT-117, BUG-105, and FUP-051 thoroughly so I can understand them from scratch
+- how you will solve them (you can use comby btw)
+- what that unlocks
+- how you will make sure your code is clean
+
+* Goal
+The final reify producers. After FEAT-115 S1/S2/S3a-c, `reify_component_body`
+produces only two LIVE fields: `refs` (DYNAMIC `&$w()` dispatch; static `&row()`
+is already unified via `template-invoke-bare`) and `matches` (`@match $sig {...}`
+render dispatch). Unify both onto the scope path so the field + reify can die,
+then FEAT-115 S5/S6 (the zero-zombie deletion) and FEAT-116 unblock.
+
+* The blocker (precisely characterized)
+A body-root render-dispatch (`&$w()`, `@match $kind {...}`) must resolve its
+NAME/SUBJECT against the HOST INSTANCE's params at mount. CONFIRMED FACT
+(stdlib/primitives/template.st:247,275): the factory seeds params on the instance
+root synchronously via `ST.set(element, name, data[name])` BEFORE append \u2014 so
+`ST.resolve(node, name)` from a body descendant DOES resolve the param. The S3d
+attempt (committed-then-reverted: template-invoke-dynamic macro +
+invoke-template dynamic resolution) failed with "Template not found: w" because
+the body-root `&$w()` flat match emitted as a selector-init with no instance
+container under the resolving node \u2014 the WRONG mount path. The injection unifier
+(injection_scopes_from_body, S3c) already solved exactly this shape for
+content-bindings: a body-root construct becomes a SYNTHESIZED nested scope on the
+template that mounts per-instance via registerSelectorInit and resolves via
+ST.resolve. Reuse that pattern.
+
+* Plan (validated)
+1. **@match as a flat %macro** modeled EXACTLY on @view (stdlib/macros/view.st +
+   stdlib/primitives/view.st \u2014 the REACTIVE sibling already works at selector
+   scope: `.stage { @view $pane {...} }`). Reuse the `match_arm`/`match_block`
+   grammar (stdlib/capture-types/match-block.st). Add a render-once `match-mount`
+   primitive (like view-mount minus the re-subscription) that resolves the
+   subject via `ST.resolve(host, sig)` (instance scope) + the dynamic arm template
+   name + dotted args via ST.resolveTemplateArg. Surface @match in a template body
+   as a synthesized scope (or a flat match routed to the instance host) so it
+   mounts per-instance.
+2. **Dynamic dispatch &$w()**: surface as a synthesized invoke scope (mirror
+   injection_scopes_from_body) OR fold into the match-mount/invoke primitive with
+   instance-root resolution. Static &row() stays on template-invoke-bare.
+3. New stdlib files (match macro/primitive) need registration in
+   src/stdlib_embedded.rs (include_str!) for embedded builds (filesystem stdlib
+   works for tests without it).
+4. Then: no-op reify `match`/`template_ref` arms, stop serializing refs/matches,
+   delete the factory refs/matches forEach.
+
+* Gotchas (from the reverted attempt)
+- %emit js MANGLES multi-line comments + multi-statement if/console.warn with
+  line-broken strings (SyntaxError). Keep emitted JS single-line + defensive.
+- The recursion depth guard (FEAT-073) currently lives in the factory refs
+  forEach; if that forEach is deleted, fold the guard into invoke-template /
+  match-mount (single-line, no early-return-with-%yield which the emit can't wrap
+  cleanly outside a function).
+
+* Acceptance
+- @match + &$w() render per-instance via the scope path; reify produces neither.
+- Native .test.st gates (now unblocked by BUG-105): a @match + a &$w() template
+  in @mount compile + run + assert headless.
+- feat073 (match + dynamic dispatch) green via the new path.
+- Then FEAT-115 S5: rg 'component_body|ComponentBody|reify_component_body|
+  component_item' src/ stdlib/ => 0; delete CaptureType::ComponentBody +
+  component-body.st + the struct fields. S6: regen snaps, all gates.
+
+* Provenance
+PLAN-039 FEAT-115 final sub-step. Reverted attempt: session commits around
+fe0975f5..3e0f90fb. Blocks FEAT-115 S5/S6 + FEAT-116.
+
+NOTE [2026-06-14]: @match HALF DONE + committed (645e4997): @match is now a flat %macro + match-render primitive, fully unified per-instance (reify_match deleted, matches not serialized). The body-root-construct ROOT-SELECTOR technique (template_root_selector → fm.selector = root) is the proven mechanism, validated by @view working in a template body.
+
+DYNAMIC-REFS attempted + cleanly reverted (forward-restore to 645e4997). PRECISE BLOCKER FOUND: the body template-invocation (static &row() AND dynamic &$w()) does NOT render when routed through the flat-match root-selector → invoke-template path. The factory `refs` forEach was the ONLY working path. Specifically: a body `&row()` in &list's body registers registerSelectorInit('.l', init) correctly (.l = list root), invoke-template's container=el resolves, BUT the init never fires / row=0 when .l is created by the &list factory. Injections work via the same root-selector mechanism (feat071 green), so the difference is invoke-specific — likely a MOUNT-ORDER issue: the invoke init must fire AFTER the host instance (.l) is appended + its params seeded, but the nested dynamic-mount observer chain for a factory-created subtree containing another invoke doesn't re-trigger the inner invoke's selector-init. (Injections bind to existing descendant nodes; invokes CREATE new subtrees, a harder observer case.)
+
+REMAINING for dynamic-refs unification: solve the nested-invoke mount-order. Options: (a) have the factory, after seeding params + appending, explicitly ST._scheduleInit/_flushInit on the new instance subtree so inner invoke selector-inits fire; (b) keep the factory forEach but source its refs from the flat matches instead of reify (smaller — refs data from World A, render via the existing working forEach); (c) a dedicated body-invoke primitive that runs synchronously in the factory closure (like the current forEach) but driven by the flat match. Option (b) is likely the cleanest path to delete reify refs while keeping the working render. The recursion-depth guard (feat073_unbounded_recursion) must stay wherever the render happens.
+
+Note: %emit js MANGLES // comments containing parens/certain words (SyntaxError 'names'/'the'/'self') — keep emitted-JS comments to a single plain short line.

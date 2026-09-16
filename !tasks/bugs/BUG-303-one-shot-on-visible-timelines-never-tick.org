@@ -1,0 +1,34 @@
+#+TITLE: One-shot @on visible timelines never tick mid-run under @clock — only run-to-end snaps them
+#+STATE: ITEM
+#+SESSION_ID: 1534a2eae1903af0
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-18T13-07-01-638Z_1534a2eae1903af0.jsonl]]
+#+CUSTOM_ID: BUG-303-one-shot-on-visible-timelines-never-tick
+
+* Found
+2026-08-05, while building the BUG-297 easing behavior gate (tests/easing/custom-form-curve.test.st).
+
+* Evidence
+A `@on &.visible(1000ms)` timeline under the virtual clock: `@clock install` → `@record-timeline riseA` → `@clock advance 500` → `@timeline riseA { nonempty }` FAILS with "expected samples, got 0". Zero frames recorded during the advance. Mid-run styles are also not applied (opacity stays 0 at t=500 of 1000ms).
+
+gh-6 (tests/repro/gh-6-hold-end-state/) passes only because `@clock advance 1000` (≥ duration) + `@clock run-to-end` SNAPS the timeline to completion — no test in the suite samples a time-based one-shot timeline at an intermediate virtual time. The ANIMATION.md example (`@clock advance 200` mid-reveal) implies mid-run ticking works; it does not.
+
+* Impact
+No mid-curve behavior assertion is possible for any time-based driver (`@on visible(Nms)`, one-shots generally). The docs/testing/ANIMATION.md "seek virtual time and assert on the curve itself" moat claim is currently unproven for the driver family it showcases.
+
+* Suspected mechanism (unverified)
+The one-shot visible timeline's ticker does not integrate with ST._clock's virtual rAF timestamps — likely it starts its own rAF loop or captures a real-clock start time, so virtual advances never map to progress. run-to-end bypasses this by forcing progress=1.
+
+* Repro
+Probe written during the investigation (passes the mount, fails the timeline):
+#+begin_src spacetime
+@import "stdlib/testing/test"
+@import "stdlib/testing/timing"
+.easeCustom { @on &.visible(1000ms) as $riseA { opacity: 0 -> 1; } }
+@test "probe" {
+  @fixture { <div class="easeCustom">A</div> }
+  @clock install
+  @record-timeline riseA
+  @clock advance 500
+  @timeline riseA { nonempty; }
+}
+#+end_src

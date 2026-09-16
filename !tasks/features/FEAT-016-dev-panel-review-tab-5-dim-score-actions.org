@@ -1,0 +1,115 @@
+#+TITLE: Dev panel Review tab (5-dim score + actions)
+#+STATE: DONE
+#+SESSION_ID: 14cb55e291e3888a
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-04-27T18-09-57-319Z_14cb55e291e3888a.jsonl]]
+#+CUSTOM_ID: FEAT-016-dev-panel-review-tab-5-dim-score-actions
+#+DEPENDS:  
+#+EFFORT: 3h
+#+LAYER: runtime
+#+PRIORITY: #A
+
+* Initial Message
+
+what can you learn from this https://github.com/alchaincyf/huashu-design
+
+to make a nice spell skill that helps with Spacetime? think about the skill + the features and improvements to the debugger that you can land
+
+* Scope
+
+In-scope:
+- New "Review" tab in the existing dev panel (=stdlib/__dev__/macros/panel.st=, see also =stdlib/__dev__/primitives/dev-panel.st=).
+- Tab UI elements:
+  - Top-level *score* (0-10) rendered as a single big number with semantic color (>=8 green, 5-7 yellow, <5 red — Catppuccin palette already used by `timelines-errors`).
+  - Five *dim rows*, each with name, dim score badge, expand toggle.
+  - Expanded row shows findings list: severity icon, message, selector (clickable → DOM highlight via existing inspect machinery in =dev-inspect.st=), value where applicable.
+  - "Refresh" button that calls `window.__stDevReview()` immediately; auto-poll every 2000ms while tab is visible.
+- Reuse Catppuccin theme + style conventions from =timelines-errors.st= (badge classes, colors, list shapes).
+
+Out-of-scope:
+- Auto-fix actions (only a "Copy report" button that puts the JSON on clipboard for hand-off to `doctor` or to share with an agent).
+- Persistent settings (audit thresholds, ignore lists) — single-shot for now.
+
+* Existing Patterns
+
+- Tab system: =stdlib/__dev__/primitives/dev-panel.st= exposes `window.__stDevPanel.getPane('id')` returning a shadow-DOM container; tabs are pre-declared in =stdlib/__dev__/macros/panel.st=. New tab requires both (a) declaring pane id "review" in panel.st and (b) populating it in a primitive.
+- Polling pattern: =stdlib/__dev__/macros/timelines-errors.st= sets `setInterval(render, 500)` while the tab is visible; copy that pattern but at 2000ms (review walker is heavier).
+- Style injection into shadow DOM: same primitive shows the canonical pattern (build `style.textContent` from a string array, append to `panel.shadow`).
+- Selector → DOM highlight: =stdlib/__dev__/primitives/dev-selector.st= already exposes a hover-highlight overlay. Reuse it for clickable findings.
+
+* Tests
+
+Manual (Playwright pass before merge):
+- M1: Open `projects/dataiku/` dev server, click "Review" tab, observe 5-row layout populated within 2s.
+- M2: Edit a `.st` file to inject `<button onclick="alert('x')">`, save, confirm tab refreshes with one new idiomatic-error row.
+- M3: Click a finding's selector chip → host page element flashes via dev-selector overlay.
+- M4: Click "Copy report" → paste shows valid JSON matching `Spacetime.review()` output.
+
+Unit (where feasible):
+- T1: `panel.getPane('review')` returns a non-null container in dev mode (extend existing dev-panel test if any; otherwise add a minimal headless test in =cargo run --features headless -- test tests/= using a fixture page that boots the dev runtime).
+
+Smoke automation (=cargo run -- doctor=, future): doctor includes a Playwright check that opens dev panel, switches to Review tab, asserts score is rendered as a number — out of scope for this item, mentioned for forward compatibility.
+
+* Implementation
+
+** ITEM Declare review pane in panel macro
+:PROPERTIES:
+:CUSTOM_ID: FEAT-016-dev-panel-review-tab-5-dim-score-actions::declare-pane
+:END:
+- File: =stdlib/__dev__/macros/panel.st=.
+- Add `'review'` to the tab list with label "Review" and an icon (reuse an existing one or add a small inline SVG).
+
+** ITEM Author review-tab primitive
+:PROPERTIES:
+:CUSTOM_ID: FEAT-016-dev-panel-review-tab-5-dim-score-actions::author-primitive
+:DEPENDS: FEAT-016-dev-panel-review-tab-5-dim-score-actions::declare-pane
+:END:
+- File: new =stdlib/__dev__/primitives/dev-review-tab.st=.
+- Mirror the shape of =timelines-errors.st=: bail if `panel.getPane('review')` not ready; inject styles; render once on load and on `setInterval(render, 2000)` while pane visible.
+- Render uses `window.__stDevReview()` (provided by FEAT-015).
+- Selector chip click → call `window.__stDevSelector.highlight(sel)` (already exposed by dev-selector.st).
+- "Copy report" button uses `navigator.clipboard.writeText(JSON.stringify(report, null, 2))`.
+
+** ITEM Wire imports
+:PROPERTIES:
+:CUSTOM_ID: FEAT-016-dev-panel-review-tab-5-dim-score-actions::wire-imports
+:DEPENDS: FEAT-016-dev-panel-review-tab-5-dim-score-actions::author-primitive
+:END:
+- File: =stdlib/__dev__/index.st=.
+- `@import "./primitives/dev-review-tab.st"` after `@import "./primitives/dev-inspect.st"` (so `__stDevReview` exists when this primitive runs).
+
+** ITEM Manual Playwright pass
+:PROPERTIES:
+:CUSTOM_ID: FEAT-016-dev-panel-review-tab-5-dim-score-actions::manual-verify
+:DEPENDS: FEAT-016-dev-panel-review-tab-5-dim-score-actions::wire-imports
+:END:
+- Run `cargo run -- serve projects/dataiku/`, open http://localhost:3333/, run scenarios M1-M4.
+- Capture screenshot `screenshots/review-tab-dataiku.png` for the FEAT body.
+
+* Edge Cases
+
+- Tab opened before dev-review primitive loaded: render placeholder "Review pending..." instead of erroring.
+- Review walker throws: catch, show single error finding with `{ severity: 'error', message: 'review failed: <text>' }` so the tab never blanks.
+- Visibility detection MUST use a MutationObserver on the pane's class list (existing pattern in panel.st), not naive document.visibilityState.
+- 0 findings across all dims: render "All clear ✓" empty state.
+
+* Acceptance Criteria
+
+- "Review" tab visible in dev panel on `projects/dataiku/`.
+- Score number renders within 2s of tab open; auto-updates every 2s.
+- Selector chip click flashes the corresponding host element.
+- "Copy report" produces clipboard JSON matching `Spacetime.review()` shape.
+- Manual scenarios M1-M4 pass; screenshot attached to FEAT body.
+
+NOTE [2026-04-27]: Deferred from PLAN-017 to FUP-009. Foundation (Spacetime.review API) shipped via FEAT-015; the tab UI is independent and was deprioritized to keep the plan slice shippable in one session.
+
+* Round-2 reactivation [PLAN-018]
+
+Reactivated from BLOCKED. Implementation guidance refined:
+- *Tabs declaration site is the primitive, NOT the macro.* Original FEAT body says "Add 'review' to the tab list with label 'Review'" and points at =stdlib/__dev__/macros/panel.st=. Correction: the live tab list is HTML strings inside =stdlib/__dev__/primitives/dev-panel.st=, around line 188 (=<button class="st-tab" data-tab="..."=) and line 197 (=<div class="st-pane" data-pane="..."=). Add =review= to BOTH lists.
+- *=panel.st= macro %binds chain:* =dev-review()= is already wired (PLAN-017 commit). The new =dev-review-tab()= primitive should also be added to the same %binds list so it is invoked at panel boot.
+- *Use FEAT-015 as-is:* =window.__stDevReview()= and =window.Spacetime.review()= are both available. Either works; prefer =window.__stDevReview()= for internal consumption to keep the public API surface clean.
+- *Visual reference:* =stdlib/__dev__/macros/timelines-errors.st= is the canonical "tab populates from a polled source" pattern (poll every 500ms, diff JSON to skip re-renders). Use it as the template.
+
+Sub-outline already complete; no schema changes beyond the implementation hints above.
+
+NOTE [2026-04-27]: PLAN-018: Review pane added to dev-panel.st (tab + pane), new primitive stdlib/__dev__/primitives/dev-review-tab.st polls window.__stDevReview() every 2000ms while the pane is visible (MutationObserver-gated), wired in stdlib/__dev__/index.st and panel.st binds chain. Manual scenarios M1 (5-row layout populated within 2s), M3 (selector chip click invokes window.__stDevSelector.highlight), M4 (Copy report writes valid JSON to clipboard) all verified on adovasio. Screenshots: dev-panel-review-tab-declared.png and dev-panel-review-tab-populated.png in plan-artifacts.

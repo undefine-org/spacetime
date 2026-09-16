@@ -1,0 +1,95 @@
+#+TITLE: Migration capsules: multi-macro %migration entries, collapsed 2026-06-09 wave, dev-ex rail
+#+STATE: DONE
+#+SESSION_ID: 1534a246b3aa1d15
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-18T13-04-13-518Z_1534a246b3aa1d15.jsonl]]
+#+CUSTOM_ID: PLAN-079-migration-capsules-multi-macro-migration
+
+* Initial Message
+User: "one thing about the migrations… i'd like each migration to contain not only the migration %-form, but also the old parser grammar and whatnot, that way the stdlib only has the new versions." + "a single migration might cover several macros." + "YES, collapse them" (the 7 seed entries → one 2026-06-09 file) + "dev-ex proposals: include them in the plan and in the docs, they look very good."
+
+* Design (confirmed with user)
+A %migration becomes a SELF-CONTAINED CAPSULE: it embeds the retired %macro definitions VERBATIM (grammar + %binds semantics) alongside the migration metadata, so stdlib proper only ever carries current syntax. ONE migration may retire SEVERAL macros (a wave is one retirement, not one file per form).
+
+Capsule shape (stdlib/migrations/entries/2026-06-09-reactive-surface.st):
+#+BEGIN_SRC
+%migration reactive-surface {
+  %date 2026-06-09
+  %docs "FEAT-072 wave: the paren-macro reactive surface retired for `:` / `<-`."
+
+  // retired definitions, verbatim (from stdlib/macros/data.st @ 75ce7975^)
+  %macro bind { %form { @bind(text: $text:expr? = undefined, …) } %if $text { %binds { bind-text(…) } } … }
+  %macro show { %creates @show %form { @show(when: $condition:expr, mode: $mode:string = "display") } %binds { bind-visible(&self, condition: $condition, mode: $mode) } }
+  %macro input-bind { %creates @input %form { … } %binds { bind-input(&self, value: $value, event: $event, debounce: $debounce) -> { $value } } }
+
+  // mechanical rewrites (per-shape data; pattern reuses the %form PEG)
+  %rewrite { @bind(text: $x:expr) } => { text <- `$x`; }
+  %rewrite { @bind(attr: $n:string, value: $v:expr) } => { `$n` <- `$v`; }
+  %rewrite { @bind(class: $c:string, when: $cond:expr) } => { .`$c`: `$cond`; }
+  %rewrite { @bind(style: $p:string, value: $v:expr) } => { `$p`: `$v`; }
+  %rewrite { @bind(visible: $v:expr) } => { .shown: `$v`; }
+
+  // manual guidance, keyed by directive
+  %hint for @show "Replace with a reactive class toggle — `.hidden: !$condition;` + a `.hidden { display: none }` rule."
+  %hint for @input "Replace with `value <- $s;` + `@on input { $s <- &el.value; }`."
+}
+#+END_SRC
+
+Key semantics:
+- Embedded macros register as REAL macros tagged retired {wave, migration-id} — REPLACES the synthetic-macro special-case in syntax/bootstrap.rs (deleted).
+- The bind-visible/bind-input/bind-text/etc. PRIMITIVES were never deleted → an embedded macro with %binds still EXPANDS with original semantics. Hint-covered directives (@show/@input) therefore COMPILE THROUGH THE WINDOW with W0715+hint (was E0910 hard-error) — restores PLAN-076's original "old syntax keeps compiling" promise for manual migrations. The macro pipeline itself is the shim; textual splice is only for %rewrite rules.
+- Shim matches %rewrite rules only (pattern → template → W0715 "auto-migrated"). Manual directives surface via the retired-macro match path (collect pending from FormMatch.matched_macro).
+- check_retired_syntax, matched retired macro: wave ≤ @version → E0911 (inert); directive has rewrite rules → E0910 (degrade: unshimmed path / multi-shape extras); else → W0715 + %hint text (compiles).
+- @version gate unchanged. Deleting the wave file = old syntax ceases to exist.
+
+Validation (load-time, order-independent):
+- %rewrite template holes ⊆ its pattern captures (per rule).
+- Every embedded macro's directive is covered by ≥1 %rewrite rule OR a %hint for it.
+- %hint for @name must name an embedded macro's directive.
+- A retired directive must NOT collide with a LIVE stdlib macro's creates-name (retirement incomplete).
+- Existing: ISO date, filename date == %date, forward-only chains (now per rewrite-rule), same-wave overlap by (date, directive, param names).
+
+Seed collapse: DELETE the 7 files 2026-06-09-{bind-*,show-*,input-*}.st; CREATE 2026-06-09-reactive-surface.st (verbatim old defs from git: bind = 75ce7975^:stdlib/macros/data.st, show/input-bind likewise). stdlib_embedded.rs synced. The TOMBSTONES REMOVED comment in data.st updated.
+
+* Dev-ex rail (user-approved, in scope + documented)
+1. =spacetime migrate --explain <id>= — print the capsule (old grammar, semantics, rewrite rules, hints) from registry data.
+2. =spacetime check --at-version <date>= — compile as if @version were bumped: preview E0911s before committing to a wave.
+3. Pill per-entry expander: old→new grammar + hint inline (status.json gains grammar text per rule row).
+4. =spacetime migrate --scaffold <id>= — generate a dated entry skeleton (stdlib/migrations/entries/<today>-<id>.st) for stdlib authors.
+
+* Status.json restructure (waves → migrations → rule rows)
+entries become per-RULE rows: {migration, kind: automatic|manual, directive?, hint?, docs, grammar?, count}; wave.appliable = any automatic row with count>0. Pill renders migration sections under each wave row; expander shows grammar+docs+hint.
+
+* Safety
+- Disk apply only touches %rewrite-rule matches (automatic); manual rows never auto-applied.
+- Staleness guard (content hash at plan time) unchanged.
+- Imported files: not textually shimmed (v1) — retired matches there degrade per check_retired_syntax.
+
+* Waves
+- W1 metasystem: MigrationDefAst restructure (macros/rewrites/hints), parser (%macro nesting, %rewrite {} => {}, %hint for), CST, registry storage + retired-tag registration (delete synthetic), validation. Unit tests.
+- W2 pipeline: shim per-rule, check_retired_syntax tri-branch, collect pending per directive, collapsed seed + embedded sync, compile tests (@show/@input compile w/ W0715; @bind arrow identical JS; E0911 inert).
+- W3 dev-ex: status.json restructure + pill sections/expander, --explain, --at-version, --scaffold. Tests.
+- W4 docs (docs/language/migrations.md, stdlib/AGENTS.md charter, data.st comment, MIGRATION.md) + full suite + live verification.
+- R1–R4 reviewer swarms after each wave (standing user directive).
+
+* DONE 2026-07-20 — full implementation record
+
+** Implemented (W1-W4, all verified):
+- Capsule metasystem: MigrationDefAst{macros, rewrites, hints}; nested %macro parsed via the REAL macro path (populate_macro_from_clauses); %rewrite <id> { %match {…} %into {…} }; %hint for @dir "…" (unescaped). Embedded macros register as REAL retired-tagged macros `<mig>#@<name>`; rules as match-only defs `<mig>#<rule>`; rule defs get +1000 specificity (RETIRED_RULE_BOOST) so patterns outrank the embedded catch-all. Validation: ISO date, ≥1 embedded macro (unique names), rule-id uniqueness, directive ∈ embedded, template non-empty, holes ⊆ captures, self-cycle, coverage (rule OR hint per directive), live-shadow guard, post-load chains (intra-capsule rule→rule chains PERMITTED).
+- Shim: per-rule rewrites keyed on matched_macro → retired_by_macro; fuel = participating rules + 1 with degraded≠progress (no bogus E0912); iteration-0 embedded scan records hint/no-rule pending rows with PRE-shim spans (span-drift fix); block-comment-aware arg scanner (no fail-open unsound rewrites); multi-shape degrade with extras-named hint.
+- Pipeline tri-branch: wave ≤ @version → E0911; surviving rule match → E0910; embedded + rules-exist → E0910; embedded + hint-covered → W0715 compile-through (embedded %binds expand). Pipeline W0715s routed to CompiledSpacetime.migration_warnings. @version integrity (dup decls, non-ISO) enforced pipeline-side (check ≡ serve/build).
+- Seed: 7 fragments collapsed into ONE capsule `stdlib/migrations/entries/2026-06-09-reactive-surface.st` (verbatim bind/show/input-bind from 75ce7975^, 5 rewrite rules, 3 hints).
+- Dev-ex rail: `migrate --explain <id>` (full capsule contract + project site count + broken-entry errors), `migrate --scaffold <id>` (dated skeleton, refuses overwrite), `check --at-version <date>` (CompileOptions.version_override → CompileContext → tri-branch; would-break = E0911), check runs shim BEFORE its from_ast compile (no false E0910), check hit-scan via retired_by_macro, check diag collector renders against shim.source when shim ran (+ pre-shim collector for shim's own warnings), check emits migration_warnings.
+- Status/pill: status.json entries carry rules+hints; mixed-kind entries read "mixed"; wave appliable tracked PER ROW (mixed waves keep Apply); hint backfill; pill per-entry <details> expander (5 rules red/green + 3 hints, verified live incl. Apply → on-disk rewrite + @version bump + pill hides).
+- Docs: docs/language/migrations.md (capsule rewrite), docs/MIGRATION.md (2026-06-09 wave table), stdlib/AGENTS.md charter, data.st TOMBSTONES comment, check_retired_syntax docstring.
+
+** Review swarms R1-R4 (5 reviewer agents, ~20 findings, ALL fixed + regression-tested): fuel guard misfire, span drift (pending + check), block-comment fail-open, dup embedded macros, partial-registration state, hint escape, mixed-wave Apply hidden, first-row-wins hint, false E0910 in check, check/build @version divergence, dropped migration_warnings, doc inaccuracies.
+
+** Filed mid-flight: BUG-204 DONE (nested-Expr record serialization + claims runtime eval + PLAN-077 lib test matched_macro fix), BUG-205 ITEM ($object signal initializers elided — orthogonal, needs investigation).
+
+** Suites: lib 2677 ✓ · integration 189 ✓ · migrations 12 ✓ · migrate_cli 5 ✓ · v8 437 ✓ · headless 631 ✓ · live pill e2e ✓ (screenshots /tmp/pill-expander.png).
+
+** Accepted limitations (FUPs):
+- Pipeline E0910/W0715 diagnostic spans are post-shim coords (drift after earlier same-file rewrite); pending rows are pre-shim correct.
+- Two waves touching same-named directive: older def matches first (re-retirement ergonomics).
+- Pill expander open state resets on 2s refresh.
+- Shim reparse uses the GLOBAL stdlib registry (production-identical to the passed one; unit tests can't chain extra→extra migrations past iteration 0).

@@ -1,0 +1,80 @@
+#+TITLE: An element reference to an undeclared name emits a dead bundle instead of a diagnostic
+#+STATE: ITEM
+#+SESSION_ID: 154d0baaa942d918
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-08-06T12-08-13-733Z_154d0baaa942d918.jsonl]]
+#+CUSTOM_ID: BUG-333-an-element-reference-to-an-undeclared-na
+
+* Initial Message
+
+exlpain #30, and for #14 and #11, does the new @on's text-change facet solve this?
+
+#+STATE: ITEM
+#+PRIORITY: B
+
+* Symptom
+
+Referencing an element binding that was never declared produces a bundle that does not parse,
+rather than a diagnostic naming the unknown reference:
+
+#+begin_src spacetime
+@import "stdlib/syntax/element-ref.st"
+.card { $x: &$b; }
+<div class="card">h</div>
+#+end_src
+
+#+begin_example
+✗ the compiler emitted JavaScript that does not parse: JS error at 6956:20: TS1109
+#+end_example
+
+* Bisected
+
+| shape                        | result |
+|------------------------------+--------|
+| `$x: &$b`                    | BROKEN |
+| `$x: &$b.rect.width`         | BROKEN |
+| `$x: $b.rect.width`          | ok     |
+| `$x: &self.rect.width`       | ok     |
+
+So the trigger is the `&$name` ELEMENT REFERENCE to a name with no declaration — not the
+member/index accessor after it. `&self` (a defined reference) is fine, and the same dotted
+expression without `&` is fine.
+
+* Relationship to BUG-328 (fixed, cdd3e397)
+
+BUG-328 was the ACCESSOR half of this area: `&$bounds.rect.width` inside `@drag`'s `%derives`
+had its `$bounds` bound as a bare IDENT, leaving `.rect.width` for a sibling
+`$selector:selector` capture to misread as a CSS class selector. That is fixed, and the fix was
+generalized to `[` as well after review found `&$items[0]` had the identical failure
+(`src/syntax/events/extractors/simple.rs`, three unit gates).
+
+Verified fixed and NOT affected by this bug:
+- `@import "stdlib/dnd/macros/drag.st"` builds (the original trigger)
+- a page actually USING `@drag(axis: "x")` builds
+- `@import "stdlib"` builds
+
+This item is the remaining, narrower case: the reference itself is unresolvable. It was found
+only because a synthetic repro used an undeclared `$b`; no stdlib or authored page hits it,
+which is why it did not surface earlier.
+
+* Why it still matters
+
+The failure mode is the worst available one. An undeclared reference is a plain authoring
+mistake with an obvious diagnostic (`unknown element reference 'b'`), but instead it emits JS
+that does not parse — so the whole page is dead and the message points at a byte offset in a
+generated bundle rather than at the source line. E0952 catches it only as "the compiler emitted
+JavaScript that does not parse", which correctly identifies a compiler bug but cannot tell the
+author what THEY did wrong.
+
+Same family as GH-13/GH-22: a construct that cannot be resolved must produce a diagnostic, never
+degrade into emitted-but-broken output.
+
+* Fix direction
+
+Resolve `&$name` against the element-reference registry at bind time. An unresolved name is a
+compile error naming the reference and listing the declared ones in scope. Do NOT emit a
+selector-resolution preamble for a name that resolved to nothing.
+
+* Gate
+
+`.card { $x: &$b; }` with no `&b` declaration must produce a diagnostic and a non-zero exit,
+and must NOT reach the JS-parse check.

@@ -1,0 +1,201 @@
+#+TITLE: generation not gates: compiled expressions + runtime-owned lifecycle make template-JS bug classes unrepresentable
+#+STATE: DONE
+#+SESSION_ID: 154a5223678cc3a4
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-08-04T09-20-40-862Z_154a5223678cc3a4.jsonl]]
+#+CUSTOM_ID: PLAN-133-generation-not-gates-compiled-expression
+#+COMPLETION_HASH: b1d467d564e33f63
+
+* Initial Message
+
+ok but I want the structural fix. How do you catch these earlier in the meta-transpiling process? Structurally?
+
+* Origin
+
+Two live runtime errors on the /brand/ comments pill (localhost:3335, 2026-08-04),
+both born in hand-written JavaScript inside `%emit js` templates:
+
+- BUG-273 (fixed tactically in 3c4e719c): `stdlib/primitives/data/derived-signal.st`
+  rewrote every `$name` token by regex/char-scan, including arrow-lambda params →
+  emitted `(SpacetimeLocal['r']) => …` → SyntaxError on every recompute of
+  `$comOpenCount` / `$comPruneFiles` (from `stdlib/comments/__dev__/pill.st:25`).
+- BUG-274 (fixed tactically in 08d0a494): `stdlib/primitives/data/source.st`
+  declared `const resolvedLocale` inside the fetch success-branch but read it in
+  the catch → ReferenceError crashed the error reporter on any fetch failure.
+  Latent since c51a096e (2026-04-07).
+
+Root cause, one sentence: the compiler checks .st inputs rigorously, then emits
+JavaScript it never structurally understands — name-resolution questions the
+compiler should answer were answered elsewhere, worse.
+
+* Ruling (design run 2026-08-04, user-directed)
+
+NO detection scaffolding. No validator wiring, no %smoke gates, no coverage
+harness, no template lint. The route is GENERATIVE: improve what the compiler
+emits so the bug class is unrepresentable. The pipeline ends up SMALLER than
+today — mechanisms must delete, not add (elegance bar).
+
+Principle: every layer is compiled by the layer above it, never re-parsed by the
+layer below it. Runtime regexes / char-scans / `new Function` are the compiler
+abdicating to a dumber consumer.
+
+* Ground-check findings (why this is a migration, not a build)
+
+1. The `expr` param type ALREADY EXISTS: `CapturedValue::Expr` in the pipeline;
+   sibling primitive `stdlib/primitives/data/computed-source.st` already declares
+   `sortBy: expr?`, `reduce: expr?` and works (uses the `$.field` idiom, no
+   rewriting). derived-signal's `expr: string` + `%balanced(';')` raw capture was
+   a deliberate trade documented in its own docstring ("keeping the grammar
+   honest — no Rust-side expression parsing") that INVERTED: the runtime regex
+   "parser" is strictly worse than the real grammar.
+2. `FAT_ARROW` is already lexed (src/syntax/cst/lexer.rs:82) — the expression
+   grammar rejects `=>` (proven live: `@eval ((async () => …))` → "expected
+   R_PAREN, found FAT_ARROW"). Grammar work is accepting a binding form, not
+   lexing.
+3. A typed JS IR exists: `JsExpr`/`JsStmt`/`JsPart`/`Marker` (src/ir/code.rs)
+   with emitter (src/emit/js.rs `emit_expr`/`resolve_expr`) and parser
+   (src/emit/js_parser.rs). Compiled expressions EXTEND this — no parallel IR.
+4. The parameterized-derive contract exists in the same codebase: fold's
+   `stepFn` and `ST.derive(deps, compute)` (st.js). Move 1 makes derive use the
+   pattern it already ships.
+
+* Move 1 — expressions are parsed by the grammar, not captured as text
+
+derived-signal.st: `expr: string` → `expr: expr` (one-word declaration change;
+computed-source is the working model).
+
+Consequences:
+- `$comRecords.filter(($r) => $r.status == "open").length` parses into a real
+  CST. A lambda-bound `$r` is a structurally different node from signal
+  `$comRecords` — no rewriting because nothing is ambiguous.
+- Deps discovered from the tree at COMPILE time. Typo `$comRecord` → compile
+  error (unknown name), instead of a badge that silently never updates.
+- Emitter emits `ST.derive(["comRecords"], (comRecords) => …)` — deps as
+  positional function args (the existing ST.derive contract).
+
+DELETED: deps regex, char-scan rewriter, lambdaBound heuristic (tactical patch
+reverted into structural shape), `new Function` + try/catch eval, runtime
+pipe-desugar. The entire BUG-273 mechanism.
+
+Grammar extension required: arrow expressions `($r) => …` (and multi-param) as
+a binding form introducing scope for the body. Lexer ready; the work is grammar
++ lowering to JsExpr. Conservative: arrow params only, not arbitrary JS.
+
+* Move 2 — the runtime owns behavior; templates emit calls
+The fetch lifecycle (locale resolution → fetch → parse → publish → error
+report) is one recurring shape, repeated for every `@data source` usage. It
+moves into the primitive's OWN `%emit prelude-js` block — emitted ONCE per
+compilation, deduplicated by primitive name (first occurrence wins), before all
+per-usage fragments. This mechanism already exists and is in use
+(src/pipeline/mod.rs:1397-1412; source.st:22 already uses it for
+`window.__spacetimeData` init).
+
+  // source.st after:
+  %emit prelude-js {
+    function __stResolveLocale() { /* written once */ }
+    function __stDataSource(opts) { /* fetch → publish → error-report, once */ }
+  }
+  %emit js {
+    __stDataSource({ url: %src, bind: %name, interval: %refresh });
+  }
+
+USER RULING (2026-08-04): shared template JS does NOT go into st.js — it goes
+into `%emit prelude-js`, so the primitive carries its own once-per-page runtime
+and stays self-describing (code as data, inside the primitive, not in the
+toolchain's runtime file).
+
+DELETED: locale triplication (`window.__st_locale || document…lang || 'en'`
+written 3× in one template), hand-rolled error path, the BUG-274 hoist patch
+(subsumed by __stResolveLocale defined once in the prelude).
+
+The hand-declared-local-crossing-scopes shape that produced BUG-274 no longer
+exists in generated code: the prelude defines plain top-level functions;
+per-usage code declares no locals — it passes arguments.
+
+Standing rule for primitives (corrected): if a JS shape repeats across USAGES
+of one primitive, it moves into that primitive's `%emit prelude-js`.
+Per-usage `%emit js` = calls + data. An `if`/loop/scan in per-usage code means:
+move it to the prelude, then call it. Nuance: dedup is PER PRIMITIVE NAME, so
+a helper shared by two DIFFERENT primitives would duplicate across their
+preludes — that cross-primitive case still argues for st.js or a shared
+prelude-owning primitive (decide when the first real case appears; do not
+pre-build).
+
+* Why "structurally impossible" rather than "better checked"
+
+The two places scoping ever mattered are gone: inside expressions (now resolved
+on the syntax tree, once, at compile time) and inside template lifecycle code
+(now one tested runtime implementation, called by reference). No text-level name
+manipulation remains anywhere in the pipeline. A bug needs a habitat; this
+removes it. Nothing new to wire or maintain.
+
+Pattern-consistency (learnable-by-pattern): after Move 1, derive takes a
+function the same way fold takes stepFn, the same way computed-source takes
+reduce. One pattern for "expression over signals".
+
+* Migration path
+
+W1. Grammar: arrow binding form in the expression grammar + lowering to JsExpr
+    (extends src/emit/js_parser.rs / src/ir/code.rs machinery).
+W2. derived-signal: expr: string → expr; template emits the lowered expression;
+    delete the rewriter machinery wholesale. Revert the lambdaBound patch.
+W3. Runtime: ST.resolveLocale + ST.dataSource (or equivalent split); rewrite
+    source.st to glue. Revert the hoist patch.
+W4. Docs: the primitive-authoring rule (expr not string; templates = calls +
+    data) into the stdlib authoring docs.
+
+* Test strategy (no new scaffolding — existing machinery suffices)
+
+- The v8_runtime derive tests from BUG-273 (tests/v8_runtime/derived_signal_tests.rs,
+  3 tests: lambda-param derive, multi-dep, fold) become the behavior proof for
+  the new lowering — same assertions, now exercising the structural path. They
+  fail if the lowering regresses scoping.
+- tests/bugs/BUG-274-data-source-error-path-reference-error.test.st keeps
+  guarding the error-path behavior through the ST.dataSource migration.
+- Existing integration data tests (24) + v8 data_source tests (8) cover the
+  rest. RED→GREEN is inherent: new code path, existing assertions.
+
+* Non-goals (explicitly ruled out by the user)
+
+- No wiring of validate_output into check (src/validation/js.rs stays as-is).
+- No %smoke registry entries, no boot gates, no branch coverage.
+- No template-complexity lint.
+- No typed emission IR replacing %emit js wholesale (horizon only — Moves 1+2
+  converge toward it but do not require it).
+
+* Open implementation questions (resolve during W1)
+
+- How do `expr`-typed params currently lower signal refs to JS (copy
+  computed-source's mechanism exactly — do not invent a second one)?
+- Does `%balanced(';')` remain for any other capture position after this
+  migration, or can the terminal be deprecated?
+- Fold's reducer shape `($src, acc, item) -> step` (documented in the
+  primitive) uses `->` not `=>` — one arrow form or two? (Harmony rule: one
+  sigil one meaning — pick one, migrate the other.)
+
+* CORRECTION (2026-08-04): Move 2 targets `%emit prelude-js` (already
+implemented, dedup by primitive name, first-occurrence-wins), NOT st.js. W3
+becomes: source.st's fetch lifecycle + locale resolution move into source.st's
+own prelude-js block as plain functions; per-usage `%emit js` becomes a single
+call. The "runtime owns behavior" principle is unchanged — the runtime in
+question is the primitive's own prelude, keeping the metasystem self-describing.
+
+* RULING (2026-08-04, user): one `=>` for BOTH lambdas and match arms — this is
+sigil unity, not overload. The arrow has ONE meaning: left side introduces
+bindings, right side produces a value. Match arm = pattern-strength binding
+form; lambda params = the irrefutable special case. The textually-identical
+case (`x => x+1` as catch-all arm vs as lambda) is harmless because the two
+readings are the same function. Disambiguation is POSITIONAL (inside a
+match/receive block → pattern; expression position → params), not sigil-based.
+W1 must accept BOTH param spellings seen in the wild: bare `item => …`
+(examples/cart-demo, on_mutation_demo) and parenthesized `($r) => …`
+(pill). Fold's reducer doc migrates `->` → `=>`. AUDIT separately: `->` in
+macro-call output position (`dnd-runtime() -> { }`) is a different role
+(yield routing, not value mapping) — likely keep; only unify actual lambdas.
+Existing `parse_arrow_fn_balanced` (cst/parser.rs:3553) consumes arrows WHOLE
+as opaque EXPR blobs for @eval/@when payloads — W1 replaces blob-consumption
+with a real binding-form node (params as scope-introducing children), which
+nested arrows (`Some(x) => xs.filter(y => y > x)`) require.
+
+NOTE [2026-08-04]: All waves landed in worktree verse-plan-133 (branch plan-133-generation-not-gates): W1+W2 8adb5888 (sexpr lowering via SWC in src/emit/st_expr.rs; derived-signal rebuilt — runtime regex/lambdaBound/new-Function machinery deleted), W2.5 64559252 (%uses registry edge: order_with_uses DFS pull, once-per-page, dep-before-dependent, cycle/unknown compile errors; locale module exemplar; FUP-175 R3 drift fixed), W3 a5b4f6a5 (data-source lifecycle → prelude-owned __stDataSource, config-call per usage, no per-usage locals; FUP-175 R2 data-store module shared by source + reactive-source), W4 (docs/language/primitive-authoring.md: sexpr-not-string, runtime-owns-behavior, %uses-not-copy-paste). Follow-ups remain: FUP-175 R1/R4/R5 (dual-channel publish, URL/fetch dedup, __stHosts), computed-source + derive-match sexpr migration.
+
+NOTE [2026-08-05]: Follow-on scope complete (2026-08-05): FUP-175 fully executed — R5/R4/R1 modules (host-register, data-url, data-channel with __stPublish/__stPublishSignal), computed-source migrated to sexpr-row (RED→GREEN lambda-param gate 87b4c34b), derive-match to sexpr-arms (715c8a02 — the third/last runtime rewriter copy deleted; the template-JS bug class is now unrepresentable across ALL expression-carrying primitives), and the single-consumer %uses wave per user ruling (easing, scroll-registry, entity-world, element-refs). Key learned constraint recorded in docs/language/primitive-authoring.md: %uses targets must be param-free module primitives. Final proof: integration 192/15 and v8 455/1 (both failure sets pre-existing, verified identical on main), headless bugs 34/0.

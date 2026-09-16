@@ -1,0 +1,120 @@
+#+TITLE: Nested-scope animation silently does nothing when @each replaces SSG-unrolled rows
+#+STATE: ITEM
+#+CUSTOM_ID: BUG-238-nested-scope-animation-loses-ssg-unrolled
+
+* Summary
+
+A nested-selector animation bound to a parent (`.parent { @on visible NAME(…, stagger: N)
+{ .child { … } } }`) resolves its child set ONCE at init. When the parent's children were
+SSG-unrolled into the served HTML and `@each` then re-renders them on hydration, the
+driver keeps animating the ORPHANED original elements. The driver's progress runs 0 → 1
+correctly, and *nothing on screen ever moves*.
+
+There is no diagnostic. `check` passes, `build` passes, the emitted config is correct
+(`defaultStaggerDelay = 700`, `scopes: [{selector: ".bd-moment", …}]`), and the progress
+variable is observably interpolating on the parent. Only the rows never receive their
+inline style.
+
+Found 2026-07-25 running the dynamic pass (`method/11-DYNAMIC`) on
+`projects/backdesk-new`, converting a 4-row narrative to a staggered arrival.
+
+* Reproduction
+
+The discriminator is whether the list is *pre-rendered into the served HTML*.
+
+** Works — list empty in SSG, rows created by @each on hydration
+
+#+begin_src spacetime
+@type M { id: string; t: string; }
+@data inline $rows M[] : [ {"id":"1","t":"one"}, … ]
+
+<main><ol class="eachlist"></ol></main>
+
+.eachlist { @on visible B(1400ms, stagger: 600) { .li-b { opacity: 0 -> 1; } } }
+.eachlist { @each($rows as $r) { <li class="li-b">`$r.t`</li> } }
+#+end_src
+
+Measured: rows become visible at 461, 660, 860, 1060 ms — spread 599ms, as configured.
+Each row carries `style="--st-B-li-b-opacity: 1; opacity: 1;"`.
+
+** Fails — same construct, but the rows ARE unrolled into the served HTML
+
+Identical author code; the only difference is that the build emitted the four `<li>`
+elements into `index.html`. Measured: rows visible at 27, 27, 27, 27 ms — spread 0, and
+every row has `style === null`. They were never animated; they are simply visible because
+nothing ever hid them.
+
+Meanwhile the parent is animating perfectly:
+
+| sample | =--st-bd-mo= on parent | row inline style |
+|--------+----------------------+------------------|
+| t0     | 0.0378…              | null             |
+| t3     | 0.3787…              | null             |
+| t6     | 0.7196…              | null             |
+| t9     | 1                    | null             |
+
+* Analysis
+
+`stdlib/primitives/animation/apply-animations.st` resolves a nested scope eagerly:
+
+#+begin_src js
+anims.scopes.forEach(scope => {
+  const selector = scope.selector;
+  let elements;
+  if (selector === '&self' || selector === '&') { elements = [root]; }
+  else { elements = Array.from(root.querySelectorAll(selector)); }
+  if (elements.length > 0) { processScope(scope, elements, %driver, selector); }
+});
+#+end_src
+
+`elements` is a snapshot `Array`, captured at init. `ST.watch(root, driverSignal, …)` then
+closes over it. If `@each` subsequently replaces the parent's children — which it does
+when re-rendering over SSG-unrolled rows — the closure holds detached nodes forever.
+
+Note the `elements.length > 0` guard makes the empty-list case *fail safe by accident*:
+when the list is empty at init, `processScope` is never called, and the (later-registered)
+each-render path ends up wiring things correctly. That is why the empty-list variant works
+and the pre-rendered one does not — the working case is working for an incidental reason.
+
+* Suggested fix
+
+Re-resolve the scope's element set at apply time rather than closing over a snapshot.
+The cheapest correct form is to move the `querySelectorAll` inside the watcher, or to
+re-query when the parent's child list has changed:
+
+#+begin_src js
+ST.watch(root, driverSignal, (rawProgress) => {
+  const elements = (selector === '&self' || selector === '&')
+    ? [root]
+    : Array.from(root.querySelectorAll(selector));
+  elements.forEach((el, i, arr) => { … });
+});
+#+end_src
+
+If per-frame `querySelectorAll` is too costly, cache it and invalidate on a
+`MutationObserver` for `childList` on `root` — the `mutation` primitive already exists.
+
+Either way the `elements.length > 0` early-exit should be reconsidered: an empty set at
+init should not permanently disable a scope whose elements arrive later.
+
+* Impact
+
+- Any stagger/reveal over a data-driven list is liable to silently not run. Stagger is
+  *only* meaningful over a nested scope (a per-element binding sees a one-element set and
+  `calcStagger` returns 0 for `total <= 1`), so nested scopes are the ONLY way to express
+  it — and data-driven lists are its most natural subject.
+- The failure is invisible: content is fully readable, so there is no obvious defect to
+  chase. An author is far more likely to conclude "stagger doesn't work" and delete it.
+- Interacts with BUG-226 (per-scope SSG unroll), because whether rows are unrolled at all
+  is the discriminator between the working and failing case.
+
+* Related
+
+- BUG-226 — only the first literal-arg template invocation per scope unrolls
+- BUG-237 — reveal animations ignore reduced motion and hide content without JS
+
+* Files
+
+- =stdlib/primitives/animation/apply-animations.st= — nested-scope resolution (~L490 initial
+  state, ~L522 processScope), and the `ST.watch(root, driverSignal, …)` closure at ~L408
+- =stdlib/primitives/data/each.st= — the re-render that replaces the captured nodes

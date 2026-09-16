@@ -1,0 +1,126 @@
+#+TITLE: PLAN-043: MCP interaction kit (picker/form/confirm) on the region pipeline
+#+STATE: DONE
+#+SESSION_ID: 150ccb99745d347e
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-17T14-25-31-601Z_150ccb99745d347e.jsonl]]
+#+CUSTOM_ID: PLAN-043-plan-043-mcp-interaction-kit-picker-form
+#+COMPLETION_HASH: 63899b1117b0664e
+
+* Initial Message
+
+Dig into the FUPs and explain to me
+1. what got done
+2. what you can do with it
+3. what we should do next
+
+treat this as an overall report to explain things to me from scratch
+
+* Goal
+Close the one remaining FEAT-123 acceptance criterion: a reusable interaction KIT
+(picker / confirm / form) as normal Spacetime functions that mount into a region of
+the live MCP environment and emit the human's choice back through the ONE generic
+signal sink (`/__mcp/signal/{instance}`). This is "Wave B" — the value payload that
+makes the live environment usable: agent offers a choice → human clicks → typed
+event returns via st_await.
+
+PLAN-041 axed the legacy bespoke picker/choose/propose surface; the kit is its
+principled successor, built on the region pipeline + host bridge, NOT new Rust routes.
+
+* Parent
+[[id:FEAT-123-mcp-preludes-host-environment-browser-an]] — the kit is FEAT-123's
+last open acceptance bullet ("picker/form/confirm are normal Spacetime functions
+and emit through the generic signal sink"). Follows PLAN-041 (environment + transport).
+
+* Non-negotiable constraints (AGENTS.md + FEAT-123)
+- NO new JS outside %primitive. The kit composes EXISTING primitives
+  (@mcp-host, @mcp-input, @mcp-action, @each, text:) — zero new primitive unless a
+  genuine gap is proven by `inspect --layer emit`.
+- NO new bespoke Rust routes per interaction (no st_pick / st_confirm). The agent
+  mounts a kit function via the EXISTING st_mount and reads the result via st_await.
+- ONE generic sink: every kit emits `mcp-action` (or a typed click) through
+  `/__mcp/signal/{instance}`. Harmony audit at the end: no ChooseForm, no
+  /__mcp/choose, no per-kit route names.
+- Region-isolated: a kit mounts into a region (`data-st-instance` root); two kits on
+  one page carry independent host bridges (already true of @mcp-host).
+
+* Data contract (how options come IN, choice goes OUT)
+The agent mounts a kit function with `input.json` carrying the kit's shape:
+  picker  → { kind:"picker",  prompt, options:[{id,label,detail?}] }
+  confirm → { kind:"confirm", prompt, confirmLabel?, cancelLabel? }
+  form    → { kind:"form",    prompt, fields:[{name,label,type,placeholder?,value?}] }
+The page reads these via `@mcp-input`. To render them with the proven list/text idiom,
+`@mcp-input` must publish the kit sources alongside the workbench arrays.
+
+DECISION (kit publish): extend `publishWorkbenchSources` in
+`stdlib/__mcp__/primitives/host.st` to ALSO publish generic kit sources from the input
+object — `mcpPrompt` (scalar), `mcpOptions` (array), `mcpFields` (array). One input
+primitive, no per-kit JS. (Rename the fn to `publishSources` since it now serves both.)
+This is a small, data-driven extension of an existing primitive (passes the elegance bar).
+
+OUT (choice): each option/button carries its id in a data attribute and emits
+`@mcp-action(action:"kit-choice", valueAttr:"data-choice-id")` — the existing
+attr-driven action path. st_await returns `{type:"mcp-action", payload:{action:"kit-choice",
+value:<id>, ...}}`. confirm emits action "kit-confirm"/"kit-cancel"; form is S0
+(emit per-field is deferred — see scope).
+
+* Wave plan
+** W1 — picker (the keystone)
+- stdlib/__mcp__/kit/picker.st: @import the module; render `text: $mcpPrompt` + an
+  @each over $mcpOptions rendering an option button per row carrying
+  `data-choice-id="`$opt.id`"`; `.kit-option { @mcp-action(action:"kit-choice", valueAttr:"data-choice-id") }`.
+  Region root `[data-st-instance] { @mcp-host }`. Warm-dark kit styles (reuse the palette).
+- Extend @mcp-input publish (host.st) to emit mcpPrompt/mcpOptions/mcpFields.
+- kit/MODULE-ish wiring: `@import "stdlib/__mcp__/kit"` exposes the kit (index re-export).
+- Verify: `cargo run -- check kit/picker.st`; `inspect --layer emit` shows @each over
+  mcpOptions + the attr-driven mcp-action; a headless test mounts picker, seeds options
+  via the documented event, asserts N option buttons + the data-choice-id; a live
+  puppeteer smoke (mount via a scratch page, click, confirm the POST body carries value=id).
+** W2 — confirm
+- kit/confirm.st: prompt + two buttons (confirm/cancel) emitting kit-confirm / kit-cancel.
+  Smallest kit; proves the binary-decision shape on the same rails.
+** W3 — form (S0)
+- kit/form.st: prompt + @each over $mcpFields rendering labeled inputs; a submit button
+  emits action "kit-submit". S0 = submit emits intent; per-field value collection that
+  needs a new %primitive is DEFERRED to a FUP if inspect proves a gap (honest scope).
+** W4 — kit index + harmony + docs
+- stdlib/__mcp__/kit/index.st re-exports the three; `@import "stdlib/__mcp__/kit"` works.
+- Embed kit files in src/stdlib_embedded.rs (mounted-inline needs embedded stdlib).
+- Harmony audit grep: no bespoke route names; one sink; @import exposes without shipping UI.
+- Doc note in index.st + a kit usage example.
+
+* Acceptance (FEAT-123 bullets this closes)
+- picker/confirm/form are normal Spacetime functions, mountable via st_mount, emitting
+  through the generic sink (verified: inspect --layer emit + headless render + live click).
+- `@import "stdlib/__mcp__/kit"` exposes them without forcing UI to ship until mounted.
+- Harmony: grep audit clean (no ChooseForm, /__mcp/choose, per-kit routes).
+
+* Verification (orchestrator, post-waves)
+- cargo build; cargo test --lib mcp; cargo run -- check on each kit file.
+- Headless: a kit render test (option count + choice-id attr) green.
+- Live puppeteer smoke: mount picker via st_mount, click an option, st_await returns
+  value=<option id>.
+- Full gate (hold baseline): lib/integration/v8/headless no regressions.
+
+* Out of scope
+- form per-field value collection requiring a new input %primitive (FUP if needed).
+- review.st (4th kit fn) — defer to a follow-up; picker/confirm/form satisfy the
+  FEAT-123 acceptance bullet ("picker/form/confirm").
+- FEAT-110 canonical @host/@data replacement (later, by design).
+
+NOTE [2026-06-18]: PLAN-043 COMPLETE — the MCP interaction kit ships on the region pipeline. 5 commits: f87616f9 (W1 picker + @mcp-input kit-source publish), 90067921 (W2 confirm + W3 form S0), 5a69dde5 (W4 kit index + embed + harmony + docs), 2d118357 (BUG-107 test annotations).
+
+WHAT SHIPPED: picker/confirm/form as normal Spacetime functions the agent mounts into a region via st_mount; the human's answer returns through the ONE generic /__mcp/signal/{instance} sink (read by st_await). ZERO new JS, ZERO new Rust routes — pure composition of existing primitives (@mcp-host + @mcp-input + @mcp-action + @each + text:). The only Rust/stdlib change was extending @mcp-input's publish to also emit kit sources (mcpPrompt/mcpOptions/mcpFields) from the same input.json — one input primitive for workbench AND kit.
+
+LIVE END-TO-END VERIFIED (the acceptance headless can't prove): st_mount picker.st with input {kind:picker, prompt, options[3]} -> real instance at /__mcp/instance/inst-1/ -> puppeteer observed prompt + 3 option buttons w/ correct data-choice-id + host bridge on the region root -> clicked Blue/green -> st_await returned {type:mcp-action, payload:{action:"kit-choice", value:"blue-green"}}. The agent reads payload.value as the chosen id. (The workbench action-dispatcher declining kit-choice as "unsupported" is CORRECT — a kit choice is for the agent to read, not a built-in workbench mutation.)
+
+FEAT-123 ACCEPTANCE CLOSED:
+- picker/form/confirm are normal Spacetime functions emitting through the generic sink. ✓ (live-verified)
+- @import "stdlib/__mcp__/kit" exposes them without shipping UI until mounted. ✓ (kit/index.st is a manifest, not an aggregator)
+- Harmony audit clean: grep src+stdlib for ChooseForm / __mcp/choose / __mcp/propose / st_pick / st_confirm / st_form / __mcp/kit -> ZERO (only unrelated LSP @form-clause matches). One sink, no per-kit route. ✓
+
+GATES: lib 2330/0 · mcp 38/0 (incl embed guard for kit/picker/confirm/form + the previously-missing primitives/bundle.st) · workbench env.st compiles (host.st change is backward-compatible) · kit headless tests pass IN ISOLATION (picker 2/0, form 1/0).
+
+IMPORTANT FINDING — BUG-107 filed: the kit headless tests pass alone but fail in the full `tests/ --headless` run due to a real harness ISOLATION bug (one shared V8 context never disconnects the page-global MutationObserver / clears ST._dataRegistry / Spacetime.templates / document.body between files, so a sibling mount file poisons them with a stale-node `nodeType` throw). Proven on PRE-EXISTING files (body-directives 11/0 alone -> 2/11 when chained with each-data-drive). This is a large fraction of the standing ~251 headless baseline — the full-suite number understates real correctness. BUG-107 has full root-cause + repro + TDD instructions. Kit test headers link it.
+
+FUP-068 filed: form per-field value collection into the submit envelope (S0 ships submit-intent; collecting values needs a form-read primitive — deferred, RED->GREEN spec in the FUP).
+
+DEFERRED: review.st (4th kit fn) — picker/confirm/form satisfy the FEAT-123 bullet; review is a follow-up. FEAT-110 canonical @host/@data replacement remains later by design.

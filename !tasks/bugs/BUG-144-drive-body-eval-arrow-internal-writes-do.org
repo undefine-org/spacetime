@@ -1,0 +1,85 @@
+#+TITLE: @drive-body @eval: arrow-internal writes don't persist + object-literal-return truncation
+#+STATE: ITEM
+#+SESSION_ID: 1520419cd6baa13b
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-02T17-12-16-474Z_1520419cd6baa13b.jsonl]]
+#+CUSTOM_ID: BUG-144-drive-body-eval-arrow-internal-writes-do
+
+* Initial Message
+
+why can't i select text in the everswap clone demo?
+
+* Summary
+
+Two distinct, compounding defects make the ergonomic `@eval` forms silently fail inside a
+`@drive` (CDP automation) body. Discovered while adding a pointer-events regression test to
+projects/everswap-clone/tests/anchor.cdp.test.st (FEAT-142). Worked around there (bare-assignment
+scalars only); this item is the root-cause fix so the natural forms work.
+
+* Defect A — arrow @eval internal writes don't persist across @drive-body directives (BUG-058 depth)
+
+Inside `@drive "<url>" { … }`, an @eval whose body is an INVOKED arrow that writes a global does
+NOT make that write visible to the NEXT directive:
+
+  @eval (() => { window.__x = 1; })      // runs, but…
+  @assert (window.__x === 1) "…"          // FAILS: __x undefined here
+
+A BARE-ASSIGNMENT @eval DOES persist:
+
+  @eval (window.__x = 1)                   // survives
+  @assert (window.__x === 1) "…"           // passes
+
+Empirically (2026-07-02): a *sync* arrow write, an *async* arrow write, and a computed arrow-IIFE
+whose RESULT is bare-assigned were all tested. Only the bare-assignment form (`window.__x = <expr>`,
+incl. `window.__x = (arrow)(args)`) persists. Root cause is in the CDP re-injection path
+(src/cdp.rs ~run_one_page: after `page.goto(url)` it replays captured `<script>` text, then each
+body directive is evaluated in its own isolate/scope) — a directive-local arrow's side effects are
+dropped while a bare global assignment on the page survives. Headless (V8 logic backend) does NOT
+have this problem (arrow evals persist there), so it is CDP-drive-specific.
+
+Impact: any @drive test using the idiomatic `@eval (() => { … stash … })` then `@assert (window.__…)`
+is a false pass/non-registering test. Confirmed live in projects/everswap-clone/tests/scene.cdp.test.st
+(still broken) and the pre-rewrite anchor.cdp.test.st.
+
+* Defect B — @eval arrow returning an object literal with a call-valued prop is truncated at emit
+
+  @eval (window.__x = ((el) => ({ a: Math.round(el.x) }))(window))
+
+emits (src/emit/js.rs arrow/opaque-JS consumption) as a TRUNCATED fragment:
+
+  window.__x = ((el) => ({ a;;
+  })();
+
+i.e. the object literal's first property value (a call expression) terminates the arrow-body scan
+early. Same failure for a multi-statement arrow with `return { a: <call>, … };`. A concise object
+with TRIVIAL values (`({ a: 1, b: 2 })`) survives; the trigger is a property VALUE that is a
+call-expression (e.g. `Math.round(...)`, `el.getBoundingClientRect().x`). Result: broken JS →
+test file registers 0 tests (`{"tests":0}`) with no compile error. Related lineage: BUG-095
+(@eval arrow-fn balanced-bracket parse). The balanced-bracket / opaque-JS consumer needs to treat
+a `{` in concise-arrow-return position (and object literals generally) as balanced structure, not
+a body terminator.
+
+* Repro
+
+Server: cargo run -- serve projects/everswap-clone/ --port 3360
+Defect A: the two @eval forms above in a @drive body; bare-assignment passes, arrow-internal fails.
+Defect B: `cargo run -- build <file>.st` then inspect emitted spacetime.js for `({ a;;` truncation,
+or run under --cdp and observe `{"tests":0}`.
+
+* Fix sketch
+
+- A: in the @drive re-injection, run each body directive in a scope that shares the page global
+  (or hoist arrow side effects) so `@eval (() => { window.x = … })` persists like a bare assignment.
+  Then the natural stash pattern works and BUG-058's swallowing note can be retired.
+- B: extend the arrow/opaque-JS consumer (src/emit/js.rs + src/syntax/cst/parser.rs arrow balanced
+  scan) to keep object literals (incl. concise `=> ({…})` and `return {…}`) balanced, so complex
+  property values don't truncate the arrow.
+
+* Also fix (dependent cleanup)
+
+projects/everswap-clone/tests/scene.cdp.test.st still uses the Defect-A arrow-stash pattern → rewrite
+to bare-assignment scalars once A is fixed (or immediately, matching anchor.cdp.test.st).
+
+* Provenance
+
+Found during FEAT-142 pointer-events fix (see that item's NOTE, 2026-07-02). Workaround pattern +
+constraints documented in projects/everswap-clone/tests/anchor.cdp.test.st header.

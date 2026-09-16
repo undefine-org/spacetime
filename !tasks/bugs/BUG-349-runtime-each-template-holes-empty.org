@@ -1,0 +1,195 @@
+#+TITLE: Runtime @each + named &template creates the element but leaves its holes EMPTY
+#+STATE: DONE
+#+PRIORITY: A
+#+CUSTOM_ID: BUG-349-runtime-each-template-holes-empty
+
+* Symptom
+
+`@each($sizes as $s) { &size-opt($s); }` where the template interpolates a field:
+
+#+begin_src spacetime
+@type Size { code: string; label: string; }
+@data inline $sizes Size[] : [ { "code": "S", "label": "Small" } ] ;
+@template &size-opt($s) { <li class="opt">`$s.label`</li> }
+<div class="size-list"></div>
+.size-list { @each($sizes as $s) { &size-opt($s); } }
+#+end_src
+
+At RUNTIME the `<li class="opt">` element IS created, but its text is empty:
+
+  @then .a .opt should have_length 1   -> PASSES (element exists)
+  @then .b should have_text "Small"    -> FAILS ("got \"\"")
+
+SSG renders the same page correctly:
+
+  <div class="size-list"><li class="opt" ...>Small</li></div>
+
+So the static unroll fills `` `$s.label` `` and the runtime does not.
+
+* Why the length assertion hid it
+
+`have_length` passes because `each-with-templates` DOES invoke the template factory and insert
+one element per item. Only a TEXT assertion sees that the interpolation never happened. Any gate
+for this feature that asserts element COUNT is certifying a row that renders blank — which is
+precisely the hollow-assertion class PLAN-143 exists to remove.
+
+* Distinct from BUG-348 (do not conflate)
+
+BUG-348 was the SSG unroller skipping the named-`&template` body grammar entirely (0 rows). That
+is FIXED — `each_invocations_html` in src/html/ssg_unroll.rs now resolves
+`$invocations:template_invocation+` and the served HTML contains the filled rows.
+
+THIS bug is the runtime half: the element is created, the hole is not filled. Same construct,
+opposite failure, different code path (`each-with-templates`' `%emit js` in
+stdlib/primitives/template.st:222 — its `invokeTemplate` / `resolvedArgs` logic resolves
+`$item.path` against item data).
+
+Together they are the same lesson as GH-11: SSG and runtime drifting about what an `@each` body
+may contain, in opposite directions.
+
+* Where to look
+
+stdlib/primitives/template.st, `%primitive each-with-templates`, the `invokeTemplate` closure —
+args are resolved (`$s` -> itemData, `$s.label` -> itemData.label), so check whether the resolved
+value reaches the template FACTORY's hole substitution, or whether the factory is invoked with a
+param name that no longer matches after resolution.
+
+Compare against `each-inline` (stdlib/primitives/data/each-inline.st), which fills holes
+correctly for the inline `@template { … }` body.
+
+* Repro (minimal, both halves in one file)
+
+/tmp/lt.test.st shape:
+
+#+begin_src spacetime
+@test "length" { @mount { <div class="a"></div>
+  .a { @each($sizes as $s) { &size-opt($s); } } }
+  @then .a .opt should have_length 1 }     // passes
+
+@test "text"   { @mount { <div class="b"></div>
+  .b { @each($sizes as $s) { &size-opt($s); } } }
+  @then .b should have_text "Small" }      // fails
+#+end_src
+
+* Accept
+
+The text assertion passes; `tests/repro/h2-reactive-state/reactive-state.test.st` goes 6/6.
+Keep BOTH a length and a text assertion in the gate so this exact split can never pass again.
+
+
+* DIAGNOSIS CORRECTED (2026-08-07) — narrower than first filed
+
+The original text implied `each-with-templates` never fills holes. That is WRONG. Measured:
+
+| scenario                                        | result |
+|-------------------------------------------------+--------|
+| real served page, SSG-rendered rows              | "ab","cd" ✓ (browser) |
+| real served page, forced RUNTIME re-render       | "xx","yy" ✓ (browser) |
+| `@mount` + NAMED `&srow($i)`                     | "" ✗ (V8 **and** --cdp) |
+| `@mount` + INLINE `@template { … }`              | "ab" ✓ (V8) |
+
+The runtime primitive is FINE. Verified in real Chromium by clearing the container, mutating
+`SpacetimeLocal.strs`, and watching `each-with-templates` re-render `["xx","yy"]` with the
+per-instance signal correctly set (`{k:"i", v:"xx", deps:1}`).
+
+The defect is confined to the **`@mount` test-harness path with a NAMED template**. It is not V8-
+only either — the same case fails under `--cdp`, so it is not a headless shim artifact.
+
+** What is actually broken
+
+The element IS created and its param IS seeded: a `@then .a .s should have_attr "style"` PASSES,
+which can only happen if `ST.set` ran (it writes the `--st-i` CSS custom property alongside the
+signal). But the text node stays empty, and a LATER `@when $strs set [...]` does not update it
+either. So the seed happens and the builder's `__applyText` subscription never fires — the
+watcher registered by `ST.watchScoped(__el, "i", __applyText)` inside the compiled builder is not
+the one `ST.set(element, "i", …)` notifies, under this path only.
+
+Still nesting-independent: moving the hole one level deeper
+(`<li><span class="in">\`$i\`</span></li>`) fails identically, so it is not about which node the
+hole sits on.
+
+** Why this matters more than the row being blank
+
+`have_length` passes, `have_attr "style"` passes, only `have_text` fails. Two of the three
+obvious assertions certify a blank row as working. Any gate written for this feature that checks
+element COUNT or presence is hollow by construction — the exact class PLAN-143 exists to remove,
+found while fixing BUG-348.
+
+** Next step
+
+Instrument the compiled builder under `@mount` to print the identity of `__el` at
+`watchScoped` time versus the `element` that `buildTemplateFactory` seeds
+(public/runtime/templates.js:533-543 calls `buildFn(null)` then `ST.set(element, …)`). If they
+differ under this path, the subscription and the write are on two different store keys. Compare
+against the inline `each-inline` path, which fills correctly under the same harness.
+
+
+* RESOLVED (verified 2026-08-07)
+
+** Root cause: a SEED is not a CHANGE
+
+Neither of my two earlier diagnoses was right. It is not the runtime's hole-filling
+(`invokeTemplate`/`resolvedArgs` were correct all along), and it is not `@mount`. It is an
+ORDERING asymmetry in `ST.set`/`ST.watch`, and `@mount` merely made it observable.
+
+`ST.watch` fires its callback SYNCHRONOUSLY when a value is already present ("call immediately
+with current value"). `ST.set` notified dependents through `queueMicrotask`. So the same pair of
+operations produced different observable timing depending purely on which ran first:
+
+| order | first paint |
+|-------|-------------|
+| `set` then `watch` | synchronous (watch's immediate call) |
+| `watch` then `set` | deferred one microtask |
+
+An author controls neither. `buildTemplateFactory` runs the compiler-emitted builder, which wires
+each hole with `ST.watchScoped` WHILE constructing the element; the caller can only seed the
+params with `ST.set` once it holds that element. So for a named template, watch ALWAYS precedes
+set, and every hole rendered blank until a microtask elapsed.
+
+The inline `@template { … }` spelling took a different construction path and happened to land on
+the other ordering — which is exactly why the two spellings disagreed.
+
+** Why the earlier diagnoses missed it
+
+The row was fully constructed and `ST.set` demonstrably ran: it writes the `--st-i` custom
+property, so `have_attr "style"` passed. `have_length` passed too. Only `have_text` failed. Two of
+the three obvious assertions certify a blank row as working — the hollow-test class PLAN-143
+exists to kill, found inside the work on it.
+
+The "forced runtime re-render" experiment that produced the earlier CORRECTED diagnosis was
+measuring a genuine CHANGE (seed already present), which took the synchronous path and looked
+healthy. It confirmed the wrong half of the mechanism.
+
+** Fix
+
+`public/runtime/st.js`, `ST.set`: notify synchronously on the transition from no-value to
+first-value; keep batching every genuine change.
+
+`isSeed` asks whether a DEFINED value exists, not whether an entry exists — `ST.watch` leaves
+`{v: undefined, d}` placeholder slots up the ancestor chain, the same distinction `ST.resolve`
+already draws when it refuses to let a bare watcher slot shadow a real value further out.
+
+Batching is preserved where it earns its place: N dependents on a moving signal still queue one
+microtask, not N. A seed transition occurs at most once per (element, name), so it cannot storm.
+The invariant is now symmetric by construction: whichever of set/watch happens first, the first
+value is delivered synchronously.
+
+** Gates
+
+- `tests/repro/bug-349-seed-notify/seed-notify.cdp.test.st` (+ `.test.st` sibling) — asserts the
+  named spelling fills its holes AND that the inline spelling agrees, so the two can never drift
+  apart again silently.
+- Both keep a `have_length` AND a `have_text` claim, so the split that hid this (count passes,
+  text fails) cannot pass again.
+- `tests/repro/h2-reactive-state/reactive-state.test.st` now **6/6** — the acceptance criterion
+  from the original filing.
+
+** Verification
+
+Polarity proven in REAL CHROMIUM, not merely headless: against the unfixed runtime the CDP gate
+fails with `Expected .a .b to have text "ab", got ""`; restored, 2 passed.
+
+`cargo test --lib` 3173 passed / 0 failed (5 inline snapshots of the emitted runtime re-accepted;
+diff reviewed and contains only this change). 21/21 repro `check-contract.sh` GREEN. Headless
+suite 720 passed / 20 failed against a 715 / 21 baseline measured on the same tree — one fewer
+failure, no new ones.

@@ -1,0 +1,92 @@
+#+TITLE: @reveal(split:"lines") duplicates text content on repeated init
+#+STATE: ITEM
+#+SESSION_ID: 1522a68ca8a351a6
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-04T13-50-14-178Z_1522a68ca8a351a6.jsonl]]
+#+CUSTOM_ID: BUG-147-revealsplitlines-duplicates-text-content
+
+* Initial Message
+
+look up the blender mcp and other stuff that we need to start making our own gltf shapes
+
+* Initial Message
+
+Found while building demos/3d/genesis/ (PLAN-063, Genesis showcase). Confirmed
+independently against the EXISTING demos/reveal-lines-reflow-free demo, so this
+is a pre-existing, currently-shipping defect — not introduced by that work.
+
+* Repro
+
+1. =cargo run -- serve demos/reveal-lines-reflow-free/=
+2. Load the page, wait for the =.kinetic= headline's =@reveal(split: "lines",
+   trigger: visible, ...)= to fire.
+3. =document.querySelector('.kinetic').textContent= shows the sentence
+   repeated 3-5x, e.g.:
+
+   #+begin_example
+   Line breaks computed by pretext, animated by Spacetime, with no layout
+   thrash on resize Line breaks computed by pretext, animated by Spacetime,
+   with no layout thrash on resize Line breaks computed by pretext, animated
+   by Spacetime, with no layout thrash on resize Line breaks computed by
+   pretext, animated by Spacetime, with no layout thrash on resize
+   #+end_example
+
+Same repro independently reproduced on a fresh page (demos/3d/genesis/) using
+=@reveal(split: "lines", trigger: visible, stagger: 80, duration: 700, from:
+"bottom")= on an =<h1 class="headline">= — duplication scaled with the number
+of times the page navigated/hot-reloaded during dev iteration, suggesting the
+reveal init may be re-running and re-appending split spans without clearing
+prior ones, OR the underlying line-split (pretext-backed per stdlib/text) is
+being invoked multiple times and concatenating results instead of replacing.
+
+* Observed DOM shape (from demos/3d/genesis/ repro, before switching away)
+
+#+begin_example
+<span class="sr-only" ...>No humanmodeled this.</span>
+<span class="st-reveal-mask" aria-hidden="true">
+  <span class="st-reveal-line" style="opacity:0; transform:translateY(100%)">
+    No humanmodeled this.No humanmodeled
+  </span>
+</span>
+<span class="st-re...  (more mask/line spans follow, each with progressively
+                         MORE duplicated/concatenated text)
+#+end_example
+
+Note also that spaces are being lost between originally-separate words
+("No human modeled" → "No humanmodeled") in addition to the duplication —
+two possibly-related defects in the same code path (word-boundary handling +
+duplication).
+
+* Suspected area
+=stdlib/macros/reveal.st= (=reveal-with-keyframes=/=reveal-simple=) →
+its bound primitive (likely =reveal-engine= — grep the primitive backing
+=%binds { reveal-engine(...) }=). Possibly interacts with =stdlib/text=
+(pretext) line-computation when that module is imported, since
+reveal-lines-reflow-free imports =stdlib/text= for exactly this fusion
+(FEAT-051 "Fuse reveal split:lines onto pretext"). Worth checking whether
+the bug is specific to the pretext-fused path or also reproduces with the
+plain offsetTop fallback (no stdlib/text import).
+
+* Workaround in use
+demos/3d/genesis/index.st switched from =@reveal(split:"lines", ...)= to
+=@load in(duration:, threshold:, ...) { opacity: 0 -> 1; translate-y: ...; }=
+— a different, unaffected on-visible primitive (whole-block fade, not
+per-line kinetic stagger). Not a fix, just an avoidance; @reveal split:lines
+remains broken for any consumer that needs the kinetic-per-line effect.
+
+* Impact
+Affects ANY page using =@reveal(split: "lines", ...)= — confirmed on at least
+2 independent pages. Given FEAT-051 explicitly fused this path onto pretext
+as a headline feature, this is a real regression/defect in a documented,
+advertised capability, not an edge case.
+
+* Test plan (not yet written)
+- RED: a headless test asserting a =@reveal(split:"lines")= element's
+  =textContent= (or word count) after reveal fires equals the ORIGINAL
+  source text, not a multiple of it.
+- Repro at both authoring surfaces: with and without =@import "stdlib/text"=
+  (isolate whether pretext fusion is the cause or if the plain fallback also
+  duplicates).
+
+* Status
+OPEN — filed from PLAN-063 session. Not investigated further (out of scope
+for that PLAN); needs its own root-cause pass.

@@ -1,0 +1,126 @@
+#+TITLE: A `2xx` status-class arm in a @data signal's receive block silently drops the entire signal-call binding (no diagnostic)
+#+STATE: ITEM
+#+SESSION_ID: 153115a0b151f3c0
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse-commercial-host/2026-07-15T18-54-16-774Z_153115a0b151f3c0.jsonl]]
+#+CUSTOM_ID: BUG-179-a-2xx-status-class-arm-in-a-data-signals
+#+layer: compiler,macros
+
+* Found by
+Discovered while implementing =stdlib/__host__/index.st= (Spacetime
+Host's Wave 4 domain-panel widget). A form-submit handler firing
+=$addDomain($domain)= silently did NOTHING in a real browser -- no
+console error, no network request, =window.ST._signalCalls= was
+empty even though =cargo run -- check= reported success with zero
+diagnostics.
+
+* Minimal reproduction
+#+begin_src text
+@import "stdlib/macros/host"
+@import "stdlib/macros/data-kind"
+@import "stdlib/macros/handle"
+
+@host $api : http("http://example.com")
+
+@data signal $addDomain($d string) to $api {
+  send POST "/domains" { domain: $d }
+  receive to Result {
+    2xx => Added($.body);
+    _   => Failed($.statusText);
+  }
+  policy latest
+}
+
+@handle $addDomain {
+  receive { Added(_) => {} }
+}
+#+end_src
+
+=cargo run -- inspect --layer emit= on this file: the compiled JS
+contains NEITHER =doHttpRequest= NOR any real
+=ST.registerSignalCall("addDomain", fire)= call -- the WHOLE
+=@data signal $addDomain= block is silently absent from the emitted
+output, as if it never existed. =cargo run -- check= on the SAME
+file reports =\u2713 All 1 file(s) passed= -- zero diagnostics, zero
+warnings, a clean success that hides a completely dropped binding.
+
+* The isolating change
+Replacing the =2xx= arm with an EXPLICIT numeric status code fixes
+it immediately:
+#+begin_src text
+  receive to Result {
+    200 => Added($.body);
+    _   => Failed($.statusText);
+  }
+#+end_src
+=cargo run -- inspect --layer emit= on this version DOES contain a
+real =doHttpRequest= call site (not just its definition) and a real
+=ST.registerSignalCall= invocation. Confirmed this is specifically
+the =2xx=-shaped status-CLASS pattern (not e.g. arm count, not the
+=422=/=409= additional arms, not the surrounding =@handle= block) --
+isolated via bisection to a 2-arm, otherwise-minimal =receive= block:
+=2xx => X(); _ => Y();= alone reproduces it; =200 => X(); _ => Y();=
+does not.
+
+* Grammar context
+=stdlib/capture-types/signal-receive.st='s own doc comment
+explicitly documents =2xx= as a SUPPORTED =recv_pat= form (\"a bare
+ident (status-class \=2xx\=, tag, or \=_\= wildcard)\"), and its
+worked example in the SAME file's header comment literally uses
+=2xx= (\"2xx => Created($.body as Todo);\"). This is a documented,
+intended-to-work feature that is actually completely broken end to
+end -- not an edge case, the FIRST example in the grammar's own doc
+comment doesn't work.
+
+* Impact
+Silent, un-diagnosed data loss: an author following the DOCUMENTED
+=2xx= pattern (copy-pasting the grammar file's own example) gets a
+signal that parses, compiles with zero errors, and simply never
+fires anything at runtime. This is a WORST-case failure mode --
+worse than a compile error, because nothing in the authoring
+workflow signals that anything is wrong until a live browser test
+(or, in production, a real user) discovers the feature silently does
+nothing.
+
+* Suspected root cause (unverified -- flagging for the
+  fix-implementer to confirm, not asserting as fact)
+=recv_pat='s three-way choice (=$num:number= | =$name:ident= |
+=$lit:string=) likely matches =2xx= against the =$name:ident= arm
+(since =2xx= is lexically an identifier-shaped token, not a valid
+=$num:number=) -- but WHATEVER consumes =$name:ident= downstream
+(the receive-arm-to-JS lowering, or the pattern match against a real
+HTTP status code at runtime) may not actually implement status-CLASS
+range matching for a bare ident like =2xx= specifically (as opposed
+to a tag/type string), and something in that path fails in a way
+that doesn't just fail figure out ONE arm -- it seems to abort the
+WHOLE macro's %binds resolution silently, dropping the entire
+=@data signal= from emission. This needs real investigation (a
+debugger/trace through the macro-matching + emission pipeline for
+this exact repro), not a guess-fix.
+
+* Fix required
+1. Root-cause WHY a =2xx=-containing receive block causes the
+   ENTIRE enclosing =@data signal='s emission to silently vanish
+   (not just why =2xx= itself doesn't match a real status -- the
+   COMPLETE DROP of the surrounding macro's output is the more
+   serious half of this bug).
+2. Either (a) implement real status-class range matching for
+   =2xx=/=3xx=/=4xx=/=5xx= tokens (matching the grammar file's own
+   documented intent), or (b) if status-class matching is
+   genuinely out of scope for now, make an unsupported/unmatched
+   =recv_pat= a LOUD compile-time diagnostic (a real error or at
+   minimum a warning), never a silent full-macro drop.
+3. Whichever fix lands, `stdlib/capture-types/signal-receive.st`'s
+   own header-comment worked example (the ONE with =2xx=/=422=/=_=)
+   must actually compile AND fire correctly end-to-end -- add a real
+   test exercising it (a live signal fire against a mocked/real
+   endpoint returning various status codes, asserting the correct
+   arm fires), not just a parse-level test.
+
+* Workaround applied (this session)
+=stdlib/__host__/index.st='s =$addDomain= signal uses an explicit
+=200= status code instead of =2xx= -- documented inline in that
+file's own comment, since =spacetime-host-server::domains::bind=
+returns exactly 200 on success, an explicit code is both correct and
+side-steps this bug. This workaround should be reverted back to
+=2xx= (the more semantically correct pattern, matching any 2xx
+success code, not JUST 200) once this bug is fixed.

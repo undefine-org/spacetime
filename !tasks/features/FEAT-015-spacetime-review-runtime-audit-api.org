@@ -1,0 +1,112 @@
+#+TITLE: Spacetime.review() runtime audit API
+#+STATE: DONE
+#+SESSION_ID: 14cb55e291e3888a
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-04-27T18-09-57-319Z_14cb55e291e3888a.jsonl]]
+#+CUSTOM_ID: FEAT-015-spacetime-review-runtime-audit-api
+#+EFFORT: 4h
+#+LAYER: runtime
+#+PRIORITY: #A
+
+* Initial Message
+
+what can you learn from this https://github.com/alchaincyf/huashu-design
+
+to make a nice spell skill that helps with Spacetime? think about the skill + the features and improvements to the debugger that you can land
+
+* Scope
+
+In-scope:
+- New runtime API: `window.Spacetime.review()` returning a 5-dim audit object (synchronous, idempotent).
+- Five dimensions, each scored 0-10 with structured findings:
+  1. *idiomatic*: scans DOM for inline event handlers (`onclick=`, `onmouseover=`, ...), `<script>` tags whose source isn't `__spacetime/`, and `style="..."` attributes containing properties that should be Spacetime-driven.
+  2. *animation*: walks `__ST_DEBUG__.getTimelines()`; flags timelines where `elementCount === 0`, `state.started === false` after `readyState === 'complete'` + 500ms grace, or `state.destroyed === true` while `state.completed === false`.
+  3. *brand*: walks computed CSS for the document; collects inline hex literals (regex `#[0-9a-f]{3,8}`) appearing in `style` attributes or unbound via `var(--*)`; reports unbound count and top offenders.
+  4. *a11y*: counts `<img>` without `alt`, `<a>` without accessible name, `<button>` without label, headings out of order (h1 → h3 skip).
+  5. *compile*: reads `window.__ST_DEBUG__.errors` (existing) for compile/runtime errors collected by the dev runtime.
+- Each finding shape: `{ dim, severity: 'error'|'warn'|'info', message, selector?, value? }`.
+- Score formula per dim: `clamp(10 - errorCount*2 - warnCount, 0, 10)`.
+- Top-level shape: `{ score: 0..10, dims: { idiomatic, animation, brand, a11y, compile }, findings: [...], generatedAt }`.
+
+Out-of-scope:
+- Production-mode exposure (review must be guarded behind `window.__ST_DEV__ === true`, set by `stdlib/__dev__/index.st:dev-flag()`).
+- Auto-fix actions (review reports only; fixes happen via doctor or dev panel tabs).
+- Historical snapshots / diffing.
+
+* Existing Patterns
+
+- Runtime debug surface lives on `window.__ST_DEBUG__` populated in =src/compiler.rs= around lines 1683-1844 (`Spacetime.diagnose`, `Spacetime.inspectTimeline`, `Spacetime.inspectElement`, `Spacetime.forcePlay`). Add `Spacetime.review` next to these.
+- Dev primitives compose via `%primitive` + `%emit js` blocks in =stdlib/__dev__/primitives/=. The audit walker for DOM-side checks SHOULD live as a primitive `dev-review.st` so it can be tweaked without recompiling Rust. The Rust side only registers the `Spacetime.review` entry point that delegates to `window.__stDevReview()` exported by the primitive.
+- Existing audit-style reads of `__ST_DEBUG__` already happen in =stdlib/__dev__/primitives/dev-inspect.st= (timelines, errors). Reuse `readTimelines()` and `readErrors()` shapes from there.
+- `%exports` blocks document reactive outputs (see header comments in dev-inspect.st). Use the same convention.
+
+* Tests
+
+Unit (Rust, =src/compiler.rs= test module or integration test):
+- T1: `Spacetime.review` is defined when dev runtime loaded; not defined in production builds.
+- T2: When delegate `window.__stDevReview` not yet present, `Spacetime.review()` returns `{ score: null, status: 'pending', reason: 'dev-review primitive not loaded' }` instead of throwing.
+
+Integration (headless, =cargo run --features headless -- test=):
+- T3: Page with one inline `onclick="..."` produces one *idiomatic* error finding.
+- T4: Page with one `<img>` missing alt produces one *a11y* error finding.
+- T5: Page with one `<style>color: #ff0000</style>` inline literal produces one *brand* warn finding.
+- T6: Page with healthy `@load` timeline produces *animation* score 10.
+- T7: Page with one timeline whose selector matches no element produces *animation* error finding.
+- T8: Top-level `score` equals min of dim scores (smoke).
+
+Manual:
+- M1: Open `projects/dataiku/` in dev server, run `Spacetime.review()` in console, verify response shape.
+
+* Implementation
+
+** ITEM Define review schema and emitted-JS contract
+:PROPERTIES:
+:CUSTOM_ID: FEAT-015-spacetime-review-runtime-audit-api::define-schema
+:END:
+- File: new =stdlib/__dev__/primitives/dev-review.st= (skeleton with `%exports` only).
+- Document the exact return shape of `window.__stDevReview()` in a leading doc comment.
+- No DOM walking yet; primitive returns `{ score: null, status: 'pending' }` until next step.
+
+** ITEM Write integration tests (TDD: before walker)
+:PROPERTIES:
+:CUSTOM_ID: FEAT-015-spacetime-review-runtime-audit-api::review-tests
+:DEPENDS: FEAT-015-spacetime-review-runtime-audit-api::define-schema
+:END:
+- File: =tests/integration_tests.rs= (new test module `review_api`) — scenarios T3..T8.
+- Use existing test fixture pattern: build a tiny `.st` file under `tests/fixtures/review/`, compile + serve headless, assert findings by `dim` and `severity`.
+- All tests start failing.
+
+** ITEM Implement DOM walkers in dev-review primitive
+:PROPERTIES:
+:CUSTOM_ID: FEAT-015-spacetime-review-runtime-audit-api::implement-walkers
+:DEPENDS: FEAT-015-spacetime-review-runtime-audit-api::review-tests
+:END:
+- File: =stdlib/__dev__/primitives/dev-review.st=.
+- Implement five walkers as small functions (`auditIdiomatic`, `auditAnimation`, `auditBrand`, `auditA11y`, `auditCompile`).
+- Aggregate, compute per-dim scores, set `window.__stDevReview = function(){...}`.
+- Hook primitive into =stdlib/__dev__/index.st= imports.
+
+** ITEM Wire Spacetime.review entry point
+:PROPERTIES:
+:CUSTOM_ID: FEAT-015-spacetime-review-runtime-audit-api::wire-runtime-entry
+:DEPENDS: FEAT-015-spacetime-review-runtime-audit-api::implement-walkers
+:END:
+- File: =src/compiler.rs= around line 1844 (after `forcePlay`).
+- Emit `Spacetime.review = function() { return (typeof window.__stDevReview === 'function') ? window.__stDevReview() : { score: null, status: 'pending', reason: 'dev-review primitive not loaded' }; };`.
+- Add Rust unit tests T1, T2 against the emitted-JS string.
+
+* Edge Cases
+
+- Primitive evaluates inside Shadow DOM (dev panel) but audits the host document; selectors must use `document.querySelectorAll`, not the panel's shadow root.
+- Walker MUST tolerate `__ST_DEBUG__` being undefined (production users never see this, but guards prevent dev-mode fragility while page is loading).
+- Inline-handler regex MUST NOT flag SVG presentation attrs that begin with `on` but aren't events (`onclick` is real; `oninput` is real; nothing else common). Whitelist event-handler attrs only.
+- Hex literal scan MUST ignore values inside `:root { --x: #aaa }` declarations (those are vars; that's the good case).
+- Multiple invocations of `Spacetime.review()` per second: walker MUST debounce-cache for 250ms to keep the dev panel poll cheap.
+
+* Acceptance Criteria
+
+- `cargo test --test integration_tests review_api` passes (8 scenarios T1..T8).
+- Console call `Spacetime.review()` on `projects/dataiku/` returns object with all 5 dims and a numeric `score`.
+- Console call `Spacetime.review()` on a fresh `cargo run -- build` artifact returns `{ score: null, status: 'pending', reason: 'dev-review primitive not loaded' }` (production guard).
+- No new `console.log` left in shipped primitive.
+
+NOTE [2026-04-27]: Closed by PLAN-017. Shipped: stdlib/__dev__/primitives/dev-review.st (5-dim audit walker, 250ms cache, exposed as window.Spacetime.review and window.__stDevReview). Wired into stdlib/__dev__/macros/panel.st and stdlib/__dev__/index.st. Deviation: bypassed compiler.rs entry point because diagnose/forcePlay live in public/runtime/debug.js (not compiler.rs); the primitive sets Spacetime.review directly. Tests T1/T2 (compiler.rs entry) not authored due to deviation; manual M1 verified the primitive expands and emits.

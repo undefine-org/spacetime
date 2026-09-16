@@ -1,0 +1,36 @@
+#+TITLE: BUG-284 @eval grammar rejects common JS shapes
+#+TODO: TODO DOING | DONE CANCELLED
+#+STARTUP: overview
+
+* TODO [#B] @eval grammar rejects common JS shapes, errors far from the cause
+:PROPERTIES:
+:CUSTOM_ID: BUG-284
+:PRIORITY: #B
+:LAYER: testing
+:DISCOVERED: 2026-08-04
+:END
+
+** Symptom (all in tests/gallery/effect-gallery.test.st development)
+Writing straightforward JS in @eval (...) produced parse errors whose message
+("expected '{' after selector", "expected COLON") points nowhere near the
+actual construct:
+- a statement STARTING with `[` (array literal) reads as an attribute selector
+- indexing an array with an identifier (`window.__g3s[i]`) — numeric literals
+  (`w[0]`) are fine
+- a top-level OBJECT LITERAL (`window.__x = { a: 1 }`) emits `a;;` — the eval
+  capture truncates at the first colon (E0952 downstream, far from the cause)
+- a ternary at expression position (`a ? b : c`) — "expected COLON"
+- `<=` in a filter predicate — "expected '{' after selector" (unconfirmed
+  token; rephrased away)
+Object literals nested inside function bodies (sampler pushes) are fine.
+
+** Impact
+Test authors bisect blindly. The workarounds (object rows in sampler
+functions, scalar evals, unrolled numeric indexing) make probes more verbose
+than the claim they serve.
+
+** Candidate direction
+@eval should capture its parenthesized body as an OPAQUE JS string (the
+grammar combinator should not tokenize JS at all) and hand it to the emitter
+verbatim — same doctrine as prose being inert in literate mode. Failing that,
+the capture_type should at least fail with the offending token quoted.

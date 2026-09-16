@@ -1,0 +1,124 @@
+#+TITLE: BUG: @score assigns windows nothing can consume — W4 is inert
+#+STATE: DONE
+#+SESSION_ID: 1534a2eae1903af0
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-18T13-07-01-638Z_1534a2eae1903af0.jsonl]]
+#+CUSTOM_ID: BUG-258-bug-score-assigns-windows-nothing-can-co
+
+* Initial Message
+
+let's have the score conversation. Please start by reminding yourself of what we were trying to do and what our design goals were. this is like a "Previously on Spacetime" feature where we get to understand what our design intentions were and where we stopped our investigations
+
+#+STATE: ITEM
+
+* The headline
+
+`@score` computes correct windows and publishes a progress signal per clip.
+NOTHING CAN READ ONE. The wave is arithmetically right and behaviorally inert.
+
+Evidence, from the built launch demo (`demos/score-launch/dist/spacetime.js`,
+"// Site Code" section):
+
+: __clip_back_3: 3 occurrences     __clip_head:   6
+: __clip_body_1: 3                 __clip_normal: 3
+: __clip_cta_2:  3                 __clip_shot:   7
+: __clip_fast_1: 3                 __clip_slow_2: 3
+
+Three occurrences = the signal's own publish, its priming read, and its watch
+registration. No consumer. The two with 6-7 are the ones a NESTED score reads —
+score-to-score works; score-to-anything-else does not exist.
+
+And the obvious way to consume one is refused:
+
+#+begin_src spacetime
+.title { opacity: 0; @on &.clip: --fade-in; }
+// error[E0949]: projection `.clip` applies to `clip` refs, but `&.clip`
+//               (no subject) is the element host
+#+end_src
+
+* Why I did not catch this
+
+Every gate I wrote asserts the score PRODUCES the right thing — window bounds,
+rate integrals, fragment expansion, the clip join. Not one asserts that a clip's
+progress reaches a style. The orphan-signal gate
+(`every_watched_score_signal_has_a_publisher`) checks the converse direction —
+watched-without-publisher — and is blind to published-without-consumer.
+
+The launch demo was supposed to be the check that a compile-time wave actually
+moves. I verified it by grepping for `_swName`/`_swOffset` constants — i.e. by
+confirming the same thing the unit gates confirm. A demo verified the way a
+unit test verifies is not a demo.
+
+* Second defect, same family: percentages are inconsistent by position
+
+#+begin_src spacetime
+.stage { @score &.time(6s) { &title for 50%; } }         // E0951, correctly
+@form score --story { &head for 50%; }                    // ACCEPTED
+.stage { @score &.time(6s) { --story; } }                 // and stays accepted
+#+end_src
+
+The domain check runs on the score's own `entries` capture, before fragments
+are spliced, so a measure inside a fragment is never checked. `demos/score-
+launch/index.st.md` relies on this: its `--story` fragment uses `for 50%` under
+a `.time`-driven score, which is precisely the error E0951 exists to raise.
+
+That is also the deeper design question the reviewers surfaced: a fragment is
+meant to be reusable ACROSS domains (that is R2's whole point, and the thesis
+depends on it), so a percentage inside a fragment arguably means "of the
+fragment" and is domain-independent. If so, E0951 is checking at the wrong
+level and the rule needs restating — not the fragment path patching to match
+the inline path.
+
+* What must happen before W4 can be called done
+
+1. A CONSUMER surface for a clip's progress. The likeliest shape: `@on
+   &.clip` (or a `.progress` facet) legal on an element the enclosing score
+   places, resolving to the window that score assigned it. This is the
+   missing half of the join that t5 built.
+2. A behavioral gate on `--cdp`: a real page, a real clock, `getComputedStyle`
+   showing a clip's opacity change at the time its window says it should. The
+   fidelity ladder exists for exactly this (`needs timing`), and W4 has no
+   such gate at all.
+3. Resolve the percentage-in-fragment question ABOVE, then make the two paths
+   agree \u2014 whichever way it is decided.
+4. The demo's claims re-verified against the fixed build, or the demo's §4
+   ("what this page does not yet prove") extended to say the page shows
+   arrangement without motion. Overstating is worse than not shipping it.
+
+* Notes
+
+The remaining reviewer findings (rate values at extreme inputs, duplicate
+signal names when one fragment is spliced twice, fragment self-recursion,
+E0951 span/dedup, `.playback` with a `planned:` primitive silently producing a
+driverless score) are filed separately \u2014 see the sibling bugs. This one is
+first because it subsumes the wave's headline claim.
+
+* RESOLVED 2026-08-02 — commit 39473106
+
+`tests/score/clip-consumer.test.st` is 4/4 in real Chromium: a clip outside its
+window is STILL, a clip inside it MOVES, an earlier clip COMPLETES before a
+later one starts, and the later clip moves when its own window opens.
+
+Four defects, each silent, each exposed by fixing the one before it:
+
+1. the naming rule (D1) — `inherited_progress_name` is now the single place a
+   `domain: inherited` driver's address is decided, called by BOTH the score
+   path and the drive path
+2. `.clip` `on_kinds: clip` -> `elem` (safe only because of 1; relaxing it
+   alone was probed first and produced two names that never meet)
+3. `apply-animations` bare `ST.watch` -> `watchScoped`, so the watch path
+   mirrors the resolve path (FUP-094) and can see an ancestor's signal. The
+   initial read worked and the watch never fired — the element sat frozen.
+4. the clip-signal suffix counted CLIPS instead of REPEATS of a subject, so the
+   second clip of any score was suffixed even with a different subject
+
+The first clip always worked, so every single-clip test passed. Both new gates
+use two subjects for that reason.
+
+** Still open from this bug's list
+
+- The percentage-in-fragment inconsistency (D2) is NOT fixed here. `for 50%`
+  under a `.time` score is still E0951 inline and still accepted inside a
+  fragment. The ruling is made (fragment-relative measures); the work is queued.
+- The launch demo's honesty note ("nothing on this page moves yet") stays until
+  D2 lands and its claims are re-verified against a build that moves. The
+  mechanism now exists, so that re-verification is real work, not a formality.

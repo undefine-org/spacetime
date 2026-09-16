@@ -1,0 +1,191 @@
+#+TITLE: MCP preludes — host, environment browser, and function-template kit
+#+STATE: DONE
+#+SESSION_ID: 150a97869c1cbe15
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-15T21-21-03-088Z_150a97869c1cbe15.jsonl]]
+#+CUSTOM_ID: FEAT-123-mcp-preludes-host-environment-browser-an
+#+DEPENDS: FEAT-122-mcp-function-environment-generic-registr FEAT-110-signal-core-reactive-output-post-emit-th
+#+LAYER: mcp
+#+PRIORITY: A
+#+COMPLETION_HASH: b007f5eb88440288
+
+* Initial Message
+
+can you find the work i did around the live environment extension for Spacetime? where was I with that?
+
+* Parent
+[[id:PLAN-038-signal-reactive-output-the-sibling-of-da]] — Zen phases 2-4, then bridge into the canonical reactive-output language.
+
+* User intent
+The user wants preludes, not one-off tools:
+1. A general prelude to browse MCP environments and tabs.
+2. A communication prelude with bindings/hosts that wire any bidirectional behavior Spell supports.
+3. Function-template orientation: apps are composed by injecting functions into the environment; an updated function with the same contract fulfills the same role.
+
+* Goal
+Turn the MCP live environment into a self-hosting Spacetime workbench. The environment browser and interaction kit are themselves Spacetime functions mounted through the same generic function environment.
+
+* Prelude split
+** stdlib/__mcp__/host.st
+Minimal communication substrate. No UI.
+- Provides a host bridge primitive mirroring stdlib/__dev__/primitives/dev-ws.st.
+- Exposes connection/capability/message signals.
+- Sends envelopes to the generic /__mcp/signal/{instance} sink.
+- Receives server->page stream messages when supported.
+- Later becomes the implementation substrate for canonical @host $mcp / @data signal/stream.
+
+** stdlib/__mcp__/env.st
+Workbench/browser prelude. UI built from templates/functions.
+- Browse discovered/open environments.
+- Browse tabs.
+- Browse registered functions and revisions.
+- Browse mounted instances and event history.
+- Mount or update a function.
+- Inspect contracts, diagnostics, and emitted events.
+- Uses host.st and the same generic function APIs; no parallel admin protocol.
+
+** stdlib/__mcp__/kit/*.st
+Reusable ad-hoc agent interface functions.
+- picker.st — choose one of N options.
+- form.st — typed form.
+- confirm.st — yes/no decision.
+- review.st — structured review/approval flow.
+Each function declares/uses the same contract vocabulary and emits through host.st.
+
+* Scope
+IN:
+- Create module-shaped stdlib/__mcp__ layout (MODULE.st/index.st/primitives/macros or kit as needed), respecting stdlib/AGENTS.md.
+- Move existing picker into kit shape after FEAT-122 provides generic mount/event semantics.
+- Compatibility wrappers: st_propose/st_await_choice may call st_mount/st_await for one release.
+- Add environment browser as a mounted function.
+
+OUT:
+- New Rust bespoke UI routes per interaction.
+- Custom JS in pages outside %primitive.
+- Device sink variants; those remain FUP-049.
+
+* Acceptance criteria
+- `@import "stdlib/__mcp__"` exposes host + kit functions without forcing any UI to ship until invoked.
+- The environment browser is mountable via st_mount and can list envs/tabs/functions/instances from host-provided data.
+- picker/form/confirm are normal Spacetime functions and emit through the generic signal sink.
+- st_propose/st_await_choice are either deleted or proven thin wrappers over st_mount/st_await.
+- Harmony audit: one host bridge, one generic sink, no ChooseForm or /__mcp/choose long-term.
+
+* Verification
+- cargo build.
+- MCP smoke: mount env browser; inspect function list.
+- Browser smoke: mount picker; click; st_await returns typed event.
+- Grep audit: no new bespoke route names for picker/form/confirm.
+
+* Relationship to PLAN-038 language waves
+This feature intentionally starts with concrete preludes and library functions. After the UX and runtime seam are proven, FEAT-110 replaces the temporary host surface with the canonical @host + @data signal/stream + @handle language. The prelude code should shrink, not fork, when FEAT-110 lands.
+
+NOTE [2026-06-15]: Correction 2026-06-15: Browser demo revealed the first click wiring attempt was not valid/effective Spacetime author syntax. Bad path: inline app-level custom %primitive/%macro and an unexpanded @mcp-click marker. Corrected prelude direction: keep JS inside stdlib/__mcp__/primitives/host.st, with @mcp-host owning a delegated click bridge for mounted-function demo buttons. Updated inst-1 to revision 8 using proper source shape: @import "stdlib/__mcp__"; markup/CSS; @mcp-host. Verified with browser click: st_await returned event seq=3 type=clicked payload text="Send MCP message". Follow-up for FEAT-123: implement real parameterized @mcp-click macro/template cleanly; do not rely on placeholder directives.
+
+NOTE [2026-06-16]: Repair 2026-06-15: Re-read plan and corrected the MCP prelude surface to an actually working Spacetime syntax. The accepted FEAT-123 S0 author syntax is now: `@import "stdlib/__mcp__";` + normal HTML with `data-mcp-event="clicked"`/`data-mcp-correlation="..."`/optional `data-mcp-value`/`data-mcp-payload`, then `@mcp-host` after markup/CSS. JS lives only in `stdlib/__mcp__/primitives/host.st`. Removed the fake parameterized macro import path from the module; `@mcp-on-click` is NOT claimed as shipped. Verification: `cargo run -- check scratch/mcp_click_smoke.st` PASS; `cargo build` PASS; `cargo run -- inspect --layer emit scratch/mcp_click_smoke.st` shows delegated `[data-mcp-event]` click handler and `/__mcp/signal/` POST in emitted JS; updated live inst-1 to fn-1 revision 9; browser page shows heading `honest MCP click syntax`, button carries `data-mcp-event=clicked`, `window.__stHost.instance=inst-1`; browser click produced MCP events visible through st_inspect, latest event type=clicked payload.text=`Send MCP message` payload.value=`demo` correlation=`inst-1-click`. Known limitation: this is the honest current S0 surface, not the final parameterized `@mcp-click` macro; a macro should only be claimed after inspect proves its bound primitive emits.
+
+* Repair note — honest FEAT-123 S0 syntax (2026-06-15)
+
+The previous browser demo overstated the state of the syntax. Re-checking the original plan and the emitted code showed that the parameterized `@mcp-click`/`@mcp-on-click` idea was not actually expanded by the current module/import path, so it must not be claimed as shipped.
+
+Current accepted S0 syntax is deliberately smaller and verified:
+
+#+begin_src st
+@import "stdlib/__mcp__";
+
+<button
+  data-mcp-event="clicked"
+  data-mcp-correlation="review-1"
+  data-mcp-value="approve">
+  Approve
+</button>
+
+@mcp-host
+#+end_src
+
+Meaning:
+- Normal HTML declares the event contract via `data-mcp-*` attributes.
+- `@mcp-host` installs the host bridge and delegates clicks from `[data-mcp-event]`.
+- JS lives only inside `stdlib/__mcp__/primitives/host.st`.
+- The bridge POSTs one envelope to `/__mcp/signal/{instance}`.
+
+Verification performed:
+- `cargo run -- check scratch/mcp_click_smoke.st` PASS.
+- `cargo build` PASS.
+- `cargo run -- inspect --layer emit scratch/mcp_click_smoke.st` shows the emitted delegated `[data-mcp-event]` handler and `/__mcp/signal/` POST.
+- Live `inst-1` updated to `fn-1` revision 9 with this syntax.
+- Browser observed heading `honest MCP click syntax`, button `data-mcp-event=clicked`, and `window.__stHost.instance=inst-1`.
+- Browser click produced MCP events; latest inspected event: `type=clicked`, `payload.text="Send MCP message"`, `payload.value="demo"`, `correlation="inst-1-click"`.
+
+Known limitation:
+- A parameterized `@mcp-click(...)` macro is not shipped. It belongs later in FEAT-123 only after `inspect --layer emit` proves the macro actually expands to the `mcp-click` primitive. Until then, the honest syntax is `data-mcp-event` + `@mcp-host`.
+
+* Repair note — remove data-mcp-* anti-pattern (2026-06-16)
+
+The `data-mcp-* + @mcp-host` syntax was still wrong for the plan. It encoded MCP behavior in HTML attributes instead of a Spacetime directive/prelude. That is an anti-pattern.
+
+Corrected FEAT-123 S0 syntax now uses a selector-scoped directive over a primitive:
+
+#+begin_src st
+@import "stdlib/__mcp__";
+
+<button class="approve">Approve</button>
+
+.approve {
+  @mcp-click(type: "approved", correlation: "review-1", value: "approve")
+}
+
+@mcp-host
+#+end_src
+
+Implementation:
+- `stdlib/__mcp__/primitives/host.st` owns all JavaScript in `%primitive` blocks.
+- `@mcp-host` is file-scoped and installs `window.__stHost` for the mounted instance.
+- `@mcp-click(...)` is selector-scoped and expands to `mcp-click-event(&self, ...)`.
+- No `data-mcp-*` attributes are required or used by the public syntax.
+
+Verification:
+- `cargo run -- check scratch/mcp_click_smoke.st && cargo build` PASS.
+- `cargo run -- inspect --layer emit scratch/mcp_click_smoke.st` shows both host bridge code and selector init for `.ping` with `host.signal(type, payload(), correlation)`.
+- Restarted the manual demo with the corrected source. Current URL: `http://127.0.0.1:37771/__mcp/instance/inst-1/`.
+- Browser observed: heading `selector-scoped MCP syntax`, `window.__stHost.instance=inst-1`, and no `data-mcp-*` attributes in the DOM.
+- Browser click on `button.ping` produced MCP event seq=1: `type=clicked`, `payload.text="Send MCP message"`, `payload.value="demo"`, `correlation="inst-1-click"`.
+
+This is the first honest working syntax aligned with the original prelude plan. Later FEAT-110 should replace the temporary host bridge with canonical `@host`/`@data signal` semantics, but the author surface is no longer an HTML-attribute event DSL.
+
+NOTE [2026-06-16]: Full plan requested 2026-06-16: Target is one Spacetime-created MCP workbench page that shows environments, tabs, functions, mounted instances, and events in a tabbed interface, instead of each function being an isolated page. Current repo state: Rust environment/tab registry and tools exist (`st_env_list/open`, `st_tab_list/open`); generic function/instance mount exists; `stdlib/__mcp__` only has host/click S0 and a legacy picker page; no `env.st` workbench exists; no host RPC/data prelude exists for a Spacetime page to list/open envs/tabs live; current mounted functions are still per-instance pages. Full route: W0 harden S0 (embed stdlib/__mcp__, fix docs, add tests); W1 add MCP resource/read surface for envs/tabs/functions/instances/events so UI can consume one canonical state; W2 extend `@mcp-host` with request/response RPC primitive/macros (`@mcp-data`, `@mcp-action` or temporary equivalent) so pages can call host ops without custom JS; W3 create `stdlib/__mcp__/env.st` as the workbench page using only Spacetime templates/data/actions; W4 make tabs render inline via iframe/preview resources and preserve selected tab/state; W5 migrate picker/form/confirm/review kit into normal Spacetime functions hosted inside the workbench; W6 collapse legacy bespoke picker/choose routes once wrappers prove thin; W7 later replace temporary MCP prelude host surface with canonical FEAT-110 `@host`/`@data signal`/`@handle` semantics. Acceptance for full workbench: one `st_mount` of env browser opens a single page; page lists discovered/open envs; can open envs and tabs; shows compile diagnostics/output previews; lists function revisions and instances; events appear in same page; all UI authored in stdlib/__mcp__ Spacetime with JS only inside primitives; legacy per-function URLs remain as preview targets but not the primary UX.
+
+NOTE [2026-06-16]: W0 hardening 2026-06-16: Embedded `stdlib/__mcp__` into `src/stdlib_embedded.rs` (MODULE.st, index.st, primitives/host.st) so the MCP prelude is available when filesystem stdlib is absent; added `mcp_prelude_is_embedded` unit guard. Fixed stale `stdlib/__mcp__/index.st` docs to describe the verified selector-scoped `@mcp-click(...)` syntax instead of the rejected `data-mcp-*` surface. Verification: `cargo test --lib mcp_prelude_is_embedded` PASS; `cargo run -- check stdlib/__mcp__/index.st` PASS; `cargo build` PASS (pre-existing warning in pipeline/resolve.rs).
+
+NOTE [2026-06-16]: W1 resources 2026-06-16: Added MCP resource/read surface for workbench state. `initialize` now advertises resources subscribe/listChanged; protocol handles `resources/templates/list`, `resources/list`, `resources/read`, `resources/subscribe`, `resources/unsubscribe`. New `src/mcp/resources.rs` exposes `spacetime://mcp/environments`, `spacetime://mcp/environments/{env_id}/tabs`, `spacetime://mcp/functions`, `spacetime://mcp/instances`, and `spacetime://instances/{instance_id}/events`. `st_mount` now returns `events_resource` + `events_read_url`. `LiveServer` gained `record_event` and `read_instance_events`, with signal sink using the shared recorder. Added protocol unit tests for resource capabilities, env/tab reads, instance event reads before/after event append, and subscription URI validation. Verification: exact gate `cargo build && cargo test --lib mcp` PASS. This is still W1 pull/read surface only; async resource update notifications are intentionally deferred.
+
+NOTE [2026-06-16]: W2 action prelude 2026-06-16: Extended `stdlib/__mcp__/primitives/host.st` with selector-scoped `@mcp-action(action: ..., target: ..., value: ...)`. It binds `mcp-action-event(&self, ...)`, listens for clicks, and emits a single generic event envelope through the existing `window.__stHost.signal` / `/__mcp/signal/{instance}` path with `type="mcp-action"` and payload `{action,target,value,text,instance,at}`. This intentionally does not add per-action Rust routes; it is the S0 workbench action contract that a later dispatcher/agent handles. Updated `stdlib/__mcp__/index.st` docs. Verification: `cargo run -- check scratch/mcp_action_smoke.st` PASS; `cargo run -- inspect --layer emit scratch/mcp_action_smoke.st` shows host bridge + `.open-env` selector init posting `mcp-action`; exact gate `cargo build && cargo run -- check stdlib/__mcp__/index.st` PASS.
+
+NOTE [2026-06-16]: W3 workbench page 2026-06-16: Added `stdlib/__mcp__/env.st`, the first single-page Spacetime MCP workbench. It loads the mounted instance snapshot from `input.json` through new `@mcp-input`, publishes workbench data arrays (`mcpDiscoveredEnvironments`, `mcpOpenEnvironments`, `mcpTabs`, `mcpFunctions`, `mcpInstances`, `mcpEvents`), and renders environments/tabs/functions/instances/events with `@template` + `@each`. Added dynamic `targetAttr`/`valueAttr` support to `@mcp-action` so template-rendered buttons can emit action targets from normal DOM attributes while behavior remains directive-owned. Embedded `env.st` in `src/stdlib_embedded.rs`; updated MODULE docs. Verification: `cargo run -- check stdlib/__mcp__/env.st` PASS; exact gate `cargo build && cargo run -- check stdlib/__mcp__/env.st` PASS; `cargo test --lib mcp` PASS; fresh `cargo run -- mcp` smoke mounted env.st with a snapshot and browser observed 6 rendered cards (env/open env/tab/function/instance/event), host bridge present, click on `Open environment` POSTed `mcp-action` payload `{action:"st_env_open", target:"demos/spacetime-docs"}` successfully. Limitation: W3 is snapshot + event-intent, not direct in-page mutation of MCP env/tab state; W4/W5 should wire live refresh/dispatch through resources/notifications or a shared host action dispatcher.
+
+NOTE [2026-06-16]: W4 launcher 2026-06-16: Added first-class `st_workbench` tool. It compiles/registers `stdlib/__mcp__/env.st` as named function `mcp-workbench`, snapshots current MCP state via `resources::workbench_snapshot` (discovered/open envs, flattened tabs, functions, instances, events), mounts the workbench as one generic Function Environment instance, and returns the page URL plus event resource. Added protocol test `st_workbench_mounts_env_browser`. Verification: exact gate `cargo build && cargo test --lib mcp` PASS; fresh `cargo run -- mcp` smoke opened `demos/spacetime-docs`, opened `index.st`, called `st_workbench`, browser rendered 45 cards (all discovered envs + open env + tab + function), and clicking an environment button emitted a successful `mcp-action` event with target `projects/ikarchitecte`. This is the first one-tool path to the full env/tabs page. Remaining: make actions mutate/refresh state in-page rather than returning event intents only; add async resource notifications/auto-read for those intents.
+
+NOTE [2026-06-16]: W5a optional-argument hardening 2026-06-16: Normalized empty-string MCP tool arguments to absent for wrapper-style calls. `st_tab_open` now treats empty `entry`/`code`/`title` as missing/default, so typed clients that send both fields with one empty no longer trip the mutual-exclusion guard. `st_mount` ignores empty `source`/`fn_id`/`name`/`title`; `st_inspect` ignores empty identifiers and lists state; `st_env_open`, `st_tab_list`, `st_await`, and env-root resolution now reject empty required values as missing. Added `empty_string_tool_arguments_are_absent` covering file tab with empty code/title, inline tab with empty entry, mount via fn_id with empty source/name/title, inspect list-state with empty ids, and the all-empty tab source error result. Verification: `cargo build && cargo test --lib mcp` PASS.
+
+NOTE [2026-06-16]: W5b action dispatch 2026-06-16: `st_await` now dispatches `mcp-action` events server-side for safe workbench actions. Supported actions: `st_env_open` (target path), `st_tab_open` (env/target + entry/value/code/title), `mcp_refresh`/`st_workbench_refresh` (snapshot refresh). Dispatch returns `structuredContent.action` with `{ok, action, summary/result|error, snapshot, updated_instance}` and updates the emitting workbench instance's `input` to the fresh `resources::workbench_snapshot`, so `input.json` becomes the canonical refreshed page state. Added `LiveServer::update_instance_input`. Test `st_await_dispatches_workbench_actions_and_refreshes_snapshot` mounts workbench, records an env-open action, awaits/dispatches it, asserts open env in returned snapshot and instance input, records tab-open action, awaits/dispatches it, and asserts tab in snapshot/input. Verification: `cargo build && cargo test --lib mcp` PASS. Note: immediate browser POST response still contains the recorded event; page-level live refresh lands in W5c via `@mcp-input(refresh: ...)` polling or notification-driven reload.
+
+NOTE [2026-06-16]: W5c modular workbench 2026-06-16: Split `stdlib/__mcp__/env.st` into a self-documenting page entry plus modular workbench files: `workbench/data.st` (snapshot contract + `@mcp-input(refresh: 1000)`), `workbench/cards.st` (pure card templates), `workbench/lists.st` (source-to-template render map), `workbench/actions.st` (host action directives), and `workbench/styles.st` (pure visual layer). Extended `@mcp-input` with optional polling (`@mcp-input(refresh: ms)`) so browser pages repaint from refreshed `input.json` after `st_await` dispatch updates the mounted instance input. Embedded all workbench module files in `src/stdlib_embedded.rs` and expanded the embed guard. Updated `MODULE.st` and public index docs. Verification: `cargo run -- check stdlib/__mcp__/index.st` PASS; `cargo build && cargo run -- check stdlib/__mcp__/env.st` PASS; `cargo test --lib mcp_prelude_is_embedded` PASS.
+
+NOTE [2026-06-16]: W5d stress verification 2026-06-16: Fresh `cargo run -- mcp` stress found an important mounted-inline import bug: modular `env.st` used `./workbench/*` relative imports, but `st_workbench` registers `env.st` as inline source, so relative imports resolved against workspace root and the function did not compile. Fixed `env.st` to use stdlib-absolute imports (`stdlib/__mcp__/workbench/*.st`), preserving file checks and mounted/embedded behavior. Stress flow after fix: fresh MCP server mounted `st_workbench` at `http://127.0.0.1:40717/__mcp/instance/inst-1/`; browser initial render showed 43 cards (42 discovered envs + workbench function), 0 open envs, 0 tabs, host bridge present. Browser clicked first env button; helper called `st_await`; dispatch returned `{decided:true,event:mcp-action,actionOk:true,action:st_env_open,openCount:1,envId:env-1}`; after `@mcp-input(refresh:1000)` poll, DOM showed one open env card for `ikarchitecte`. Browser then posted synthetic `st_tab_open` action for env-1 inline code; `st_await` dispatch returned `actionOk:true,tabCount:1,tabTitle:"Stress inline"`; DOM poll showed one tab card. Browser clicked Refresh; dispatch returned `action:mcp_refresh,openCount:1,tabCount:1,eventCount:3`; DOM poll ended at open=1, tabs=1, events=3, cards=49, hostError=null. Final gate `cargo test --lib mcp && cargo run -- check stdlib/__mcp__/env.st` PASS. Remaining non-W5 dirty state: pre-existing `stdlib/text/vendor/pretext` submodule.
+
+NOTE [2026-06-18]: FEAT-123 COMPLETE. All three prelude layers shipped + the last acceptance bullet (the interaction kit) closed by PLAN-043.
+
+Layers delivered:
+- host.st (communication substrate): @mcp-host region bridge + @mcp-click/@mcp-action/@mcp-input primitives, one generic /__mcp/signal/{instance} sink. (W0-W2, earlier sessions.)
+- env.st (environment browser): the one-page warm-dark workbench listing envs/tabs/functions/instances/events, rebuilt on the region pipeline by PLAN-041 (FEAT-130 chrome). (W3-W5.)
+- kit/*.st (interaction kit): picker + confirm + form as normal Spacetime functions mounted via st_mount, emitting the human's answer through the generic sink. (PLAN-043, this session.)
+
+Acceptance criteria — all met:
+- `@import "stdlib/__mcp__"` exposes host + kit without forcing UI to ship until invoked. ✓
+- The environment browser is mountable via st_mount/st_workbench and lists envs/tabs/functions/instances. ✓ (PLAN-041)
+- picker/form/confirm are normal Spacetime functions emitting through the generic signal sink. ✓ LIVE-VERIFIED (PLAN-043): mount picker -> click -> st_await returns action:kit-choice value:<option id>.
+- st_propose/st_await_choice deleted (not wrappers) — the legacy bespoke surface was AXED by PLAN-041 W5/FEAT-131. ✓
+- Harmony audit: one host bridge, one generic sink, no ChooseForm / __mcp/choose long-term. ✓ (grep-clean)
+
+Relationship to PLAN-038/FEAT-110 preserved: the temporary @mcp-host bridge is the substrate FEAT-110 later replaces with canonical @host/@data signal/stream; the prelude shrinks, not forks, when that lands.
+
+Follow-ups open: FUP-068 (form field-value collection), review.st 4th kit fn (deferred), BUG-107 (headless harness isolation — surfaced during kit verification, blocks honest full-suite headless signal).

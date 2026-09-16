@@ -1,0 +1,48 @@
+#+TITLE: MCP workbench UI nav actions misrouted to agent queue (input.json never repaints)
+#+STATE: DONE
+#+SESSION_ID: 150f02eff2cc2dd6
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-19T07-44-15-819Z_150f02eff2cc2dd6.jsonl]]
+#+CUSTOM_ID: BUG-110-mcp-workbench-ui-nav-actions-misrouted-t
+#+COMPLETION_HASH: a2b7248f07c4c7f5
+
+* Initial Message
+
+Test drive the Spacetime MCP workbench and list all the actions and their expected vs. actual output. The workbench should end up feeling like a mix of Spacetime+Squarespace+Figma/Framer in the end, and it doesn't. This is a REVIEW+DESIGN+BRAINSTORM session
+
+* Summary
+The workbench's PRIMARY navigation loop is broken end-to-end. Clicking "Open environment" (or any server-audience `@mcp-action`) fires the signal correctly, but the host signal sink mis-routes it to the AGENT queue as a generic `message` instead of resolving it synchronously and mutating `input.json`. The page polls an `input.json` that never changes ⇒ the UI never repaints. The workbench is a read-only snapshot of mount-time state.
+
+* Evidence (browser-verified, 2026-06-19)
+- Client side OK: clicking `.mcp-open-env` fires `POST /__mcp/signal/inst-1` then polls `input.json` (network trace captured).
+- Button wiring OK: `<button class="mcp-open-env" data-env-path="projects/ikarchitecte">`.
+- Signal sink response to `{action:"st_env_open", payload:{path:...}}`:
+  `{ok:true, event:{type:"message", audience:"agent", action:null, raw:{action:"st_env_open",...}}}`
+  → `audience:"agent"`, `action:null` — NOT resolved as a server action.
+- `st_await inst-1` drains it as `message#2` — confirming it sat in the agent queue.
+- After UI click + 1.5s: `input.json` `environments.open` still `[]`.
+
+* Expected (per actions.st + PLAN-041/PLAN-045)
+actions.st docstring: "These are SERVER-audience actions (PLAN-045): the signal sink resolves them SYNCHRONOUSLY (open env / open tab / refresh), updates input.json, and data.st polls that file and repaints — the agent is never woken for navigation."
+
+* Actual
+Server-audience actions (`st_env_open`, `mcp_refresh`, open-tab) are classified `audience:"agent"` and queued, never resolved. `action` field is null.
+
+* Likely root cause (unverified — needs source read)
+The signal sink's audience/action classifier doesn't recognize the `@mcp-action(action: "st_env_open")` server verbs; everything falls through to the agent path. Either the action registry isn't consulted, or the `@mcp-action` payload shape (`action` at top level) isn't mapped to the sink's resolver keys.
+
+* Repro
+1. `cargo run -- serve` (or live MCP), mount workbench (st_workbench).
+2. Open nav drawer, click any "Open environment".
+3. `curl .../input.json` → `environments.open` stays `[]`.
+
+* Fix scope
+- Host signal sink: classify `@mcp-action` server verbs (st_env_open, st_tab_open, mcp_refresh) as `audience:"host"`, resolve synchronously, mutate the instance `input.json`, bump a revision/seq the poller can observe.
+- Keep agent-audience (kit-* answers) on the existing st_await path.
+- Add an MCP JSON-RPC smoke: click→signal→input.json repaint (the loop FEAT-124 acceptance already implies).
+
+* Relates
+Parent epic FEAT-124. Surfaced by FEAT-126/PLAN-041 review. Blocks the "feels live" acceptance.
+
+NOTE [2026-06-19]: FALSE POSITIVE — retracted 2026-06-19 after source + live re-test. The review's diagnosis rested on a MALFORMED manual curl probe that omitted the `type:"mcp-action"` envelope field, so the server correctly defaulted it to a bare `message` (agent-audience). The GENUINE compiled `@mcp-action` client sends the correct envelope: `{type:"mcp-action", payload:{action:"st_env_open", target:"projects/...", ...}, correlation:...}`. Verified live: clicking the real "Open environment" button → input.json `environments.open` went 0→2, `discovered[0].open` flipped to true, AND the DOM repainted (domOpenEnvs:2, domTabs:3) within one @mcp-input(refresh:1000) cycle. The server-audience loop (button → /__mcp/signal → actions::route→Server → dispatch_signal_action → input.json mutate → poll → repaint) works end-to-end. actions.rs REGISTRY correctly tags st_env_open as Audience::Server. No code change. Lesson saved: test the real client envelope, never hand-craft the signal body.
+
+Residual REAL (cosmetic, split to follow-up): discovered env cards still render the "DISCOVERED" origin label + grey "Open environment" button even after the env is open — the card doesn't reflect open state, and a separate "open" list duplicates it. Tracked under the design pass, not a functional bug.

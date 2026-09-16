@@ -1,0 +1,86 @@
+#+TITLE: format_form_signature + @data dispatch source
+#+STATE: DONE
+#+SESSION_ID: 14f94e45c6c3f247
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-02T11-06-49-499Z_14f94e45c6c3f247.jsonl]]
+#+CUSTOM_ID: FEAT-089-format-form-signature-data-dispatch-sour
+#+COMPLETION_HASH: 7b115769623564e9
+
+* Initial Message
+
+what's next to make this super usable? especially for e.g. multiple dispatch and making it useful as an actual browser. also, could you create a basic Markdown parser in pure Spacetime (only scoped to spacetime-docs for now, if needed), that you would use to integrate Markdown files already written about testing? How hard would that be?
+
+* Parent
+[[id:PLAN-033-world-class-spacetime-macro-dispatch-ref]]. Data plane for the reference UI. Dep: FEAT-087.
+
+* Goal
+Two things the reference page renders:
+1. ~format_form_signature(&FormClause) -> String~ — a human-scannable, faithful
+   rendering of a macro's dispatch signature (the thing the scorer reads).
+2. ~@data dispatch $macros~ — a build-time data source (sibling to FEAT-084's
+   ~@data registry~) that hands the page the catalog: per macro {directive,
+   signature, overloads, doc, scopes, binds, kind}.
+
+* Target files
+- ~src/syntax/form_scoring.rs~ or a new ~src/metasystem/signature.rs~ —
+  ~format_form_signature~ (+ a STRUCTURED variant ~form_signature_tokens(&FormClause)
+  -> Vec<SigToken{ text, role }>~ where role ∈ {directive,binding,type,literal,
+  optional,param,delim} so the UI can chip-style each token).
+- ~src/compiler.rs~ — ~build_dispatch_json(&MetaRegistry, filter) -> String~
+  (mirror ~build_registry_json~ at compiler.rs:832) + ~inject_dispatch_data~ +
+  ~has_dispatch_data~ (mirror ~inject_registry_data~/~has_registry_data~).
+- ~stdlib/macros/data-kind.st~ — add ~data-dispatch-all~ / ~data-dispatch-filtered~
+  %macros recognizing ~@data dispatch $x [from KEY VAL]~ (mirror the
+  ~data-registry-all~/~data-registry-filtered~ forms already there).
+
+* Contract — format_form_signature
+Walk ~form.inline_elements~ → ~form.params~ (parens) → ~form.post_arg_inline~ →
+body. Map each ~FormInlineElement~:
+- Literal(s)            → s            (role: literal)        e.g. "fetch"
+- Capture(FormCapture)  → "$"+var+":"+type+modifier          (binding/type/optional)
+  modifier: Optional→"?", ZeroOrMore→"*", OneOrMore→"+", Required→""
+  type via ~CaptureType~ → short name (Binding→"binding", Expr→"expr", Typeref→"typeref",
+  Union(v)→"("+join("|")+")", Balanced(c)→"balanced('c')", Custom(s)→s, …; full enum at meta_ast.rs:409)
+  alias_capture present → " as $alias:type"
+- Comparison{op,cap}    → op+" "+sig(cap)
+- KeywordBlock/PseudoSelector/PseudoClass → name+" { … }"+modifier
+Params: "(" + join(", ", name+": "+sig(elements) [+ " = "+default]) + ")".
+Prefix the whole thing with ~"@"+directive_name~ (directive_name already carries no @).
+Example target: ~@data fetch $name:binding $type:typeref? : $src:expr ;~
+
+* Contract — @data dispatch JSON rows
+~build_dispatch_json~ emits an array of:
+~{ "directive":"@data", "name":"data-fetch", "signature":"@data fetch …",
+   "tokens":[{ "text":"fetch","role":"literal"}, …], "doc":"…", "kind":"data",
+   "scopes":["file","selector"], "binds":["fetch-source"],
+   "overloads":["data-inline","data-fetch","data-derive","data-query"] }~
+Only macros with a ~%form~ are included (dispatchable). ~kind~ via the same
+~kind_of(source_file)~ helper build_registry_json uses. Optional ~from KEY VAL~
+filter (e.g. ~from kind "data"~) reuses the registry-filter retain logic.
+Flows through the IDENTICAL inline path: ~inject_dispatch_data~ rewrites the
+FormMatch into ~@data inline $macros : <json>~ → @each SSG-unroll + hydration.
+
+* Edge cases
+- A directive with one overload still emits ~overloads:["self"]~ (UI shows "1 form").
+- Multi-word directive_name ("on hover") → signature "@on hover …"; split on first
+  space for the directive chip vs the rest.
+- Forms with body_capture / body_params → append " { … }" so the signature reads as
+  block-taking. Don't dump the whole body grammar.
+- Keep tokens + signature CONSISTENT (signature == tokens.map(text).join with spacing).
+
+* Acceptance
+- Unit: ~format_form_signature~ over data-fetch / on / each-filtered / measure
+  produces the expected strings (golden test).
+- ~@data dispatch $m~ in a .st test → built JS/HTML carries rows with directive,
+  signature, tokens, doc for stdlib macros (mirror FEAT-084's
+  ~data_registry_injects_…~ test).
+- ~build dispatch~ row count ≈ number of %form-carrying macros; ~from kind "data"~
+  filter keeps only data-kind rows.
+- Full lib + integration green.
+
+* Notes
+- FEAT-087's catalog can reuse ~format_form_signature~ once it lands (087 may ship a
+  directive-only fallback first; 089 upgrades both the layer and the @data source).
+- ~tokens~ (structured) is what makes the UI chips possible — do not skip it for a
+  flat string only.
+
+NOTE [2026-06-10]: DONE. metasystem/signature.rs: form_signature_tokens (Vec<SigToken{text,role}>, roles directive/binding/type/literal/punct/param/delim) + format_form_signature (= tokens joined, can't drift) + capture_type_name + MacroScope::as_str (DRY, inspect.rs delegates). compiler.rs: build_dispatch_json (per %form-macro row {directive,name,signature,tokens,doc,kind,scopes,binds,overloads}) + inject_dispatch_data + has_dispatch_data, wired into the same clone gate as registry/doc. stdlib/macros/data-kind.st: @data dispatch $x [from KEY VAL] (data-dispatch-all/filtered). inspect.rs overload_of now uses canonical format_form_signature. Tests: 4 signature goldens (incl flat==joined invariant + role classification), 2 @data dispatch injection tests (catalog unroll + kind filter). lib 2176/0, integration 168/0.

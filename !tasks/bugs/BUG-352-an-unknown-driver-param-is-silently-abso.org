@@ -1,0 +1,161 @@
+#+TITLE: An unknown driver param is silently absorbed — no primitive declares it, nothing reads it, nothing says so
+#+STATE: DONE
+#+SESSION_ID: 153497be379ff5cc
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-18T12-18-12-318Z_153497be379ff5cc.jsonl]]
+#+CUSTOM_ID: BUG-352-an-unknown-driver-param-is-silently-abso
+#+COMPLETION_HASH: a71ea7057ae5b7c2
+
+* Initial Message
+
+list all the remaining open BUGs in your session then maek a full PLAN
+
+* Symptom
+
+Any misspelled or invented named parameter, on any of the 28 registered drivers,
+is accepted and discarded without a word:
+
+#+begin_src spacetime
+.list { @on &.click(from: ".item")     { $n <- 1; } }   // BUG-334
+.a    { @on &.visible(once: true)      { opacity: 0 -> 1; } }  // BUG-331
+.b    { @on &.click(nonsense: 1)       { $n <- 1; } }   // pure typo
+#+end_src
+
+All three pass ~spacetime check~ with a ✓ and build successfully. None of the
+parameters has any effect.
+
+* Evidence
+
+Building a page WITH the clause and WITHOUT it produces BYTE-IDENTICAL
+=dist/spacetime.js=. Confirmed for both =from:= and =once:=.
+
+Method note: a token grep CANNOT establish this. =grep -c once dist/spacetime.js=
+returns 16 and =unobserve|disconnect= returns 4 — all runtime-library text, none
+of it this feature. Page JS is bundled INTO spacetime.js alongside the runtime,
+so only an A/B diff of two builds distinguishes author code from library code.
+Use a distinctive marker (=$zzmarker <- 4242=) to locate page code. See AUD-011.
+
+* Root cause — one site
+
+=bind_driver_args=, =src/pipeline/drivers.rs= ~:2473:
+
+#+begin_src rust
+match text_of(a.get("name")) {
+    Some(name) => {
+        let name = param_map.iter()
+            .find(|(from, _)| *from == name)
+            .map(|(_, to)| to.clone())
+            .unwrap_or(name);        // <-- unknown name passes through unchanged
+        args.push(BindArg::Named {
+            value: typed_primitive_arg(registry, primitive, &name, &value),
+            name,
+        })
+    }
+#+end_src
+
+=unwrap_or(name)= is the defect. When the registry has no mapping for an author's
+param, the name is used verbatim, bound to a parameter no primitive declares, and
+evaporates downstream. There is no check that the resulting name is real.
+
+Note the contrast one branch below: the POSITIONAL path was already hardened
+(BUG-322) so an unnamed arg binds by NAME via =positional_params= rather than by
+index. The named path never got the same treatment.
+
+* Why this is the root, not a third instance
+
+The machinery to route a param correctly already exists and works:
+
+- =%primitive on-mutation-handler= (stdlib/primitives/animation/drivers.st:1971)
+  declares =target: selector?=.
+- The emitted JS has a complete delegation implementation reading
+  =delegateSelector=.
+- =param_map= renames an author param to the primitive's own name, as registry
+  DATA — but only 2 of 28 drivers declare one.
+
+So nothing is missing except the refusal.
+
+* Fix
+
+Validate a named arg, after the =param_map= rename, against the params the
+primitive DECLARES. Those are already parsed — =typed_primitive_arg= consults
+them for typing, so the data is in hand at the call site.
+
+Requirements:
+
+1. Registry-driven, never a Rust allowlist. A newly registered driver must get
+   validation for free, with no Rust arm per driver (AGENTS elegance bar:
+   variants are DATA).
+2. DELETES the =unwrap_or= fall-through rather than adding a special case.
+3. The deliverable is the DIAGNOSTIC, not the refusal:
+   : `once` is not a parameter of driver `visible` — accepted: duration, delay
+
+* Expected fallout — budget for it
+
+This will light up currently-silent sites across =projects/= and =demos/=. That
+is the fix working: every site it finds is a page whose author wrote a behavior
+that never happened. Triage each — a typo gets corrected; a param that SHOULD
+exist gets a =param_map= entry or a primitive param.
+
+Triaging the fallout is expected to be the majority of the work, not the
+validation itself.
+
+* Gate
+
+RED first: =@on &.click(nonsense: 1)= compiles clean TODAY and must fail after.
+Seen failing before the fix, passing after. Assert on the RUN, not on a source
+string.
+
+* Children
+
+- BUG-334 (=from:= dropped) — fixed by routing, once this refuses.
+- BUG-331 (=once:= ignored) — refused for free by this, unless implemented.
+
+NOTE [2026-08-08]: FIXED. Both rails refuse, with a per-primitive enumeration.
+
+** Two rails, not one
+
+The named-arg `unwrap_or(name)` in `driver_param_args` was only HALF the defect.
+A MUTATION body never reaches that function at all: both `on-mutation-handler`
+sites hand-build their args and never read `driver_params`, so the params were
+dropped one step EARLIER. Fixing only the motion rail would have left
+`@on &.click(from: ".item") { $n <- 1; }` — the exact BUG-334 spelling — still
+silent. Caught because the RED gate used a mutation body and stayed red after
+the first fix looked correct.
+
+`check_mutation_driver_params` is shared by BOTH mutation sites deliberately —
+the same two-loops-one-refusal shape BUG-346 got wrong first, where the nested
+case kept dropping silently after the top-level one was fixed.
+
+** E0960, not a new code
+
+Reused the code a `@form` call site already gets for the same mistake
+(`--surface(padding: 3rem)` against a form without `$padding`). One defect at
+two layers = one diagnostic; a new code would have split one concept in two.
+
+** Registry-driven
+
+`declared_primitive_params` reads `registry.get_primitive(p).params` — the same
+data the typing path already consults. No Rust arm per driver; a newly
+registered driver is validated the moment it names a primitive. Deliberately
+permissive when the primitive is absent from the registry: refusing there would
+blame the author for a registry gap, and an unknown primitive is E0956's job.
+
+The enumeration is per-PRIMITIVE, which is what makes it TRUE rather than a
+hardcoded list — a motion body reports `duration, delay, threshold…` while a
+mutation body reports `event, actions, target`, because those are genuinely
+different primitives. Both pinned by gates.
+
+** Fallout: zero
+
+576 .st files across demos/ examples/ tests/ stdlib/ projects/ — no E0960.
+Canary-verified: planting one bogus param in demos/ surfaces exactly 1 hit, so
+the directory scan really does report. lib 3173/0, integration 217/0.
+
+That zero is itself the finding: the absorbed params were confined to bug
+reports and my own repros, never shipped in a real page.
+
+** Gates
+
+tests/driver_param_validation_test.rs — 5, all seen RED first (3 failed before
+the fix; the over-widening guard passed from the start, which is what makes it a
+guard). Assert on the CLI RUN, because a source-string assertion cannot tell
+"refused" from "absorbed".

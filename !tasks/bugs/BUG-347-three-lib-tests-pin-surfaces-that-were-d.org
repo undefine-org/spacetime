@@ -1,0 +1,72 @@
+#+TITLE: Three lib tests pin surfaces that were deleted — they cannot pass and cannot detect anything
+#+STATE: DONE
+#+SESSION_ID: 153497be379ff5cc
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-18T12-18-12-318Z_153497be379ff5cc.jsonl]]
+#+CUSTOM_ID: BUG-347-three-lib-tests-pin-surfaces-that-were-d
+#+COMPLETION_HASH: c6b6b344dd9dcf94
+
+* Initial Message
+
+please review the failures now and tell me what is left open that will fix it, and let's plan the corresponding PLN
+
+* Symptom
+
+Three of the ten standing =cargo test --lib= failures assert on syntax the repo
+has since REMOVED. They are not detecting a regression; they are pinning a
+corpse. Each will fail forever until rewritten, and while red they mask any real
+regression in the same area.
+
+** 1. =syntax::events::form_compiler::pdc_diagnostic_tests::test_component_body_known_directive_stays_silent_with_registry=
+
+: a KNOWN directive (@effect) must not emit E0900
+
+`@effect` was DELETED in =0000c27d= ("@effect retires onto @on $sig.change — 15
+consumers migrated"). `stdlib/macros/effect.st` does not exist. E0900
+("not a known directive") is now the CORRECT answer, so the test asserts the
+compiler must stay silent about a directive it is right to reject.
+
+The test's INTENT is still valuable — it guards BUG-167 against over-widening,
+i.e. a directive the registry DOES know must not produce a false E0900. The fix
+is to re-point it at a directive that still exists (its own comment names
+`@portal` and `@fn` as equally valid choices), NOT to delete it.
+
+** 2. =lsp::workspace::import_resolver::tests::test_stdlib_resolution=
+
+: Expected Stdlib for 'stdlib/macros/fade-in', got File("…/stdlib/macros/fade-in.st")
+
+Directly contradicted by =1b24e320= ("BUG-340: an opt-in stdlib module resolves
+to the FILE ON DISK, not a dead end"). `File(...)` is the new, deliberate
+behavior; the test still encodes the pre-BUG-340 expectation. Update the
+expectation to match the decision that superseded it.
+
+** 3. =compiler::snapshot_tests::snapshot_mixed_file_level_and_selector_scoped=
+
+Not stale syntax — a real defect. Split out as BUG-346 (CSS property mutation
+has no grammar).
+
+* The other seven, for the record
+
+- 4 =snapshot_*= (data_directive, template_definition,
+  template_definition_and_invocation, test_and_fixture) — insta snapshot
+  mismatches from emit churn. Need `cargo insta review`: each diff must be read
+  and accepted deliberately, since a snapshot test that is auto-accepted proves
+  nothing.
+- =compiler::tests::signal_emits_policy_and_lifecycle=
+- =parser::test_sourcespan::test_matches_include_scoped_directives=
+- =syntax::cst::parser::tests::a_value_position_call_without_a_trailing_member_stays_an_arg_list=
+
+* Provenance
+
+ALL TEN verified pre-existing by building commit =de31fa26= (immediately before
+the cutover work) in a clean `git worktree` and running the same suite:
+identical 3165 passed / 10 failed, same ten names. None are caused by the
+migration or cutover work.
+
+* Why this matters more than the count
+
+A permanently-red test is worse than a missing one: it trains everyone to read
+"10 failed" as the expected baseline, which is exactly how a real regression
+walks in unnoticed. The number must be driven to zero or each remaining failure
+must carry an explicit, linked reason.
+
+NOTE [2026-08-08]: FIXED and VERIFIED at HEAD (ccb1491a, tightened in c685605f). Both gates pass. (a) `test_component_body_known_directive_stays_silent_with_registry` asserted @effect must not emit E0900, but @effect was DELETED in 0000c27d — re-pointed at @portal (stdlib/macros/portal.st), keeping the BUG-167 over-widening guard. (b) `test_stdlib_resolution` expected Stdlib but BUG-340 (1b24e320) deliberately made resolution filesystem-first — now pins File(...) exactly rather than accepting either.

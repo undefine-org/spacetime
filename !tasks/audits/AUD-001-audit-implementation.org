@@ -1,0 +1,64 @@
+#+TITLE: Audit implementation
+#+STATE: DOING
+#+CUSTOM_ID: AUD-001-audit-implementation
+#+EFFORT: 1h
+#+PRIORITY: #B
+#+LAYER: coding-agent
+
+* Source
+Manual audit
+
+* Findings
+Here's my complete audit:
+
+---
+
+## Audit Findings
+
+### 1. Stale `getComputedStyle` reference across animation cycles
+- **What**: `cs`, `font`, `lineHeight` are captured once at initialization time (line 724-727) but used inside `animateChange` (line 807, 815-816, 819). If the element's font changes at runtime (e.g. responsive breakpoint, class toggle), all measurements will be wrong.
+- **Where**: `stdlib/primitives/animation/drivers.st` lines 724-727, used at 807, 815-816, 819
+- **Why**: Incorrect height/width measurements after a font change → visual glitch where text doesn't fit container. The old driver also had this for `fontKerning` but re-read `getComputedStyle` each cycle for `fontSize`. This is a regression in correctness.
+- **Effort**: `small` — move `var cs = getComputedStyle(%&el)` and the `font`/`lineHeight` extraction inside `animateChange`, before measurement.
+
+### 2. `newWordWidths` computed but never consumed
+- **What**: `newWordWidths` is calculated at line 816 and stored in `wordContainers[].newW`, but nothing ever reads `.newW`.
+- **Where**: `stdlib/primitives/animation/drivers.st` lines 816, 885
+- **Why**: Dead computation. Minor perf cost per cycle (N `prepareWithSegments` + `layoutWithLines` calls that produce unused values). More importantly, it misleads the next reader into thinking the enter layer uses explicit widths.
+- **Effort**: `trivial` — remove `newWordWidths` computation and the `.newW` field from `wordContainers`.
+
+### 3. Destroy-during-animation allows zombie observer re-attach
+- **What**: If `destroy()` is called while an animation is in progress, the pending `setTimeout` callback will still fire, reset `isChanging`, and call `observer.observe()` on the already-disconnected observer — re-enabling observation on a "destroyed" instance.
+- **Where**: `stdlib/primitives/animation/drivers.st` lines 936-956 (setTimeout callback) vs 984-988 (destroy)
+- **Why**: Resource leak: the observer continues firing mutations after the element's lifecycle has ended. The old driver had the same bug (with `await`), but the plan described fixing it. A `var destroyed = false` guard checked in the setTimeout callback would fix it.
+- **Effort**: `small` — add `var destroyed = false` flag, set it in `destroy()`, check it at the top of the setTimeout callback.
+
+### 4. `node_modules` not in `.gitignore`
+- **What**: `.gitignore` has no `node_modules` entry. The committed `package.json`/`package-lock.json` will cause `npm install` to create `node_modules/` which could be accidentally staged.
+- **Where**: `.gitignore`
+- **Why**: Risk of accidentally committing 50+ MB of `node_modules/` in a future change.
+- **Effort**: `trivial` — add `node_modules/` to `.gitignore`.
+
+### 5. `kfToCss` only emits `transform` keyframe property, drops all others
+- **What**: The `kfToCss` function (line 750-752) only checks for `frame.transform` and ignores all other CSS properties in the keyframe (e.g. `opacity`, `scale`, `filter`). For user-provided keyframe objects that have properties other than `transform`, those properties are silently dropped from the `@keyframes` CSS rule.
+- **Where**: `stdlib/primitives/animation/drivers.st` lines 750-752
+- **Why**: The CSS `@keyframes` only drives per-char transform stagger. Opacity is handled via WAAPI on the layer. So this is correct for the current architecture. But it's a silent contract: if someone adds `opacity` or `filter` to their `:entering` keyframes, the per-char stagger won't include them. The old driver had the same behavior. Not a regression, but a documentation gap.
+- **Effort**: `trivial` — add a comment at line 750 explaining that only `transform` is emitted to CSS keyframes; other properties are handled via WAAPI on enter/exit layers.
+
+### 6. Emoji test uses escaped surrogate pairs, may not survive all editors
+- **What**: The emoji test at line 96 uses `'\ud83d\udc4b\ud83c\udf0d'` (escaped UTF-16 surrogates). While this is valid JavaScript, the `.test.st` file format may not handle these escapes correctly through the Spacetime parser — the test runner output showed the test DSL being emitted as garbage JS.
+- **Where**: `tests/unit/animations/value-change.test.st` lines 96-98
+- **Why**: The test cannot currently run (V8 headless was already broken pre-change). If/when the browser-mode test runner parses this file, the surrogate escapes in `@eval` and `@then` directives may not be correctly preserved through the Spacetime parser → test would fail even with a correct driver. Using literal emoji characters (👋🌍) would be more robust.
+- **Effort**: `trivial` — replace `\ud83d\udc4b\ud83c\udf0d` with literal emoji characters `👋🌍` in the `.test.st` file.
+
+### 7. Pretext `layout()` height calculation may be inaccurate for the value-change use case
+- **What**: `ST.text.prepare(newText, font)` + `layout(prepared, containerWidth, lineHeight)` computes height for the newText as if it were rendered as normal flowing text. But during animation, the text is rendered as inline-block word containers with absolute-positioned exit layers — a fundamentally different layout. The pretext height may differ from the actual rendered height of the animated DOM.
+- **Where**: `stdlib/primitives/animation/drivers.st` lines 806-807
+- **Why**: If pretext says the new text should be 48px tall but the actual plain-text rendering is 52px (due to line-height rounding, border-box interaction, or padding), the height animation will snap to the wrong value at the end. The old `cloneNode` approach measured the actual DOM height. The fallback at line 809 only catches zero-height cases. This is the highest-risk semantic change in the rewrite.
+- **Effort**: `medium` — consider using `cloneNode` as a fallback when pretext height differs from `currentHeight` by more than `lineHeight`, or keep the pretext height but validate against `%&el.scrollHeight` after setting `textContent = newText` in cleanup (the DOM truth).
+
+### 8. No negative assertion test for `paddingTop`/`marginTop` in codegen
+- **What**: The plan's acceptance criteria include "Compiled JS contains NO paddingTop / marginTop" but no codegen test asserts this. The `test_compile_value_change_no_font_kerning_hack` test checks `.fontKerning` but there's no equivalent for `.paddingTop` or `.marginTop`.
+- **Where**: `tests/value_change_test.rs` — missing tests
+- **Why**: A future change could reintroduce the box-model mutation pattern without test failure. The main Firefox compositing flash bug was caused by paddingTop/marginTop, so this is the most important negative assertion.
+- **Effort**: `trivial` — add a test asserting `!compiled.js.contains(".paddingTop")` and `!compiled.js.contains(".marginTop")`.

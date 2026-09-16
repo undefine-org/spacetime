@@ -1,0 +1,164 @@
+#+TITLE: W3 continuation: implement %for emit, then ship claim grammar + @then{claims}
+#+STATE: ITEM
+#+SESSION_ID: 14f94e45c6c3f247
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-02T11-06-49-499Z_14f94e45c6c3f247.jsonl]]
+#+CUSTOM_ID: FEAT-065-w3-continuation-implement-for-emit-then
+#+LAYER: compiler
+
+* Initial Message
+
+actually, Land the PLAN-026 core now (done/committed); file the testing-macro cluster (@assert swap, @then/@eval nested-match) as a new BUG/PLAN with the diagnosis captured, and STOP — .test.st gating remains blocked
+ on that follow-up. Don't register text tests yet.
+
+Put text tests as FEAT within the plan. Be comprehensive
+
+Continuation of [[id:FEAT-059-w3-assertion-grammar-mount-block-claims]]. The W3
+claim grammar is DESIGNED and PARSES correctly but cannot EMIT because the
+=%for= construct in =%emit js= is unimplemented in the active compile path.
+
+* THE BLOCKER (precise)
+=src/emit/emit_tokenizer.rs:35= documents =%for $var in %array { body }= as a
+"placeholder for future". Verified: a =%macro= whose =%emit js= uses
+=%for $c in $claims { … }= produces EMPTY output in the block-body recompile
+(compile_block_body_to_js). =@behavior= (stdlib, uses =%for $t in $transitions=)
+ALSO emits 0 in a test body \u2014 same gap. So ANY claim-style macro that iterates a
+captured array is blocked until =%for= emit is implemented.
+
+* WHAT WORKS (proven, keep for the rebuild)
+- BUG-054 scope fix LANDED (commit 61b500f5): test-body directives share ONE
+  lexical scope (flatten_body_scopes). Sibling @eval mutations compound; @try/
+  $error persist. This is the foundation the claim emit needs.
+- The claim GRAMMAR parses correctly (proven via rematch probes). Final shape that
+  produced clean FLAT captures (no nested wrapper, one field-access level):
+  #+BEGIN_SRC
+  %capture_type claim_op { "==" | "!=" | ">=" | "<=" | "<" | ">" | "~=" | "~>" | "matches" }
+  %capture_type claim_block {
+      ( ( $prop:ident $op:claim_op $value:expr ";" ) | ( $prop:ident ";" ) )*
+  }
+  // @then $subject:selector { $claims:claim_block }
+  // claims => Array([{prop, op, value}, {prop}, …])  \u2014 FLAT, %$c.prop / %$c.op / %$c.value
+  #+END_SRC
+  NB: claims MUST be =;=-terminated \u2014 the =value:expr= extractor only stops at
+  =;= / =)= / =}= / =,=, NOT newline, so unterminated claims greedily merge. Either
+  require =;= (chosen) or add a newline-aware value terminal.
+- The emit design (a __claimProp resolver + __claimCmp dispatcher + per-claim
+  throwing check, computed()/be_visible -> ST._rung.require('layout')) is written
+  and correct; it just needs =%for= to expand.
+
+* TASKS
+1. Implement =%for $var in $array { body }= in =%emit js= (emit_tokenizer +
+   metasystem codegen): expand at compile time over a CapturedValue::Array,
+   binding =$var= per item with one-level field access =%$var.field=. Make
+   =@behavior='s transitions emit work as the acceptance for this sub-task.
+2. Re-add stdlib/capture-types/claims.st + the =then-claims= macro (design above).
+3. Then resume the W3 parity audit + hard cutover (delete @fixture + 43 then-*).
+
+* WHY SPLIT OUT
+The W3 core (scope fix) shipped. The claim grammar is gated on a metasystem
+feature (=%for= emit) that is its own implementation effort. Shipping a
+non-emitting macro would violate the hard-cutover discipline (no broken surface).
+
+* Depends on
+- [[id:FEAT-059-w3-assertion-grammar-mount-block-claims]]
+* Parent
+[[id:PLAN-027-spacetime-testautomation-infra-fidelity]]
+
+* SHARPENED DIAGNOSIS (correction)
+%for is NOT unimplemented \u2014 expand_for_loop_meta (src/emit/js.rs:1407) fully
+expands it: reads ctx.params.get(array) as JSON, iterates, binds the loop var.
+PROVEN: @behavior's `%for $t in $transitions` emits transitions.push(...) in a
+NORMAL compile (inspect --layer emit). 
+
+The REAL blocker is narrower: in the BLOCK-BODY RECOMPILE path
+(compile_block_body_to_js -> Compiler::from_ast().without_runtime()), the captured
+array (`$claims` / `$transitions`) is not threaded into `ctx.params`, so
+expand_for_loop_meta hits "array not found" and emits nothing. @behavior fails in
+a @test body for the same reason.
+
+So FEAT-065 task 1 is REVISED: thread captured-array params through the
+block-body recompile so %for finds them (ctx.params must carry the macro's
+array captures when compiling a nested test-body directive). Then the FLAT claim
+grammar (already proven to parse) + flat emit (%$c.prop/%$c.op/%$c.value) will
+expand. Everything else in the design stands.
+
+Also recall: field access is ONE level (%$c.prop OK, %$c.claim.prop NOT) \u2014 the
+flat claim_block design already accounts for this.
+
+* CONFIRMED probe (acceptance for the threading fix)
+`@behavior .m machine(initial:"a") { a -> b on click; }` inside a @test body emits
+0 transitions.push (works in a normal compile). Use this as the regression test
+for the block-body %for-array threading fix \u2014 when it emits transitions in a test
+body, the claim grammar's %for will also expand.
+
+* PROGRESS: fixed typed body-capture key (commit pending)
+Fixed a real bug in parse_body_capture_specs (form_compiler.rs): a typed
+`$x:type*` body capture (e.g. `$transitions:transitions*`) was mis-handled by the
+`children*` branch, producing capture key "x:type" instead of "x". Now typed
+star-captures fall through to the name/type split. Verified: @behavior's capture
+key is now `transitions` (was `transitions:transitions`); lib 2098 green;
+@behavior still emits in normal compile.
+
+REMAINING (the deeper block-body gap): even with the correct capture key,
+@behavior (and the claim grammar) emit NOTHING when compiled inside a @test body
+via compile_block_body_to_js. The macro's full %emit (register_machine + %for)
+does not expand in the block-body recompile path, while it does in a normal
+compile. Next: trace why compile_block_body_to_js's Compiler::from_ast().
+without_runtime().compile() drops the macro's emit body (likely the
+%for/register-machine primitive synthesis isn't reached, or registry/param
+threading differs from the main pipeline). Acceptance: @behavior in a @test body
+emits register_machine + transitions.
+
+* CONVERGENT BLOCKER (W3 + W4 + W5 all gate on this)
+After W3 (claim grammar) and W4 (@property/@fuzz), the SAME metasystem gap blocks
+all grammar-dependent waves:
+
+  STRUCTURED-CAPTURE FIELD ACCESS IN %emit js IS UNSUPPORTED.
+  - `%$c.prop` / `%$c.op` (one level, from a %for item)  -> empty emit
+  - `%$binding.0.name` (array index + field)              -> empty emit
+  - `%$c.claim.prop` (two level)                          -> empty emit
+  Only WHOLE captures (`%$desc`, `%$body.js`) and the @fn-style "pass the whole
+  structured capture to a %binds primitive" pattern work today.
+
+Plus a secondary form-parsing gap:
+  - a capture inside FORM PARENS that aren't immediately adjacent to a prior
+    capture (`forall ( $x:... )`) gets the parens consumed as an ARG_LIST, so the
+    inner capture eats the whole `(...)`. `@fn`-style `name($p:params)` (no space,
+    params type) is the only reliable in-paren capture.
+
+* THE UNLOCK (one feature, three waves)
+Implement structured-capture field access in the %emit codegen (js_parser.rs /
+emit_tokenizer.rs marker resolution): a `%$var.field` (and `%$var.N.field`) marker
+on a CapturedValue::Named/Array must resolve to the field's JS value. THEN:
+- W3 claim grammar emits (the flat claim_block design in this FEAT).
+- W4 @property/@fuzz bind the generated value (runtime engine already shipped).
+- W5 timeline-claims work.
+- @behavior-in-test-body also benefits (the %for path).
+
+This is the single highest-leverage metasystem task remaining in PLAN-027.
+
+* DEEPEST ROOT CAUSE (actionable fix for %for)
+%for's expand_for_loop_meta (src/emit/js.rs:1418) does
+`serde_json::from_str(&array_json)` on the captured array. BUT captured_to_js_
+with_registry (src/pipeline/expand.rs:407+) serializes a CapturedValue::Array of
+Named maps to a JS OBJECT LITERAL with UNQUOTED keys: `[{from: "a", to: "b"}]` \u2014
+which is NOT valid JSON, so from_str FAILS -> "failed to parse array" -> empty
+emit. This affects ANY %for over a structured-capture array (claim grammar's
+$claims, @behavior's $transitions), in BOTH normal and block-body compile.
+
+FIX OPTIONS:
+(a) expand_for_loop_meta: parse the array leniently (json5 / a tolerant parser)
+    instead of strict serde_json; OR
+(b) add a captured_to_json (strict, quoted keys) used specifically for the %for
+    array param, separate from the JS-literal captured_to_js used for direct
+    interpolation.
+(b) is cleaner: the %for needs a structured value to iterate (quoted-key JSON),
+    while %$x.field interpolation needs JS literals. Thread a JSON-shaped param
+    for arrays consumed by %for.
+
+Once %for parses the array, loop_var field access (%$c.field) ALREADY WORKS
+(resolve_var_ref does value.get(field) for loop_vars), so the claim grammar emits.
+For W4 @property, restructure the single binding as a 1-item %for so the binding
+becomes a loop_var with working field access.
+
+This is THE concrete fix. Everything else (claim grammar, runtime generators,
+fuzz) is built and waiting.

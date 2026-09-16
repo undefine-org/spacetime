@@ -1,0 +1,78 @@
+#+TITLE: Fix data-source double emission for file-level typed data macros
+#+STATE: ITEM
+#+SESSION_ID: 14915155248bdb3e
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-03-13T16-38-09-810Z_14915155248bdb3e.jsonl]]
+#+CUSTOM_ID: DRAFT-002-fix-data-source-double-emission-for-file
+#+EFFORT: 30m
+#+PRIORITY: #A
+#+LAYER: backend
+
+* Initial Message
+
+commit
+
+* Problem
+
+~@data customers: Customer[] { src: ... }~ triggers double emission of the ~data-source~ primitive:
+1. Metasystem path (compiler.rs ~expand_macro~) — emits correctly with prelude
+2. Pipeline path (~resolve_single~ → ~get_conditional_binds~ → ~resolve_via_binds_with_decls~) — emits a second copy
+
+The runtime error ~window.__spacetimeData is undefined~ was fixed in commit bc3c73e6 (prelude emission from ~process_bind~). But the double emission remains as a correctness/performance bug — two IIFEs per ~@data~ declaration, four total for two data sources on the dataiku site.
+
+** Root cause chain
+
+1. ~@data customers: Customer[]~ matches ~type-data.st~ macro (not ~data.st~)
+2. ~type-data.st~ has ~%binds { data-source(...) }~ and ~%registers binding(...)~ INSIDE a ~%if $src { }~ block
+3. The parser's ~convert_cst_directive_to_macro_body_item~ (src/parser/mod.rs:4270) has a ~_ => None~ catch-all that silently drops ~%registers~ inside ~%if~ blocks — there's no ~MacroBodyItem::Registers~ variant
+4. ~resolve_single~ checks ~macro_def.registers.is_some()~ (line 241) which is ~None~ for type-data because the conditional registers was dropped
+5. Falls through to ~get_conditional_binds~ (line 251) which finds the conditional ~%binds~ and resolves data-source via pipeline
+6. Meanwhile, metasystem's ~expand_macro~ processes the same macro with its own parser, finds both ~%binds~ and ~%registers~, emits data-source code
+
+* Fix
+
+** ITEM Skip pipeline resolution for file-level macros with conditional %binds
+:PROPERTIES:
+:EFFORT: 15m
+:END:
+
+In ~src/pipeline/resolve.rs~, after ~get_conditional_binds~ returns non-empty results (line 252), check if the macro is file-level (~form_match.selector.is_none()~). If so, return ~Ok(vec![])~ because the metasystem path already handles all file-level macro expansion including conditional ~%binds~.
+
+#+begin_src rust
+// After line 251:
+let conditional_binds = get_conditional_binds(&macro_def.body, &form_match.captures);
+if !conditional_binds.is_empty() {
+    // File-level macros with conditional %binds are fully handled by
+    // the metasystem expansion path (expand_macro in compiler.rs).
+    // Skip pipeline resolution to avoid double emission.
+    if form_match.selector.is_none() {
+        return Ok(vec![]);
+    }
+    return resolve_via_binds_with_decls(
+        form_match,
+        macro_def,
+        &conditional_binds,
+        meta_registry,
+    );
+}
+#+end_src
+
+** ITEM Verify fix and add regression test
+:PROPERTIES:
+:EFFORT: 15m
+:END:
+
+1. Run ~cargo test --lib~ (2031 tests) and ~cargo test --test integration_tests~ (129 tests)
+2. Run ~cargo run --features headless -- test tests/ --headless~ (880 tests)
+3. Build dataiku: ~cargo run -- build site/dataiku/index.st~ — verify ~grep -c "window.__spacetimeData\[sourceName\]" spacetime.js~ returns 2 (was 4, one per @data declaration not two)
+4. Verify no ~querySelectorAll~ regression
+5. Commit with descriptive message
+
+* Files to modify
+
+- ~src/pipeline/resolve.rs~ — add file-level guard before conditional binds resolution
+
+* Verification
+
+- ~cargo test --lib && cargo test --test integration_tests~
+- ~cargo run --features headless -- test tests/ --headless~
+- ~cargo run -- build site/dataiku/index.st && grep -c "window.__spacetimeData\\[sourceName\\]" spacetime.js~ → should be 2 not 4

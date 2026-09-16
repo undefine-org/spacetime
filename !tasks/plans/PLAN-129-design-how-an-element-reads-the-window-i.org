@@ -1,0 +1,233 @@
+#+TITLE: DESIGN: how an element reads the window its score assigned (W5a)
+#+STATE: ITEM
+#+SESSION_ID: 1534a2eae1903af0
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-18T13-07-01-638Z_1534a2eae1903af0.jsonl]]
+#+CUSTOM_ID: PLAN-129-design-how-an-element-reads-the-window-i
+
+* Initial Message
+
+ok please explain everything that is next and that got carried forward. What would be your plan for achieving it all?
+
+#+STATE: ITEM
+
+* The finding that reframes the question
+
+The consumer mechanism ALREADY EXISTS and is fully generic. Verified by
+building `.title { @on &.scroll: --rise; }` and reading the emitted site code:
+
+: ST.watch(root, "__drive_scroll_1", (rawProgress) => {
+:   const value = interpolateKeyframes(prop.keyframes, progress, ...);
+:   applyStyle(el, prop.property, value, driverSignal, scopeId);
+: })
+
+`apply-animations` takes a SIGNAL NAME AS A STRING and does not care what
+publishes it. It already handles clamping, stagger, scope ranges, per-property
+easing, `{x,y}` drivers, animation ownership (`_stAnimOwner`), initial-state
+application before watchers register, and CSS-variable binding.
+
+A score already publishes exactly such a signal: `__clip_title`, 0..1, via the
+same `ST.set` rail every driver uses.
+
+So BUG-258 needs NO new runtime concept and NO new primitive. The gap is
+purely: WHAT SYNTAX names that signal at the element? This is a language
+question, not an implementation one — which is why it is being decided before
+any code is written.
+
+* The constraint that eliminates naive options
+
+`src/pipeline/mod.rs`:
+
+: 1268  drivers::expand_drive_binds(...)     <- @on lowers HERE
+: 1276  score::check_score_domains(...)
+: 1282  score::expand_score_binds(...)       <- windows computed HERE
+
+`@on` lowers BEFORE the score computes its windows. So any option where `@on`
+must know a score-computed fact is ordering-blocked unless the passes are
+reordered or the fact is derivable independently.
+
+The saving grace: the clip signal name is derived from the SUBJECT ALONE
+(`src/pipeline/score.rs:591`) —
+
+: __clip_{subject}         for the first placement
+: __clip_{subject}_{i}     for a repeat
+
+— with no score-local state. An element therefore CAN compute its own clip
+signal name from its own name, without the score's cooperation. That is what
+makes options A and B viable at all.
+
+* The five options
+
+** A. Relax `&.clip` on the element host
+
+#+begin_src spacetime
+.stage { @score &.time(12s) { &title at 2s for 3s; } }
+.title { @on &.clip: --rise; }
+#+end_src
+
+`.clip` currently has `on_kinds: clip`, so a subject-less `&.clip` is E0949
+("applies to `clip` refs, but `&.clip` (no subject) is the element host").
+Change to `on_kinds: elem` and the element host becomes legal; the driver
+lowers to a watch on `__clip_<own-name>`.
+
++ Zero new syntax. Reads exactly like every other driver — `@on &.scroll`,
+  `@on &.clip`, one pattern, learnable by the AGENTS.md rule.
++ Uses the existing `drive` rail unchanged.
+- The element must know its own name matches the score's subject, and NOTHING
+  CHECKS THAT. `@on &.clip` on an element no score places would watch a signal
+  nobody publishes — the exact silent class BUG-258 is about. Needs a paired
+  check: every `&.clip` consumer must have a placing score, or E-something.
+- `_i` disambiguation (`__clip_title_1`) is unreachable — an element placed
+  twice can only address its first window.
+
+** B. A `.clip` projection WITH a subject
+
+#+begin_src spacetime
+.title { @on &title.clip: --rise; }
+#+end_src
+
+Keeps `on_kinds: clip` honest — the subject IS a clip ref. The projection
+resolves to `__clip_title`.
+
++ No registry change; `.clip`'s existing kind rule already describes this.
++ Addresses a specific clip, so `&title.clip(2)` could reach a repeat placement
+  — solves A's `_i` gap.
+- Redundant at the common call site: `.title { @on &title.clip }` names `title`
+  twice. Violates the "knowing one thing tells you the next" bar — every other
+  driver on an element's own rule is subject-less.
+- Reads as though it could name ANOTHER element's clip, which is either a
+  feature (cross-clip choreography) or a trap. Undecided either way.
+
+** C. The score head names the consumer inline
+
+#+begin_src spacetime
+.stage {
+  @score &.time(12s) {
+    &title at 2s for 3s: --rise;
+  }
+}
+#+end_src
+
+The placement carries its motion, like a body-less `@on` (D28's colon).
+
++ ONE PLACE. The score becomes the whole story — arrangement and motion
+  together, which is what a timeline UI would edit.
++ No naming problem at all: the subject and its motion are lexically adjacent,
+  so no signal name is ever written by the author and A's unchecked-name
+  hazard cannot exist.
++ P4-consistent: trailing words are what the language owns, and `: --rise` is
+  the same consequence punctuation `@on` already uses.
+- Splits where motion lives: some in the score, some in CSS rules. Two places
+  to look for "what moves this element".
+- A score body would now contain motion forms, so the `score_entry` grammar
+  grows a consequence slot. More grammar than A or B.
+- Does NOT compose with an element that wants several motions from one window.
+
+** D. A `.progress` value facet on the clip
+
+#+begin_src spacetime
+.title { @on &.clip.progress -> $p: --rise($amount: $p); }
+#+end_src
+
+Exposes the window as a SIGNAL the author can bind and compute with.
+
++ Most general — arbitrary derivation, not just "play this form".
++ Fits the D26 value-facet rail that already exists.
+- Heaviest surface for the common case (just play a form over my window).
+- The general case is not yet needed; PLAN-126's facets exist and nothing in
+  W4/W8 demands arbitrary clip math yet. Adding it now is speculative.
+
+** E. Implicit — a placed element's motion just runs over its window
+
+#+begin_src spacetime
+.stage { @score &.time(12s) { &title at 2s for 3s; } }
+.title { @on: --rise; }   // or even just a motion form in the rule
+#+end_src
+
+Being placed by a score IS the binding; the element's motion runs over the
+window automatically.
+
++ Least syntax of all.
+- MAGIC. Nothing at the element says its timing comes from a score elsewhere;
+  the same rule means different things depending on a distant score. Directly
+  against the learnability bar, and unreviewable in a diff.
+- REJECT — recorded so the option space is complete, not as a contender.
+
+* Cross-cutting questions these options must each answer
+
+1. What happens when `@on &.clip` appears on an element NO score places? Must
+   be a diagnostic (silent-default is the banned class). A and B need this as a
+   separate check; C makes it structurally impossible.
+2. What happens when an element is placed TWICE? A cannot address the second
+   window; B can with an index; C is inherently per-placement and gets it free.
+3. Does a clip consumer compose with a NESTED score? An element can be both a
+   clip of its parent and the driver of its own score. `.clip` as a driver
+   (t5, working) and `.clip` as a consumer must not collide.
+4. Does the answer survive `&.playback` and `&.steps` (W5+), where a window's
+   parent is not a wall clock?
+
+* PROBED: option A compiles green and is WRONG as stated
+
+Ran it rather than reasoning about it. Temporarily flipped `.clip` to
+`on_kinds: elem` and built:
+
+#+begin_src spacetime
+.stage { @score &.time(12s) { &title at 2s for 3s; } }
+.title { @on &.clip: --rise; }
+#+end_src
+
+: ✓ All 1 file(s) passed
+:
+: apply-animations watches -> "__drive_clip_1"
+: the score publishes    -> "__clip_title"
+
+TWO NAMES THAT NEVER MEET. The relaxation alone produces a NEW silent orphan —
+the same defect class as BUG-258, in the fix for BUG-258. And `.clip` has
+`primitive: none`, so nothing publishes `__drive_clip_1` either.
+
+(Probe reverted; `stdlib/macros/drivers.st` is byte-identical to committed.)
+
+** Why, and what it implies
+
+`src/pipeline/drivers.rs:544` derives every driver's signal name as:
+
+: as_name  OR  named param `name`  OR  `__drive_{member}_{counter}`
+
+A COUNTER. But a clip's address is its ELEMENT (`__clip_title`). So `.clip`
+cannot use the generic naming fallback — it needs the element-derived rule.
+
+That rule ALREADY EXISTS, at `src/pipeline/score.rs:517`, for the nested-score
+join: a `domain: inherited` score derives its name from its selector, so
+parent and child meet without a cross-pass channel. The consumer path needs
+exactly the same rule at the `@on` site.
+
+∴ Option A is not "one registry field". It is: `domain: inherited` drivers
+derive their signal name from the ELEMENT rather than the counter — ONE rule,
+stated once, honored by both the score path and the drive path. That is a
+strictly better change than the field flip: it is registry-data-driven
+(`domain:`, already a column), it removes a special case rather than adding
+one, and it makes the nested-score join and the consumer join THE SAME
+MECHANISM instead of two lookalikes.
+
+The ordering worry in the section above turns out NOT to bind: `apply-animations`
+receives its driver as `BindValue::Variable(name_key)` — a NAME REFERENCE
+resolved at runtime, not a compile-time value (`src/pipeline/drivers.rs:668`).
+So `@on` lowering before the score computes windows is fine, PROVIDED both
+sides derive the same name. Nothing needs reordering.
+
+* Recommendation to bring to the user
+
+A and C are the real contenders and they are NOT mutually exclusive: C is sugar
+that could lower to exactly what A produces. Shipping A first and considering C
+later as sugar keeps one implementation under two surfaces.
+
+But A is now understood correctly (see the probe above): it is NOT a field flip,
+it is the INHERITED-NAMING RULE — a `domain: inherited` driver addresses its
+progress by ELEMENT, not by counter, on both the score path and the drive path.
+One rule, stated once, replacing what would otherwise be two lookalike
+mechanisms. That satisfies the elegance bar in a way the field flip does not.
+
+It still needs its companion NEGATIVE: `@on &.clip` on an element no score
+places must be a diagnostic naming the element, not a watch on a signal nobody
+publishes. Without it, A trades BUG-258 for a quieter version of itself. That
+diagnostic is the gate — and it must be proven to fire, per the standing rule
+that a gate never seen to fail is not a gate.

@@ -1,0 +1,175 @@
+#+TITLE: Drive the standing test failures to zero — every red test is a decision, not a baseline
+#+STATE: ITEM
+#+SESSION_ID: 153497be379ff5cc
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-18T12-18-12-318Z_153497be379ff5cc.jsonl]]
+#+CUSTOM_ID: PLAN-142-drive-the-standing-test-failures-to-zero
+
+* Initial Message
+
+please review the failures now and tell me what is left open that will fix it, and let's plan the corresponding PLN
+
+* Why
+
+The suite has carried "10 failed" in --lib for long enough that it reads as the
+expected baseline. That is the actual danger: a stable red count is
+indistinguishable from a real regression arriving. Every failure must either go
+green or carry an explicit linked reason.
+
+All failures below were verified PRE-EXISTING by building =de31fa26= (the commit
+before the cutover work) in a clean worktree: identical 3165/10, same ten names.
+The cutover is not implicated in any of them.
+
+* The full standing ledger (15 failures across 4 suites)
+
+| suite        | n | cause                                        | item    |
+|--------------+---+----------------------------------------------+---------|
+| lib          | 4 | insta snapshot churn (emit changed)          | W1      |
+| lib          | 1 | CSS property mutation has no grammar         | BUG-346 |
+| lib          | 2 | tests pin DELETED surfaces (@effect, BUG-340)| BUG-347 |
+| lib          | 3 | signal lifecycle / sourcespan / CST arg-list | W3      |
+| integration  | 2 | data_kind_dispatch (concurrent agent's)      | W4      |
+| migrations   | 2 | object-literal decl                          | BUG-342 |
+| v8           | 1 | @editable arg-unwrap per-instance            | W5      |
+
+* Waves
+
+Ordered by what unblocks or de-risks the most, not by size.
+
+** W1 — Adjudicate the 4 snapshot diffs  (do FIRST, it is a blocker)
+
+=snapshot_data_directive=, =snapshot_template_definition=,
+=snapshot_template_definition_and_invocation=, =snapshot_test_and_fixture=.
+
+Run `cargo insta review` and read EVERY diff by hand. For each: is the new emit
+correct, or is the snapshot catching a real regression? Accept only diffs
+understood and justified; record the justification in the commit.
+
+This is first because these four are the ones most likely to be HIDING a
+regression, and because a bulk `insta accept` would destroy the evidence. Never
+auto-accept.
+
+Risk: the emit churn came from concurrent agents, so a diff may encode someone
+else's in-flight bug. If a diff cannot be justified, file it rather than accept it.
+
+** W2 — BUG-347: re-point the two stale tests
+
+Both are one-line expectation fixes with a decision attached:
+- =@effect= → re-point at a directive that still exists (`@portal` / `@fn`);
+  keep the BUG-167 over-widening guard intact.
+- import_resolver → adopt `File(...)`, the deliberate BUG-340 behavior.
+
+Cheap, and it removes two permanently-unpassable tests from the count.
+
+** W3 — Diagnose the 3 uncategorised lib failures
+
+=signal_emits_policy_and_lifecycle=, =test_matches_include_scoped_directives=,
+=a_value_position_call_without_a_trailing_member_stays_an_arg_list=.
+
+Not yet attributed to a cause — each needs reading before it can be classified
+as stale-expectation vs real defect. Do NOT assume churn. Each ends as either a
+fix or a filed bug with a repro.
+
+** W4 — BUG-346: decide whether a CSS property can be mutated
+
+The design question, and the only failure representing a user-visible capability
+gap. `@on &.click { opacity <- 0.8; }` does not compile.
+
+Decide between widening `mutation` to accept a property target, or making it a
+deliberate refusal with a diagnostic that names the property and points at the
+transition form `opacity: 0 -> 1` (which already works). Evidence favors the
+refusal reading — `->` covers it and signals stay the one mutable-cell concept —
+but confirm against docs first.
+
+Either way collapse the duplicate `mutation` / `on_mutation` declarations.
+If widened, the gate must be --cdp: the property actually changes in a browser.
+
+** W5 — The lower-value tail
+
+- integration =data_kind_dispatch= ×2 — concurrent agent's territory; confirm
+  ownership before touching.
+- v8 =editable_bind_is_per_instance= — `@editable` arg-unwrap,
+  `src/emit/js.rs::parse_param_value`.
+- BUG-342 object-literal decl ×2 — CST-level, already narrowed; the
+  `balanced(';')` fix was tested and REJECTED, so start from the CST, not the
+  capture type.
+
+* Out of scope, tracked separately
+
+- BUG-343 — scroll element does not hold first keyframe at progress 0.
+  User-visible (reveals flash partially-faded), --cdp only. Higher user impact
+  than most of this plan; sequenced separately because it needs browser
+  investigation, not test triage.
+- AUD-010 — five .st files do not parse, so `migrate` silently skips them. One
+  is retired `~name` preset syntax with NO capsule at all: the error tells
+  authors to migrate by hand and gives them no tool. Best candidate for the next
+  migration capsule.
+
+* Acceptance
+
+- =cargo test --lib= green, or every remaining failure linked to a filed item
+  with a stated reason.
+- No snapshot accepted without a written justification.
+- Any behavioral fix gated under --cdp, seen failing before and passing after.
+
+NOTE [2026-08-08]: COMPLETE. lib 3165/10 -> 3173/0. integration 215/2 -> 217/0.
+
+** Waves
+
+| W  | outcome |
+|----+---------|
+| W1 | 4 snapshot diffs adjudicated by hand: 3 accepted, 1 REFUSED (it was BUG-346 evidence, not churn) |
+| W2 | 2 tests re-pointed off DELETED surfaces (`@effect`, pre-BUG-340 resolver) |
+| W3 | 2 stale fixtures fixed (`~name`->`&name`, `@on click`->`@on &.click`, `@bind`->`@portal`) |
+| W4 | BUG-346 fixed: property mutation refused BY NAME, top-level and nested |
+| W5 | 2 brittle variable-name pins unpinned; 3 more failures diagnosed |
+
+** The two things reviewers caught in MY work
+
+1. *Nested-scope silent drop.* My BUG-346 fix handled only the top-level body
+   loop, but `on_motion_body` is RECURSIVE \u2014 `.child { opacity <- 0.8; }` still
+   parsed, matched, and was dropped. I had reintroduced the exact defect the fix
+   exists to remove, one level down, and made it INVISIBLE at the top level.
+   Fixed in c685605f by routing both loops through one `property_mutation_error`.
+
+2. *A src-only grep called the stdlib dead.* I filed BUG-348 and BUG-349
+   claiming `timeout`/`retry`/`ephemeral`/`transport` were threaded and never
+   consumed, on `grep -rc src/ --include=*.rs` returning 0. In a Rust + `.st`
+   system that grep structurally cannot see the layer that does the work \u2014 all
+   four have live readers in `stdlib/primitives/`. Both retracted (6616573b);
+   the real causes were a wrong fixture (`(x number)` must be `($x number)`) and
+   a wrong assertion (`parseMs(3000)` vs the correct `parseMs("3s")`). AUD-011
+   records the method that produced the wrong answer.
+
+Running a sweep MECHANICALLY over 31 fields and reporting "exactly three have no
+reader" made a wrong result look rigorous. Precision on a false premise reads as
+authority \u2014 that is the lesson worth keeping.
+
+** Verified, not assumed
+
+- Provenance of all 10 original failures established by building `de31fa26` in a
+  clean worktree: identical 3165/10, same names. (The worktree needed the two
+  vendor submodules symlinked \u2014 that is what had blocked this comparison before.)
+- The BUG-346 refusal probed across 10 paths: top-level, nested `.child`, nested
+  `&`, with `as`, `$sig.change`, mixed valid+invalid, file scope, `@score`,
+  arms, timeline. No silent drops.
+- Every gate canary-checked. One canary FAILED to fail (`.oops` suffix) and was
+  replaced with one that does (unbalanced paren) \u2014 a canary that cannot fail
+  proves nothing about the guard.
+
+** Remaining, all filed
+
+- BUG-342 \u2014 narrowed hard this pass: only TYPE + BRACE fails; the CST is
+  INNOCENT (new passing gate proves it); `ExprExtractor`, `TyperefExtractor` and
+  the `balanced(';')` theory all ruled out by reading/testing. Blocks the last 2
+  `migrations_test` failures.
+- BUG-350 (mine) \u2014 `@editable(bind:)` not per-instance. 1 v8 failure. NB a
+  concurrent session has since reused IDs BUG-343/344/346/348/349/350 for
+  unrelated bugs; mine are identifiable by title.
+- BUG-343 (mine) \u2014 scroll reveals flash partially-faded. --cdp only, unchanged
+  at 104/7.
+- AUD-010 \u2014 five `.st` files don't parse, so `migrate` skips them silently.
+
+** Final state
+
+lib 3173/0 \u00b7 integration 217/0 \u00b7 rail 12/0 \u00b7 migrations 16/2 (BUG-342) \u00b7
+v8 458/1 (BUG-350) \u00b7 headless 715/21 \u00b7 --cdp 104/7 (BUG-343, unchanged).

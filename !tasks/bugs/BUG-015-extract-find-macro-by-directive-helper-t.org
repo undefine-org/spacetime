@@ -1,0 +1,329 @@
+#+TITLE: Extract find_macro_by_directive helper to deduplicate form-directive lookup
+#+STATE: DONE
+#+SESSION_ID: 14af06f548bc2a02
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-04-05T18-27-38-914Z_14af06f548bc2a02.jsonl]]
+#+CUSTOM_ID: BUG-015-extract-find-macro-by-directive-helper-t
+#+EFFORT: S
+#+LAYER: pipeline
+#+PRIORITY: #B
+
+NOTE [2026-04-05]: Extracted find_macro_by_directive on MetaRegistry. Replaced 3 inline blocks in evaluate.rs and resolve.rs. Added 4 tests (3 registry + 1 resolve_evaluated fallback). All 1983 tests pass.
+
+* Initial Message
+
+Implement these audit recommendations from org://AUD-005-audit-implementation:
+
+Three usages of the scoring pattern. The full "get_all_macros_by_form_directive + filter scope + score + max" block appears in 3 places:
+1. `evaluate_match` (evaluate.rs:122-134) — new
+2. `resolve_evaluated` (resolve.rs:57-70) — new
+3. `resolve_single` (resolve.rs:130-142) — pre-existing
+
+This is a DRY violation at 3 copies. Per the project rules: "DRY at 2. When you write the same pattern a second time, stop and extract a shared helper."
+
+Let me also check whether the test covers the negative case (no matching macro at all):
+
+The test only checks the happy path (directive-derived name finds the macro via fallback). There's no test for:
+1. When the fallback also finds nothing (both `get_macro` and form-directive return None)
+2. Multiple macros matching the same directive (scoring disambiguation)
+
+But the first case is already covered by the pre-existing behavior (returns empty `EvaluatedMatch` with `body_was_evaluated = false`), and the scoring tests exist in `form_scoring.rs`.
+
+Here are my findings:
+
+---
+
+## Findings
+
+### 1. DRY violation: form-directive lookup + scoring block is triplicated
+- **What**: The pattern `get_all_macros_by_form_directive → filter scope → score → max` is now copy-pasted in 3 locations across evaluate.rs and resolve.rs.
+- **Where**: `src/pipeline/evaluate.rs:122-134`, `src/pipeline/resolve.rs:57-70`, `src/pipeline/resolve.rs:130-142`
+- **Why**: Per project rules "DRY at 2", this should be a shared helper (e.g. `find_best_macro_for_form` on `MetaRegistry`). A fourth caller will copy-paste the pattern incorrectly. If the scoring logic changes (e.g. tiebreaker rules), all three must be updated in sync.
+- **Effort**: `small` — extract a method on `MetaRegistry` that takes `&str` name, `&HashMap<String, CapturedValue>` captures, and `&Option<String>` selector, returns `Option<&MacroDefAst>`. Wire it into all three call sites.
+
+### 2. No test for the resolve_evaluated fallback path
+- **What**: The fix in `resolve_evaluated` (resolve.rs:53-71) has no direct test. The unit test only covers `evaluate_match`. If the evaluate fix were reverted but the resolve fix remained, we'd have no test coverage proving `resolve_evaluated` can find form-directive macros.
+- **Where**: `src/pipeline/resolve.rs:53-71`
+- **Why**: Low risk — the full pipeline integration (cargo run inspect, visual test) does exercise this path end-to-end. But a targeted unit test would prevent silent regressions if someone refactors resolve_evaluated independently.
+- **Effort**: `small`
+
+### 3. Dead comment in resolve_evaluated: "shouldn't happen" is now misleading
+- **What**: Line 81 says `"No macro def but we have binds — shouldn't happen, fall through"`. After the fix, this path is even less reachable than before (both evaluate and resolve now have the same fallback). The comment is accurate but could benefit from clarification that both layers now use form-directive lookup.
+- **Where**: `src/pipeline/resolve.rs:81`
+- **Why**: Cosmetic; slightly misleading to a future reader who might think this is a common path.
+- **Effort**: `trivial`
+
+* Problem
+
+The form-directive macro lookup pattern (get candidates → filter scope → score → pick best) is copy-pasted in 3 locations:
+
+1. =evaluate_match= in =src/pipeline/evaluate.rs= lines 118-135
+2. =resolve_evaluated= in =src/pipeline/resolve.rs= lines 53-71
+3. =resolve_single= in =src/pipeline/resolve.rs= lines 130-142
+
+Per project rules ("DRY at 2"), this should be a shared helper. If scoring logic changes (e.g. tiebreaker rules), all three must be updated in sync. A fourth caller will copy-paste incorrectly.
+
+* Implementation
+
+** File: =src/metasystem/registry.rs=
+
+Add a new method on =MetaRegistry=:
+
+#+begin_src rust
+/// Find the best macro definition for a directive name using scoring.
+///
+/// 1. Try direct name lookup via `get_macro(name)`.
+/// 2. If not found, get all macros registered under the `@name` form directive.
+/// 3. Filter by scope compatibility.
+/// 4. Score each candidate against the captures and return the best match.
+///
+/// Used by both evaluate and resolve layers.
+pub fn find_macro_by_directive(
+    &self,
+    directive_name: &str,
+    captures: &HashMap<String, CapturedValue>,
+    selector: &Option<String>,
+) -> Option<&MacroDefAst> {
+    self.get_macro(directive_name).or_else(|| {
+        let matching = self.get_all_macros_by_form_directive(directive_name);
+        if matching.is_empty() {
+            return None;
+        }
+        let input = CaptureMapInput { captures };
+        matching
+            .into_iter()
+            .filter(|m| macro_scope_matches(&m.scopes, selector))
+            .filter_map(|m| score_macro_form(m, &input).map(|s| (m, s)))
+            .max_by_key(|(_, score)| *score)
+            .map(|(m, _)| m)
+    })
+}
+#+end_src
+
+*** Required imports
+
+Add to =src/metasystem/registry.rs= imports:
+
+#+begin_src rust
+use crate::syntax::form_scoring::{CaptureMapInput, score_macro_form};
+use crate::syntax::CapturedValue;
+#+end_src
+
+=HashMap= is already imported. =macro_scope_matches= is defined in the same file. No re-export changes needed in =mod.rs= since the method is on =MetaRegistry= which is already public.
+
+** File: =src/pipeline/evaluate.rs=
+
+Replace lines 118-135:
+
+#+begin_src rust
+// Before (inline fallback):
+let macro_def = registry.get_macro(&form_match.macro_name).or_else(|| { ... });
+
+// After (single call):
+let macro_def = registry.find_macro_by_directive(
+    &form_match.macro_name,
+    &form_match.captures,
+    &form_match.selector,
+);
+#+end_src
+
+Remove now-unused imports: =macro_scope_matches=, =CaptureMapInput=, =score_macro_form=.
+
+** File: =src/pipeline/resolve.rs=
+
+*** =resolve_evaluated= (lines 53-71)
+
+Replace the inline fallback with:
+
+#+begin_src rust
+let macro_def = meta_registry.find_macro_by_directive(
+    &ev.form_match.macro_name,
+    &ev.form_match.captures,
+    &ev.form_match.selector,
+);
+#+end_src
+
+*** =resolve_single= (lines 130-161)
+
+Replace the scoring block with the helper, keeping the resolve-specific fallbacks at the call site:
+
+#+begin_src rust
+let macro_def = meta_registry
+    .find_macro_by_directive(
+        &form_match.macro_name,
+        &form_match.captures,
+        &form_match.selector,
+    )
+    .or_else(|| {
+        // Fall back to first form-directive match (backward compatibility)
+        meta_registry
+            .get_macro_by_form_directive(&form_match.macro_name)
+            .filter(|m| macro_scope_matches(&m.scopes, &form_match.selector))
+    })
+    .or_else(|| {
+        // Fall back to direct macro name lookup (prefix-based patterns)
+        meta_registry
+            .get_macro(&form_match.macro_name)
+            .filter(|m| macro_scope_matches(&m.scopes, &form_match.selector))
+    });
+#+end_src
+
+Note: =resolve_single= still needs =macro_scope_matches=, =CaptureMapInput=, and =score_macro_form= — but only =macro_scope_matches= remains needed (for the two fallback filters). Remove =CaptureMapInput= and =score_macro_form= from =resolve.rs= imports if they become unused after the refactor. Check with =cargo check= and clean up any warnings.
+
+*** Comment fix (line 81)
+
+Update the misleading comment:
+
+#+begin_src rust
+// Before:
+// No macro def but we have binds — shouldn't happen, fall through
+
+// After:
+// No macro def found even via form-directive fallback — fall through to resolve_single
+#+end_src
+
+** Test: =src/metasystem/registry.rs=
+
+Add a unit test in the =registry.rs= test module:
+
+#+begin_src rust
+#[test]
+fn test_find_macro_by_directive_form_fallback() {
+    let mut registry = MetaRegistry::new();
+
+    // Register macro "test-dispatcher" with form @test $event:ident
+    let macro_def = MacroDefAst {
+        name: "test-dispatcher".to_string(),
+        form: Some(FormClause {
+            directive_name: "@test".to_string(),
+            inline_elements: vec![FormInlineElement::Capture(
+                FormCapture {
+                    var_name: "event".to_string(),
+                    capture_type: CaptureType::Ident,
+                    modifier: CaptureModifier::Required,
+                    alias_capture: None,
+                },
+                None,
+            )],
+            params: vec![],
+            body_capture: None,
+            body_params: vec![],
+            span: SourceSpan::default(),
+        }),
+        ..Default::default()
+    };
+    registry.register_macro(macro_def).unwrap();
+
+    let captures: HashMap<String, CapturedValue> = [
+        ("event".to_string(), CapturedValue::Ident("visible".to_string())),
+    ].into_iter().collect();
+
+    // Direct name works
+    let found = registry.find_macro_by_directive("test-dispatcher", &captures, &None);
+    assert!(found.is_some());
+    assert_eq!(found.unwrap().name, "test-dispatcher");
+
+    // Directive-derived name (form fallback) works
+    let found = registry.find_macro_by_directive("test", &captures, &None);
+    assert!(found.is_some(), "Must find macro via form-directive fallback");
+    assert_eq!(found.unwrap().name, "test-dispatcher");
+
+    // Nonexistent directive returns None
+    let found = registry.find_macro_by_directive("nonexistent", &captures, &None);
+    assert!(found.is_none());
+}
+#+end_src
+
+Check the =registry.rs= test module for existing patterns — use =Default::default()=, =..Default::default()= struct shorthand, and existing helper functions if available.
+
+Also check imports needed in the test module: =FormClause=, =FormInlineElement=, =FormCapture=, =CaptureType=, =CaptureModifier= from =crate::parser::meta_ast=, and =CapturedValue= from =crate::syntax=. Read the existing test imports before adding new ones.
+
+** Test: =src/pipeline/resolve.rs=
+
+Add a test for =resolve_evaluated= with a directive-derived macro_name:
+
+#+begin_src rust
+#[test]
+fn test_resolve_evaluated_form_directive_fallback() {
+    // Same as test_evaluate_and_resolve_conditional_binds but with
+    // macro_name = "on" (directive-derived) instead of "on-event-dispatcher" (registered name)
+    let mut meta_registry = MetaRegistry::new();
+
+    // Register "load-driver" primitive (needed for resolve)
+    let prim = PrimitiveDefAst {
+        name: "load-driver".to_string(),
+        params: vec![PrimitiveParam {
+            name: "trigger".to_string(),
+            param_type: "string".to_string(),
+            default: None,
+        }],
+        ..Default::default()
+    };
+    meta_registry.register_primitive(prim).unwrap();
+
+    // Register macro under "on-event-dispatcher" with form @on
+    let macro_def = MacroDefAst {
+        name: "on-event-dispatcher".to_string(),
+        form: Some(FormClause {
+            directive_name: "@on".to_string(),
+            // ... same inline_elements as test_evaluate_and_resolve_conditional_binds
+            // with $event:ident capture
+        }),
+        binds: vec![],
+        body: vec![MacroBodyItem::If(MetaIfClause {
+            condition: MetaIfCondition::Equals("event".to_string(), "visible".to_string()),
+            then_body: vec![MacroBodyItem::Binds(vec![BindDecl {
+                primitive: "load-driver".to_string(),
+                args: vec![BindArg::Named {
+                    name: "trigger".to_string(),
+                    value: BindValue::String("visible".to_string()),
+                }],
+                outputs: vec![],
+                span: SourceSpan::default(),
+            }])],
+            elif_clauses: vec![],
+            else_body: None,
+            span: SourceSpan::default(),
+        })],
+        ..Default::default()
+    };
+    meta_registry.register_macro(macro_def).unwrap();
+
+    // FormMatch with directive-derived name "on" (NOT "on-event-dispatcher")
+    let mut captures = HashMap::new();
+    captures.insert("event".to_string(), CapturedValue::Ident("visible".to_string()));
+
+    let form_match = FormMatch {
+        macro_name: "on".to_string(), // directive-derived name
+        captures,
+        capture_spans: HashMap::new(),
+        selector: Some(".hero".to_string()),
+        span: SourceSpan::default(),
+        source_file: None,
+    };
+
+    // Evaluate finds the macro via form-directive fallback
+    let evaluated = evaluate_match(&form_match, &meta_registry).unwrap();
+    assert!(evaluated.body_was_evaluated);
+
+    // Resolve also finds the macro via the same fallback
+    let primitives = resolve_evaluated(&[evaluated], &meta_registry).unwrap();
+    assert_eq!(primitives.len(), 1);
+    assert_eq!(primitives[0].primitive_name, "load-driver");
+}
+#+end_src
+
+Use the same struct patterns as the existing =test_evaluate_and_resolve_conditional_binds= test (around line 1500 of resolve.rs). Read that test to match struct field patterns exactly — particularly =FormClause=, =FormInlineElement=, =FormCapture= construction, and =PrimitiveDefAst= setup.
+
+* Edge Cases
+
+- =find_macro_by_directive= must NOT change behavior for callers that pass the registered macro name directly — =get_macro= is tried first and will succeed, never reaching the scoring path.
+- =resolve_single='s additional fallbacks (backward compat =get_macro_by_form_directive=, direct =get_macro=) remain at the call site, not absorbed into the helper. These are resolve-specific behaviors.
+- The helper absorbs scope filtering (=macro_scope_matches=) — verify this is correct for all callers. Currently all three inline blocks include scope filtering.
+
+* Acceptance Criteria
+
+1. =cargo check= — compiles with no new warnings
+2. =cargo test --lib= — all tests pass (existing 1979 + 3 new)
+3. =grep -c "get_all_macros_by_form_directive" src/pipeline/*.rs= returns 0 (all moved to helper)
+4. =grep -c "find_macro_by_directive" src/pipeline/*.rs= returns at least 3 (one per call site)
+5. =cargo run -- inspect --layer emit /tmp/test-visible.st= still produces IntersectionObserver JS (no regression from PLAN-012 fix)

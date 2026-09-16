@@ -1,0 +1,63 @@
+#+TITLE: The contract is the app: server-emitted contract DSL (events/assigns/pushes) + typed pushes with @data stream decode
+#+STATE: DONE
+#+SESSION_ID: 1539989eb44441ea
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-22T09-34-26-513Z_1539989eb44441ea.jsonl]]
+#+CUSTOM_ID: FEAT-160-the-contract-is-the-app-server-emitted-c
+#+COMPLETION_HASH: 80cd83ba4c644624
+
+* Initial Message
+
+explain the FUPs and show me your vision for the Spacetime <> LV connection and what would make it *wow*. Exlpain the impact of each bug that you saw
+
+* Wow pillar 2 of 3 — "The contract is the app."
+Closes FUP-123; realizes and extends FEAT-139. Principles:
+elixir/spacetime_lv/AGENTS.md §bridge principles (2, 4).
+
+* Problem
+The contract sidecar (frontend/CounterLive.contract.json) is HAND-WRITTEN —
+the server knows its events/assigns but doesn't SAY them, so the shared schema
+can drift from the server silently. And LiveView's third message kind,
+push_event (transient effects: toasts, "someone else moved this card",
+confetti), has no typed surface at all — modelling it as an assign reintroduces
+the sticky-state bug (effect re-fires on reconnect because assigns replay).
+
+* Deliverable — both directions of "the compiler proves the seam":
+
+1. *Server-side typed DSL (extends FEAT-139).* `use Spacetime.LiveView` grows
+   declared sections:
+     events  do event :move_card, card_id: :string, to: :atom end
+     assigns do assign :items, :list ; assign :presence, :map end
+     pushes  do push :flash, message: :string, kind: :atom end
+   A `__spacetime_contract__/0` callback (Spark transformer or plain macro —
+   pick whichever the codebase already leans toward) introspects the module and
+   EMITS <Module>.contract.json (mix task `mix spacetime.contract` writes it
+   into frontend/). Hand-written sidecar is deleted; the server is the source
+   of truth. Compile-time warning when the emitted contract changed but the
+   .st side wasn't rebuilt (fingerprint already exists — counter-v2).
+2. *Typed pushes + @data stream (client).* New @data kind
+   `@data stream $fx from $board { receive to Effect { "flash" => Flash($.payload); … } }`
+   — the SAME receive-arm matcher as signal replies (principle 4),
+   discriminator = push event name. Bridge routes push_event (this.handleEvent
+   in the hook) to the stream's publishReply: uncorrelated, fire-once, NEVER
+   replayed on reconnect. Server push_event calls are arity/type-checked
+   against the declared pushes section.
+3. *Contract completeness.* E0928-family rules now cover all three kinds:
+   send emit ⊆ events (exists) · subscribe ⊆ assigns (FEAT-159) ·
+   stream receive tags ⊆ pushes (new). Renaming anything on either side turns
+   the other side's build RED.
+
+* Tests
+- mix: contract emission task produces JSON identical to the module's declared
+  sections; push_event outside the declared section → compile warning/error.
+- cargo: stream-tag ⊆ pushes RED→GREEN.
+- Headless .st: a push_event arriving at the bridge decodes through the
+  stream's receive arms → @handle fires once; simulated reconnect does NOT
+  re-fire it.
+
+* Depends on
+FEAT-139 (existing, contract emission groundwork). Pairs with FEAT-159
+(subscribe rule). Consumed by the kanban demo (flash on card moves by others).
+
+NOTE [2026-07-22]: Implemented FEAT-160: declared events/assigns/pushes DSL emits deterministic `__spacetime_contract__/0`; `mix spacetime.contract` generates CounterLive sidecar; declared transient pushes flow to passive `@data stream` through existing receive matcher; E0928 validates stream tags ⊆ pushes. Verified: mix precommit (8 passed), frontend cargo check/build, focused analyzer + legacy stream tests. `cargo test --lib`: 2722 passed; 3 expected concurrent BUG-206/207 failures only.
+
+NOTE [2026-07-22]: Gap closed 2026-07-22 (orchestrator e2e, commit 3378b9ca): the acceptance-6 proof the implementing agent couldn't run (port occupied) exposed a REAL bug — compiled registerLiveStream ran at signal-factory time, before the @host registration IIFE in bundle emission order, so resolveHost() had no module and streams silently never registered (pushes dropped, zero console errors; subscribe escaped by emission-order luck only). Fixed in stdlib/primitives/signal.st: registerLiveStream reports settled/not-settled and retries every 50ms until the module resolves (mirrors the bridge's attachStreamHandlers polling). Also fixed counter.st flash decode ($.payload = whole push map → [object Object]; now $.payload.message). Full browser proof on a fresh :4001 server: registry {SpacetimeLvWeb.CounterLive: [flash]}; "Count reached 15" rendered; forced liveSocket disconnect/connect → ZERO stream reply fires during/after reconnect (fire-once holds; persisting text is client state, not replay); remounted socket flashed "Count reached 5" → pushes flow post-reconnect. Screenshot: artifacts/FEAT-160-flash-e2e.png. Delta-zero regressions (same 3 foreign lib + 2 foreign headless BUG-206/207 failures only). FEAT-160 remains DONE — now with acceptance 6 actually evidenced.

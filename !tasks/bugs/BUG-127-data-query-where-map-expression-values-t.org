@@ -1,0 +1,61 @@
+#+TITLE: @data query where/map expression values truncated — convert_property_value strips a quote from quote-adjacent expressions
+#+STATE: DONE
+#+SESSION_ID: 1510a559ccf03ced
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-20T14-12-20-403Z_1510a559ccf03ced.jsonl]]
+#+CUSTOM_ID: BUG-127-data-query-where-map-expression-values-t
+#+COMPLETION_HASH: d3f84a5cd5ad2bdd
+
+* Initial Message
+
+ok i want you to design a prototype a deep integration between Spacetime and elixir, especially Phoenix LiveView and it should be a la Djinn.LiveView (~/code/ora/monorepo).
+
+What could it look like? Show me your DSL design so we can think about it together. Look at the recent Spacetime $host improvements and whatnot, maybe you can extend it to a canonical host for Phoenix LiveView that makes the integration insanely seamless and self-aware (re-uses the power of Elixir macros/Spark and the introspectability of Spacetime to deliver an experience that leverages the best of both).
+
+* Symptom
+A `@data query` (or any macro body property) whose value EXPRESSION starts or
+ends with a quoted string silently corrupts:
+
+  @data query $todo from $cards { where: $.col == "todo"; }
+
+emits JS `filterText = "$.col == \"todo"` — the CLOSING quote is dropped, so the
+predicate is invalid JS, the runtime `new Function` throws, `filterFn` stays
+null, and the query filters NOTHING (every row passes). On a Kanban board this
+rendered all cards in every column.
+
+* Root cause
+`src/syntax/events/form_compiler.rs::convert_property_value` did:
+    let clean = value_str.trim().trim_matches('"').trim_matches('\'');
+`trim_matches('"')` removes a quote from BOTH ends greedily, so an expression
+that merely ENDS (or starts) with a string literal loses that quote. It was
+intended only to unwrap a WHOLE string-literal value (`"hello"` → `hello`).
+
+Compounding it, `CapturedValue::to_js` for the `Expr` variant emitted the
+expression RAW in a DoubleQuoted context, so even an intact expression embedded
+as a `string`-typed primitive param (`filter: string`) would collide with the
+wrapping quotes. Both needed fixing.
+
+* Fix
+1. `convert_property_value`: replace blind `trim_matches` with
+   `strip_wrapping_quotes`, which unwraps ONLY a single pair of matching outer
+   quotes that spans the ENTIRE value (scans the interior for an early-closing
+   unescaped quote; leaves `"a" == "b"` and `$.x == "y"` intact).
+2. `CapturedValue::to_js` (src/syntax/form_match.rs): the `Expr` arm now
+   JS-escapes quotes/backslashes in SingleQuoted/DoubleQuoted contexts (mirrors
+   String quoting), so an expression embedded as a JS string literal can't be
+   truncated by quote collision.
+
+* Tests (RED→GREEN)
+- src/syntax/events/form_compiler.rs::bug127_property_value_tests (4):
+  expr ending/starting with quoted string keeps both quotes; whole string
+  literal still unwrapped; two adjacent literals not unwrapped.
+
+* Acceptance
+- `@data query { where: $.col == "todo" }` emits valid JS; filter applies.
+- The liveview-kanban demo shows cards filtered into their correct columns.
+- cargo test --lib green.
+
+* Impact on prototype
+Blocked the per-column card filtering (LIVE substrate) in the LiveView-Kanban
+prototype — every column showed all 6 cards. Fixed.
+
+NOTE [2026-06-20]: Fixed 2026-06-20. Root cause: form_compiler.rs convert_property_value used trim_matches('"') which dropped a quote from any expr value starting/ending with a string literal (`$.col == "todo"` → `$.col == "todo`), making @data query predicates invalid JS → filter silently matched everything. Fix: strip_wrapping_quotes() unwraps ONLY a single pair of outer quotes spanning the whole value (scans interior for early close). Verified the to_js Expr path already quotes string-typed params correctly (reverted an over-broad to_js change that regressed 8 tests). Tests: form_compiler::bug127_property_value_tests (4: end/start quoted, whole literal unwrap, two-literals-not-unwrapped). Verified live: liveview-kanban columns now filter 2/2/2; cargo test --lib 2442 + integration 179 passed.

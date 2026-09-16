@@ -1,0 +1,86 @@
+#+TITLE: Strengthen @data subscribe to parity with sibling @data kinds: add $type:typeref? slot + typed/non-null seed
+#+STATE: DONE
+#+SESSION_ID: 153c9c68ea93c166
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-24T17-46-26-602Z_153c9c68ea93c166.jsonl]]
+#+CUSTOM_ID: FUP-144-strengthen-data-subscribe-to-parity-with
+#+COMPLETION_HASH: f2112d54e33f4186
+
+* Initial Message
+
+look at the spacetime_lv and do a review and show me the features that would be most exciting for you to do there
+
+* Initial Message
+Surfaced by FUP-142 forms spike (2026-07-24). The user's hypothesis — "just make
+@data subscribe stronger to have everything we wanted from @data form and more"
+— is CORRECT for the biggest seam. This is that fix.
+
+* The gap (a parity omission, not a design choice)
+Every sibling @data kind carries a `$type:typeref?` slot in its %form:
+  - @data inline  (data-kind.st L27)
+  - @data fetch   (L50, L190)
+  - @data derive  (L86)
+  - @data stream  (L361 event-source, L458 live-stream)
+`@data subscribe` (L543) is the ONLY kind WITHOUT it:
+: @data subscribe $name:binding from $host:binding : $assign:ident ;
+and it hardcodes a null seed:
+: local-state-impl(name: $name, initial: null)
+
+Consequences (observed in the forms spike, elixir/spacetime_lv/frontend/signup.st):
+1. A subscribed signal can't be typed → an `@type Envelope` describing the
+   assign's shape is DECORATIVE (W0203 "defined but never used").
+2. Every nested read of a subscribed value compiles to a defensive
+   `try { __v = ST.resolve(node,'x').a.b } catch { return }` because the seed is
+   null until the first server diff lands. Verified in emitted spacetime.js.
+3. Any local pattern that needs the value to be a well-shaped object before the
+   first server echo (e.g. `Object.assign({}, $sub.values, …)`) spreads
+   `undefined` until seeded.
+
+* Fix
+Bring subscribe to parity:
+  1. Add `$type:typeref?` to the %form (same slot, same capture, as siblings).
+  2. Seed from the type's default / an explicit seed rather than null. Options:
+     a. `@data subscribe $form FormEnvelope from $auth : form ;`
+        → seed = the type's zero-value ({} for object types, etc).
+     b. explicit: `@data subscribe $form FormEnvelope from $auth : form = { … } ;`
+        (mirrors @data inline's `: <value>`), for when the zero-value is wrong.
+  3. Register the type so nested reads are total (no try/catch) and typo'd field
+     access can be checked (feeds FUP-142 SPIKE-5 / OQ2).
+
+* Why this is the keystone for forms
+FUP-142's "seam #1" (typed envelope, null seed) dissolves entirely into this fix.
+Once subscribe is typed + seeded, the forms `field()` sugar (FUP-142 Tier A) can
+safely do `Object.assign({}, $form.values, {…})` on the first keystroke, and the
+inline-error reads are total. "Everything we wanted from @data form" mostly lives
+HERE, at the subscribe layer, benefiting EVERY subscriber — not just forms.
+
+* Elegance-bar
+Passes cleanly: extends an existing grammar slot that all siblings already have
+(no new subsystem), variants are stdlib/registry data, DELETES the null-seed
+special-case + the decorative-type / try/catch pattern, testable by the same
+compile+browser machinery. This is a bugfix-shaped parity change.
+
+* Open questions
+1. Zero-value derivation: does the type registry expose a default/zero-value per
+   typeref (object → {}, list → [], number → 0, string → "")? If not, that's the
+   sub-spike. Explicit-seed form (2b) is the fallback that needs no zero-value
+   machinery.
+2. Reconciler interaction: the server st-set diff currently overwrites the whole
+   signal; confirm a seeded-then-diffed subscribe still reconciles correctly
+   (seed is just the pre-first-diff value).
+3. Should the type also drive the E0928-family field-name check (FUP-142 OQ2)?
+   Likely yes, but that needs the contract to carry the assign's field shape —
+   track under FUP-142 SPIKE-5, not here.
+
+* Acceptance
+- `@data subscribe $x T from $h : assign ;` compiles; `$x` reads are typed.
+- signup.st re-expressed with a typed subscribe: no W0203 on the envelope type,
+  no try/catch in the emitted nested reads, non-null seed.
+- Existing untyped `@data subscribe $count from $counter : count ;` still
+  compiles unchanged (type slot is OPTIONAL, `?`).
+
+* Relation
+Keystone for FUP-142 (forms). Independent of FUP-121/132/143, FEAT-138.
+
+NOTE [2026-07-26]: DONE 2026-07-24 via PLAN-118. Shipped: (1) `$type:typeref?` slot on @data subscribe (sibling parity) — typed subscribe registers a real subscription + carries its shape; kills the decorative-@type W0203 on the forms fixture. (2) `data-subscribe-seeded` companion body macro `{ initial: <seed>; }` — scalar + one-level-object seeds work, overwritten by the first server diff. Caught + fixed a real ordering bug (seeded variant at %order 249 registered under empty-module key; moved to 250 to emit after @host). Tests: tests/features/FUP-144-typed-seeded-subscribe.test.st (3 GREEN) + FEAT-159/signal-flip regressions GREEN + 2829 unit + 202 integration GREEN. Docs: data-kind.st doc-comment + bridge README table. DEFERRED (filed): nested-object seeds blocked on BUG-228 (balanced-capture limitation, scope-expanded); type-driven zero-value seed; compile-time field-name check (FUP-142 OQ2).
+
+NOTE [2026-07-26]: Deferred-items ledger now filed as their own tracked items (2026-07-24): FUP-149 (type-driven zero-value seed), FUP-150 (compile-time field-name check on typed reads / E0928 sibling), BUG-234 (subscribe silent-degrade → hard error). Nested-object seed remains under BUG-228 (scope-expanded). All four are the honest deferred surface of FUP-144.

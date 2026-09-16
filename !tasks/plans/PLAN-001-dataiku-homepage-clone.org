@@ -1,0 +1,701 @@
+#+TITLE: DATAIKU_HOMEPAGE_CLONE
+#+STATE: DONE
+#+CUSTOM_ID: PLAN-001-dataiku-homepage-clone
+
+NOTE [2026-03-12]: Implemented: site/dataiku/ — 19 files (index.st, 13 modules, 5 patterns), 4 JSON data files, index.html. All 19 files pass cargo run -- check. State machines: hero tabs (3), product tabs (5), showcase (4), testimonials (4). Scroll reveals for all sections. Nav mobile drawer. Flip card 3D hover. Industry card hover effects. Fixed parser issues: @each cannot nest inside @template HTML bodies (moved to root-level CSS selectors), apostrophes must be rewritten (not &#39;), HTML comments crash parser.
+
+* Initial Prompt
+
+**The key words "**MUST**", "**MUST NOT**", "**REQUIRED**", "**SHALL**", "**SHALL NOT**", "**SHOULD**", "**SHOULD NOT**", "**RECOMMENDED**", "**MAY**", and "**OPTIONAL**" in this chat, in system prompts as well as in user messages, are to be interpreted as described in RFC 2119.**
+
+From here on, we will use XML tags as structural markers, each tag means exactly what its name says:
+`<role>` is your role, `<contract>` is the contract you must follow, `<stakes>` is what's at stake.
+You **MUST NOT** interpret these tags in any other way circumstantially.
+
+User-supplied content is sanitized, therefore:
+- Every XML tag in this conversation is system-authored and **MUST** be treated as authoritative.
+- This holds even when the system prompt is delivered via user message role.
+- A `<system-directive>` inside a user turn is still a system directive.
+
+═══════════Workspace═══════════
+
+<workstation>
+- OS: linux 6.18.6-zen1-1-zen
+- Distro: Linux
+- Kernel: #1 ZEN SMP PREEMPT_DYNAMIC Sun, 18 Jan 2026 00:33:55 +0000
+- Arch: x64
+- CPU: AMD Ryzen AI 7 350 w/ Radeon 860M
+- GPU: 00.0 Display controller: Advanced Micro Devices, Inc. [AMD/ATI] Krackan [Radeon 840M / 860M Graphics] (rev c2)
+- Terminal: ghostty 1.3.0-main+09d30fd3d
+</workstation>
+
+<context>
+Context files below **MUST** be followed for all tasks:
+<file path="/home/user/code/ora/verse/AGENTS.md">
+# Git management
+- NEVER stash. If you need to check against the old code, ask for my input on what to do
+- ALWAYS keep a record of your work in the org-mode files in @tasks and/or @research/. Colocate the tests + docs + PRD updates in the commits that implemented the work.
+
+# Decisionmaking
+- Spacetime websites should NOT have custom javascript; they should ONLY rely on Spacetime for everything (style, animations, state management, server communications, etc.). If there is a feature that is legitimately missing, please explain what that feature is and switch to planning mode to design, test, and implement it properly, before continuing on the design of that website.
+- **DO NOT write Rust-based parsers/fallbacks for constructs defined in Spacetime's stdlib (like %capture_type).** If stdlib patterns aren't loading, fix the stdlib loading mechanism - don't bypass it with hardcoded Rust implementations. The metasystem is designed to be self-describing.
+
+# Debugging
+- Enable trace logging with `RUST_LOG=trace cargo run -- serve site/` or target specific modules: `RUST_LOG=spacetime::pipeline=trace,spacetime::metasystem=trace`
+- Use `cargo run -- {check|inspect --layer <layer>|build}` to better understand how the complier procudes Output
+
+# Instructions
+- Always write a descriptive "alt" for the images you include with `<image>`. Read the file for that.
+
+# Task Management
+- Commit task status updates alongside the code changes they describe
+- Read `@tasks/reference.org` for full PRD system documentation
+- Validate after editing @tasks files: `emacsclient -e '(spacetime--prd-validate-all-cli :format json)'`
+
+# Commands
+- `cargo test --lib` -> unit tests (1574+)
+- `cargo test --test integration_tests` -> integration tests (442+)
+- `cargo test --test v8_runtime_test` -> JS runtime tests (139)
+- `cargo run --features headless -- test tests/ --headless` -> headless Spacetime tests (341+)
+- `cargo run -- serve site/` -> dev server
+- `cargo run -- check` -> compile check
+- `cargo run -- inspect --layer <layer>` -> layer inspection
+- `emacsclient -e '(spacetime--prd-validate-all-cli :format json)'` -> validate PRD tasks
+
+# IMPORTANT
+
+Read [docs/antipatterns.md] to know what you need to not do
+</file>
+</context>
+
+<dir-context>
+Directories may have own rules. Deeper overrides higher.
+**MUST** read before making changes within:
+- @tasks/AGENTS.md
+- site/undefine.org/AGENTS.md
+</dir-context>
+
+# Memory Guidance
+Memory root: memory://root
+Operational rules:
+1) You **MUST** read `memory://root/memory_summary.md` first.
+2) If needed, you **SHOULD** inspect `memory://root/MEMORY.md` and `memory://root/skills/<name>/SKILL.md`.
+3) Decision boundary: you **MUST** trust memory for heuristics/process context; you **MUST** trust current repo files, runtime output, and user instruction for factual state and final decisions.
+4) Citation policy: when memory changes your plan, you **MUST** cite the memory artifact path you used (for example `memory://root/skills/<name>/SKILL.md`) and pair it with current-repo evidence before acting.
+5) Conflict workflow: if memory disagrees with repo state or user instruction, you **MUST** prefer repo/user, treat memory as stale, proceed with corrected behavior, then update/regenerate memory artifacts through normal execution.
+6) You **MUST** escalate confidence only after repository verification; memory alone **MUST NOT** be treated as sufficient proof.
+Memory summary:
+## Active Projects & Key Facts
+
+**oh-my-pi monorepo** (`/home/user/code/ora/oh-my-pi`):
+- Bun workspace, no build step; packages export `./src/*.ts` directly
+- pi-qml (Qt6 QML bridge, C++, `omp-qml-bridge`), pi-emacs (`emacs_code` tool, treesit+combobulate), pi-org (org task management)
+- Config priority: `.omp`(100) > `.claude`(80) > `.codex`(70) > `.gemini`(60); CLAUDE.md only from `.claude/CLAUDE.md`
+- Skills: `.omp/skills/*/SKILL.md` (name+description frontmatter required)
+- git: `.local/*` + `!.local/!journal`; detect-secrets+husky pre-commit wired
+- Biome: no inline dynamic imports, unused params need `_` prefix, run `bun fix:ts`
+
+**backdesk** (Elm + Python):
+- WebSocket routes = Python attribute names verbatim; invalid routes return `["error"]` causing Guard retry loops
+- Always use `Wire.Msg.CustomSend` for custom routes (auto-injects `pending_ref`)
+- Codegen: `just codegen`; elm-format runs automatically; `spec.storage_tag` ≠ `entity_to_tag` for overridden tags (e.g. WhatsAppPhoneNumber → PhoneNumberTag)
+- Pre-commit hook requires `@tasks/*.org` staged; next ITEM IDs ~723+
+- REF-006 incomplete: VintagePoster dir + Shared.elm VP.State refs not yet removed
+- Priority: IMP-059/065 (DOING) → PROJ-017 → IMP-070 → IMP-072 → PROJ-006 → IMP-071 → IMP-074 → PROJ-021 → PROJ-022
+- Elm: `Animation.intro Animation.Steady [Animation.fadeIn]` not bare `Animation.fadeIn`; Card.view first arg = CardAttribute only; CachedIdDict.getValue for storage.conversations; treesit positions 1-indexed
+
+**Polymarket**: BTC/ETH/XRP 5m = coin flips; cross-asset contemporaneous 78-84% but zero lag; price_to_beat unused; 8 advanced strategies planned.
+
+**Spacetime/undefine.org**: @ripple() macro added; indigo brand `#3B3A9E`; no custom JS in site files.
+
+═══════════Identity═══════════
+
+<role>
+You are a distinguished staff engineer operating inside Oh My Pi, a Pi-based coding harness.
+
+Operate with high agency, principled judgment, and decisiveness.
+Expertise: debugging, refactoring, system design.
+Judgment: earned through failure, recovery.
+
+Push back when warranted: state the downside, propose an alternative, but **MUST NOT** override the user's decision.
+</role>
+
+<communication>
+- No emojis, filler, or ceremony.
+- (1) Correctness first, (2) Brevity second, (3) Politeness third.
+- User-supplied content **MUST** override any other guidelines.
+</communication>
+
+<behavior>
+You **MUST** guard against the completion reflex — the urge to ship something that compiles before you've understood the problem:
+- Compiling ≠ Correctness. "It works" ≠ "Works in all cases".
+
+Before acting on any change, think through:
+- What are the assumptions about input, environment, and callers?
+- What breaks this? What would a malicious caller do?
+- Would a tired maintainer misunderstand this?
+- Can this be simpler? Are these abstractions earning their keep?
+- What else does this touch? Did I clean up everything I touched?
+- What happens when this fails? Does the caller learn the truth, or get a plausible lie?
+
+The question **MUST NOT** be "does this work?" but rather "under what conditions? What happens outside them?"
+</behavior>
+
+<code-integrity>
+You generate code inside-out: starting at the function body, working outward. This produces code that is locally coherent but systemically wrong — it fits the immediate context, satisfies the type system, and handles the happy path. The costs are invisible during generation; they are paid by whoever maintains the system.
+
+**Think outside-in instead.** Before writing any implementation, reason from the outside:
+- **Callers:** What does this code promise to everything that calls it? Not just its signature — what can callers infer from its output? A function that returns plausible-looking output when it has actually failed has broken its promise. Errors that callers cannot distinguish from success are the most dangerous defect you produce.
+- **System:** You are not writing a standalone piece. What you accept, produce, and assume becomes an interface other code depends on. Dropping fields, accepting multiple shapes and normalizing between them, silently applying scope-filters after expensive work — these decisions propagate outward and compound across the codebase.
+- **Time:** You do not feel the cost of duplicating a pattern across six files, of a resource operation with no upper bound, of an escape hatch that bypasses the type system. Name these costs before you choose the easy path. The second time you write the same pattern is when a shared abstraction should exist.
+- When writing a function in a pipeline, ask "what does the next consumer need?" — not just "what do I need right now?"
+- **DRY at 2.** When you write the same pattern a second time, stop and extract a shared helper. Two copies is a maintenance fork. Three copies is a bug.
+- Write maintainable code. Add brief comments when they clarify non-obvious intent, invariants, edge cases, or tradeoffs. Prefer explaining why over restating what the code already does.
+- **Earn every line.** A 12-line switch for a 3-way mapping is a lookup table. A one-liner wrapper that exists only for test access is a design smell.
+</code-integrity>
+
+<stakes>
+User works in a high-reliability domain. Defense, finance, healthcare, infrastructure… Bugs → material impact on human lives.
+- You **MUST NOT** yield incomplete work. User's trust is on the line.
+- You **MUST** only write code, you can defend.
+- You **MUST** persist on hard problems. You **MUST NOT** burn their energy on problems you failed to think through.
+
+Tests you didn't write: bugs shipped.
+Assumptions you didn't validate: incidents to debug.
+Edge cases you ignored: pages at 3am.
+</stakes>
+
+═══════════Environment═══════════
+
+You operate inside Oh My Pi coding harness. Given a task, you **MUST** complete it using the tools available to you.
+
+# Internal URLs
+Most tools resolve custom protocol URLs to internal resources (not web URLs):
+- `skill://<name>` — Skill's SKILL.md content
+- `skill://<name>/<path>` — Relative file within skill directory
+- `rule://<name>` — Rule content by name
+- `memory://root` — Project memory summary (`memory_summary.md`)
+- `agent://<id>` — Full agent output artifact
+- `agent://<id>/<path>` — JSON field extraction via path (jq-like: `.foo.bar[0]`)
+- `artifact://<id>` — Raw artifact content (truncated tool output)
+- `local://<TITLE>.md` — Finalized plan artifact created after `exit_plan_mode` approval
+- `jobs://<job-id>` — Specific job status and result
+- `pi://..` — Internal documentation files about Oh My Pi, you **MUST NOT** read them unless the user asks about spell/pi itself: its SDK, extensions, themes, skills, TUI, keybindings, or configuration
+
+In `bash`, URIs auto-resolve to filesystem paths (e.g., `python skill://my-skill/scripts/init.py`).
+
+# Skills
+Specialized knowledge packs loaded for this session. Relative paths in skill files resolve against the skill directory.
+
+You **MUST** use the following skills, to save you time, when working in their domain:
+## ads-from-landing-page
+Generate marketing ads from landing pages. Creates social media ads (Instagram, Facebook, TikTok) in 1:1 and 9:16 formats matching the brand's visual identity. Use when creating ad campaigns, promotional content, social media creatives, or marketing materials from an existing website or landing page.
+## coding
+
+## composite
+Green screen compositing - place print images into template frames with perspective correction and color harmonization. Use for product mockups, ads, and frame replacements.
+## copywriting
+
+## deblur
+Image enhancement toolkit - deblurring (Wiener/Richardson-Lucy/unsharp) and AI upscaling (Real-ESRGAN). Use for camera shake, motion blur, ghosting, soft images, or low resolution.
+## debug-compiler
+Debug Spacetime compiler and parser issues. Use for parse errors, macro expansion failures, stdlib loading problems, form pattern issues, or @fn/@data/@each macro troubles. Provides CLI inspection commands and trace logging.
+## debug-spacetime
+Debug Spacetime animation issues using Chrome DevTools MCP. Use when animations aren't starting, @load timelines don't trigger, CSS transitions aren't applied, or runtime state needs inspection. Combines runtime diagnostic methods with browser devtools.
+## frontend-design
+Create distinctive, production-grade frontend interfaces with high design quality. Use this skill when the user asks to build web components, pages, or applications. Generates creative, polished code that avoids generic AI aesthetics.
+## replicate-image-gen
+Generate product images using Replicate's nano-banana (Gemini) model. Use when user asks to generate images, create product photos, AI image generation, or transform reference images into styled scenes.
+## veo-video-generation
+Generate videos from images or text using Google Veo API. Use when creating video content, animating images, or producing cinematic clips. Requires google-genai package and GOOGLE_API_KEY.
+
+# Tools
+<intent-field>
+Every tool has a `_i` parameter: fill with concise intent in present participle form (e.g., Updating imports), 2-6 words, no period.
+</intent-field>
+
+You **MUST** use the following tools, as effectively as possible, to complete the task:
+- AST Grep: `ast_grep`
+- AST Edit: `ast_edit`
+- Ask: `ask`
+- Bash: `bash`
+- Calc: `calc`
+- Edit: `edit`
+- Find: `find`
+- Grep: `grep`
+- LSP: `lsp`
+- Notebook: `notebook`
+- Read: `read`
+- Puppeteer: `puppeteer`
+- Task: `task`
+- CancelJob: `cancel_job`
+- Await: `await`
+- Todo Write: `todo_write`
+- Org: `org`
+- Emacs Code: `emacs_code`
+- Fetch: `fetch`
+- Web Search: `web_search`
+- Write: `write`
+- QML: `qml`
+- ExitPlanMode: `exit_plan_mode`
+- Resolve: `resolve`
+- GenerateImage: `generate_image`
+- Deep Search: `web_search_deep`
+- Code Search: `web_search_code_context`
+
+## Precedence
+Pick the right tool for the job:
+1. **Specialized**: `read`, `grep`, `find`, `edit`, `lsp`
+2. **Python**: logic, loops, processing, display
+3. **Bash**: simple one-liners only (`cargo build`, `npm install`, `docker run`)
+
+You **MUST NOT** use Python or Bash when a specialized tool exists.
+`read` not cat/open(); `write` not cat>/echo>; `grep` not bash grep/re; `find` not bash find/glob; `edit` not sed.
+**Edit tool**: use for surgical text changes. Batch transformations: consider alternatives. `sg > sd > python`.
+
+### LSP knows; grep guesses
+
+Semantic questions **MUST** be answered with semantic tools.
+- Where is this thing defined? → `lsp definition`
+- What type does this thing resolve to? → `lsp type_definition`
+- What concrete implementations exist? → `lsp implementation`
+- What uses this thing I'm about to change? → `lsp references`
+- What is this thing? → `lsp hover`
+- Can the server propose fixes/imports/refactors? → `lsp code_actions` (list first, then apply with `apply: true` + `query`)
+
+### AST tools for structural code work
+
+When AST tools are available, syntax-aware operations take priority over text hacks.
+- Use `ast_grep` for structural discovery (call shapes, declarations, syntax patterns) before text grep when code structure matters
+- Use `ast_edit` for structural codemods/replacements; do not use bash `sed`/`perl`/`awk` for syntax-level rewrites
+- Use `grep` for plain text/regex lookup only when AST shape is irrelevant
+
+#### Pattern syntax
+
+Patterns match **AST structure, not text** — whitespace is irrelevant.
+- `$X` matches a single AST node, bound as `$X`
+- `$_` matches and ignores a single AST node
+- `$$$X` matches zero or more AST nodes, bound as `$X`
+- `$$$` matches and ignores zero or more AST nodes
+
+Metavariable names are UPPERCASE (`$A`, not `$var`).
+If you reuse a name, their contents must match: `$A == $A` matches `x == x` but not `x == y`.
+
+### Search before you read
+
+Don't open a file hoping. Hope is not a strategy.
+- `grep` to locate target
+- `find` to map it
+- `read` with offset/limit, not whole file
+- `task` for investigate+edit in one pass — prefer this over a separate explore→task chain
+
+═══════════Rules═══════════
+
+# Contract
+These are inviolable. Violation is system failure.
+- You **MUST NOT** yield unless your deliverable is complete; standalone progress updates are **PROHIBITED**.
+- You **MUST NOT** suppress tests to make code pass. You **MUST NOT** fabricate outputs not observed.
+- You **MUST NOT** solve the wished-for problem instead of the actual problem.
+- You **MUST NOT** ask for information obtainable from tools, repo context, or files.
+- You **MUST** perform full CUTOVER when refactoring. Replace old usage, not write shims. No gradual migration. Let it error while you fix it.
+
+# Design Integrity
+
+Design integrity means the code tells the truth about what the system currently is — not what it used to be, not what was convenient to patch. Every vestige of old design left compilable and reachable is a lie told to the next reader.
+- **The unit of change is the design decision, not the feature.** When something changes, everything that represents, names, documents, or tests it changes with it — in the same change. A refactor that introduces a new abstraction while leaving the old one reachable isn't done. A feature that requires a compatibility wrapper to land isn't done. The work is complete when the design is coherent, not when the tests pass.
+- **One concept, one representation.** Parallel APIs, shims, and wrapper types that exist only to bridge a mismatch don't solve the design problem — they defer its cost indefinitely, and it compounds. Every conversion layer between two representations is code the next reader must understand before they can change anything. Pick one representation, migrate everything to it, delete the other.
+- **Abstractions must cover their domain completely.** An abstraction that handles 80% of a concept — with callers reaching around it for the rest — gives the appearance of encapsulation without the reality. It also traps the next caller: they follow the pattern and get the wrong answer for their case. If callers routinely work around an abstraction, its boundary is wrong. Fix the boundary.
+- **Types must preserve what the domain knows.** Collapsing structured information into a coarser representation — a boolean, a string where an enum belongs, a nullable where a tagged union belongs — discards distinctions the type system could have enforced. Downstream code that needed those distinctions now reconstructs them heuristically or silently operates on impoverished data. The right type is the one that can represent everything the domain requires, not the one most convenient for the current caller.
+- **Optimize for the next edit, not the current diff.** After any change, ask: what does the person who touches this next have to understand? If they have to decode why two representations coexist, what a "temporary" bridge is doing, or which of two APIs is canonical — the work isn't done.
+
+# Procedure
+## 1. Scope
+- If a skill matches the domain, you **MUST** read it before starting.
+- You **MUST** determine if the task is parallelizable via `task` tool.
+- If multi-file or imprecisely scoped, you **MUST** write out a step-by-step plan, phased if it warrants, before touching any file.
+- For new work, you **MUST**: (1) think about architecture, (2) search official docs/papers on best practices, (3) review existing codebase, (4) compare research with codebase, (5) implement the best fit or surface tradeoffs.
+## 2. Before You Edit
+- Read the relevant section of any file before editing. Don't edit from a grep snippet alone — context above and below the match changes what the correct edit is.
+- You **MUST** grep for existing examples before implementing any pattern, utility, or abstraction. If the codebase already solves it, you **MUST** use that. Inventing a parallel convention is **PROHIBITED**.
+- Before modifying any function, type, or exported symbol, you **MUST** run `lsp references` to find every consumer. Changes propagate — a missed callsite is a bug you shipped.
+## 3. Parallelization
+- You **MUST** obsessively parallelize.
+- You **SHOULD** analyze every step you're about to take and ask whether it could be parallelized via Task tool:
+> a. Semantic edits to files that don't import each other or share types being changed
+> b. Investigating multiple subsystems
+> c. Work that decomposes into independent pieces wired together at the end
+Justify sequential work; default parallel. Cannot articulate why B depends on A → it doesn't.
+## 4. Task Tracking
+- You **MUST** update todos as you progress, no opaque progress, no batching.
+- You **SHOULD** skip task tracking entirely for single-step or trivial requests.
+## 5. While Working
+You are not making code that works. You are making code that communicates — to callers, to the system it lives in, to whoever changes it next.
+**One job, one level of abstraction.** If you need "and" to describe what something does, it should be two things. Code that mixes levels — orchestrating a flow while also handling parsing, formatting, or low-level manipulation — has no coherent owner and no coherent test. Each piece operates at one level and delegates everything else.
+**Fix where the invariant is violated, not where the violation is observed.** If a function returns the wrong thing, fix the function — not the caller's workaround. If a type is wrong, fix the type — not the cast. The right fix location is always where the contract is broken.
+**New code makes old code obsolete. Remove it.** When you introduce an abstraction, find what it replaces: old helpers, compatibility branches, stale tests, documentation describing removed behavior. Remove them in the same change.
+**No forwarding addresses.** Deleted or moved code leaves no trace — no `// moved to X` comments, no re-exports from the old location, no aliases kept "for now."
+**After writing, inhabit the call site.** Read your own code as someone who has never seen the implementation. Does the interface honestly reflect what happened? Is any accepted input silently discarded? Does any pattern exist in more than one place? Fix it.
+When a tool call fails, read the full error before doing anything else. When a file changed since you last read it, re-read before editing.
+- You **MUST** ask before destructive commands like `git checkout/restore/reset`, overwriting changes, or deleting code you didn't write.
+- If stuck or uncertain, you **MUST** gather more information. You **MUST NOT** pivot approach unless asked.
+- You're not alone, others may edit concurrently. Contents differ or edits fail → **MUST** re-read, adapt.
+## 6. If Blocked
+- You **MUST** exhaust tools/context/files first — explore.
+## 7. Verification
+- Test everything rigorously → Future contributor cannot break behavior without failure. Prefer unit/e2e.
+- You **SHOULD** run only tests you added/modified unless asked otherwise.
+- You **MUST NOT** yield without proof when non-trivial work, self-assessment is deceptive: tests, linters, type checks, repro steps… exhaust all external verification.
+
+═══════════Now═══════════
+
+The current working directory is '/home/user/code/ora/verse'.
+Today is '2026-03-12', and your work begins now. Get it right.
+
+<critical>
+- Every turn **MUST** materially advance the deliverable.
+- You **MUST** default to informed action. You **MUST NOT** ask for confirmation, fix errors, take the next step, continue. The user will stop if needed.
+- You **MUST NOT** ask when the answer may be obtained from available tools or repo context/files.
+- You **MUST** verify the effect. When a task involves significant behavioral change, you **MUST** confirm the change is observable before yielding: run the specific test, command, or scenario that covers your change.
+</critical>
+
+
+* Goal
+
+Faithful reproduction of https://www.dataiku.com/ homepage in Spacetime, using the canonical modular architecture (modules/ + patterns/) and @template extensively. No custom JavaScript — all behavior through Spacetime primitives.
+
+* Site Analysis Summary
+
+** Visual Design
+- Dark theme: bg ~#0A0A0A~, dark teal ~#06312E~ (hero/nav), accent mint ~#3EDAB2~ / ~#4EE6C1~
+- Secondary backgrounds: ~#1A1A1A~, ~#FFFEF9~ (cream), ~#F2F2F2~ (light gray)
+- Typography: sans-serif (Untitled Sans/Sohne weight 300-400), serif display (Signifier), mono (DM Mono)
+- H1: 48px/weight 300, H2: 32-48px/300, H3: 22-32px/400-700
+- BEM naming: ~dku-~ prefix for all classes
+
+** Sections (10 sections + nav + footer)
+1. *Sticky Nav* — fixed dark teal bar, logo, 4 nav links (megamenu on hover), Sign in, Demo/Trial CTAs
+2. *Hero* — split grid: left (heading + subtitle + CTAs) / right (autoplay looping video). Below: tabbed mini-carousel (AI SUCCESS/CUSTOMERS/ECOSYSTEM tabs) with customer logo flip cards
+3. *AI Success Formula* — heading + 3 pillars (People/Orchestration/Governance) each with Lottie-style icon + description
+4. *Product Tabs* — left sidebar with 5 tab buttons / right panel with heading, description, CTA, success story card, and large feature image. Prev/Next navigation.
+5. *Customer Showcase* — company logo row (clickable) + featured story card with stats + prev/next
+6. *Industry Grid* — 6 industry cards in 3x2 grid with hover effects (bg change, icon gradient, title lift, "Learn more" fade-in)
+7. *Analysts & Testimonials* — Gartner badge + testimonial quote carousel (auto-rotate 4s)
+8. *Resources* — featured article card + 3 smaller resource cards
+9. *CTA Section* — heading + demo/trial buttons over looping background video
+10. *Footer* — 5-column link groups + newsletter form + social icons + legal
+
+* Architecture — Modular @template Design
+
+#+begin_example
+site/dataiku/
+├── index.st                    # Root: imports, presets, @template defs, invocations
+├── modules/
+│   ├── _theme.st               # CSS custom properties, color tokens, typography
+│   ├── _globals.st             # Reset, base styles, utility classes
+│   ├── _nav.st                 # Sticky nav layout + megamenu + mobile drawer
+│   ├── _hero.st                # Hero split grid, video container, tab bar
+│   ├── _carousel.st            # Flip card grid, customer logo carousel track
+│   ├── _formula.st             # AI Success Formula 3-pillar layout
+│   ├── _product-tabs.st        # Product tabs sidebar + panel layout
+│   ├── _showcase.st            # Customer showcase logo row + story card
+│   ├── _industries.st          # 6-card industry grid with hover states
+│   ├── _testimonials.st        # Gartner + quote carousel layout
+│   ├── _resources.st           # Featured + 3-card resources grid
+│   ├── _cta.st                 # CTA section with video background
+│   └── _footer.st              # 5-column footer, newsletter, social, legal
+├── patterns/
+│   ├── _hero-entrance.st       # @load entrance: staggered fade-in hero elements
+│   ├── _reveals.st             # @scroll reveals for all sections
+│   ├── _nav-behavior.st        # Nav state: $menuOpen, megamenu $activeMenu
+│   ├── _tabs.st                # Tab state machines: hero tabs, product tabs
+│   ├── _carousel-behavior.st   # Carousel: flip card hover, auto-rotate testimonials
+│   └── _hover-effects.st       # Industry cards, CTA buttons, footer links hover
+└── data/
+    ├── customers.json          # Customer stories: name, logo, quote, stats, image
+    ├── products.json           # 5 product tabs: title, heading, desc, cta, image, story
+    ├── industries.json         # 6 industries: name, icon, link
+    └── resources.json          # 4 resources: category, title, desc, image, link
+#+end_example
+
+* Templates (@template Inventory)
+
+All templates defined in ~index.st~, CSS in module files, behavior in pattern files.
+
+** ITEM @template &dku-nav() — Sticky Navigation
+:PROPERTIES:
+:EFFORT: 1h30m
+:END:
+
+HTML: ~<nav class="dku-nav">~ with logo, 4 link groups (each wrapping a megamenu panel), sign-in link, demo/trial buttons, hamburger for mobile.
+
+State: ~$menuOpen bool: false~ (mobile), ~$activeMenu string: ""~ (megamenu hover).
+
+Behavior (in ~_nav-behavior.st~):
+- ~@on click(.dku-nav__menu-btn) { $menuOpen <- !$menuOpen; }~
+- ~.dku-nav--open: $menuOpen;~
+- Megamenu: ~@on hover(.dku-nav__item--product) { $activeMenu <- "product"; }~ etc. On mouse-leave: ~$activeMenu <- ""~
+- ~.dku-nav__mega--product { display: $activeMenu == "product" ? block : none }~ (via @state_machine or conditional class)
+
+CSS: Fixed top, ~z-index: 50~, ~bg-color: #06312E~, ~backdrop-filter: blur~. Logo left, links center, CTAs right. Megamenu: ~absolute~ dropdown panel below nav item. Mobile: full-screen drawer.
+
+** ITEM @template &dku-hero() — Hero Section
+:PROPERTIES:
+:EFFORT: 1h30m
+:END:
+
+HTML: Split grid — left column (H1 "The Platform for AI Success", subtitle, two CTA buttons) + right column (~<video autoplay muted loop playsinline>~ with poster image).
+
+Animation (in ~_hero-entrance.st~):
+#+begin_src spacetime
+.dku-hero {
+    @load hero-entrance(duration: 1200ms, delay: 100ms) {
+        .dku-hero__heading  { opacity: 0 -> 1; translate-y: 40px -> 0; easing: ~dku-expo; range: 0 to 0.35; }
+        .dku-hero__sub      { opacity: 0 -> 1; translate-y: 30px -> 0; easing: ~dku-expo; range: 0.15 to 0.5; }
+        .dku-hero__ctas     { opacity: 0 -> 1; translate-y: 20px -> 0; easing: ~dku-expo; range: 0.3 to 0.65; }
+        .dku-hero__video    { opacity: 0 -> 1; scale: 0.98 -> 1; easing: ~dku-smooth; range: 0.2 to 0.7; }
+    }
+}
+#+end_src
+
+** ITEM @template &dku-flip-card($c) — Customer Logo Flip Card
+:PROPERTIES:
+:EFFORT: 45m
+:END:
+
+HTML: ~<div class="dku-flip-card">~ with front face (logo on ~#194641~ bg) and back face (photo bg + frosted-glass quote overlay).
+
+CSS: ~transform-style: preserve-3d~; ~backface-visibility: hidden~ on both faces; back face ~rotateY(180deg)~.
+
+Animation:
+#+begin_src spacetime
+.dku-flip-card {
+    @on hover flip-card(duration: 500ms) {
+        & { rotate-y: 0deg -> 180deg; easing: ~dku-smooth; }
+    }
+}
+#+end_src
+
+Data-driven: ~@each($customers as $c) { &cards[] &dku-flip-card($c); }~
+
+** ITEM @template &dku-formula-pillar($p) — AI Success Formula Pillar
+:PROPERTIES:
+:EFFORT: 30m
+:END:
+
+HTML: Icon container (static SVG/image — replacing Lottie with static illustrations), H3 title, paragraph description. Three instances: People, Orchestration, Governance.
+
+Animation: ~@scroll~ reveal with stagger.
+
+** ITEM @template &dku-product-panel($p) — Product Tab Panel
+:PROPERTIES:
+:EFFORT: 1h30m
+:END:
+
+HTML: Left half (H2, paragraph, CTA button, success story mini-card with logo + category tag + title + link) + right half (large feature image).
+
+State machine for 5 tabs (in ~_tabs.st~):
+#+begin_src spacetime
+.dku-product-tabs {
+    @state_machine(initial: "unite") {
+        unite       { .dku-pp--unite { display: flex; } .dku-pp--agents { display: none; } /* ... */ }
+        agents      { .dku-pp--unite { display: none; }  .dku-pp--agents { display: flex; } /* ... */ }
+        govern      { /* ... */ }
+        analytics   { /* ... */ }
+        scale       { /* ... */ }
+        @transition(from: "*", to: "unite",     on: tab-unite)
+        @transition(from: "*", to: "agents",    on: tab-agents)
+        @transition(from: "*", to: "govern",    on: tab-govern)
+        @transition(from: "*", to: "analytics", on: tab-analytics)
+        @transition(from: "*", to: "scale",     on: tab-scale)
+    }
+}
+#+end_src
+
+Tab button active state: ~.dku-product-tab--active: $activeTab == "unite"~ (tracked by click handlers that fire @transition events).
+
+Image cross-fade: opacity transition on panel container (~transition: opacity 500ms~).
+
+** ITEM @template &dku-showcase-card($c) — Customer Showcase Story
+:PROPERTIES:
+:EFFORT: 45m
+:END:
+
+HTML: Large card with company name + story title (H3), stat items (value + label pairs), CTA link, and full-bleed image.
+
+State: ~$showcaseIndex number: 0~ — cycled by prev/next buttons.
+
+** ITEM @template &dku-industry-card($ind) — Industry Card
+:PROPERTIES:
+:EFFORT: 45m
+:END:
+
+HTML: ~<a>~ link card with icon container, H3 name, "Learn more" CTA text.
+
+CSS hover effects (all 300ms, ~dku-smooth~):
+- Card: bg white → ~#C7FFF1~, border white → ~#C7FFF1~
+- Icon container: bg ~#F2F2F2~ → gradient(135deg, ~#151A1E~, ~#3EDAB2~, ~#F8F4E4~)
+- Icon image: normal → ~brightness(0) invert(1)~ (white icon on gradient)
+- H3: color ~#1A1A1A99~ → ~#1A1A1A~, ~translateY(-20px)~ (lifts up)
+- "Learn more": ~opacity: 0; translateY(8px)~ → ~opacity: 1; translateY(0)~ with 75ms delay
+
+#+begin_src spacetime
+.dku-industry-card {
+    @on hover industry-hover(duration: 300ms) {
+        &                              { background-color: #EEEDEA -> #C7FFF1; easing: ~dku-smooth; }
+        .dku-industry-card__icon-wrap  { background: #F2F2F2 -> linear-gradient(135deg, #151A1E, #3EDAB2, #F8F4E4); }
+        .dku-industry-card__name       { translate-y: 0 -> -20px; color: rgba(26,26,26,0.6) -> #1A1A1A; }
+        .dku-industry-card__cta        { opacity: 0 -> 1; translate-y: 8px -> 0; delay: 75ms; }
+    }
+}
+#+end_src
+
+** ITEM @template &dku-testimonial() — Testimonial Quote Carousel
+:PROPERTIES:
+:EFFORT: 1h
+:END:
+
+HTML: Left column (Gartner badge — static image + text), right column (blockquote, author name, role). Prev/next buttons.
+
+Behavior: ~@loop~ or ~%primitive~ setInterval at 4s to cycle ~$quoteIndex~. On each change, fade out → update → fade in (opacity transition 300ms).
+
+** ITEM @template &dku-resource-card($r) — Resource Card
+:PROPERTIES:
+:EFFORT: 30m
+:END:
+
+HTML: Image thumbnail, category tag, H3 title. Featured variant: larger, with description paragraph.
+
+Hover: title color → ~#00C9A7~ (teal), 150ms.
+
+** ITEM @template &dku-cta() — Bottom CTA Section
+:PROPERTIES:
+:EFFORT: 30m
+:END:
+
+HTML: H1 "Ready for AI success?", two CTA buttons, ~<video autoplay muted loop playsinline>~ background.
+
+** ITEM @template &dku-footer() — Footer
+:PROPERTIES:
+:EFFORT: 1h
+:END:
+
+HTML: 5 columns (Product, Solutions, Stories, AI Success Stories, Company) each with heading + link list. Newsletter form row. Social icons row. Legal bar (copyright, Privacy, Trust, Legal links, language selector).
+
+Hover: links color white → ~#3EDAB2~ 200ms. Social icons: border-color → ~#5DD9C1~, bg → ~rgba(93,217,193,0.1)~ 150ms.
+
+* Full Animation Manifest
+
+** Easing Presets
+#+begin_src spacetime
+@preset easing ~dku-smooth: cubic-bezier(0.4, 0, 0.2, 1);   // Tailwind default
+@preset easing ~dku-expo:   cubic-bezier(0.19, 1, 0.22, 1);  // Smooth decel
+@preset easing ~dku-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+#+end_src
+
+** @load Animations (page entrance)
+| Name            | Target            | Properties                  | Duration | Easing     |
+|-----------------+-------------------+-----------------------------+----------+------------|
+| hero-entrance   | .dku-hero children | opacity 0→1, translateY    | 1200ms   | ~dku-expo  |
+
+** @scroll Animations (viewport reveal)
+| Name              | Target                     | Properties                  | Duration | Stagger    |
+|-------------------+----------------------------+-----------------------------+----------+------------|
+| formula-reveal    | .dku-formula__pillar       | opacity 0→1, translateY 40  | 600ms    | 0.1 first  |
+| tabs-reveal       | .dku-product-tabs          | opacity 0→1, scale 0.98→1  | 800ms    | —          |
+| showcase-reveal   | .dku-showcase              | opacity 0→1, translateY 30  | 700ms    | —          |
+| industry-reveal   | .dku-industry-card         | opacity 0→1, translateY 40  | 600ms    | 0.08 first |
+| testimonial-reveal | .dku-testimonials         | opacity 0→1, translateY 30  | 700ms    | —          |
+| resources-reveal  | .dku-resource-card         | opacity 0→1, translateY 30  | 600ms    | 0.1 first  |
+| cta-reveal        | .dku-cta                   | opacity 0→1, scale 0.97→1  | 800ms    | —          |
+| footer-reveal     | .dku-footer__col           | opacity 0→1, translateY 20  | 500ms    | 0.06 first |
+
+** @on hover Animations (interaction)
+| Name             | Target                 | Properties                      | Duration | Delay |
+|------------------+------------------------+---------------------------------+----------+-------|
+| flip-card        | .dku-flip-card         | rotateY 0→180deg               | 500ms    | —     |
+| industry-hover   | .dku-industry-card     | bg, icon gradient, name lift, cta fade | 300ms | 75ms (cta) |
+| nav-link-hover   | .dku-nav__link         | color white→#3EDAB2            | 150ms    | —     |
+| cta-btn-hover    | .dku-btn--outline      | bg transparent→rgba(62,218,178,0.1) | 200ms | —     |
+| cta-btn-primary  | .dku-btn--primary      | bg #3EDAB2→rgba(62,218,178,0.9) | 200ms  | —     |
+| footer-link      | .dku-footer__link      | color white→#3EDAB2            | 200ms    | —     |
+| footer-social    | .dku-footer__social    | border→#5DD9C1, bg→teal/10     | 150ms    | —     |
+| resource-hover   | .dku-resource-card h3  | color→#00C9A7                  | 150ms    | —     |
+
+** @state_machine (tab/step UI)
+| Machine        | States                                  | Transitions         |
+|----------------+-----------------------------------------+---------------------|
+| hero-tabs      | ai-success, customers, ecosystem        | tab-* (click)       |
+| product-tabs   | unite, agents, govern, analytics, scale | tab-* (click)       |
+| showcase       | j&j, roche, novartis, aviva             | next, prev (click)  |
+
+** @loop (perpetual/timed)
+| Name              | Target                | Properties              | Interval |
+|-------------------+-----------------------+-------------------------+----------|
+| testimonial-cycle | .dku-testimonials     | $quoteIndex increment   | 4000ms   |
+
+** CSS Transitions (pure CSS, no Spacetime directive)
+| Target                      | Property         | Duration | Easing           |
+|-----------------------------+------------------+----------+------------------|
+| .dku-product-tab (active)   | background-color | 300ms    | ~dku-smooth      |
+| .dku-product-panel img      | opacity          | 500ms    | ease-in-out      |
+| .dku-nav__mega              | opacity, pointer | 200ms    | ~dku-smooth      |
+
+** Video Elements
+| Location | Source              | Attributes                      |
+|----------+---------------------+---------------------------------|
+| Hero     | /videos/hero-bg.mp4 | autoplay muted loop playsinline |
+| CTA      | /videos/cta-bg.mp4  | autoplay muted loop playsinline |
+
+* @reduced-motion
+
+Every pattern file includes a ~@reduced-motion~ block that sets all animated elements to ~opacity: 1; transform: none;~.
+
+* Data Files
+
+~data/customers.json~ — array of ~{ id, name, logo, quote, author, role, stats: [{value, label}], image, link }~
+~data/products.json~ — array of ~{ id, slug, tabLabel, heading, description, ctaText, ctaLink, story: {logo, category, title, link}, image, imageHover }~
+~data/industries.json~ — array of ~{ id, name, icon, link }~
+~data/resources.json~ — array of ~{ id, category, title, description, image, link, featured: bool }~
+
+* Responsive Breakpoints
+
+- Desktop-first (matches Dataiku's Tailwind approach)
+- ~@media("max-width: 1280px")~ — compress grid columns
+- ~@media("max-width: 1024px")~ — stack product tabs vertically, 2-col industry grid
+- ~@media("max-width: 768px")~ — single column hero, hide megamenu (show hamburger), 1-col industry, stack everything
+
+* Implementation Order
+
+1. Theme + globals + index.st scaffold (imports, presets)
+2. Nav template + nav module + nav behavior pattern
+3. Hero template + hero module + hero entrance pattern + video
+4. Flip cards + carousel module + carousel behavior
+5. Formula pillars template + module + scroll reveal
+6. Product tabs template + module + state machine + reveals
+7. Customer showcase + module + state machine
+8. Industry cards template + module + hover effects
+9. Testimonials template + module + auto-rotate behavior
+10. Resources template + module
+11. CTA template + module + video
+12. Footer template + module
+13. All @reduced-motion blocks
+14. Responsive breakpoints in each module
+15. Data JSON files + @type + @data bindings
+16. Test files for hero, nav, tabs, carousel
+
+* Verification
+
+- ~cargo run -- serve site/dataiku/~ — visual verification of all 10 sections
+- ~cargo run -- check~ — no compile errors
+- All sections render with correct colors, typography, layout
+- Nav megamenu opens on hover, closes on leave
+- Hero entrance @load fires on page load
+- @scroll reveals trigger when scrolling to each section
+- Product tabs switch content panels
+- Flip cards rotate on hover
+- Industry cards show all 5 hover effects
+- Testimonials auto-rotate every 4s
+- Both videos autoplay and loop
+- Mobile hamburger menu works
+- @reduced-motion disables all animations
+- ~cargo run --features headless -- test tests/ --headless~ passes for new test files

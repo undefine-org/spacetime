@@ -1,0 +1,91 @@
+#+TITLE: FUP (SIP seed): fire-time consequence evaluation — dynamic form args + keyframe endpoints
+#+STATE: ITEM
+#+SESSION_ID: 1534a2eae1903af0
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-18T13-07-01-638Z_1534a2eae1903af0.jsonl]]
+#+CUSTOM_ID: FUP-156-fup-sip-seed-fire-time-consequence-evalu
+
+* Initial Message
+
+can you explain everything that is still open for my decisions? Explain it with depth and sharpness
+
+SIP candidate, requested by the user (2026-07-26, D31). PLAN-126 ships
+`.prev` + arm guards with consequences still compile-time-baked; this FUP
+is the machinery that makes consequences value-reactive AT FIRE TIME.
+
+* The syntax it enables
+
+#+begin_src
+/* dynamic form args in arms — bound pattern values flow INTO the consequence */
+.stock {
+  @on $price {
+    $old -> $new => --flash(strength: $new - $old, rising: $new > $old);
+  }
+}
+
+/* dynamic keyframe endpoints — signals/facets evaluated at play time */
+.chart {
+  @on $zoom.change(duration: 400ms) {
+    scale: $zoom.prev -> $zoom;
+  }
+}
+.badge {
+  @on $count.change(duration: 300ms) {
+    translate-y: 0 -> ($count - $count.prev) * -2px;
+  }
+}
+#+end_src
+
+* The core semantic (the SIP's one sentence)
+
+Expressions inside an animation CONSEQUENCE evaluate at FIRE time, with
+`.prev` bound to the pre-fire value. Values are captured ONCE per play and
+held constant for that play's duration.
+
+* Why it is a machinery change (measured)
+
+- expand_arms (src/pipeline/drivers.rs:289) resolves each arm's form at
+  COMPILE time: params substituted by name/position/default, duration and
+  easing pulled out for the WAAPI play. Bound pattern values cannot flow
+  through — they would freeze at build.
+- apply-animations (stdlib/primitives/animation/apply-animations.st)
+  interpolates BAKED keyframe IR against driver progress; keyframe values
+  are compile-time data.
+
+* The shape of the implementation (sketch)
+
+1. THUNKED IR: keyframe values and form args may carry `valueExpr` (a JS
+   accessor) instead of a baked literal. At fire time the consequence
+   materializes frames by evaluating the thunks.
+2. Arms: the emitted arm record gains `animationsFor(ctx)` beside the
+   baked `animations` — ctx carries the match bindings ($old/$new), the
+   pre-fire value, and the subject signal accessor. signal-arms' play()
+   calls animationsFor when present.
+3. `.change`/event-driver bodies: play-time capture — evaluate endpoints
+   when the one-shot transport starts, then constant. (`.prev` at fire =
+   the value that TRIGGERED the change — the watcher already has it.)
+4. SCRUB DRIVERS EXCLUDED: per-frame re-evaluation ("live keyframes") is a
+   different, weirder feature (animation shape mutating mid-scrub) and is
+   NOT this SIP. Scrub bodies keep baked IR; fire-time evaluation applies
+   to event/one-shot drivers (`.change`, text-change, click...) only.
+5. Type discipline rides D26: play-time positions accept value-typed
+   expressions; a driver-typed facet in a keyframe value is E0950, checked
+   by the same facet pass PLAN-126 builds.
+
+* Interactions already decided
+
+- `.prev` (D31-ii) ships in PLAN-126 with match-time/flush semantics; the
+  SIP sharpens it in fire-time positions (pre-fire value per play).
+- Guards (D31-iii) are match-time; args are fire-time. The two never share
+  an evaluation moment — document the distinction, it is load-bearing.
+- The D30 bool sugar desugars to arms, so dynamic args work there too for
+  free.
+
+* Acceptance (when promoted to SIP)
+
+- RED→GREEN: `$old -> $new => --flash(strength: $new - $old)` emits an
+  arm whose play evaluates strength at fire time (assert on emitted JS).
+- `scale: $zoom.prev -> $zoom;` in a `.change` body materializes per-fire
+  endpoints (headless gate).
+- Scrub bodies with signals in keyframe values: E0950 (refused loudly,
+  not silently baked).
+- Suites + article gate + node --check stay green.

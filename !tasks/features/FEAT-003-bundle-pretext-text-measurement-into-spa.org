@@ -1,0 +1,106 @@
+#+TITLE: Bundle pretext text measurement into Spacetime runtime
+#+STATE: DONE
+#+SESSION_ID: 14a6f40c66699109
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-03-30T11-18-58-449Z_14a6eb4da46990fa/7-CreateFEAT1.jsonl]]
+#+CUSTOM_ID: FEAT-003-bundle-pretext-text-measurement-into-spa
+#+EFFORT: 3h
+#+PRIORITY: #B
+#+LAYER: runtime
+
+NOTE [2026-03-30]: Superseded: pretext is now embedded via %emit prelude-js in the value-change-driver primitive itself (FEAT-004), eliminating the need for a separate runtime module. No emit.rs or main.rs changes needed.
+
+* Scope
+** In-scope
+- Build @chenglou/pretext TypeScript source to a browser IIFE bundle
+- Create =public/runtime/pretext.js= with thin ST.text wrapper
+- Add =include_str!()= constant in =src/pipeline/emit.rs= (lines 20-28 area)
+- Insert into =format_js_with_runtime()= concatenation (emit.rs lines 272-290)
+- Add headless runtime constant in =src/main.rs= (lines 2738-2752 area)
+- Insert into =get_combined_runtime()= (main.rs line 2765 area)
+** Out-of-scope
+- Modifying the value-change-driver itself (separate item)
+- Any consumer site changes
+- Conditional runtime inclusion (all modules are always included currently)
+** Rationale
+Pretext is a ~15KB pure-TS library that provides canvas-based text measurement with 7680/7680 cross-browser accuracy. By vendoring it into the runtime, any %primitive can use =ST.text= for layout-reflow-free text measurement.
+
+* Tests
+** =tests/value_change_test.rs= (or a new =tests/runtime_pretext_test.rs=)
+- Compile a minimal .st file and verify =compiled.js.contains("ST.text")= is true
+- Verify the IIFE bundle does not pollute global namespace (no bare =window.__Pretext=)
+** Build verification
+- =cargo test --lib= must pass (no compilation errors from include_str)
+
+* Implementation
+** Step 1: Build pretext IIFE bundle
+#+begin_src bash
+# One-time build step (not part of regular cargo build)
+npm install @chenglou/pretext
+bun build node_modules/@chenglou/pretext/src/layout.ts --target browser --format iife --global-name=__PretextInternal --outfile /tmp/pretext-raw.js
+#+end_src
+Wrap the raw IIFE in an ST.text namespace integration:
+#+begin_src javascript
+// public/runtime/pretext.js
+// Pretext — canvas-based text measurement (vendored from @chenglou/pretext)
+(function() {
+  // ... raw IIFE content ...
+
+  // Expose via ST namespace
+  const P = __PretextInternal;
+  ST.text = {
+    prepare: P.prepare,
+    layout: P.layout,
+    prepareWithSegments: P.prepareWithSegments,
+    layoutWithLines: P.layoutWithLines,
+    clearCache: P.clearCache,
+    setLocale: P.setLocale,
+    // Thin wrapper for single-segment width measurement via canvas
+    measureWidth: function(text, font) {
+      // Uses pretext's internal canvas context for consistency
+      var ctx = this._ctx;
+      if (!ctx) {
+        if (typeof OffscreenCanvas !== 'undefined') {
+          ctx = new OffscreenCanvas(1, 1).getContext('2d');
+        } else if (typeof document !== 'undefined') {
+          ctx = document.createElement('canvas').getContext('2d');
+        }
+        this._ctx = ctx;
+      }
+      if (!ctx) return 0;
+      ctx.font = font;
+      return ctx.measureText(text).width;
+    },
+    _ctx: null
+  };
+})();
+#+end_src
+
+** Step 2: Add include_str in emit.rs
+In =src/pipeline/emit.rs= after line 28 (after RUNTIME_TEMPLATES):
+#+begin_src rust
+const RUNTIME_PRETEXT: &str = include_str!("../../public/runtime/pretext.js");
+#+end_src
+Update =format_js_with_runtime()= to include =RUNTIME_PRETEXT= AFTER =RUNTIME_TEMPLATES= and BEFORE site code.
+
+** Step 3: Add headless runtime constant in main.rs
+In =src/main.rs= after ST_TIMELINES (line 2752):
+#+begin_src rust
+#[cfg(feature = "headless")]
+const ST_PRETEXT: &str = include_str!("../public/runtime/pretext.js");
+#+end_src
+Add =ST_PRETEXT= to the array in =get_combined_runtime()= (line 2769 area).
+
+Note: Pretext lazily initializes canvas context — loading in V8/LinkeDOM (headless) is safe. It only throws when =prepare()= or =measureWidth()= is actually called, which requires Canvas API. Value-change tests that exercise measurement should be browser-only.
+
+* Edge Cases
+- Pretext's IIFE must not leak any global variables (verify after build)
+- If IIFE build fails with bun, try esbuild as fallback: =esbuild node_modules/@chenglou/pretext/src/layout.ts --bundle --format=iife --global-name=__PretextInternal --outfile /tmp/pretext-raw.js=
+- Empty string to =ST.text.prepare('', font)= must return a valid object (pretext handles this)
+- =ST.text.measureWidth()= returns 0 if no canvas context available (graceful degradation)
+
+* Acceptance Criteria
+- [ ] =public/runtime/pretext.js= exists and is under 25KB
+- [ ] =cargo test --lib= passes with no compilation errors
+- [ ] Compiled JS output from =cargo run -- build site/= contains =ST.text=
+- [ ] No bare =__PretextInternal= visible in compiled output (IIFE encapsulates)
+- [ ] Pretext version documented in a comment at top of pretext.js

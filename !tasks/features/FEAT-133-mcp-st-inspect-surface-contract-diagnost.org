@@ -1,0 +1,44 @@
+#+TITLE: MCP st_inspect: surface contract/diagnostics/events in human-readable output
+#+STATE: DONE
+#+SESSION_ID: 150f02eff2cc2dd6
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-19T07-44-15-819Z_150f02eff2cc2dd6.jsonl]]
+#+CUSTOM_ID: FEAT-133-mcp-st-inspect-surface-contract-diagnost
+#+COMPLETION_HASH: 63ad09053bd25e45
+
+* Initial Message
+
+Test drive the Spacetime MCP workbench and list all the actions and their expected vs. actual output. The workbench should end up feeling like a mix of Spacetime+Squarespace+Figma/Framer in the end, and it doesn't. This is a REVIEW+DESIGN+BRAINSTORM session
+
+* Summary
+`st_inspect` returns only a one-line summary ("Function fn-2 revision 1." / "2 function(s), 1 mounted instance(s)."). The rich data the tool description PROMISES — contract, compile diagnostics, input, event history, await cursor — is absent from the human-readable text. When `st_fn_put` / `st_tab_open` report "compiled with 1 error(s)", there is NO tool-call path to read that error. The agent is forced to guess source fixes blind.
+
+* Evidence (2026-06-19)
+- `st_fn_put greeter` → "registered with 1 diagnostic(s)"; `st_inspect name:greeter` → "Function fn-2 revision 1." (no diagnostic text).
+- The diagnostic detail DOES exist in `input.json.functions[].compile.diagnostics` and `.contract` — so it's computed, just not surfaced via the tool.
+- Took 4 blind re-registrations + stdlib grep to discover the actual error was a fabricated `@import "stdlib/ui"` (no such module). A one-line diagnostic would have been instant.
+
+* Expected
+`st_inspect` with fn_id/name returns: contract (input kind, params, events, source), compile {ok, sizes, diagnostics[]}, revision, and (for instances) event history + await cursor — as readable text, not only structuredContent.
+
+* Impact
+This is the single biggest DX failure of the live-coding loop. The whole NREPL premise (FEAT-124: "redefine functions and inspect results") depends on inspect actually showing results + errors.
+
+* Fix scope
+- Render diagnostics[] (with line/message) in st_fn_put / st_tab_open failure text AND in st_inspect.
+- Render the contract block (params, events) in st_inspect text.
+- Keep structuredContent for machine consumers.
+
+* Relates
+Parent FEAT-124 (st_inspect deepening is explicitly in-scope). Independent of BUG-110/111; pure tool-output surfacing.
+
+NOTE [2026-06-19]: DONE 2026-06-19. The (summary, structuredContent) tuple sent only `summary` text to MCP clients; diagnostics/contract lived in structuredContent (invisible in text-only clients). Fixed by enriching the summary strings.
+
+Added three formatters in tools.rs (format_compile_errors, format_record_diagnostics, format_contract_params) and wired them:
+- st_fn_put: success shows warnings + contract params; failure inlines every diagnostic with [code] message + "NOT mountable until fixed".
+- st_tab_open: failure inlines compile errors (code/message/selector/hint).
+- st_inspect: instance path shows fn/region/contract; function path shows compile state + diagnostics + contract; list path renders one line per fn (id/name/rev/[ok|ERR]) + per instance (id→fn, region).
+- live.rs mount_function refusal: inlines diagnostics so a blocked mount needs no second st_inspect.
+
+Tests: feat133_format_tests (5) in tools.rs. lib mcp 62/0.
+
+This was the biggest DX wound (the review took 4 blind re-puts to find a fabricated import); now a failed compile is debuggable in one tool call.

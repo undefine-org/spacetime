@@ -1,0 +1,67 @@
+#+TITLE: a bare signal-call body under @on $sig.change silently drops the whole directive
+#+STATE: DONE
+#+PRIORITY: #A
+
+* The bug (twelfth silent-drop instance; reviewer-swarm found, orchestrator reproduced)
+`@on $pings.change { $ping(); }` compiles GREEN (Pages: 1) and emits NOTHING —
+no change-driver bind, no watchChanges, no element init. The whole directive
+vanishes. Reproduced at /tmp/sigcall: 'ping' appears only in state init; no
+`.w` init exists at all.
+
+Mechanism (reviewer 66.0): on_motion_body (stdlib/macros/on.st:163) admits
+slots/splices/mutations/scopes/motion lines — NO bare signal-call
+alternative. The body fails the capture; the directive fails to match; NO
+error sibling fires; the @on drops silently.
+
+Real-world victim: stdlib/__host__/index.st:797 — the host widget's
+`@on $bridgeReady.change { $status(); }` (the BUG-263 @effect migration)
+never subscribes; the widget's status refresh is dead in production.
+
+* Two halves, both required
+1. THE CAPTURE: a bare signal call `$name(args);` is a legal change-rail
+   body — ST.runMutations ALREADY dispatches bare `$name(args)` statements
+   (stdlib/primitives/signal.st:558, public/runtime/st.js:61). The grammar
+   just never captures it. Add the shape to the change-body grammar and
+   lower it as a mutation statement.
+2. THE BACKSTOP: a directive whose head matches but whose body fails EVERY
+   capture must not vanish. The clean-match work (6c5d8cb5) guards OPTIONAL
+   captures; this is a whole-directive no-match after a partial match.
+   Where does the dropped @on go? Find the fall-through and make it loud
+   (E0806-class with the real reason), or prove an existing diagnostic was
+   SUPPOSED to fire and route it.
+
+* Gates
+- /tmp/sigcall shape: the change-driver bind is emitted and a CDP test shows
+  flipping $pings re-fires $ping (the host comment at index.st:793 says a
+  live browser test caught exactly this once — that lesson applies here).
+- NEGATIVE: a body that is genuinely unrecognizable errors at compile time
+  naming the body line — never a green page with a missing init.
+- tests/v8_runtime_test.rs's five stale @effect fixtures (reviewer 66.1)
+  migrate to the @on rail in the same commit.
+
+* FIXED 2026-08-04 (agent 71 + orchestrator)
+
+1. CAPTURE: `%capture_type on_signal_call` in stdlib/macros/on.st — a bare
+   `$name(args)` body is a legal change-rail body, tried AFTER `mutation` so
+   `$dst <- $src` stays a mutation. Lowered as a mutation statement through
+   the same runMutations rail (drivers.rs expand_body, swept into 1af16061).
+2. BACKSTOP: body-capture failures now outrank head failures in the matcher,
+   so an unrecognizable body is LOUD instead of the directive vanishing
+   (proven: the gate file fails to compile when the grammar is reverted).
+3. THE V8 KNOT (orchestrator): the change-driver init builds an
+   AbortController at the top; the V8 harness lacked it, the init threw, and
+   _flushInit's catch swallowed it — the driver never subscribed, invisibly.
+   Two fixes: (a) tests/v8_runtime/context.rs loads the BUG-196
+   AbortController/AbortSignal block SLICED from headless_shims.js (the whole
+   file aborts V8 in the FEAT-077 builder tests — isolate stack check);
+   (b) _flushInit init errors are now ALWAYS console.error, never swallowed
+   (public/runtime/st.js).
+4. TDZ: the driver binds `%&el` to a distinct `targetEl` local — `const el =
+   el` would self-shadow and throw at init.
+5. v8 fixtures: the five stale @effect fixtures migrated to the @on rail;
+   on_change 5/5. FEAT-077 `line: None` repairs included (the concurrent
+   session's required field).
+
+Gates: tests/score/bare-call-rail.test.st (CDP) — fire event after a source
+change, NEGATIVE before; discrimination = revert grammar, gate fails to
+compile. v8_runtime 442+5 on_change/feat077 green; tests/score --cdp 22/22.

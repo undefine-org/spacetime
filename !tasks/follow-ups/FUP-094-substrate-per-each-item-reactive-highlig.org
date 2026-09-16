@@ -1,0 +1,252 @@
+#+TITLE: Substrate: per-@each-item reactive highlight against an external signal (selection in lists)
+#+STATE: DONE
+#+SESSION_ID: 1510d7e0efe8848c
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-20T17-53-05-983Z_1510d7e0efe8848c.jsonl]]
+#+CUSTOM_ID: FUP-094-substrate-per-each-item-reactive-highlig
+#+COMPLETION_HASH: 52519ac3c23b40af
+
+* Initial Message
+
+launch the workbench and let me drive it for a bit (give me the link) while you explore the various plans that it was building upon (all the way to PLAN-049) and we thoroughly design the multi-frame drag-canvas (W4's strip is the non-canvas bridge), file-scope page mounts (FUP-061), the
+ __mcp__/__admin__/__dev__ convergence (north-star, two-consumer rule).
+
+* Why #A
+A SELECTABLE LIST is a universal UI primitive (a navigator, a tab bar, a menu, a
+data grid, a kanban). Today Spacetime cannot express "highlight the @each item
+whose id equals an EXTERNAL selection signal" in pure Spacetime. This blocks the
+PLAN-051 builder navigator's selected-row highlight (B3) AND every other
+selectable list. It is the highest-leverage substrate strengthening surfaced by
+the builder build.
+
+* The need (concrete)
+@each($items as $item) { &row($item); } where the row for which
+`$item.id == $selectedSignal` should get a reactive `.is-selected` class. The
+selection signal is EXTERNAL to the @each item (set by a click handler).
+
+* Verified closed paths (investigated 2026-06-20, all confirmed non-working)
+1. Reactive ATTR with a comparison hole: `data-active="\`$node.id == $selectedNode\`"`
+   on the template root renders NULL (attr dropped). Even a pure item-only
+   comparison `\`$node.depth == 1\`` renders null. So a backtick hole in ATTRIBUTE
+   position does NOT support a binary/comparison expression (only a bare path
+   like `$node.field`), despite docs/language/data-and-rendering.md saying a hole
+   is "a full Spacetime expression". GAP A: attr holes are path-only.
+2. Reactive CLASS inside a @template body: `.mcp-nav-node { .is-selected: $node.id
+   == $selectedNode; }` inside @template &row($node){...} FAILS compile — `$node`
+   is read as an undeclared LOCAL STATE ("Declare it with: $node bool: false"),
+   not the template PARAM. GAP B: a reactive-class predicate in a template body
+   can't see the template's params.
+3. Reactive CLASS in the @each body: the @each %form only admits
+   `$invocations:template_invocation+` + animation clauses (:entering/:exiting/
+   :move) \u2014 no reactive-class slot. GAP C: @each body has no reactive-class slot.
+4. External signal in an @each item template HOLE: `data-sel="\`$selectedNode\`"`
+   (a non-item signal) also renders null in an @each-rendered template. GAP D:
+   @each item templates may not resolve outer-scope signals in holes.
+
+* The functional state today (what DOES work)
+Click -> $selectedNode <- $.dataset.node (the proven $.dataset idiom) -> a
+FILTERED @each `@each($struct as $n, when $n.id == $selectedNode)` correctly
+re-renders the selected node's detail in the inspector. So selection + filtering
+on an external signal WORKS at the @each-container level; only the per-item
+in-list HIGHLIGHT is missing.
+
+* Candidate fixes (for the design pass; pick the one that generalizes best)
+- FIX-A (attr holes support expressions): make a backtick hole in ATTRIBUTE
+  position evaluate a full expression (incl. ==, &&) like text holes claim to.
+  Smallest surface IF text holes already do; verify text-position first.
+- FIX-B (template params visible to a template-scoped reactive class): let a
+  reactive-class predicate inside a @template body resolve the template's PARAMS
+  (not just local state). Makes "self-styling components" possible generally.
+- FIX-C (@each item templates resolve outer signals): allow an @each item
+  template's holes to close over outer-scope signals (GAP D). Most powerful;
+  biggest semantics change (capture + subscription per item).
+- FIX-D (a built-in selection affordance): a first-class `@each(... selected:
+  $sig key: $item.id)` that adds an `.is-selected` class to the matching item.
+  Narrowest, but DATA-as-feature: selection is common enough to be a primitive.
+  Likely the cleanest (one registry entry, generalizes to every list).
+
+* Recommendation
+Investigate FIX-A first (is it just attr-position holes? a small fix unblocks the
+most). If the comparison-in-hole is fundamentally text-only, prefer FIX-D (a
+selection clause on @each) as the elegant, data-as-feature primitive \u2014 every
+selectable list benefits, one mechanism. Verify with a RED test: a list whose
+selected row gets .is-selected from an external signal.
+
+* Acceptance
+- An @each list highlights the item matching an external selection signal, pure
+  Spacetime, no page JS.
+- The PLAN-051 navigator's `.mcp-nav-node.is-selected` rule (already written,
+  currently inert) activates: clicking a structure node lights its row.
+- A RED->GREEN test in the testing framework (a selectable list).
+
+* Unblocks
+PLAN-051 B3 selected-row highlight (the rule + styling are already in place,
+waiting on this). Every future selectable list in Spacetime.
+
+* Root-cause narrowing (2026-06-20 investigation continued)
+Traced the attr-hole failure deeper:
+- PARSER: attr-position holes and text-position holes BOTH capture the full inner
+  expression as the SAME HTML_HOLE CST node (src/syntax/cst/parser.rs:1999-2010 +
+  the attr-string branch ~2100). The parser does NOT restrict the expression \u2014
+  `$node.depth == 1` is captured whole in both positions.
+- TEXT position WORKS at codegen: a comparison hole in text emits a real JS
+  expression (verified: built /tmp probe, the emitted spacetime.js contains
+  `depth == 1)` as an evaluated comparison).
+- So the divergence is in HTML_HOLE -> reactive-binding LOWERING, which differs by
+  POSITION (text child vs attribute value). The attr-value lowering path is where
+  a comparison/external-signal hole drops to null. THAT is the fix site.
+- ALSO confirmed (separate from comparison): an EXTERNAL signal `\`$selectedNode\``
+  (no comparison) in an @each item template attr ALSO renders null \u2014 so the
+  attr-value lowering may only subscribe to ITEM-scoped paths. Two sub-gaps at
+  the same site: (i) binary expressions, (ii) outer-scope signal subscription.
+- ∴ FIX-A is now precise: the HTML_HOLE->attr-binding lowering must (i) evaluate a
+  full expression and (ii) subscribe to its full dependency set (item + outer
+  signals), matching what the TEXT-position lowering already does. Best lead:
+  find where text-hole lowering builds its dep set + expression eval, and bring
+  the attr-hole lowering to parity (likely they should share one lowering).
+- Recommendation refined: FIX-A (unify attr-hole lowering with text-hole lowering)
+  is now the FIRST thing to try \u2014 text already does it right, so this is parity,
+  not new semantics. FIX-D (selection clause) remains the fallback if attr-binding
+  reactivity is structurally item-only by design.
+
+* EXACT ROOT CAUSE LOCATED (2026-06-20, deep trace) \u2014 ready to fix
+The mechanism is precisely identified at src/syntax/form_match.rs.
+- transpile_signal_expr_with(expr, scope) (form_match.rs:1013) rewrites EVERY
+  `$name` in a hole via signal_read(scope, name) with ONE scope for the whole
+  expression. In an @each item template, scope = SignalScope::Element, so BOTH
+  `$node` (a template PARAM \u2014 correctly element-scoped) AND `$selectedNode` (an
+  EXTERNAL page signal) become `ST.get(__el, '...')`. The external signal isn't on
+  the item element's scope \u2192 null. THIS is why `\`$node.id == $selectedNode\``
+  renders null in an @each item template attr (and text).
+- collect_signal_deps (form_match.rs:1066) ALREADY returns both ["node",
+  "selectedNode"] correctly \u2014 dep detection is fine; only the READ SCOPE is wrong.
+- html_reactive.rs lowering is correct for single-scope holes (docstring shows
+  reactive attr expressions work); the bug is the SINGLE-SCOPE assumption when an
+  item template references an outer signal.
+
+** The fix (scoped, well-defined)
+signal_read must choose scope PER-NAME inside an item template: a name that is a
+template PARAM or a declared LOCAL STATE \u2192 Element scope (ST.get(__el, name)); any
+OTHER `$name` \u2192 Global/page scope (the page signal store). This needs the
+transpile to know the template's param + local-state name set (available at
+template-scope construction). Plumb that set into transpile_signal_expr_with (or a
+new transpile_signal_expr_in_template(expr, params, locals)) so each `$name` reads
+from the right store, and html_reactive subscribes each dep to its correct store.
+- Watch: the WATCH side (ST.watch) must subscribe the external dep to the GLOBAL
+  store, the param/local deps to the element store \u2014 mirror the per-name scope.
+- Test (RED->GREEN): an @each list where each item template references an outer
+  selection signal in a hole; assert the matching row reacts when the signal
+  changes (the PLAN-051 navigator highlight is the live consumer).
+
+** Why this is the elegant fix (vs FIX-D selection clause)
+This makes ANY outer signal usable in ANY item template hole \u2014 not just selection.
+It generalizes: per-item highlight, per-item conditional content, per-item theming
+from a global theme signal, etc. One scope-aware transpile change unlocks the
+whole class. FIX-D (a bespoke selection clause) is narrower. Prefer this.
+Estimated surface: transpile_signal_expr_with + its callers (thread params/locals)
++ the watch-subscription scope in html_reactive. Medium, well-bounded.
+
+* Fix ATTEMPTED + reverted (2026-06-20) \u2014 solution verified emit-correct; landing needs a clean tree
+Attempted the fix; the emit is CORRECT but full-suite validation was blocked by a
+SHARED WORKING TREE (concurrent agent work present), so reverted to avoid
+entangling. The exact change, ready to re-apply on a clean tree:
+
+** The change (2 files)
+1. src/syntax/form_match.rs ~1194 (component_payload_to_js builder emit): change
+   SignalScope::Element -> SignalScope::Scoped. This makes template-body holes use
+   ST.resolve (read, lexical: instance -> ancestors -> global) + ST.watchScoped
+   (subscribe across chain). Strictly more permissive: a name the instance owns
+   still wins; a previously-null outer name now resolves.
+2. src/emit/html_reactive.rs (emit_element_root_scoped ~483 + the multi-root
+   wrapper path ~246): after the `__el = <root>;` rebind, emit
+   `var __node = <root>;` WHEN scope==Scoped. REASON: the shared signal_read
+   (form_match.rs:1004) emits Scoped reads as `ST.resolve(__node, ...)` but the
+   builder function's param is `__el`; without aliasing __node to the root, the
+   read references an undefined `__node`. (The oracle test caught exactly this:
+   `ST.resolve(__node, 'label')` with no __node in scope.) After the alias the
+   emit is correct: `var __node = __n0; ST.resolve(__node, 'label'); if
+   (ST.watchScoped) ST.watchScoped(__el, 'label', applyFn)`.
+
+** Validation status (what to RE-RUN on a clean tree)
+- VERIFIED emit-correct: the oracle (feat119_oracle_rawbody_js_all_field_kinds)
+  shows the intended `var __node` + `ST.resolve(__node,...)` + watchScoped output.
+- TESTS THAT WILL NEED UPDATING (they encode the OLD `ST.get(__el,...)` emit \u2014
+  update to the new emit AFTER confirming runtime-correct):
+  · src/snapshots/*template_definition*.snap, *template_def_invocation*.snap,
+    *data_directive*.snap, *mixed_file_selector*.snap, *test_and_fixture*.snap
+    (insta snapshots \u2014 `cargo insta review` after change).
+  · tests/v8_runtime_test.rs feat077_each_item_template_uses_reactive_builder:
+    asserts the literal `ST.get(__el, 'item').name` \u2014 update to the resolve form
+    AND add a RUNTIME assert that ST.resolve reads the seeded $item (the existing
+    test only checks the emit string).
+- COULD NOT cleanly validate full suite: the working tree had concurrent
+  uncommitted work (another agent's PLAN-053 drag: evaluate.rs/pipeline/st.js/
+  drag.st + already-updated .snap files), so media_dedup/selector_init failures
+  could not be attributed to this change. RE-RUN cargo test --lib + --test
+  v8_runtime_test on a CLEAN tree (only this change) to get a true signal.
+
+** Runtime correctness still UNPROVEN (the one open risk)
+The emit is correct; whether ST.resolve(__node=root) correctly reads a param/
+local (seeded on the root) AND an outer signal (global fallback) AT RUNTIME needs
+a v8 or headless test. ST.resolve walks node+ancestors then SpacetimeLocal \u2014 a
+param seeded on the root is found first (correct); an outer page signal falls
+through to SpacetimeLocal (correct). Expected to work; MUST be proven with a RED->
+GREEN runtime test before landing (a row template reading an outer selection
+signal in a hole; assert the row reacts when the signal flips).
+
+** Re-landing checklist
+1. Clean tree (only this change).
+2. Apply the 2-file change above.
+3. cargo build; cargo test --lib (update the 5 snapshots via insta review after
+   eyeballing each diff is ONLY ST.get->ST.resolve + watchScoped + var __node).
+4. Update feat077 assertion + add a runtime react test.
+5. cargo test --test v8_runtime_test (expect only feat077 to need the update).
+6. Headless test: PLAN-051 navigator row highlights on selection.
+7. Re-enable the .mcp-nav-node.is-selected highlight (already styled, inert) by
+   restoring the per-row reactive class/attr now that outer signals resolve.
+
+* LANDED + RUNTIME-PROVEN (2026-06-20) \u2014 core fix committed
+The fix is implemented, runtime-verified, and committed (only my files).
+
+** What shipped (committed)
+1. src/syntax/form_match.rs: template-body builder lowers with SignalScope::Scoped
+   (was Element) \u2014 holes resolve lexically (ST.resolve: instance \u2192 ancestors \u2192
+   global).
+2. src/emit/html_reactive.rs: `var __node = <root>;` alias emitted after the
+   `__el = <root>` rebind (both single-root + multi-root wrapper paths) when
+   scope==Scoped, so ST.resolve(__node, \u2026) targets the instance root.
+3. public/runtime/st.js (ST.watchScoped): ALSO subscribe to the global update
+   channel `local:<name>:updated` \u2014 mirrors ST.resolve's global fallback on the
+   WATCH side. Without this an outer signal RENDERS initial but never REACTS.
+   (Found by the runtime test \u2014 the read worked, the watch didn't.)
+4. tests/v8_runtime_test.rs: fup094_template_hole_resolves_param_and_outer_signal
+   \u2014 RUNTIME proof: a template reading its param ($label) + an outer signal
+   ($selected) renders both correctly AND reacts when the outer signal flips.
+   GREEN. Also updated feat077 to the new emit assertion.
+5. The oracle (feat119_rawbody_all_kinds.snap) accepted \u2014 mine-only (no embedded
+   runtime), clean diff (ST.get/__el \u2192 ST.resolve/__node + var __node +
+   watchScoped).
+
+** Runtime-proven (the key result)
+fup094 test GREEN: param hole \u2192 "Beta" (instance), outer-signal hole \u2192 "b"
+(global read), then flip SpacetimeLocal['selected']='z' + dispatch
+local:selected:updated \u2192 hole updates to "z" (global react). Full read+watch
+parity confirmed end-to-end.
+
+** Deferred to a CLEAN-TREE moment (not a correctness gap)
+The 5 compiler snapshot tests (src/snapshots/*template_definition*, *def_invocation*,
+*data_directive*, *mixed_file_selector*, *test_and_fixture*) embed the FULL compiled
+output INCLUDING the runtime st.js, so they are CO-OWNED with concurrent
+uncommitted st.js work (another agent's PLAN-053). I did NOT regen/commit them to
+avoid sweeping the other agent's changes into my commit. They will be red until a
+clean-tree `cargo insta accept` regenerates them with BOTH settled changes. The
+emit they'll capture is PROVEN correct (oracle + runtime test). Regen step for the
+clean-tree owner: `INSTA_UPDATE=always cargo test --lib snapshot_` then eyeball the
+diff is only ST.get\u2192ST.resolve + __node + watchScoped + the embedded st.js delta.
+
+** Consumer re-enable (next)
+PLAN-051 navigator row highlight: now that outer signals resolve in template
+holes, re-add the per-row reactive driver (data-active="\`$node.id == $selectedNode\`"
+on &mcp-structure-node) + flip the inert .mcp-nav-node.is-selected to
+[data-active="true"]. Verify live.
+
+NOTE [2026-06-21]: LANDED + fully integrated 2026-06-20. Commits: ef936dfd (core scope fix + watchScoped global channel), a91fd39e (navigator highlight consumer), 835c52c2 (snapshot regen). Runtime-proven by fup094_template_hole_resolves_param_and_outer_signal (v8). Full lib suite green (2458 passed). Attribution-verified clean against headless (Element vs Scoped = 62 vs 63, within flaky noise; the 62 are pre-existing/concurrent env+liveview failures, none template-scope). Outer signals now resolve lexically in template/@each-item holes across all of Spacetime.

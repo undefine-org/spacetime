@@ -1,0 +1,74 @@
+#+TITLE: PLAN-042: Post-PLAN-041 cleanup wave (FUP-063/064/066 parallel swarm)
+#+STATE: DONE
+#+SESSION_ID: 150ccb99745d347e
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-17T14-25-31-601Z_150ccb99745d347e.jsonl]]
+#+CUSTOM_ID: PLAN-042-plan-042-post-plan-041-cleanup-wave-fup
+#+COMPLETION_HASH: 6e36c11d34b0d30c
+
+* Initial Message
+
+Dig into the FUPs and explain to me
+1. what got done
+2. what you can do with it
+3. what we should do next
+
+treat this as an overall report to explain things to me from scratch
+
+* Goal
+Harden the base left after PLAN-041 (unified live MCP environment) by clearing the three "Category A / cleanup" follow-ups in ONE parallel wave. Each is independent (disjoint file sets, no shared symbols), so all three run as concurrent subagent tasks. After they join, the ORCHESTRATOR runs the full suite (workers run only their own targeted tests).
+
+This is Wave A of the two-wave plan agreed with the user. Wave B (FEAT-123 interaction kit — picker/form/confirm on the new region pipeline) is the value follow-on, NOT in this plan.
+
+* Parent / lineage
+Follows [[id:PLAN-041-plan-039-unified-live-mcp-environment-or][PLAN-041]] (DONE). These three FUPs were filed during PLAN-041 waves and deferred by design.
+
+* The three cleanup tasks (parallel, no blockers)
+
+** FUP-063 — comment-aware %emit js statement splitter  [compiler]
+`find_semicolon_at_depth_zero` in src/emit/js_parser.rs tracks strings + brace/paren depth but NOT `//` or `/* */` comments. A `;` inside a comment is mis-read as a statement boundary → tail loses its `//` prefix → runtime SyntaxError. Same family as BUG-040/041.
+HARD CONSTRAINT: a prior fix attempt REGRESSED the 4 template snapshots (`template_definition_js`, `template_def_invocation_js`, + the css pair) with `return element;;`, lost indentation, broken `} else {`. The new fix MUST keep those snapshots byte-identical (no `cargo insta accept`).
+Acceptance: new unit test — `;` inside `//` and inside `/* */` does NOT split; 4 snapshots UNCHANGED; `cargo test --lib js_parser` + `cargo test --lib snapshot_tests` green.
+
+** FUP-066 — single shared compile in put_function_from_args  [mcp]
+`put_function_from_args` (src/mcp/tools.rs) compiles the source TWICE: once via `super::bundle::compile_to_bundle` (contract params) and once via `compile_option` (html/css/js). Both run `Compiler::from_ast(&ast).compile()` on the same source. Real risk = divergent error semantics (`has_errors` vs `compile_ok`), already papered over by a `!has_errors` gate.
+Fix: one shared compile/extract that runs the pipeline ONCE and yields both projections (html/css/js/diagnostics + bundle/contract_params) from the same CompiledSpacetime+AST. Keep `compile_to_bundle`'s public API (used by /bundles endpoint + tests); add a combined helper used by put.
+Acceptance: put compiles source exactly once; contract extraction + page compile read the SAME result; existing tests green (`cargo test --lib mcp`).
+
+** FUP-064 — headless harness can drive @each data sources  [testing]
+Re-scoped (2026-06-18): NOT a runtime render bug. Runtime `@each` renders correctly on a live serve — it re-renders on a dispatched `data:{src}:loaded` / `local:{src}:updated` CustomEvent (detail=array), see stdlib/primitives/data/each.st. The headless tests in tests/unit/templates/collection-ref-each.test.st seed `window.SpacetimeLocal.crefItems = [...]` directly and never dispatch that event → @each never renders → the test was in the 251 pre-existing-failure baseline.
+Fix: make the headless harness able to drive an @each data source the way a live page does (dispatch the documented CustomEvent). Prefer an EXISTING testing-vocabulary affordance (@drive / @when data probe) over hand-dispatch; fall back to dispatching the documented event from @eval + document the convention. DO NOT modify runtime each.st render logic.
+Acceptance: collection-ref-each.test.st passes headlessly (`cargo run --features headless -- test tests/unit/templates/collection-ref-each.test.st --headless`); the seeding convention is documented.
+
+* Execution rules (CRITICAL — concurrency safety)
+- Each task COMMITS ITS OWN WORK with an explicit file list (`git add <paths>`), NEVER `git add -A` / `git add .` — three agents share one working tree concurrently.
+- If `.git/index.lock` exists (another worker mid-commit), wait ~1s and retry; NEVER delete the lock; NEVER stash/reset/revert/checkout.
+- Each task runs ONLY its own targeted tests (above). The ORCHESTRATOR runs the full gate after all three join.
+- Disjoint file sets: FUP-063 → src/emit/js_parser.rs; FUP-066 → src/mcp/{tools,bundle,live}.rs; FUP-064 → tests/unit/templates/ + src/test_runner.rs (+ testing stdlib). No overlap.
+- Shared `target/` cargo build lock serializes builds across workers — expected, not an error (workers block, don't fail).
+
+* Verification (orchestrator, post-join)
+Full gate: `cargo test --lib`, `cargo test --test integration_tests`, `cargo test --test v8_runtime_test`, `cargo run --features headless -- test tests/ --headless`. Baseline to beat/hold: lib 2326/0, integration 172/0, v8 428/9 (pre-existing BUG-039), headless 356/251 (FUP-064 should FLIP collection-ref-each from fail→pass, reducing the 251). Confirm 0 NEW regressions.
+
+* Out of scope
+- FEAT-123 kit (Wave B).
+- FUP-061 (file-scope in bundle), FUP-062 (@scope macro), FUP-065 (:root grammar) — design-gated, deferred.
+- FEAT-124 (contract hot-swap/NREPL) — final vision, own dependency chain.
+
+NOTE [2026-06-18]: PLAN-042 COMPLETE. Wave A cleanup shipped — 3 commits, all gated.
+
+Subagent swarm hit a 429 weekly/monthly model limit (all 3 workers returned empty), so the orchestrator executed all three FUPs directly, each committed with an explicit file list + its own targeted tests (the user's constraints honored).
+
+Commits:
+- 2dd2ed01 FUP-063: comment-aware %emit js statement splitter. find_semicolon_at_depth_zero now skips // and /* */ so a ; inside a comment is no longer a false statement boundary; a lone / (division) untouched. Tests: semicolon_inside_comment_is_not_a_boundary + emit_js_comment_with_semicolon_round_trips. js_parser 45/0, the 4 template snapshots BYTE-IDENTICAL (13/0, no insta accept).
+- 11c41afc FUP-066: single shared compile in put_function_from_args. bundle::compile_function runs the pipeline ONCE and yields both the region bundle + page html/js; OptionOutcome::from_compiled derives page ok+diagnostics from the SAME result -> page status and bundle.has_errors cannot diverge. Extracted compile_pipeline + bundle_from_compiled; compile_to_bundle keeps its public API; deleted dead compile_option. Tests: single_compile_tests {clean agree, semantic-error unifies failure}. mcp 38/0.
+- f626def2 FUP-064: drive @each data sources in headless harness. NEW each-data-drive.test.st (2/0) pins the achievable drive contract: a plain selector-scoped @each renders headless when seeded mount->init->ST.setData (data:loaded), re-render via local:updated. Investigation OVERTURNED the prior re-scope: collection-ref-each.test.st fails NOT from seeding but from a real builder gap (collection-ref &cards[] .sel { @each } drops the loop from the template builder, payload refs:[], proven via inspect --layer emit) = BUG-085 class = in-progress PLAN-039. Annotated collection-ref-each as a PLAN-039 pin + corrected its syntax. Filed FUP-067 (backtick-hole @each silently emits nothing — sigil harmony).
+
+FINAL GATE (orchestrator, post-join):
+- lib 2330/0 (+4: 2 js_parser, 2 single_compile)
+- integration 172/0
+- v8 428/9 (the 9 = pre-existing BUG-039: media_dedup x7 + selector_init x2, byte-identical, 0 introduced; confirmed test_comment_in_selector_string_causes_error is a runtime CSS-selector contract test unrelated to FUP-063's JS splitter)
+- headless 358/251 (+2 from each-data-drive flipping fail->pass; failures HELD at 251, 0 regressions)
+
+FUPs: FUP-063 DONE, FUP-066 DONE, FUP-064 drive-half DONE (collection-ref half -> PLAN-039), FUP-067 filed.
+
+Deferred (unchanged, design-gated): FUP-061, FUP-062, FUP-065, FUP-067, FEAT-124. Wave B (FEAT-123 interaction kit) is the next value move, NOT in this plan.

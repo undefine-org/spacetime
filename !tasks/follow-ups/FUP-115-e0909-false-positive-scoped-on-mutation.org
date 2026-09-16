@@ -1,0 +1,58 @@
+#+TITLE: E0909 false positive: scoped @on mutation inside a @template's .sel{} block flagged as content injection
+#+STATE: ITEM
+#+SESSION_ID: 152939d2e5b25e66
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-09T16-24-34-454Z_152939d2e5b25e66.jsonl]]
+#+CUSTOM_ID: FUP-115-e0909-false-positive-scoped-on-mutation
+
+* Initial Message
+
+can dom-refs (`&my-template(..., ...) { ... }`) contain all of ST? As in, html, CSS, ST syntax through macros, etc. and then it gets its scope solved to be within the template? Or does it have some special case?
+
+The goal is to empower the 'element-ref as function' way of creating Spacetime affordances the most blessed way to build encapsulation and whatnot. I would like to do that for Ora Ventures, whose website we want to rewrite completely to be attractive to Chief AI Officers at big groups in emerging markets, as well as capital-rich SMBs that want to be more dynamic and competitve. That website should be sober, have crisp but minimal copy, and showcase Spacetime features in a way that is unique and helps us convert more (so think of advanced interactions and motions in terms of high-convertion)
+
+Come back with your plan, sources, inspirations, for the copy
+Come back with your analysis for the &... thing
+
+* Found via
+BUG-166 verification (PLAN-070 W2) — incidental discovery, not a BUG-166 regression
+(confirmed pre-existing: the two code paths never intersect — E0909 lives in
+=src/pipeline/mod.rs::check_injection_outside_template=, BUG-166's fix only
+touched =src/syntax/events/form_compiler.rs::validate_on_action=).
+
+* Repro
+#+begin_src spacetime
+@template &probe-mix() {
+  $open bool: false;
+  <div class="mix-box">Click</div>
+  .mix-box {
+    @on click {
+      $open <- !$open;
+    }
+  }
+}
+<main class="page"></main>
+.page { &mixInst &probe-mix(); }
+#+end_src
+Compiles + runs correctly (the mutation fires, headless @claim confirms), but
+emits: =⚠ E0909: `<-` content injection used outside component body context=.
+
+* Root cause (partial trace, not fully isolated)
+=src/pipeline/mod.rs::check_injection_outside_template= scans FormMatch
+captures (=StyleProperties=/=String=/=Expr= values) for any =" <- "= or
+=<-= substring, skipping only =template=/=template-inline=/=handle=/=data=
+macro names. A SCOPED =.sel { @on click { $var <- expr; } }= inside a
+@template body is not itself a =template= FormMatch — it is a nested
+scope/selector match — so the skip-list doesn't catch it, and the scan
+false-positives on the legitimate mutation's =<-=.
+
+* Fix direction (not yet implemented — low priority, warning-only)
+=check_injection_outside_template= needs to know it's inside a template's
+lexical scope, not just check the immediate FormMatch's macro name. Likely
+fix: thread a "within @template body" flag through scope traversal (the
+same instance-scope tracking PLAN-039 already established), and skip the
+injection check whenever that flag is set — mirroring the existing
+=handle=/=data= carve-out.
+
+* Priority
+Low — warning-only (does not fail compilation or affect runtime behavior).
+File for whoever next touches =check_injection_outside_template=.

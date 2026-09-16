@@ -1,0 +1,146 @@
+#+TITLE: cargo run -- doctor CLI (one-shot project audit)
+#+STATE: DONE
+#+SESSION_ID: 14cb55e291e3888a
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-04-27T18-09-57-319Z_14cb55e291e3888a.jsonl]]
+#+CUSTOM_ID: FEAT-020-cargo-run-doctor-cli-one-shot-project-au
+#+DEPENDS:  
+#+EFFORT: 6h
+#+LAYER: coding-agent
+#+PRIORITY: #A
+
+* Initial Message
+
+what can you learn from this https://github.com/alchaincyf/huashu-design
+
+to make a nice spell skill that helps with Spacetime? think about the skill + the features and improvements to the debugger that you can land
+
+* Scope
+
+In-scope:
+- New CLI subcommand: =cargo run -- doctor <project-path> [--routes /,/about,/contact] [--format pretty|json] [--screenshot-dir <path>] [--port 4444]=.
+- Sequence:
+  1. =cargo run -- check= over the project; collect diagnostics.
+  2. Boot a headless server on `--port` (default `4444`, fallback +1 on collision).
+  3. For each route (default = `/`, plus auto-discovered locale / sub-routes from project's `site.json` if present):
+     a. Navigate via Playwright (existing harness in =cargo run --features headless -- test=).
+     b. Wait for `document.readyState === 'complete'` + 500ms.
+     c. Run `Spacetime.review()` (FEAT-015).
+     d. Save screenshot to `<screenshot-dir>/<route-slug>.png`.
+     e. Capture console errors and unhandled promise rejections.
+- Aggregate into a single `DoctorReport` JSON with: project path, started/finished timestamps, per-route block, top-level pass/fail.
+- Pass/fail thresholds (failing if ANY of):
+  - check produced any error-severity diagnostic;
+  - any route's review `score < 6`;
+  - any route had console errors during navigation.
+- Pretty mode prints colored summary + per-route table; JSON mode dumps full report (one stdout line is `===JSON===` separator before payload, for skill scripting).
+- Each finding includes a `skillRef` field pointing to the relevant section/anchor in the spacetime-design skill (e.g. `"spacetime-design#anti-slop-inline-handlers"`).
+
+Out-of-scope:
+- Snapshot/regression diffing (deferred — selected as out-of-scope in plan answer).
+- CI integration template (will be a follow-up doc once doctor is stable).
+- Fixing findings; doctor only reports.
+
+* Existing Patterns
+
+- Headless browser harness: =cargo run --features headless -- test tests/= already drives Chromium; reuse the same Playwright glue (helpers under =tests/= and =src/= guarded by `#[cfg(feature = "headless")]`).
+- Server boot: =src/server.rs::serve()=. Doctor MUST boot via the same code path so behavior matches `cargo run -- serve`.
+- Diagnostic collection: =src/cli/inspect.rs= already pulls warnings/errors via the pipeline. Doctor reuses the helper that produces them.
+- JSON serialization: existing serde-based output in inspect (=src/cli/inspect.rs= around lines 305-422). Mirror.
+- Screenshots: existing test-runner saves screenshots to `screenshots/`; reuse helper.
+
+* Tests
+
+Unit (=src/cli/doctor.rs= new file):
+- T1: `DoctorReport::pass_fail` returns `Fail` when any route score < 6 (table-driven).
+- T2: Route-slug helper turns `/about` into `about`, `/` into `index`, `/fr/contact` into `fr-contact`.
+
+Integration (=tests/integration_tests.rs= new module `doctor`):
+- T3: `cargo run -- doctor projects/spacetime-showcase/ --format json` exits 0 with JSON containing `routes[*].review.score`.
+- T4: A fixture project deliberately containing one inline-handler outputs a doctor report whose JSON includes a finding with `dim: 'idiomatic'` and `skillRef` set.
+- T5: `--screenshot-dir tests/tmp/doctor/` produces ≥1 PNG per route.
+
+Manual:
+- M1: `cargo run -- doctor projects/dataiku/ --format pretty` prints summary + per-route review.
+
+* Implementation
+
+** ITEM Wire Doctor subcommand stub
+:PROPERTIES:
+:CUSTOM_ID: FEAT-020-cargo-run-doctor-cli-one-shot-project-au::wire-subcommand
+:END:
+- File: =src/main.rs=.
+- Add Doctor variant; print "doctor: not implemented" but accept all flags.
+
+** ITEM DoctorReport schema + serde
+:PROPERTIES:
+:CUSTOM_ID: FEAT-020-cargo-run-doctor-cli-one-shot-project-au::report-schema
+:DEPENDS: FEAT-020-cargo-run-doctor-cli-one-shot-project-au::wire-subcommand
+:END:
+- File: new =src/cli/doctor.rs=.
+- Define `DoctorReport`, `RouteReport`, `Finding` structs (serde Serialize).
+- T1, T2 unit tests.
+
+** ITEM Wire check + diagnostics
+:PROPERTIES:
+:CUSTOM_ID: FEAT-020-cargo-run-doctor-cli-one-shot-project-au::wire-check
+:DEPENDS: FEAT-020-cargo-run-doctor-cli-one-shot-project-au::report-schema
+:END:
+- Reuse the existing diagnostics helper from inspect path; populate `DoctorReport.checkDiagnostics`.
+
+** ITEM Headless route loop with Spacetime.review()
+:PROPERTIES:
+:CUSTOM_ID: FEAT-020-cargo-run-doctor-cli-one-shot-project-au::headless-loop
+:DEPENDS: FEAT-020-cargo-run-doctor-cli-one-shot-project-au::wire-check FUP-014-verify-spacetime-review-executes-on-a-re::inspect-shape
+:END:
+- File: =src/cli/doctor.rs=.
+- Boot server (existing =serve()=); for each route navigate, await ready, evaluate =Spacetime.review()=, capture screenshot, capture console.
+- Tag each Finding with =skillRef= based on =dim= + =severity= via a small static map (initial map can have rough placeholders; refined when skill ships in FEAT-021).
+- Headless harness: reuse =src/browser_test.rs= Playwright init (=playwright::Playwright::initialize()=). Do NOT spin up a second instance.
+- Dev runtime: boot via =serve()= with =debug=true= so =/__spacetime/dev/runtime.js= is mounted (per =src/server.rs::dev_runtime_js_handler=).
+- Pre-flight: refuse to start the route loop if =FUP-014::inspect-shape= has not produced its artifact yet (i.e., =!tasks/plans/plan-artifacts/PLAN-018/review-runtime-dataiku.json= must exist). This guards against running 6h of doctor work on top of an unverified runtime API.
+- T3, T5 integration tests.
+** ITEM Pretty + JSON output
+:PROPERTIES:
+:CUSTOM_ID: FEAT-020-cargo-run-doctor-cli-one-shot-project-au::output-modes
+:DEPENDS: FEAT-020-cargo-run-doctor-cli-one-shot-project-au::headless-loop
+:END:
+- Pretty: ANSI table; emit `===JSON===` sentinel only in JSON mode (not pretty).
+- T4 integration test.
+
+** ITEM Manual smoke
+:PROPERTIES:
+:CUSTOM_ID: FEAT-020-cargo-run-doctor-cli-one-shot-project-au::manual-smoke
+:DEPENDS: FEAT-020-cargo-run-doctor-cli-one-shot-project-au::output-modes
+:END:
+- Run M1; capture output to =scratch/doctor-dataiku.txt= and screenshot dir.
+
+* Edge Cases
+
+- Project has no routes (empty `site.json`): default to `/` only.
+- Server boot fails (port conflict): increment port and retry up to 5 times before erroring.
+- `Spacetime.review()` returns `{ status: 'pending' }` (dev primitive not loaded — doctor MUST run with dev runtime injected): doctor MUST force-inject the dev runtime via the same mechanism `cargo run -- serve` uses, asserting status != pending; if still pending, mark route as Fail with reason "dev runtime did not initialize".
+- Network slow / page hangs: per-route 30s timeout; on timeout report Fail with reason and skip to next route.
+- Locale routes: respect existing `try_serve_locale` behavior; doctor's auto-discovery walks `site.json` `locales` array.
+
+* Acceptance Criteria
+
+- `cargo run -- doctor projects/spacetime-showcase/ --format json` exits 0, output JSON parseable, contains all 5 review dims per route.
+- `cargo run -- doctor projects/dataiku/ --format pretty` prints summary table with overall pass/fail.
+- T1..T5 pass.
+- M1 captured artifacts referenced from this org item.
+- `--help` documents all flags.
+
+NOTE [2026-04-27]: Deferred from PLAN-017 to FUP-012. Spacetime.review() runtime API (FEAT-015) shipped; doctor wraps it with headless route loop.
+
+* Round-2 reactivation [PLAN-018]
+
+Reactivated from BLOCKED. Implementation guidance refined per user direction:
+- *Mirror =src/cli/inspect.rs= structurally.* That file (1937 lines) already has the canonical pattern: =OutputFormat= enum, layer-output structs with serde Serialize, dispatcher that builds the report and renders pretty/JSON. =src/cli/doctor.rs= MUST mirror this layout, not invent a new one.
+- *Reuse, do not re-derive.* Diagnostic collection: pull from the same helpers =inspect= calls. Server boot: call into =src/server.rs= rather than rolling a new boot path.
+- *Headless harness:* =src/browser_test.rs= already initializes Playwright (=playwright::Playwright::initialize()=). Doctor's headless route loop reuses the same =Arc<Playwright>= initialization; do NOT spin up a second Playwright instance.
+- *Dev runtime injection:* =cargo run -- serve= with =debug=true= mounts =/__spacetime/dev/runtime.js= via =dev_runtime_js_handler= in =src/server.rs:1622=. Doctor MUST boot with the same flag set so =Spacetime.review()= is defined on the page.
+- *Acceptance:* in addition to the original criteria, doctor MUST pass cleanly on =projects/spacetime-showcase/= AND produce a non-error JSON on =projects/dataiku/= (dataiku may have known findings; non-zero score is acceptable as long as the report is well-formed).
+
+Sub-outline already complete in this item; no schema changes needed beyond the implementation hints above.
+
+NOTE [2026-04-27]: PLAN-018: doctor CLI subcommand wired (src/main.rs + src/cli/doctor.rs + src/cli/mod.rs). DoctorReport schema + serde, route_slug helper, compute_pass logic, 8 unit tests. Check phase walks .st files and emits CheckDiagnostic entries (parse/resolve/validate/analysis errors). Pretty mode prints colored summary; JSON mode prefixes payload with ===JSON=== sentinel. Routes are marked skipped_reason until the headless route loop lands; that piece is tracked at FUP-016-feat-020-doctor-headless-route-loop-with. Smoke artifacts: doctor-dataiku-pretty.txt, doctor-dataiku-json.txt, doctor-showcase-json.txt in plan-artifacts.

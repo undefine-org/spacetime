@@ -1,0 +1,58 @@
+#+TITLE: nested @each inside a @template body renders as literal text (builder gap)
+#+STATE: ITEM
+#+SESSION_ID: 14fc108ed3772fa8
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-04T14-32-37-965Z_14fc108ed3772fa8.jsonl]]
+#+CUSTOM_ID: BUG-085-nested-each-inside-a-template-body-rende
+
+* Initial Message
+
+ok dude I want you to focus on FEAT-092. Give me your boldest vision for it, and explain what's separating us from it. Do a deep review of what's available and how to do it
+
+* Symptom
+An @each nested INSIDE a @template body is not compiled — it appears verbatim
+in the rendered DOM as text, with holes mis-interpolated:
+  @template &card($c) {
+    <div class="sig">
+      @each($c.params as $p) { <span class="$p.cls">$p.name</span> }
+    </div>
+  }
+renders: `@each([object Object],[object Object] as ) { <span …></span> }`
+(the $c.params array stringified into the @each source, $p lost).
+
+* Cause
+The reactive builder (FEAT-077) that materializes @template bodies treats the
+body as markup + holes; it does not recurse into a nested @each directive. Only
+SELECTOR-SCOPE @each (`.sel { @each(...) }`) and FILE-SCOPE @each are compiled.
+A template body is neither — so the @each text survives as literal content.
+
+* Impact
+Blocks per-item sub-lists inside a card template (e.g. FEAT-092 W4 component
+palette param chips). Workaround: shape the sub-list into a single
+presentation string in the data-shaping helper (ST.adComponentCards → `sig`),
+rendered as one text node. The chips' per-param styling is lost but the data
+shows declaratively.
+
+* Acceptance
+- [ ] A nested @each in a @template body compiles + renders its items
+- [ ] RED→GREEN test (template body with inner @each over a param array)
+- [ ] W4 palette can revert to per-param chips
+- NB likely needs the template builder to detect + lower nested @each the same
+  way selector-scope @each is lowered (shared each-inline primitive).
+
+NOTE [2026-06-13]: Same root-cause CLASS as BUG-103 (@editable in template body). Both are "nested selector-scope construct in a component body isn't expanded — leaks as literal text or drops." Designed under PLAN-039 (unify nested constructs in component bodies): W2 builder-lowering of in-element directives closes the @each placement gap; W3 converges @each (deletes the hand-rolled ssg_unroll.rs find_nested_each/expand_nested_each string parser + the cb_nested_each special case onto the unified grammar+builder path). Acceptance carried in PLAN-039.
+
+NOTE [2026-06-19]: HOME for the headless @each/collection-ref cluster [2026-06-19]: The 4 RED tests in tests/unit/templates/collection-ref-each.test.st are now formally adopted as this bug's named regression pins (previously floating, unattributed, inside the 91-failure headless count). They exercise EXACTLY this defect — a COLLECTION-REF block `&cards[] .cref-cards { @each($crefItems as $item) { &cref-card($item); } }` inside a `@template &cref-dashboard()` body. `cargo run -- inspect --layer emit` shows that template's emitted body payload carries `refs: []` and NO @each primitive: the nested @each is silently dropped from the per-instance builder, so nothing renders on ANY backend (V8 or CDP) — not a headless-only or seeding issue (the test already uses the correct ST.setData-after-mount seeding per FUP-064).
+
+The 4 pinned tests (all currently RED, fail identically pre/post FUP-072+BUG-112):
+  1. "collection ref + @each creates children from data source" — container .cref-cards.children.length === 3 (gets 0).
+  2. "each child in collection ref is a cref-card element" — children[0].classList throws (undefined; no children rendered).
+  3. "MutationObserver sets collection ref state to array" — ST.get(dash,'cards') not an array (never populated).
+  4. "collection ref state elements match container children" — cards.length throws (undefined).
+
+These are the SAME root-cause CLASS as BUG-103 (@editable in a @template body emitted as literal text). Structural fix is the in-progress PLAN-039 ("Unify nested constructs in component bodies"): W2 builder-lowering of in-element directives closes the @each placement gap; W3 converges @each onto the unified grammar+builder path (deletes ssg_unroll.rs find_nested_each/expand_nested_each + the cb_nested_each special case). FUP-064 already documents collection-ref-each.test.st as a PLAN-039 pin; this note completes the linkage so the cluster is no longer orphaned inside the aggregate headless-failure number.
+
+Acceptance addendum (RED→GREEN, in addition to the generic acceptance above):
+  - [ ] `cargo run --features headless -- test tests/unit/templates/collection-ref-each.test.st --headless` reports 7 passed / 0 failed (currently 3/4).
+  - [ ] `inspect --layer emit` of &cref-dashboard shows the @each primitive present in the body payload (refs no longer empty).
+
+Provenance: triaged 2026-06-19 immediately after landing BUG-112 (@try $error fix), which took the full headless suite to 527 passed / 91 failed. These 4 are part of that residual 91 and trace to PLAN-039, not to any testing-stdlib or harness defect. NOT fixed here (out of scope — requires the PLAN-039 builder work); filed/adopted as the tracked regression target so it has an explicit owner.

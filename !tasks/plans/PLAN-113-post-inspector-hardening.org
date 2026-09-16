@@ -1,0 +1,286 @@
+#+TITLE: Post-inspector hardening — silent-failure classes, registry ownership, and coverage debt
+#+STATE: DONE
+#+CUSTOM_ID: PLAN-113-post-inspector-hardening
+#+PRIORITY: #A
+
+* Why this plan exists
+
+PLAN-112 shipped the Inspector pill and, in doing so, surfaced a set of defects
+that are mostly NOT about the pill. They are about the machinery underneath it:
+constructs that fail SILENTLY, a shared registry with no ownership rule, and
+coverage debt on surfaces that were changed.
+
+The organising observation: every item below was invisible to a green test suite.
+Several were invisible to me until I drove the real thing in a browser, and three
+tests were found PASSING against broken code. That is the theme this plan
+attacks — not "fix seven bugs", but "stop the compiler and test framework from
+lying".
+
+Priority order therefore follows OBSERVABILITY, not user-visible breakage: a
+silent miscompile outranks a cosmetic overlap even when the overlap is the thing
+you can see.
+
+* Wave 1 — Silent failure must become loud failure (#A)
+
+These share one shape: correct-looking source produces wrong or absent output,
+with no diagnostic. They are the highest-value fixes in the repo right now
+because every future change is made less safe by their existence.
+
+** W1.1 — BUG-216: an unmatched directive is dropped silently
+
+`!tasks/bugs/BUG-216-unmatched-directive-is-dropped-silently.org`
+
+A directive matching no `%form` is deleted from the bundle with no error. The
+compiler even BUILDS the diagnostic — every caller then discards it as `_diags`
+(`src/parser/mod.rs:423, 2032, 2035, 2115-2116`).
+
+Visible instance: `@assert (false) ("expected 3, got " + rows.length)` compiles to
+NOTHING and the test PASSES. The message form you most want (one that reports the
+failing value) is exactly the one that silently stops asserting.
+
+Do W1.1 FIRST. It is the meta-fix: it converts an unknown number of future
+silent-drop bugs into build errors, and it is the reason BUG-212 and BUG-217 were
+hard to find.
+
+Constraint discovered while investigating: the multi-registry passes parse the
+same source twice (stdlib-only, then augmented with user macros), and the
+stdlib-only pass legitimately fails to match project-local directives. The fix
+must report only directives unmatched by the FINAL registry — a blanket promotion
+of all diagnostics to errors will produce false failures.
+
+** W1.2 — BUG-212: `%emit js` mangles a bodyless `if (cond) return;`
+
+`!tasks/bugs/BUG-212-emit-js-mangles-a-bodyless-if-cond-retur.org`
+
+A guard followed by an arrow declaration is rewritten into semantically different
+JS: the guard inverts, the following statement is absorbed, the `return` is
+deleted, the binding is dropped. Silent — compiles clean, the primitive simply
+never works. Root cause located in `extract_cond_and_body`
+(`src/emit/js_parser.rs`); fix + regression test specified in the bug.
+
+Zero live exposure in shipped stdlib (verified), so this is a trap for the next
+primitive author rather than an active incident. Note the workaround currently in
+force across PLAN-112 code: guards in `%emit js` use positive-condition BLOCKS
+(`if (x) { … }`). Once fixed, that constraint can be lifted — and the fix should
+land with a test proving the bodyless form now round-trips.
+
+** W1.3 — FUP-134: bare-name template collisions need an ownership policy
+
+`!tasks/follow-ups/FUP-134-bare-name-template-collisions-between.org`
+
+One global registry keyed by BARE template name, with a dev page loading its own
+bundle plus every dock widget's bundle. BUG-211 fixed the wholesale clobber
+(`new Map()` wiping the registry); per-NAME collision is still unfixed and today
+is quiet only by luck, because dock templates happen to be prefixed
+(`field-*`, `mcp-*`, `st-*`).
+
+This is a DESIGN decision, not a patch — the FUP lays out three options
+(namespace by owning bundle / reserved-prefix enforcement / loud duplicate
+diagnostic) with tradeoffs. Decide it deliberately; per the Elegance bar, prefer
+the option expressed as registry DATA over new Rust special-cases.
+
+Sequencing note: W1.3 benefits from W1.1 landing first — a duplicate-registration
+diagnostic is only useful if diagnostics are actually surfaced.
+
+** W1.4 — FUP-138 (DONE, 8f6b9e26): kept here as the worked example
+
+`!tasks/follow-ups/FUP-138-primitive-exports-never-reach-file-sco.org`
+
+Already fixed, listed because it is Wave 1's thesis demonstrated end to end and
+because two of its findings change how the remaining items should be approached.
+
+A `%binds` output list written one-per-line lost every entry after the first: the
+parser split on `,` while the line accumulator had already joined the block with
+spaces, so the list parsed as ONE output whose alias was the rest of the text.
+That alias failed a plain-ident gate, no remap was recorded, and `%yield` silently
+wrote the RAW export name. Nothing errored anywhere. The inspector pill's
+Saved/error line was dead from the day it shipped — including on REJECTED writes,
+where silence is indistinguishable from success.
+
+Two lessons that bear directly on W1.1–W1.3 and W2.1:
+
+1. LAYER TESTS AGREEING IS NOT EVIDENCE THE LAYERS COMPOSE. Parser and resolver
+   unit tests both passed throughout this bug, because neither ran the whole path.
+   Only a test asserting the OBSERVABLE end — which key reaches the emitted
+   `ST.set` — fails when it is reintroduced. Prefer one end-to-end assertion over
+   two more layer tests. This applies directly to BUG-217 (W2.1): 30 failures
+   whose layers presumably each look fine.
+
+2. A PLAUSIBLE CAUSE WRITTEN UP CONFIDENTLY IS WORSE THAN NO CAUSE. FUP-138 was
+   filed naming a specific mechanism (`_bridgeExport` not registered for a `@data
+   derive`) that was FALSE — the call had been there since BUG-197. It listed four
+   "tried and reverted" approaches, all of which failed for a reason the writeup
+   never identified. Anyone picking the item up would have started from a wrong
+   map. When filing the remaining items, separate what was OBSERVED from what was
+   INFERRED, explicitly.
+
+Also fixed en route, both of which had made FEAT-163 look broken: `__ST_DEV__` was
+set only by the debug PANEL though it means "a dev SERVER is serving this" (so
+`@each` stamped nothing on a plain `spacetime serve`), and the pill imported
+`dev-ws` without BINDING it (importing a primitive does not run it).
+
+* Wave 2 — Coverage and correctness debt (#B)
+
+** W2.1 — BUG-217: `stdlib/testing/meta` has 30 failing self-tests
+
+`!tasks/bugs/BUG-217-stdlib-testing-meta-suite-has-30-failin.org`
+
+The suite that tests the TEST FRAMEWORK is red (73 pass / 30 fail / 6 skip),
+clustered almost entirely in `@given`. Confirmed pre-existing by substituting the
+pre-PLAN-112 `stdlib/testing/test.st` and re-measuring: identical 30 failures.
+
+Impact is compounding: a regression in `@given`/`@assert`/`@when` lands in an
+already-red suite and is invisible. Every item in this plan is verified BY this
+framework, which is why it belongs early in Wave 2.
+
+Rule: do not restore green by weakening assertions. A test kept green by
+asserting less removes the signal too.
+
+** W2.2 — FUP-135: the workbench's selection→edit path has no integration test
+
+`!tasks/follow-ups/FUP-135-workbench-selection-edit-path-has-no-i.org`
+
+PLAN-112 W5 converged the workbench onto the shared `field-*` widgets and deleted
+its two bespoke row templates. That was hand-verified once, live; the only
+automated test covers the helper/template seam, not the workbench's own path
+(server rows → navigator/canvas selection → typed controls → edit → poll →
+focused editor survives). The FUP carries the exact five-step test plan.
+
+This is coverage debt on a surface I CHANGED — the honest classification is "works
+now, nothing guards the next edit".
+
+** W2.3 — FUP-133: lossy round-trip for single-quoted and quoted-numeric tokens
+
+`!tasks/follow-ups/FUP-133-lossy-round-trip-for-single-quoted-and.org`
+
+Editing a param normalizes `'foo'` → `"foo"` and `"42"` → `42`. Pre-existing in
+the server's value logic; PLAN-112 changed REACHABILITY, not the behaviour — every
+template param on every dev page is now one click from an edit.
+
+No semantic corruption; the damage is source churn the author did not make. The
+FUP lists the five before/after cases to measure first, and flags the two that
+matter most: an edit must never rewrite an untouched token, and quote-preservation
+must never defeat correct escaping.
+
+* Wave 3 — Dev-surface polish (#C)
+
+Genuinely cosmetic. Listed so they are not lost, sequenced last so they never
+displace a correctness fix.
+
+** W3.1 — FUP-136: nested stamped invocations draw overlapping hover outlines
+
+`!tasks/follow-ups/FUP-136-nested-stamped-invocations-draw-overlap.org`
+
+Pick mode outlines both the inner and outer stamped node. No wrong-target risk
+(resolution takes the innermost; W4R also suppresses the page's own action on an
+accepted pick). One-file fix in `stdlib/__inspector__/primitives/inspect-pick.st`.
+Must NOT weaken the stamping or the W4R ambiguity-dropping rule.
+
+** W3.2 — FUP-137: dock widget panels occlude each other
+
+`!tasks/follow-ups/FUP-137-dock-widget-panels-occlude-each-other.org`
+
+Three pills, three independently-openable panels, no z-index or mutual-collapse
+policy. Constraint that must not regress: dock widgets share ONE global reactive
+scope, and an un-prefixed `$isExpanded` was once observed opening BOTH panels —
+whatever coordination is chosen must not reintroduce a shared signal name. Policy
+belongs in the dock composition (`host_widget_inject`), not duplicated per widget.
+
+* Cross-cutting rules for every wave
+
+- *Sabotage-verify every fix.* Remove the fix; the test MUST fail. This session
+  caught three tests passing against broken code — including one that
+  sabotage-passed because it was checked against the wrong `@each` variant
+  (`each.st` vs `each-inline.st`). Verifying against the wrong thing is the same
+  as not verifying.
+- *Drive the real thing.* Six PLAN-112 defects were invisible behind green tests
+  and only appeared in a live browser against a real project. For anything
+  user-facing, a live check is part of done, not a bonus.
+- *One need, one implementation.* Delete the superseded copy. Precedent from this
+  work: a `ST.insStableTemplates` helper was written to stabilise an array
+  reference, then DELETED once the engine-level `@each` fix (BUG-215) made it
+  redundant.
+- *Fix at the source, not at the call site.* BUG-215 was fixed in `@each` itself
+  rather than worked around in the pill, because every `@each` over a polled
+  source had it.
+- *Never* `git stash/reset/revert/checkout`.
+
+* Already done (context, not work)
+
+- *BUG-215* — `@each` rebuilt its whole list on every emit, destroying live DOM
+  state (focus/caret, `<select>` value, open `<details>`) twice a minute on any
+  polled source. Fixed at the engine in both `each.st` and `each-inline.st`;
+  sabotage-verified. `!tasks/bugs/BUG-215-each-rebuilds-on-identical-re-emit-destr.org`
+- *BUG-214 (dock injection)* — an HTML COMMENT mentioning `__spacetime/runtime.js`
+  satisfied the FUP-098 idempotency guard, so the entire dev dock (all three
+  pills) silently vanished from `projects/backdesk-hospitality`. Guard now strips
+  comments; FUP-098's double-load protection intact and still locked by tests that
+  call the real predicate.
+- *`main` is no longer mandatory* — the inspect route and the stamp walk both use
+  a shared `default_entry_template`. Zero of 23 checked projects define `&main()`.
+- All of the above in commit `4655ee0e`. Gates at that commit: 2782 lib · 191
+  integration · 438 v8 · 656 headless · 17 pill.
+
+* Definition of done for the plan
+
+Wave 1 complete and each fix sabotage-verified; Wave 2 complete with
+`stdlib/testing/meta` green (or every remaining failure explicitly skipped with a
+reason and a linked follow-up); Wave 3 complete or consciously deferred with the
+reason recorded. Full gate list green throughout, with snapshot churn accepted
+only after reading the diff.
+
+* CLOSED (2026-07-25) — all three waves executed, each reviewed by a swarm
+
+** Outcome per item
+
+| item    | state | outcome                                                        |
+|---------+-------+----------------------------------------------------------------|
+| BUG-216 | DONE  | two defects: CST paren-group + emit silence. Message slot still unfixed (BUG-226) |
+| BUG-212 | DONE  | bodyless `if … return;` round-trips; 3 stale workaround notes removed |
+| FUP-134 | DONE  | owner-scoped template identity; owner rides the FACTORY         |
+| BUG-217 | DONE  | framework self-tests 73 → 102; 4 remain red (BUG-226)           |
+| FUP-135 | DONE  | 5 workbench tests; gestures + action bridge deferred (FUP-139)  |
+| FUP-133 | DONE  | quote style preserved; 2 of its 5 cases were already correct    |
+| FUP-136 | DONE  | one outline; rendered-outline test deferred to --cdp (FUP-139)  |
+| FUP-137 | DONE  | one open panel; behaviour test deferred to --cdp (FUP-139)      |
+
+Filed during the plan: BUG-218, BUG-225, BUG-226, FUP-139.
+
+** Final gate state
+
+: 2829 lib · 202 integration · 445 v8 · 659 headless · 38 pill+mcp+fields
+: stdlib/testing/meta — 102 passed, 4 failed, 6 skipped
+
+TWO deliberate reds, each mapped to a filed item and to nothing else:
+- `tests/fixtures/w8-seed/state-claims.test.st` — BUG-218 (a `@mount` body that has
+  never mounted anything; BUG-216's fix made it visible)
+- 4 in `stdlib/testing/meta` — BUG-226 (`@wait_until` / `@wait_for`)
+
+Neither was silenced, skipped, or weakened.
+
+** What the reviewer swarms caught — the real lesson
+
+Every wave's swarm found a defect IN MY OWN FIX, and in each case my tests had
+passed:
+
+| wave | finding                                                              |
+|------+----------------------------------------------------------------------|
+| W1.1 | my paren consumer ran past its closer and DELETED a following scope   |
+| W1.3 | owner identity died when the bundle finished evaluating              |
+| W2   | blur shim froze `activeElement`; `.state_props` truncated values; a "no-op" change was HARMFUL (removing it: +3 tests); the "flaky" 5th failure was a real unimplemented `<select>.value` |
+| W3   | the dock policy did not fire on the LABEL — the path users take       |
+
+The recurring shape: I verified the mechanism on a path the user never takes, or
+inside one synchronous block that never crossed the boundary the mechanism depends
+on. Eight tests across the plan sabotage-PASSED and were rewritten.
+
+** Rules that earned their place
+
+1. Sabotage-verify every fix, and re-check after restoring a backup — twice a
+   restore silently reverted a test strengthening.
+2. Measure before keeping a change. `"block"` in PERMISSIVE *looked* more correct
+   and cost 3 passing tests.
+3. Prefer one end-to-end assertion over two more layer tests. Parser and resolver
+   unit tests both passed throughout FUP-138's bug because neither ran the path.
+4. A backend that cannot observe a property must REFUSE, not approximate — the
+   `--headless` CSS tests say what they do not cover instead of faking it.

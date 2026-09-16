@@ -1,0 +1,136 @@
+#+TITLE: Self-describing MCP — st_mount/st_await over .st signal functions
+#+STATE: ITEM
+#+SESSION_ID: 1507711255a45786
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-13T10-37-35-958Z_1507711255a45786.jsonl]]
+#+CUSTOM_ID: FEAT-111-mcp-transport-collapse-interfaces-as-liv
+
+* Initial Message
+
+look at the Spell MCP features. I would like the interfaces to be defined as functions that are loaded into the live environment, so that it is a fully live environment from scratch, instead of just a 'prompt thing'.
+
+1. look at anything that's pending in that thread of work
+2. find your own insights w.r.t what I just said
+3. come back to me with your realisations
+
+* Parent
+[[id:PLAN-038-signal-reactive-output-the-sibling-of-da]] — WAVE 2 (tool surface).
+The user's literal ask: "interfaces defined as functions loaded into the live
+environment … a fully live environment from scratch, not just a 'prompt thing'."
+Design: [[file:../../research/spacetime-signal-S0.org]] §S1.
+
+DEPENDS ON:
+- [[id:FEAT-114-mcp-prelude-window-sthost-ws-bridge-gene]] (the __stHost bridge +
+  generic /__mcp/signal sink — the runtime substrate this tool surface drives).
+- [[id:FEAT-110-signal-core-reactive-output-post-emit-th]] (@data signal/stream +
+  @handle — the language the library .st functions are written in).
+- [[id:BUG-102-data-fetch-relative-url-rejected-under-c]] (relative fetch under check).
+
+NOTE (2026-06-13): rescoped from "@signal" to the §S1 model. The library .st
+functions (picker/form/confirm) are now written with `@data stream/signal … to $mcp`
++ `receive` decode + @handle, NOT @signal. An interface = a .st function whose
+@data-signal REGISTRY is its schema (read via the same rail as @data dispatch).
+st_mount(fn,input) compiles + reads that registry + serves (with __stHost from
+FEAT-114); st_await returns the decoded variant. The 4 bespoke tools (st_propose/
+st_proposal_status/st_await_choice/st_elicit) collapse to st_mount + st_await.
+* Why
+Today the human→agent signal path is THREE parallel Rust impls of one need
+(picker route + ChooseForm + OptionDiagnostic precompute; st_elicit 100% Rust;
+compile-only). Each new interaction = new Rust tool + descriptor prose + Spell
+re-register + rebuild. That IS the "prompt thing." Harmony violation: one need,
+N impls. Collapse to ONE generic transport; interfaces become .st FUNCTIONS.
+
+* The collapse (cutover, DELETE the parallel impls — AGENTS: refactors are cutover)
+  BEFORE (src/mcp)                          AFTER
+  ----------------------------------------  --------------------------------------
+  st_propose (compile+store+picker route)   st_mount(fn, input) → {url, instance}
+  st_proposal_status (poll)                 st_await(instance) → declared payload
+  st_await_choice (blocking poll)           (one await, same blocking mechanism)
+  st_elicit (Rust server→client form)       form.st library function via st_mount
+  /__mcp/choose/{id} + ChooseForm{usize}    /__mcp/signal/{instance} (generic sink)
+  OptionDiagnostic + badge/url precompute   the FUNCTION declares its own payload
+  picker.st (Rust-coupled data.json shape)  picker.st = a portable library function
+
+* Mental model (functions-as-interfaces)
+  An "interface" = a .st FUNCTION = { inputs (params via @data), UI (markup),
+  signal-back (@signal emit … to mcp) }. The MCP is just a HOST that:
+   1. st_mount(fn, input): fn = a library name (stdlib/__mcp__/<name>.st) OR inline
+      .st code; input = JSON bound under @data for the page; compile + serve live;
+      return {url, instance_id}.
+   2. injects window.__stHost into every served page (symmetric with __dev__'s
+      window.__stDevWs) so `@signal emit … to mcp` routes to the host.
+   3. /__mcp/signal/{instance}: the ONE generic webhook. __stHost.signal(name,payload)
+      POSTs here → store keyed by instance → unblocks st_await.
+   4. st_await(instance): blocks until a signal arrives → returns the RAW declared
+      payload (the function's shape, NOT a Rust struct). Re-callable on timeout
+      ({decided:false}), same bounded-<30s pattern as today's st_await_choice.
+
+* The library (stdlib/__mcp__/, the first functions)
+  - picker.st  : choose 1-of-N options. @data fetch $input → options; @each cards;
+                 each card fires `@signal emit $choose {idx number} to mcp` on click.
+                 (rewrite of today's picker.st — drops ALL Rust-contract coupling.)
+  - form.st    : typed input form. payload schema IS the @signal declaration;
+                 replaces st_elicit's Rust form. (Native MCP elicitation stays as an
+                 OPTIONAL fast-path when the client advertises it — see Decision.)
+  - confirm.st : yes/no. `@signal emit $decide {ok bool} to mcp`.
+  These are DISCOVERABLE (st_mount by name) and EXTENSIBLE (the agent can st_mount
+  inline .st in the same turn — the "fully live from scratch" property).
+
+* Decision — keep native elicitation as a fast-path?
+  st_elicit (server→client elicitation/create) is a REAL second channel (no browser).
+  KEEP it as a thin tool, but reframe: st_elicit pushes the SAME payload schema a
+  form.st function declares. One schema vocabulary, two render hosts (native prompt
+  vs browser form). Do NOT delete elicitation; DO delete the bespoke browser-form
+  Rust. (If this proves redundant in practice, fold later — note as FUP.)
+
+* Verified ground truth
+- window.__stDevWs injection precedent: stdlib/__dev__/primitives/dev-ws.st +
+  @dev-bridge wiring in stdlib/__admin__/index.st. __stHost mirrors this exactly.
+- Current MCP surface to collapse: src/mcp/{tools.rs,live.rs,state.rs,protocol.rs}.
+  live.rs already runs an ephemeral axum server + proposal store + await_choice
+  poll — REUSE that machinery; swap the bespoke routes for the generic signal sink.
+- picker.st already @data-fetches data.json + @each-renders + native <form> POST.
+  The rewrite swaps the <form> for `@signal emit … to mcp` (no functional loss).
+
+* Scope (W2)
+IN: st_mount + st_await + /__mcp/signal/{instance} generic sink; window.__stHost
+injection in served pages; rewrite picker.st + add form.st + confirm.st as library
+functions using @signal; DELETE st_propose/st_proposal_status/st_await_choice +
+/__mcp/choose + ChooseForm + OptionDiagnostic precompute; keep st_elicit (reframed)
++ st_tab_open + st_env_*. Update tool descriptors + spell.kdl note.
+OUT: CDP server (PLAN-037 W3, separate). ws/device sinks (W5).
+
+* Edge cases
+- inline fn code that fails to compile → st_mount returns {ok:false, diagnostics}
+  (the function's own diagnostics, surfaced both channels — reuse existing).
+- multiple mounts live at once → instance_id keys keep them isolated in the store.
+- human closes tab without signaling → st_await times out, re-callable (unchanged).
+- a fn that emits MANY times (streaming UC6) → st_await returns latest; document
+  that repeated await consumes a sequence.
+- fn with no @signal (display-only) → st_mount still serves; st_await just blocks
+  (warn in result).
+
+* Tests
+- cdp round-trip: st_mount(picker, {options:[…]}) → open url → click card → st_await
+  returns {idx:N} (the DECLARED shape). Assert NO Rust struct in the path.
+- form.st: st_mount(form, {schema}) → fill+submit → st_await returns typed object.
+- harmony audit (the proof the collapse is real): grep src/mcp shows NO ChooseForm,
+  NO /__mcp/choose, NO OptionDiagnostic; ONE /__mcp/signal route only.
+- regression: st_env_*/st_tab_open unchanged; st_elicit still works when advertised.
+- the old tool names are GONE from tools::list() (assert).
+
+* Acceptance (W2)
+- An interface is a .st function st_mount-ed live (library name OR inline); the human
+  acts; st_await returns the function's declared payload — zero Rust-contract coupling.
+- 4 bespoke tools → st_mount + st_await (+ reframed st_elicit). picker is a library fn.
+- ONE generic signal sink; bespoke choose route + structs deleted.
+- cargo build + tests green; cdp round-trip proven; harmony grep clean.
+- spell.kdl unchanged in shape (same stdio server); user reloads Spell to pick up
+  the new tool surface, then test-drives.
+
+* Files (expected)
+- src/mcp/tools.rs    (st_mount/st_await; delete propose/status/await_choice)
+- src/mcp/live.rs     (generic /__mcp/signal/{instance}; delete /__mcp/choose etc.)
+- src/mcp/state.rs    (instance store; __stHost-aware)
+- src/mcp/protocol.rs (descriptors; keep elicit roundtrip, reframed)
+- stdlib/__mcp__/picker.st (rewrite), form.st (NEW), confirm.st (NEW)
+- window.__stHost injection (where served pages are assembled — live.rs)

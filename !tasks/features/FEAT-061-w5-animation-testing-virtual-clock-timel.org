@@ -1,0 +1,88 @@
+#+TITLE: W5 animation testing: virtual @clock, timeline sampling, frame-budget (the moat)
+#+STATE: ITEM
+#+SESSION_ID: 14f94e45c6c3f247
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-02T11-06-49-499Z_14f94e45c6c3f247.jsonl]]
+#+CUSTOM_ID: FEAT-061-w5-animation-testing-virtual-clock-timel
+#+LAYER: runtime
+
+* Initial Message
+
+actually, Land the PLAN-026 core now (done/committed); file the testing-macro cluster (@assert swap, @then/@eval nested-match) as a new BUG/PLAN with the diagnosis captured, and STOP — .test.st gating remains blocked
+ on that follow-up. Don't register text tests yet.
+
+Put text tests as FEAT within the plan. Be comprehensive
+
+Wave 5 of [[id:PLAN-027-spacetime-testautomation-infra-fidelity]]. Deterministic
+animation testing — the capability traditional browser automation cannot do.
+Built on what already exists: seekable drivers (=info.progress= settable,
+public/runtime/debug.js:90), timing instrumentation (=ST._timing.recordRAF/
+recordDriver=, st.js:602), the centralized RAF coordinator
+(public/runtime/raf-coordinator.js), and WAAPI primitives (stdlib/primitives/
+animation/waapi/*, getAnimations-compatible).
+
+* Why it's a moat
+Traditional tools assert on wall-clock-sampled PIXELS: flaky, slow, endpoint-only.
+Owning the drivers + clock lets us assert the ANIMATION ITSELF: exact curve value
+at t, monotonicity, overshoot, stagger deltas, frame budget — none expressible in
+Playwright-alone.
+
+* Virtual @clock (the spine — K2 approved)
+- Inject a test-controlled clock seam at the RAF coordinator: in test mode, =rAF=
+  is driven by the harness, not the browser. Drivers already accept settable
+  progress; route both JS-drivers and WAAPI (=Animation.currentTime= / =timeline=)
+  through the seam.
+- Surface:
+  - =@clock advance <time>= — step virtual time deterministically.
+  - =@clock run-to-end= — run until all drivers complete.
+  - =@clock sample <n> frames= — step n frames, recording each.
+  - works on BOTH backends: logic (fake-but-seekable) for curve math; CDP/timing for
+    real layout-coupled timing.
+
+* Timeline sampling + assertions
+- =@record-timeline <name> as $t= — capture =ST._timing.driverUpdates[name]= as a
+  sampled {t, progress} series.
+- claim forms over a timeline (extend W3 grammar):
+  - =deltas all >= 0= (monotonic), =overshoot == 0=, =ends-at == 1.0=,
+  - =mean-delta ~= 30ms ± 3=, =progress all in 0..1=.
+- =@then @frame-budget { max-delta < 20ms; dropped-frames == 0 }= from
+  =ST._timing.report()= (jitter/fps already computed).
+
+* Curve-value assertions
+#+BEGIN_SRC
+@test "fade easing is cubic" needs timing {
+  @mount @self .hero
+  @clock advance 120ms
+  @then .hero { computed(opacity) ~= 0.62 ± 0.02 }
+}
+#+END_SRC
+
+* @hypothesis (completes the W4 reservation)
+#+BEGIN_SRC
+@hypothesis "reveal stagger monotonic" samples 100 needs timing {
+  @mount @self .headline
+  @record-timeline reveal as $t
+  @clock run-to-end
+  @then $t { deltas all >= 0; mean-delta ~= 30ms ± 5 }
+}
+#+END_SRC
+- generative params (W4) × timing assertions: =forall (e: Easing, d: 100ms..2s)= ⇒
+  assert =progress all in 0..1; ends-at == 1.0= ∀ easings (no curve escapes the box).
+
+* Tests (mutation-proven)
+- A linear-vs-cubic mismatch at t=120ms FAILS; correct curve PASSES.
+- Monotonicity assertion catches an injected backward step.
+- Frame-budget catches an injected 40ms stall.
+- Virtual clock determinism: same test, 100 runs, identical samples (no flake).
+
+* Risks
+- WAAPI seek under CDP (Animation.currentTime) vs JS-driver progress parity — verify
+  both honor the clock seam identically.
+- Ensure the seam is test-only (zero prod runtime cost / no behavior change live).
+
+* Depends on
+- [[id:FEAT-058-w2-cdp-substrate-chromiumoxide-warm-chro]] (timing rung backend)
+- [[id:FEAT-059-w3-assertion-grammar-mount-block-claims]] (claim grammar to extend)
+- [[id:FEAT-060-w4-generative-testing-property-fuzz-from]] (@hypothesis = generative × timing)
+
+* Parent
+[[id:PLAN-027-spacetime-testautomation-infra-fidelity]]

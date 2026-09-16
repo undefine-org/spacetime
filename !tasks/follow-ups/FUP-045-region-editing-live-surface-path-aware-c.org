@@ -1,0 +1,68 @@
+#+TITLE: Region-editing live surface: PATH-aware contenteditable for nested regions
+#+STATE: DONE
+#+SESSION_ID: 1503ca05d05c0c62
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-10T14-32-18-497Z_1503ca05d05c0c62.jsonl]]
+#+CUSTOM_ID: FUP-045-region-editing-live-surface-path-aware-c
+
+* Initial Message
+
+okkk! how does that translate to the actual admin? is the actual editing interface working, and how? let's DESIGN and BRAINSTORM how we'd do it properly
+
+* Problem
+FUP-042 made the ST.Editable MODEL region-complete (project/lift/validate/resolvePath
+all descend regions, proven by 29 model tests + nested-tree fuzz). But the LIVE SURFACE
+(stdlib/editable/primitives/editable-surface.st) predates regions and is FLAT-ONLY:
+- E.project(doc) ✓ already dispatches projectBlock → region blocks RENDER correctly.
+- E.insertText/deleteRange/splitBlock ✗ all call E.resolve (flat), never resolvePath.
+- E.posFromDOM / E.domFromPos ✗ the selection bridge: collectTextNodes() walks straight
+  through region hosts (data-st-region), flattening all regions into one text run.
+∴ A region block (list, columns) renders in the admin but CANNOT be edited: the caret math
+collapses regions, so typing in the right column lands at the wrong position. This is the
+"edit ops through PATHs / cross-region selection needs CDP" deferral from the FUP-042 close-out.
+
+* Decision (USER, 2026-06-12)
+Approach A: ONE contenteditable host, PATH-aware selection bridge. DOM stays a render
+target (the kernel invariant) — do NOT give the browser back authority via nested
+contenteditables (approach B rejected: nested-CE selection leakage, focus/paste/undo
+coordination). Spacetime-native, beautiful, powerful.
+
+* CDP IS available here
+CORRECTION to inherited assumption: /usr/bin/google-chrome-stable exists, src/cdp.rs
+find_chrome() locates it, `--features cdp` wires chromiumoxide. The live-click proof CAN
+run here. Author the @drive CDP test AND headless-provable mapping unit tests.
+
+* Waves (each proves itself on the rung it can)
+- S1 PATH selection bridge: posFromDOM/domFromPos descend data-st-region hosts → return/accept
+  PATH-consistent integer positions (docSize-consistent across region boundaries). The MAPPING
+  LOGIC is unit-testable against projected DOM in V8 (LinkeDOM) — no real browser needed.
+- S2 Region-aware ops: insertText/deleteRange/splitBlock route through resolvePath so an op
+  inside a region edits that region's content, not a flattened run. Pure, fuzz-testable.
+- S3 Surface rewire: editable-surface.st beforeinput funnel calls the path-aware ops + bridge.
+  Thin glue.
+- S4 CDP @drive gate: live-click region editing (type in a list item, in the left column;
+  caret lands correctly; client doc == server-validated doc). Run under `--features cdp`.
+
+* Gate
+A project with @editable + a region block (list or columns): user clicks into a region,
+types, caret is correct, persistence round-trips, server validates. Flat docs unchanged
+(byte-identical floor — all existing surface behaviour preserved).
+
+* Provenance
+PLAN-031 Cluster A → FUP-042 (model) → THIS (surface). Model commits: cd71ced5 R1,
+32330cdf R2, a54e28d3 BUG-089, c7b51d01 R3, 9bea9c5c fuzz, e2501afe docs.
+
+NOTE [2026-06-12]: DONE across S1-S4 + 2 reviewer-hardening cuts. The region-editing surface works: a user clicks into a region (list item / column), types, the caret + text land in that region, persistence round-trips. Proven live under real Chromium (browser tool: posFromDOM=6 → right region 'RZ', left 'L', caret restored in right; scratch/region-edit-live.png).
+
+Commits: 11460633 S1 bridge, 5732a017 S1r, 061f96ce S2 ops, 49b469cd S2r, 5d37a681 S3 surface, 10ec4890 S4 CDP test. Design: research/spacetime-editable-region-surface-S0.org (+ as-built).
+
+BONUS: S1's anchor-map rewrite FIXED a latent off-by-one in the LIVE FLAT editor (the old bridge used open=acc+1 while the post-FUP-042 model folds to open=acc — they silently disagreed; the bridge round-trip test only proved self-consistency, never bridge≡model).
+
+Floor held: 20 flat tests + 4 surface tests byte-identical. 38 V8 model tests + nested-tree op-fuzz green.
+
+Deferred (filed): cross-region SELECTION (Range across regions) — ops clamp to anchor leaf today (safe). BUG-095 (the @eval/@drive lexer can't parse a structured-value body) blocks the authored .st region surface test + the @drive CDP test from PARSING — a test-runner bug, the run-pending blocker for automated region coverage.
+
+NOTE [2026-06-12]: UPDATE: BUG-095 (the @eval/@drive arrow-fn parse blocker) is now FIXED (commits eeb74741 + 53e9566d). Consequences:
+- The headless .st region surface test is UNBLOCKED + PASSING: stdlib/editable/tests/surface.test.st "typing into a column region lands in that region" (5 surface tests green). The S4 region-edit loop is now an automated, committed gate on the logic rung — not just a browser-tool interactive proof.
+- The @drive CDP test (region-surface.cdp.test.st) now PARSES + launches Chromium, but can't complete: the CDP test RUNNER has a separate harness-injection failure (__spacetime_run_tests never available; chromiumoxide WS deserialize errors) — filed as BUG-099, pre-existing (cdp_runner_test fails identically), NOT a regions issue. Live behaviour stays proven via the puppeteer/browser tool (raw CDP, works).
+
+So FUP-045's automated coverage is now: 38 V8 model tests + op-fuzz (kernel) + 5 headless surface tests (live funnel incl. region typing). The CDP @drive form is authored + parsing, run-pending on BUG-099.

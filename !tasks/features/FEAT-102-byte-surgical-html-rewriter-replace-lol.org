@@ -1,0 +1,60 @@
+#+TITLE: Byte-surgical HTML rewriter — replace lol_html in CMS write paths
+#+STATE: ITEM
+#+SESSION_ID: 1503ca05d05c0c62
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-10T14-32-18-497Z_1503ca05d05c0c62.jsonl]]
+#+CUSTOM_ID: FEAT-102-byte-surgical-html-rewriter-replace-lol
+
+* Initial Message
+
+due you're being very thick. HOLES ARE WRITTEN WITH BACKTICKS YOU FUCKING IDIOT
+THERE'S A WHOLE TEST INFRA BUILT ON CHROMEOXIDE
+
+
+How the f are you so thick.
+
+Parent: [[id:PLAN-031-editable-structured-rich-text-input-mult]]. Split out of FEAT-095 (2026-06-10).
+
+* Why this is separate
+The remaining lol_html sites REWRITE HTML and WRITE IT TO DISK (user source files
+and prod export). lol_html is a SURGICAL STREAM rewriter: it touches only matched
+elements and emits every other byte VERBATIM (comments, whitespace, doctype,
+attribute quoting/order, entity encoding, void-element form preserved). html5ever
+is a full parse→tree→reserialize that NORMALIZES the whole document. Routing a
+user's hand-written .html through parse→serialize would silently rewrite their
+entire file on every CMS edit = data-loss regression. So these CANNOT be a naive
+html5ever swap; they need a byte-surgical primitive we own.
+
+* Sites (B)
+- src/server.rs ~2293-2501: save_html_handler → update_element_content (writes
+  edited .html source to disk via std::fs::write); inject_content_provenance.
+- src/sync/handlers.rs:390 update_element_content; :704 handle_content_edit_html
+  (re-inject provenance, replace innerHTML, strip data-st-* attrs, write to disk);
+  :915/:944/:951 selector innerHTML replace.
+- src/syntax/form_match.rs:1576 inject_template_provenance (annotate text-bearing
+  elements with data-st-id/data-st-origin; debug-only).
+- src/export/html.rs:process_html (strip dev attrs, drop spacetime tags, inject
+  CSS/JS bundle links before </head>/</body>).
+
+* Target
+- NEW: src/html/surgery.rs — a byte-surgical rewriter primitive: parse with
+  html5ever to LOCATE element byte-spans + attr spans (html5ever can yield
+  positions via the tokenizer/tree with source offsets, OR a lightweight
+  span-tracking tokenizer), then perform targeted string splices on the ORIGINAL
+  bytes (set/remove attr, replace inner content, append child, remove element).
+  Unmatched bytes are copied verbatim. This is the lol_html behavior, owned.
+- Port the (B) sites to this primitive; drop lol_html from Cargo.toml.
+
+* Acceptance (fidelity is the whole point)
+- NEW fidelity corpus test: round-trip docs through each rewrite op and assert
+  UNMATCHED regions are byte-identical — comments survive, attribute order/quoting
+  preserved, entities (&amp; &#x2014; &nbsp;) not re-encoded, void elements (<br>,
+  <img>) unchanged, doctype + leading whitespace intact. Only the targeted element
+  changes.
+- All existing tests green: export/html.rs (strips_all_dev_attrs etc.), handlers
+  round-trip, server save tests.
+- rg lol_html src/ Cargo.toml → ZERO (this FEAT removes the last uses).
+- Security: provenance-strip + content-replace must not introduce injection
+  (escape replaced content per existing ContentType::Html semantics).
+
+* Depends
+FEAT-095 (extraction sites already on html5ever; shared html5ever helpers exist).

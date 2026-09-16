@@ -1,0 +1,59 @@
+#+TITLE: EDN file ingress for serve + proactive compile with build-status.json
+#+STATE: DONE
+#+CUSTOM_ID: FEAT-169-edn-file-ingress-build-status
+
+* Intent
+
+beam-lisp (the BEAM Clojure dialect growing a live LLM-chat UI) drives
+Spacetime through the FILESYSTEM: it writes `page.edn`, the dev server
+compiles and reloads, and the verdict comes back as a file. That required
+three gaps to close:
+
+1. `Compiler::from_file` (the serve/check/build choke point) only parsed `.st`
+   text — EDN ingress existed but was MCP-only (PLAN-148 W5).
+2. The watcher ignored `.edn`, so an EDN page edit never recompiled.
+3. Compile verdicts reached the browser overlay or nowhere — an external
+   process had no machine-readable build status, and a failed recompile
+   served EMPTY HTML with no record.
+
+* As built
+
+- `src/compiler.rs::Compiler::edn_ingress` — shared EDN-aware parse: EDN is
+  lifted straight to `StFile` via `edn::to_st_file` (never through the
+  printer, per the W5 rule). `from_file` branches on structural detection;
+  the migration shim is skipped for EDN (it rewrites `.st` TEXT, and EDN
+  projects the current registry so retired syntax is inexpressible).
+- `src/server.rs::compile_with_validation` re-parse routes through the same
+  helper, so diagnostics see the same AST the compile did.
+- Entry resolution accepts `.edn`: `derive_st_path`, `st_entry_for_route`,
+  and the new `default_entry` helper (`index.st` → `index.st.md` →
+  `index.edn`).
+- `src/watcher.rs::should_watch` watches `.edn`.
+- `src/server.rs::compile_default_entry_with_status` — compiles the default
+  entry and writes `<site>/build-status.json` (tmp+rename, mtime observed
+  BEFORE the compile). Called from `run_serve` on boot and on every watched
+  file change, BEFORE the `Reload` is forwarded: the status and the warm
+  cache exist with no browser connected, and the reload lands on fresh
+  output.
+
+* Proof
+
+- `tests/edn_file_ingress_test.rs` — 4 tests: from_file EDN≡.st byte parity,
+  broken-EDN error names the file, status written ok:true for a clean EDN
+  site, status ok:false with diagnostics for an unknown form.
+- Live: `spacetime serve /tmp/edn-site` with `index.edn` — edit → status
+  flips ok:true → break → ok:false with the unknown-macro message → fix →
+  ok:true, each within one debounce cycle, no browser attached.
+- Regression: `cargo test --lib` 3222 passed; edn_st_parity,
+  edn_corpus_roundtrip, edn_nested_block_test green.
+
+* Honest edges
+
+- The proactive compile builds the DEFAULT entry only; a change to a
+  non-default page (`about.edn`) still compiles on request. Sufficient for
+  the single-page live-machine use case.
+- Reload transport is unchanged (WS `Reload` → full page reload); the
+  compile merely runs before the announcement now. No browser-behavior
+  claim is made beyond the pre-existing one.
+- `build-status.json` lands in the served site dir, so it is also
+  HTTP-readable at `/build-status.json` — dev convenience, not a contract.

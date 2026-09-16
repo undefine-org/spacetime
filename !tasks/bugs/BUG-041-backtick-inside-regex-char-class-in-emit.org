@@ -1,0 +1,65 @@
+#+TITLE: backtick inside regex char class in %emit js breaks stdlib parse (lexer)
+#+STATE: DONE
+#+SESSION_ID: 14f48ced503111a7
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-05-29T18-28-09-664Z_14f48ced503111a7.jsonl]]
+#+CUSTOM_ID: BUG-041-backtick-inside-regex-char-class-in-emit
+#+COMPLETION_HASH: f90d59ff6bbe7050
+
+* Initial Message
+
+ok start with FEAT-046 Blocker 1 and then continue onto the W3->W6 cluster. Use the native testing tool whenever you can. I'm going for a date, so trust yourself and consider any decision approved. Be rigourous and choose the more structurally sound and long-term option, even if it means adding waves/leaves and surfacing/filing/fixing or implementing FEAT/BUG files. Write a summary in between each sub-wave and whatnot.
+
+* Symptom
+A `%primitive`/`%macro` whose `%emit js` block contains a JavaScript regex with a
+LITERAL backtick inside a character class fails to load silently (the primitive is
+dropped from the registry; downstream uses emit `// Primitive not found: <name>`).
+
+Minimal repro (drops the primitive from the registry — `loaded=0`):
+#+begin_src
+%primitive zz-probe(name: ident, expr: string) {
+  %emit js {
+    const masked = "x".replace(/(['"`])(?:\\.|(?!\1).)*\1/g, (s) => '');
+  }
+  %exports { $value: any }
+}
+#+end_src
+Remove the backtick from the char class (`(['"])`) and it loads fine.
+
+* Root cause (suspected)
+The Spacetime emit-js lexer treats the backtick as a TEMPLATE-LITERAL delimiter even
+when it appears inside a regex literal's character class. It then mis-tracks the
+block (string/brace state desync), so the surrounding `%emit js { ... }` block fails
+to parse. Same family as BUG-040 (`%emit js brace tracking desyncs on quoted regex`)
+— the lexer does not have a full JS regex/template-literal sub-grammar, so regex
+context is not recognized and `` ` ``/`{`/`}` inside a regex are misread.
+
+* Scope / impact
+Low frequency (most stdlib regexes don't put a backtick in a char class). Hit while
+implementing @data derive/fold (FEAT-046): a string-masking regex
+`/(['"`])(?:\\.|(?!\1).)*\1/g` intended to skip ALL JS string forms. Worked around by
+dropping the backtick alternative (Spacetime exprs use ' and " only). The metasystem
+is self-describing; the proper fix is lexer-level (recognize regex-literal context so
+its inner `` ` ``/braces are inert), NOT a per-primitive escape dance.
+
+* Repro/repro-adjacent
+- stdlib/primitives/data/derived-signal.st (FEAT-046) originally carried the offending
+  regex; reduced to `(['"])` as the workaround.
+- See also BUG-040 (quoted regex brace tracking).
+
+* Acceptance
+- A `%emit js` regex literal may contain backticks (and braces) inside it without
+  desyncing the block lexer.
+- Repro above loads (`loaded=1`).
+- Add a stdlib-load regression test enshrining a backtick-in-regex `%emit js` block.
+
+NOTE [2026-08-02]: FIXED + GATED 2026-07-31, commit aae443a8 (PLAN-122 W0 / FEAT-164). Same root cause and same one-line fix as BUG-040 — filed correctly as the same family.
+
+The suspected cause ("the backtick is treated as a template-literal delimiter even inside a regex char class") was right in effect but the mechanism is simpler than a missing regex sub-grammar: ANY unterminated quote-like token (', ", or `) opened a string that ran to EOF, swallowing the `}` that closed the `%emit js` block. BUG-072 had already stopped that at a newline; the EOF path had not been updated to match. The fix makes the two agree — an unterminated string at EOF consumes only its opening quote and the rest re-lexes.
+
+Per the filed acceptance ("the proper fix is lexer-level, NOT a per-primitive escape dance"): correct, and it needed no regex-context recognition. A backtick inside a regex char class is now inert because it simply fails to open a string that outlives the line/input, not because the lexer learned JS.
+
+Gate: meta_emit_js_regex_char_class_with_backtick in src/syntax/events/grammar/meta.rs enshrines this bug's exact repro `/(['"`])(?:\\.|(?!\1).)*\1/g` at parse level — chosen deliberately over a stdlib-load count assertion, because this bug's symptom was a SILENT registry drop (`loaded=0`, downstream `// Primitive not found`), and a parse-level gate catches it at the layer where it originates rather than by counting a downstream effect.
+
+The FEAT-046 workaround noted here — stdlib/primitives/data/derived-signal.st reduced `(['"`])` to `(['"])` — can now carry the backtick alternative again. Not reverted in this commit (no test depends on it; a separate change should re-widen it deliberately).
+
+Verified: meta + lexer 152/152, integration 202/202.

@@ -1,0 +1,71 @@
+#+TITLE: stale insta snapshots for data/template emit (reactive arc not regenerated)
+#+STATE: REVIEW
+#+SESSION_ID: 14f48ced503111a7
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-05-29T18-28-09-664Z_14f48ced503111a7.jsonl]]
+#+CUSTOM_ID: BUG-038-stale-insta-snapshots-for-data-template
+
+* Initial Message
+
+Ok do me a full summary of the spec. Now we're PLANNING, and once the plan is valid, we ORCHESTRATE. Get yourself ready and pumped
+
+* Symptom
+4 lib snapshot tests fail at HEAD (pre-existing, verified via clean worktree):
+- compiler::snapshot_tests::snapshot_data_directive
+- compiler::snapshot_tests::snapshot_template_definition
+- compiler::snapshot_tests::snapshot_template_definition_and_invocation
+- compiler::snapshot_tests::snapshot_mixed_file_level_and_selector_scoped
+
+* Root cause
+The FEAT-042/BUG-036 reactive arc (commits ~1602ebd9, 6e1bc767) changed @data/@template JS
+emit (locale resolution via window.__st_locale||documentElement.lang||'en'; SpacetimeLocal
+publish; `apply(el)` transpiled-arrow mutation actions replacing raw expr eval; `applyTo`
+watch refactor) but the corresponding *.snap fixtures were never regenerated with
+`cargo insta accept`. The new emitted JS is the INTENDED, committed behavior; the snapshots
+are stale.
+
+* Pre-existing
+Reproduces at HEAD independent of PLAN-023 W0. Surfaced while gating Wave 0.
+
+* Fix
+Regenerate the 4 snapshots (`cargo insta accept` / INSTA_UPDATE) so they capture the
+committed reactive-arc emit. Audited each diff: all changes are reactive-arc runtime JS, no
+unintended content.
+
+* Acceptance
+- cargo test --lib snapshot_tests GREEN (all 4)
+- diffs limited to reactive-arc emit (apply-arrow, SpacetimeLocal, locale, applyTo)
+
+NOTE [2026-06-07]: Dispatched async fix subagent (parallel with PLAN-030 Wave 0). Covers 5 stale snapshot failures + the duplicate `wait-for` macro (automation.st:57 vs test.st:968) causing E0812 on 2 of them.
+
+* RESOLUTION (2026-06-07, main thread)
+
+** Corrected root cause — NOT stale snapshots
+The "stale snapshot" hypothesis was WRONG. The true root cause of all 5 snapshot
+failures (and, it turned out, the 3 `compiler::tests::html_*` failures too) was a
+SINGLE duplicate macro name: `%macro wait-for` defined in BOTH
+`stdlib/testing/automation.st:57` (directive `@wait-for <sel>`) and
+`stdlib/testing/test.st:968` (directive `@wait_for <sel> timeout:`). Both load into
+the shared stdlib registry → E0812 "Duplicate macro definition 'wait-for'" →
+EVERY test that compiled against a fresh stdlib registry failed with a pipeline error
+(snapshots asserted `pipeline_errors.is_empty()`, html_* asserted clean compiles).
+
+The two are genuinely DISTINCT directives that happened to share a MACRO name. Directive
+dispatch keys on the %form first token (resolve.rs `get_macro_by_form_directive`), not the
+macro name — so the names can be made unique with zero behavioral change.
+
+** Fix
+Renamed `automation.st`'s macro to `%macro wait-for-appears` (its `@wait-for` directive
+surface is unchanged; `@wait_for ...timeout:` in test.st keeps `%macro wait-for`). Added a
+doc comment explaining the name-uniqueness requirement. No snapshot regeneration was
+needed — the committed emit was already correct; the registry was simply poisoned.
+
+** Verification
+- cargo test --lib: 2130 passed, 0 failed (was 8 failing). All 5 snapshots + 3 html_*
+  now green.
+- @wait-for and @wait_for both still resolve (distinct directives, callers unaffected;
+  @wait_for has real callers in stdlib/testing/meta/wait-timing.test.st).
+- Files: stdlib/testing/automation.st.
+
+** Note for BUG-038/PLAN-023
+The 3 `compiler::tests::html_*` failures previously attributed to "PLAN-023 W1 unfinished"
+were ALSO this collision — they are now green. No PLAN-023 work was required.

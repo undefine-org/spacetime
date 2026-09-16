@@ -1,0 +1,70 @@
+#+TITLE: Headless V8 logic backend missing DOMParser / el.animate / __ST_DEBUG__ globals
+#+STATE: DONE
+#+SESSION_ID: 1510d7e0efe8848c
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-20T17-53-05-983Z_1510d7e0efe8848c.jsonl]]
+#+CUSTOM_ID: BUG-129-headless-v8-logic-backend-missing-dompar
+#+COMPLETION_HASH: 787aaf13b2d05581
+
+* Initial Message
+
+launch the workbench and let me drive it for a bit (give me the link) while you explore the various plans that it was building upon (all the way to PLAN-049) and we thoroughly design the multi-frame drag-canvas (W4's strip is the non-canvas bridge), file-scope page mounts (FUP-061), the
+ __mcp__/__admin__/__dev__ convergence (north-star, two-consumer rule).
+
+* Symptom
+Running the headless Spacetime suite (cargo run --features headless -- test tests/
+--headless) shows ~62 failures, a cluster of which are ENVIRONMENT-API gaps in the
+lightweight V8 `logic` backend (not logic regressions):
+- "DOMParser is not defined" (5+): runtime sanitize path (build_runtime.rs:425
+  `new DOMParser().parseFromString(...)`) + any test exercising HTML parsing.
+- "el.animate is not a function": Web Animations API absent in the V8 backend.
+- "__ST_DEBUG__ should be an object" / "__stDebugHook should be an object": debug
+  hooks not seeded in the headless context.
+- "Cannot read properties of undefined (reading 'registerTimeline')": timeline
+  registry not present.
+
+* Root cause
+The `--headless` fast V8 backend is a bare JS VM (logic-fidelity per
+docs/testing/FIDELITY_LADDER.md). It lacks DOM/Web-platform APIs (DOMParser,
+Element.animate, IntersectionObserver in some paths) and some ST debug globals.
+Tests that need these APIs run on it and fail with ReferenceError/TypeError
+instead of either (a) being gated to a higher-fidelity backend (--cdp) or (b) the
+backend providing a minimal shim.
+
+* Why it matters
+These failures are NOISE in the headless signal: they mask real regressions (a
+genuine break is hard to spot among ~62 known-environmental failures). A clean
+headless baseline is essential for attributing future changes (this session had to
+run an Element-vs-Scoped probe to separate 1 real delta from 62 environmental
+failures).
+
+* Verified NOT a regression
+Present independent of recent template-scope work (FUP-094): the Element-vs-Scoped
+attribution probe showed 62 vs 63 failures, i.e. these ~62 predate and are
+orthogonal to template emit changes.
+
+* Options (pick the elegant one)
+1. SHIM (preferred for logic-level tests): provide minimal DOMParser (parse to the
+   existing lightweight DOM the backend already has), a no-op el.animate returning
+   a stub Animation, and seed __ST_DEBUG__/__stDebugHook in the headless harness
+   bootstrap. Keeps these tests on the fast backend.
+2. GATE: mark the API-needing tests as requiring layout/paint fidelity so they
+   REFUSE on --headless (like the existing layout-fidelity refusals) instead of
+   erroring — honest, but loses coverage on the fast path.
+3. SPLIT: a `dom`-fidelity tier between `logic` and `layout` (jsdom-backed) for
+   tests that need DOM APIs but not real layout.
+
+Recommend (1) for DOMParser/animate/debug-globals (cheap shims, keep fast
+coverage) + (2) for anything genuinely needing layout.
+
+* Acceptance
+- The headless suite's environmental failures drop to ~0; remaining failures are
+  real or explicitly fidelity-gated (refusals, not errors).
+- A documented, stable headless pass count (AGENTS.md cites 341+).
+- DOMParser/el.animate/__ST_DEBUG__ available (shimmed) OR cleanly gated.
+
+* Note
+The layout-fidelity REFUSALS (~9: "needs 'layout' fidelity but the backend tops
+out at 'logic'") are BY DESIGN (the fidelity ladder) and are NOT part of this bug
+\u2014 they correctly refuse rather than fake a green.
+
+NOTE [2026-06-22]: RESOLVED (PLAN-059, 2026-06-22). Added src/headless_shims.js (included + evaled in both headless runtime paths in main.rs): DOMParser (wraps linkedom.parseHTML), window.getSelection + createRange, IntersectionObserver (geometry-aware via inline top/display heuristic), Element.animate + getAnimations (WAAPI stub), focus/blur + activeElement tracking, FocusEvent, MouseEvent/KeyboardEvent init-dict property preservation (key/shiftKey/clientX/…), CSSOM setProperty string coercion. Debug globals __stDebugHook/__ST_DEBUG__ seeded from the dev-hooks primitive's own JS (extracted at runtime via dev_hooks_js() — single source of truth, no copy). have_count assertion added (alias of have_length). Wait-cap raised 10ms→250ms so real timers fire. CSS-var/opacity coercion in product (interpolate.js, st.js bindStyle). Rung refusals now report as SKIPPED (deferred to CDP), not FAILED. Net: headless 549→598 passed, 62→0 failed, 15 rung-skipped.

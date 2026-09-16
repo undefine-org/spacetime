@@ -1,0 +1,39 @@
+#+TITLE: File-scope hydration: widen static-initial evaluator + SSG export path
+#+STATE: DONE
+#+SESSION_ID: 14fc108ed3772fa8
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-04T14-32-37-965Z_14fc108ed3772fa8.jsonl]]
+#+CUSTOM_ID: FUP-039-file-scope-hydration-widen-static-initia
+#+COMPLETION_HASH: 3b65cef83fe02e83
+
+* Initial Message
+
+Ok, start with Phase B. Use a wave manifest with in-chat mid-flight check-ins exlpaining what's going on, what' you've done, and what you're doing next. use main thread for architectural work and reviewer swarms in between waves. add as many gap implementation as needed; you have unlimited time budget. file FEAT/BUG you find mid-flight using the org tool and fix/implement them mid-flight
+
+* Parent
+FEAT-078 (file-scope HTML reactivity). Two documented later steps, deferred (not blocking; the
+core reactive hydration is done + V8-verified).
+
+* 1. Widen the static-initial evaluator
+html_hydrate::static_initial only resolves a BARE `$x` to its declared initial. A compound
+expr (`$a + $b`, `$x.y`, filtered `$total | currency`) renders EMPTY statically and is filled by
+the on-load render (so no-JS shows nothing for those). Widen the compile-time evaluator to
+resolve simple compound exprs over known global initials (the ssg_unroll static-array evaluation
+is precedent). Document the boundary (what stays hydrate-on-load).
+
+* 2. SSG export path
+compiled.html (file-scope markup + hydration markers) is injected only in the DEV SERVER
+(synthesize_st_only_shell). The static EXPORT (src/export/emit.rs) reads AUTHORED .html files
+from disk and does not inject compiled.html. So `cargo build` of a pure-.st page that relies on
+file-scope markup needs the export pipeline to emit compiled.html into the route's index.html
+(or synthesize a shell like the dev server). Until then, file-scope reactive markup is
+dev-server-correct but not statically exported. Decide: inject compiled.html in process_html, or
+synthesize a shell for st-only routes.
+
+* Gate
+Both: a real `cargo build` of an st-only page with file-scope holes produces a static index.html
+with initial values + the hydration bundle; eyeball first paint correct + reactive.
+
+NOTE [2026-06-09]: BOTH parts done.
+PART 2 (SSG export): NEW src/html/page_shell.rs render_page_shell shared by dev server + export (no drift); dev's synthesize_st_only_shell delegates to it. CompiledBundle carries html; export::emit::run synthesizes <dir>/index.html from compiled.html (wrapped in the shared shell + bundle hrefs) for st-dirs lacking an authored .html. Additive + precedence-safe (authored wins, no-markup synthesizes nothing). Real cargo build of an st-only page now reports Pages:1 with file-scope markup + data-st-hole markers + bundle. Tests: 3 export + page_shell unit + 3 dev-shell (via delegation).
+PART 1 (static-initial evaluator): static_initial -> eval_static bounded JS-faithful evaluator (literals, bare $x, + - * / % with JS string-concat/numeric semantics over known global initials). CORRECTNESS INVARIANT: non-empty result == runtime apply() (no flash); bails to empty on calls/filters/member-access/comparisons/unknown-signal. V8 feat078_compound_initial_matches_runtime proves $a+$b bakes 7==runtime, reacts to 14.
+Gates: lib 2148/0, integration 162/0, v8 314/12 (pre-existing media), headless 355/254 (baseline). HEAD 26d499bd.

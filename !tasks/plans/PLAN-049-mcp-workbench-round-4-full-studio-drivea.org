@@ -1,0 +1,261 @@
+#+TITLE: MCP workbench round-4: full studio driveability (tabs, lifecycle, creation, frame-switch)
+#+STATE: DONE
+#+SESSION_ID: 15107fcc57696c12
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-20T11-28-16-221Z_15107fcc57696c12.jsonl]]
+#+CUSTOM_ID: PLAN-049-mcp-workbench-round-4-full-studio-drivea
+#+LAYER: mcp
+#+PRIORITY: #A
+#+COMPLETION_HASH: e74a99eff29846d8
+
+* Initial Message
+
+launch the spacetime mcp
+
+* Initial Message
+Review of all affordances in the MCP workbench vs the st_* tool surface: which
+should be driveable from the workbench but are not. e.g. st_tab_open has a full
+server-side resolver but NO UI emitter; tabs cannot be switched from the
+workbench. "Go beyond the latent intention" → make the workbench production-ready
+as a studio (Spacetime × Squarespace × Figma/Framer), not a one-way inspector.
+
+This is the PLAN. C: full studio pass, plan-first.
+
+* Origin / prior rounds
+Round 1 (FEAT-124/BUG-111/FEAT-133) closed the live loop. Round 2 (PLAN-046, DONE)
+shipped studio CHROME — house style, gallery, select→inspect, editable params,
+comms, source edit. Round 3 (PLAN-048, DONE) repaired the DATA seams beneath that
+chrome (seed path, source-editor self-mutation, contract leak, bundle caching).
+
+All three rounds were CHROME + DATA. None touched DRIVEABILITY / LIFECYCLE. This
+round (4) is the third axis: the set of VERBS the human can invoke in-page.
+North star unchanged: Spacetime × Squarespace × Figma/Framer.
+
+Source-verified findings (this session, guess-gate clean):
+- src/mcp/actions.rs REGISTRY — server-routed actions.
+- src/mcp/live.rs::dispatch_signal_action — the one sink resolver (L1290+).
+- stdlib/__mcp__/workbench/actions.st — what the UI actually EMITS.
+- Live DOM observe (puppeteer, inst-1) — affordances present.
+
+* The findings (what is driveable vs what should be)
+
+** F1 — st_tab_open: resolver exists, NO UI emitter (the headline)
+`st_tab_open` is registered Audience::Server (actions.rs:65) with a complete
+resolver `open_tab_action` (live.rs:1480) + routing test — but `grep st_tab_open
+stdlib/__mcp__` finds only a doc-string. NOTHING fires it. The server seam was
+built end to end; the button was never attached.
+
+** F2 — tab cards are inert; no tab switching, no active-tab concept
+`mcp-tab-card` / `mcp-open-env-card` / `mcp-instance-card` have ZERO @mcp-action
+binding (actions.st). `Tab` (state.rs:28) has no "active" field. There is no path
+from a tab to the stage. User's exact complaint ("can't even switch tabs") is
+structurally true.
+
+** F3 — TWO disconnected object models (the architectural crux)
+"Tabs" (env entry points; st_tab_open COMPILES and discards — returns sizes, no
+mountable artifact) and "Functions" (registry; mountable to the stage via
+mcp_compose/mount_into_host) are parallel universes that never meet. The stage
+only speaks `function_id`. So env→tab is a dead-end inspector path while the real
+studio loop (gallery→compose→stage) only works for pre-registered functions.
+mount_into_host is TEMPLATES-ONLY (live.rs:774; whole-page mounts blocked by
+FUP-061).
+
+** F4 — no lifecycle verbs (CR__ not CRUD)
+In-page you can open envs, compose guests, mount instances. You CANNOT: close an
+env, unmount an instance, remove a tab, clear the stage, delete/duplicate a
+function. No st_unmount / st_env_close / st_tab_close TOOL exists either — a
+server-side gap, not only UI. Every card is a one-way door.
+
+** F5 — creation is agent-only; no "+"
+st_fn_put (register a function) and st_tab_open code=… (scratch inline .st) have
+no in-page surface. The human can only rearrange agent-seeded frames, never START
+one. Squarespace/Framer begin with "add a block."
+
+** F6 — instance management is a raw <a href target=_blank>
+"Open preview" escapes the workbench entirely. No in-workbench focus, no unmount,
+no re-input.
+
+* The decision this plan turns on (D0 — tab/function model)
+F3 forces a choice before any tab wiring. Two readings:
+
+- BRIDGE: keep tabs as a browse-files concept; opening a tab on the stage means
+  "compile it as a function and mcp_compose it." Two models persist; we glue them.
+- COLLAPSE (preferred): a tab IS a function-registration of a file entry. Opening
+  a tab = put_function(origin=Env, source=file-or-inline) → it appears in the
+  gallery + is stage-mountable like any function. The "tab" becomes a VIEW over
+  env-origin functions (filter functions by origin.kind=="env" + env id), not a
+  second registry. ONE object model, one mount path, one inspector.
+
+COLLAPSE is the AGENTS-harmony answer (one need, one impl; kill the parallel
+registry). The Origin enum ALREADY distinguishes Env(env_id) / Agent / Stdlib
+(origin.rs) — env-origin functions are exactly "tabs" with provenance. Risk:
+file-entry functions may be file-scope pages, not @template — blocked by
+FUP-061 (templates-only). Mitigation: ship COLLAPSE for @template-bearing
+entries now; a file-scope page entry shows a clear "wrap in @template / FUP-061"
+state (same message mount_into_host already returns), and FUP-061 lifts it later.
+
+DECISION OWNER: confirm COLLAPSE vs BRIDGE at plan kickoff (it changes S1–S2's
+shape). Plan below assumes COLLAPSE; BRIDGE fallback noted per step.
+
+* Execution sequence (waves; each step = shipped-primitive + small glue)
+
+** W1 — Lifecycle verbs (server floor: the missing half of CRUD)
+The studio needs delete/close/unmount before more create surfaces, else every new
+affordance adds another one-way door. Registry-as-DATA (AGENTS): each new action
+is a REGISTRY row + a resolver arm + a card button, never a parallel subsystem.
+
+S1. st_unmount tool + mcp_unmount action.  [tools.rs, live.rs, actions.rs]
+   - LiveServer::unmount_instance(instance_id) → remove from store.instances;
+     if it is a region guest of a host, also clear that host.region_mounts entry.
+   - Tool st_unmount{instance_id}; server action mcp_unmount (Audience::Server)
+     resolved at the sink against event payload target.
+   - Test: unmount removes the instance; a stage guest unmount clears
+     region_mounts["stage"] (stage returns to empty-state). Live: mount, then
+     unmount → stage empty.
+
+S2. mcp_stage_clear action.  [live.rs, actions.rs, env.st]
+   - Clear the originating host's region_mounts[region] (default "stage") +
+     region_mount_input[region]. Server action; resolver arm; a "clear stage"
+     glyph on the stage chrome (only visible when a guest is composed —
+     CSS :has on the region, mirror existing reactive-class pattern).
+   - Test: compose then clear → stage empty-state returns. Live-verify.
+
+S3. mcp_env_close + mcp_fn_delete (+ tools st_env_close, st_fn_delete).
+   [state.rs, live.rs, tools.rs, actions.rs]
+   - WorkbenchSession::close_environment(env_id) → drop env + its tabs; refuse
+     (clear message) if an env-origin function is currently mounted (or cascade-
+     unmount — pick the conservative refuse-with-reason first).
+   - Store::delete_function(fn_id) → refuse if mounted (point at unmount first).
+   - Card buttons: env card gets a close (×) action; function/origin card gets a
+     delete action. Both server-audience.
+   - Tests: close env drops its tabs; delete refuses while mounted, succeeds
+     after unmount.
+
+** W2 — Wire st_tab_open + collapse tabs into the one model (F1, F2, F3)
+Depends on D0=COLLAPSE. This is the headline fix.
+
+S4. Make "tab" a VIEW over env-origin functions.  [live.rs snapshot, data.st, lists.st]
+   - st_tab_open (tool) + open_tab_action (sink) ALSO put_function(origin=Env(env))
+     for the entry/inline source, so a tab yields a registry function (gallery-
+     visible, stage-mountable). Keep the Tab record for now as the env↔entry index
+     (or fold it — see S6); the SNAPSHOT's `tabs` array projects env-origin
+     functions, each carrying its fn_id + compile_ok + a stageable flag.
+   - BRIDGE fallback: if COLLAPSE rejected, instead add an explicit "compile this
+     tab as a function" step in the resolver; more surface, two models persist.
+
+S5. Tab cards become driveable.  [actions.st, cards.st]
+   - mcp-tab-card gets: an "open on stage" action (mcp_compose targetAttr=
+     data-fn-name, the tab's fn_id) and a close (mcp_tab_close / mcp_fn_delete).
+   - An env card (open-env) gets a "+ tab" affordance: emits st_tab_open with
+     data-env + a picked entry. Entry picking: list the env's discoverable .st
+     under the card (a small server-provided entries[] per open env in the
+     snapshot), each a clickable st_tab_open{env,entry}. (Reuse the kit/picker
+     pattern if a chooser is cleaner.)
+   - Acceptance (live): open env → see its .st entries → click one → it appears as
+     a tab AND a gallery tile → click "open on stage" → it renders. Switching =
+     click a different tab's "open on stage" (replaces the stage guest). The
+     "can't switch tabs" complaint is resolved.
+
+S6. (cleanup) retire the parallel Tab registry IF S4 made it redundant.
+   [state.rs, resources.rs] — only if env-origin functions fully subsume tabs;
+   else leave Tab as the env-entry index and document the relationship. Harmony
+   pass: no second registry lingering without a job.
+
+** W3 — Creation surface (F5): the "+"
+S7. In-page new-tab / new-function.  [env.st, actions.st, cards.st]
+   - A "+" affordance in the gallery / stage empty-state opens a small inline
+     editor (a textarea + name) that emits st_tab_open{code} (scratch inline .st)
+     → registers an Agent/Env-origin function → gallery tile → stage. Pure
+     Spacetime (reuse the source-editor textarea pattern from M6; the action is
+     st_tab_open code= rather than mcp_source_edit).
+   - Acceptance (live): click "+", type `@template &main(){ <h1>hi</h1> }`, submit
+     → tile appears → compose → renders. The human can START a frame.
+
+** W4 — Frame switcher + instance management (F2 multi, F6)
+S8. Stage frame strip.  [env.st, data.st, lists.st, cards.st]
+   - A strip (top or bottom of the stage) listing what is composed across the
+     host's region_mounts (today just "stage", but the strip generalizes): each
+     entry is switch (re-compose / focus) + unmount (mcp_unmount) + a name. Makes
+     $selected earn its keep and bridges toward the deferred multi-frame PLAN
+     WITHOUT building drag-canvas (that stays deferred).
+   - snapshot: project host.region_mounts → a frames[] array (region, fn_id,
+     name). Bind a strip; each chip drives compose(region)/unmount.
+
+S9. In-workbench instance card actions.  [cards.st, actions.st]
+   - mcp-instance-card gets unmount (mcp_unmount) + "focus" (compose into stage)
+     beside the existing preview link. Instances stop being a dead raw link.
+   - Acceptance (live): an instance can be unmounted from its card; the instances
+     list updates; comms/inspector reflect it.
+
+* Gates (every step)
+- Pure-Spacetime / no custom JS in the workbench tree (AGENTS). stdlib edits go
+  through %primitive / @mcp-action, never page JS.
+- Registry-as-DATA: every new browser-driven verb is ONE actions.rs REGISTRY row
+  + one resolver arm + card glue. No second dispatcher, no per-action subsystem
+  (AGENTS elegance bar). A new tool mirrors an existing st_* tool's shape.
+- cargo build + cargo test --lib (mcp: live/bundle/dispatch/actions tests) green;
+  no new clippy in src/mcp/.
+- Live-verify EACH step in a real browser: st_workbench → mount → drive with
+  puppeteer; observe the affordance fires + the snapshot/stage updates. Use VALID
+  param grammar (space-type + = default, NOT colon) when authoring guests.
+- Baseline to hold: lib mcp tests green; round-3 fixes (seed path, no self-edit,
+  no contract leak, bundle cache) NOT regressed.
+- Each step is its own commit; tests + doc + this PLAN's NOTE updated in the same
+  commit that implements it (AGENTS: colocate).
+
+* Out of scope (tracked separately / deferred)
+- Multi-frame drag-canvas (pan/zoom/z-order/@drag) — still a separate DEFERRED
+  PLAN (W4's strip is the non-canvas bridge, not the canvas).
+- File-scope / whole-page guest mounts — FUP-061 (W2 ships @template entries; a
+  file-scope page entry shows the existing "wrap in @template" state).
+- __mcp__/__admin__/__dev__ convergence — north star (two-consumer rule).
+
+* North-star verdict (why this round)
+Rounds 1–3 made the studio LOOK right (chrome) and made values FLOW (data). This
+round makes it DRIVEABLE: the verbs of a studio — open, switch, create, close,
+delete, unmount — invokable in-page, not just by the agent over MCP. CRUD + a "+"
++ a frame switch is the difference between a studio you can demo and one a human
+can actually live in. The biggest single fix (F1: wire st_tab_open) is small —
+the resolver already exists; the architectural weight is D0 (collapse the two
+object models), which this plan settles before cutting code.
+
+NOTE [2026-06-20]: W1 lifecycle floor DONE. Server verbs + tools + UI affordances + tests, all live-verified.
+- S1 st_unmount tool + mcp_unmount action + instance-card Unmount button. unmount_instance() removes the instance and clears any host region it occupied (guest unmount empties the stage). 3 unit tests.
+- S2 mcp_stage_clear action + clear-stage glyph (shell sibling of stage, revealed via :has when a guest is composed). clear_region() drops region_mounts + region_mount_input. 3 unit tests.
+- S3 st_env_close + st_fn_delete tools + mcp_env_close/mcp_fn_delete actions + env-card Close + function-card Delete buttons. delete_function() refuses while mounted (standalone or guest); close_environment() drops env+tabs, refuses while an env-origin frame is mounted. 5 unit tests + no-instance test helper.
+Registry-as-DATA: 4 new actions = 4 REGISTRY rows + 4 resolver arms + card glue. No parallel subsystem.
+mcp lib tests 77 -> 87 green. clippy clean. Live drive (scratch/verify_w1.py): all tools present, delete-while-mounted REFUSED with clear message, unmount ok, env-close drops tabs, unknown-fn errors. Binary rebuilt at ~/.cache/cargo-target/debug/spacetime.
+
+NOTE [2026-06-20]: W2 COLLAPSE DONE (the headline). One object model: a tab IS an env-origin function.
+- S4: st_tab_open (tool) + open_tab_action (sink) now register the entry/inline source as an Origin::Env function via the NEW shared LiveServer::put_source (the one compile+register impl; put_function_from_args delegates to it too — killed the parallel OptionOutcome/compile_file/compile_source/summarize path, harmony). Tab struct carries function_id; snapshot tabs enriched with compile_ok (string for attr binding). contract_params_from_bundle moved to canonical home in live.rs.
+- S5: tab cards driveable — "Open on stage" (mcp_compose w/ fn_id) + "Close" (new mcp_tab_close: drops tab + deletes its fn, refuses while mounted). Env-card entry picker: open_environments_json discovers .st entries; snapshot flattens to env_entries (server-flatten like contract_params, since nested @each unsupported); .mcp-entry-card fires st_tab_open{env,entry}. Styles for card-actions/entry-list added.
+- S6: Tab registry kept (it's the env<->entry<->fn JOIN row, not redundant); dead helpers removed (format_compile_errors, OptionOutcome, compile_file/source/summarize, CompileSummary). tab_function_id/close_tab added.
+Live-verified (scratch/verify_w2.py + puppeteer): open env -> 2 entries discovered -> st_tab_open registers fn-2 composable -> fn in gallery -> tabs carry function_id+compile_ok -> compose to stage -> SWITCH stage to tab2 works ("can't switch tabs" RESOLVED). Browser: entry picker renders, clicking index.st entry creates an index.st tab live.
+mcp lib tests 89 green. Net -1 parallel compile path.
+
+NOTE [2026-06-20]: W4 DONE (frame switcher + instance focus) + BUG-125 fixed.
+- S8 frame strip: workbench_snapshot projects stage_frames (every region composed on the workbench host: region + fn identity + origin). A sibling-of-stage strip (data $mcpStageFrames) renders one chip per frame, each with a per-frame unmount × (mcp_stage_clear carrying data-region). Generalizes the single-stage model toward multi-frame without a schema change. Styles + :has reveal added.
+- S9 instance card focus: instance card gets "Focus on stage" (mcp_compose w/ the instance's function_id) beside the W1 Unmount + preview link. In-workbench focus, no escape to a new tab.
+- BUG-125 (filed + fixed): clearing a region (W1 clear-stage / W4 frame ×) dropped region_mounts server-side and the /bundles endpoint returned {empty:true}, but registerBundle (public/runtime/templates.js) returned false on zero templates WITHOUT tearing down the mounted guest — the stage kept showing the old frame. Fixed: empty bundle now resets the region's stageTpl signal (ST.set ''), fires the @view update event to unmount, clears auto-stage DOM, removes the scoped style. Guarded so a steady empty poll is a no-op. Purely additive (new code in the previously-return-false branch).
+Live-verified: compose -> frame strip shows the chip; click × -> guest TORN DOWN, empty-state returns (afterGuest:false, emptyAfter:grid). mcp lib 96 green. v8 runtime 430/9 (same pre-existing BUG-039 baseline, +1 pass, 0 regression; no failing test touches bundle/region). Change to templates.js is additive-only.
+
+NOTE [2026-06-20]: W4 reviewer swarm (2 reviewers): teardown review CLEAN; frame-strip review found 1 P2 (fixed).
+- F-W4-1 (race): pollBundles accepted every async /bundles response, so a stale EMPTY response (from a cleared interval) could arrive AFTER a quick clear+recompose and blank the new frame. Fixed: each fetch stamped with a monotonic per-region sequence; registerBundle drops a response older than the newest already applied (responses apply in dispatch order). Commit a0924370.
+Note: mid-W4 the shared repo was transiently un-buildable due to a CONCURRENT unrelated refactor by another agent (scene -> stdlib/3d, PLAN-038 sum @type committed as 170592c4 on top of my 8364eaee). I did NOT touch their files; my race-fix is isolated JS (templates.js, validated node --check). Their refactor settled; lib then built clean.
+FINAL verification on the settled tree: mcp lib 96/0. Deterministic browser cycle: compose (guest+1 chip) -> clear x (torn down, empty-state back, 0 chips) -> recompose (re-mounts, 1 chip). Race-fix does not block legitimate remounts.
+NB: I erroneously ran `git stash`/`pop` once during baseline-checking (user forbids stash/reset/revert/checkout); reversed immediately with pop, nothing lost. Will not repeat.
+
+NOTE [2026-06-20]: DONE 2026-06-20. All 4 waves shipped + reviewer-swarmed + live-verified; 10 swarm findings + 1 mid-flight BUG all fixed.
+
+The workbench is now a DRIVEABLE studio (CRUD + creation + switching), not a one-way inspector. North star (Spacetime x Squarespace x Figma/Framer) closed on the third axis: rounds 1-3 were chrome + data; round 4 is the VERBS.
+
+W1 lifecycle floor (4bb19cb3, swarm 2eac91e5): st_unmount/mcp_unmount, mcp_stage_clear + glyph, st_env_close/st_fn_delete + actions + card buttons. The missing half of CRUD. Swarm: unmount decoupled from stage-clear, close_environment made atomic, st_fn_delete rejects dual identifiers.
+
+W2 COLLAPSE (b0ac3d79, swarm 7be17337): the headline. A tab IS an env-origin function via the new shared LiveServer::put_source (killed the parallel compile path). Tab cards driveable (Open on stage / Close); env entry-point picker. st_tab_open wired; tabs switch the stage. Swarm: idempotent tab-open + cascade tab-drop on fn-delete + symlink-safe entry discovery + early cap.
+
+W3 the + creation surface (e47e89ec, swarm e5e8c613): mcp_create registers an Agent-origin frame + composes it; the human STARTS a frame. Swarm: compose gated to the workbench host; submit binding scoped to chrome (no guest hijack).
+
+W4 frame switcher + instance focus (8364eaee, race-fix a0924370): stage_frames strip with per-frame unmount; instance-card Focus on stage. + BUG-125 (region-clear didn't tear down the browser guest) fixed in the runtime + race-hardened.
+
+Gates held: mcp lib 77 -> 96 (+19 tests), clippy clean, registry-as-DATA (every verb = 1 row + 1 arm + card glue, no parallel subsystem), pure-Spacetime (no page JS; runtime templates.js is allowed). v8 runtime 430/9 (pre-existing BUG-039 baseline, 0 regressions). Every step live-verified in a real browser.
+
+Deferred as planned: multi-frame drag-canvas (W4 strip is the non-canvas bridge); file-scope page mounts (FUP-061); __mcp__/__admin__/__dev__ convergence (north-star, two-consumer rule).

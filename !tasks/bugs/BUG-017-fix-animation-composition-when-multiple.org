@@ -1,0 +1,169 @@
+#+TITLE: Fix animation composition when multiple scroll target same property
+#+STATE: DONE
+#+SESSION_ID: 14af0a7e71c1adaa
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-04-05T18-43-05-799Z_14af0a7e71c1adaa.jsonl]]
+#+CUSTOM_ID: BUG-017-fix-animation-composition-when-multiple
+#+EFFORT: 3
+#+PRIORITY: #B
+#+LAYER: stdlib
+#+DEPENDS: BUG-016-revert-scroll-scope-default-from-entry-t
+
+NOTE [2026-04-05]: Added per-element, per-property ownership tracking in apply-animations.st. First-writer-wins at init, active animations (0<p<1) always claim, dormant (0 or 1) yield. Verified via browser: crystal panel starts at opacity 0, fades in gradually with scroll, ownership transfers correctly between in/out animations.
+
+* Initial Message
+
+the final states in the scrolls in http://localhost:9416/en/ (ora-ventures.com) are always shown, I don't have that scroll timeline working anymore. Find the root cause and exlpain it to me. Use the browser tool to find out as well.
+
+* Problem
+When two =@scroll= animations target the same CSS property on the same element (the in/out pattern), they fight over the inline style. Each animation independently calls =applyStyle()= which writes to =el.style[property]= unconditionally. The last watcher to fire wins.
+
+** Init-time bug
+At =scrollY=0=, =applyInitialState= runs for both animations at =progress=0=:
+1. =work-panel-1-in= (=opacity: 0 → 1=): writes =opacity: 0= ✓
+2. =work-panel-1-out= (=opacity: 1 → 0=): writes =opacity: 1= ✗ (overwrites)
+
+The element starts visible instead of hidden. Masked when elements are below the fold, but incorrect.
+
+** Scroll-time bug
+During scroll, both ST.watch callbacks fire via microtask queue (FIFO from backward =__stScrollHandlers= iteration). The first-registered animation's microtask fires LAST, so it always wins. At 45% scroll (panel-1-out should be fading out), panel-1-in (clamped at =progress=1=) writes =opacity=1= last, preventing the fade-out.
+
+Masked in practice because panel 2 overlays panel 1 (both =position: absolute=), but technically incorrect.
+
+** Affected pattern
+Any site using separate in/out =@scroll= blocks on the same element:
+#+begin_src spacetime
+@scroll panel-1-in(start: 0.05, end: 0.25) {
+    [data-panel="crystal"] { opacity: 0 -> 1; }
+}
+@scroll panel-1-out(start: 0.45, end: 0.55) {
+    [data-panel="crystal"] { opacity: 1 -> 0; }
+}
+#+end_src
+
+Affected elements in ora-ventures.com: =[data-panel="crystal"]=, =[data-panel="market"]=, and their associated =.ora-topic= elements.
+
+* Fix: Property ownership tracking in apply-animations.st
+
+** Target file
+=stdlib/primitives/animation/apply-animations.st=
+
+** Design: ownership model
+Add a per-element, per-property ownership map (=el._stAnimOwner=). The animation whose scroll range is currently being traversed takes priority.
+
+Rules:
+| progress | owner? | action |
+|----------+--------+--------|
+| =0= (before range) | no owner | claim + write |
+| =0= (before range) | different owner | SKIP |
+| =0= (before range) | self | write |
+| =0 < p < 1= (active) | any | claim + write |
+| =1= (past range) | different owner | SKIP |
+| =1= (past range) | self | write |
+
+Key insight: an animation at =progress=0= or =progress=1= (clamped at boundary) is dormant. It should NOT steal ownership from another animation. An animation actively transitioning (=0 < p < 1=) always takes priority.
+
+** Implementation steps
+
+*** 1. Modify =applyInitialState= (line ~369)
+Add first-writer-wins ownership check:
+#+begin_src javascript
+const applyInitialState = (elements, properties, scopeEasing, driverName, selector) => {
+    if (!properties || properties.length === 0) return;
+    const scopeId = getScopeId(selector);
+    elements.forEach(el => {
+        if (!el._stAnimOwner) el._stAnimOwner = {};
+        properties.forEach(prop => {
+            const normProp = prop.property.replace(/-([a-z])/g, (_, c) => c.toUpperCase());
+            // First-writer wins: skip if another animation already claimed this property
+            if (el._stAnimOwner[normProp] && el._stAnimOwner[normProp] !== driverName) return;
+            el._stAnimOwner[normProp] = driverName;
+            const value = interpolateKeyframes(prop.keyframes, 0, prop.easing || scopeEasing);
+            applyStyle(el, prop.property, value, driverName, scopeId);
+        });
+    });
+};
+#+end_src
+
+*** 2. Modify watcher callback in =processScope= (line ~446)
+Add ownership check before each property write. Note: =rawProgress= from the driver indicates 0 (before range), 0<p<1 (in range), or 1 (past range).
+#+begin_src javascript
+activeProperties.forEach(prop => {
+    const value = interpolateKeyframes(prop.keyframes, progress, prop.easing || scopeEasing);
+    const normProp = prop.property.replace(/-([a-z])/g, (_, c) => c.toUpperCase());
+
+    // Animation composition: ownership tracking
+    if (!el._stAnimOwner) el._stAnimOwner = {};
+    const owner = el._stAnimOwner[normProp];
+    const isActive = progress > 0 && progress < 1;
+
+    if (owner && owner !== driverSignal && !isActive) {
+        return; // Dormant animation: don't steal from current owner
+    }
+    if (isActive || !owner) {
+        el._stAnimOwner[normProp] = driverSignal;
+    }
+
+    applyStyle(el, prop.property, value, driverSignal, scopeId);
+});
+#+end_src
+
+*** 3. Transform sub-property handling
+The ownership key must be the sub-property name (=translateY=, =scale=), NOT the composite =transform=. The existing =applyStyle= already stores sub-properties in =el._stTransforms[normProp]=, so using =normProp= as the ownership key naturally handles this — =translateY= and =scale= are tracked independently.
+
+*** 4. Verify =rawProgress= is available in the watcher
+The watcher callback receives =rawProgress= from the driver signal. This IS the scroll-mapped progress (0 when before range, 1 when past). For XY drivers (=@mouse=), use scalar progress per axis. Confirm the existing code passes the raw value, not the range-adjusted value.
+
+** Edge cases
+- *Interactive animations* (=hover=, =click=): already guarded by =if (%interactive && rawProgress === 0) return;=. The ownership check adds a second layer but should not conflict — interactive animations skip entirely at progress=0.
+- *Static properties*: applied via =applyStyle= without a progress concept. These should NOT participate in ownership tracking. They're applied once and don't conflict.
+- *Single animation on element*: first-writer claims ownership, no contention. Zero behavioral change.
+- *Scroll backwards*: ownership transfers correctly. If user scrolls back from panel-1-out's range to panel-1-in's range, panel-1-in re-enters active state (=0 < p < 1=) and reclaims ownership.
+- *XY drivers* (=@mouse=): per-property axis resolution happens before ownership check. Each axis-specific property (=translateX=, =translateY=) gets independent ownership.
+
+** Testing
+
+*** New test file: =tests/unit/primitives/scroll-composition.test.st=
+
+Tests to add:
+
+#+begin_src spacetime
+@test "in/out scroll animations: initial state uses first animation's value" {
+  @fixture {
+    <div class="comp-parent">
+      @scroll comp-in(start: 0.05, end: 0.25) {
+        .comp-target { opacity: 0 -> 1; }
+      }
+      @scroll comp-out(start: 0.45, end: 0.55) {
+        .comp-target { opacity: 1 -> 0; }
+      }
+      <div class="comp-target" style="opacity: 0">Target</div>
+    </div>
+  }
+  @then .comp-target should have_style "opacity: 0"
+}
+
+@test "in/out scroll animations on same element both register timelines" {
+  @fixture {
+    <div class="comp-dual">
+      @scroll dual-in(start: 0, end: 0.3) {
+        .dual-target { opacity: 0 -> 1; translate-y: 30px -> 0; }
+      }
+      @scroll dual-out(start: 0.7, end: 1) {
+        .dual-target { opacity: 1 -> 0; translate-y: 0 -> -30px; }
+      }
+      <div class="dual-target">Target</div>
+    </div>
+  }
+  @then .comp-dual should have_timeline "dual-in"
+  @then .comp-dual should have_timeline "dual-out"
+}
+#+end_src
+
+*** Existing tests
+Run all existing scroll and animation tests to verify no regressions:
+- =cargo run --features headless -- test tests/unit/primitives/scroll-driver.test.st --headless=
+- =cargo run --features headless -- test tests/unit/primitives/scroll-multi-keyframe.test.st --headless=
+- =cargo run --features headless -- test tests/unit/primitives/scroll-scope.test.st --headless=
+- =cargo run --features headless -- test tests/integration/animation-chain.test.st --headless=
+- =cargo run --features headless -- test ora-ventures.com/ora-ventures-motion.test.st --headless=
+- =cargo test --lib=

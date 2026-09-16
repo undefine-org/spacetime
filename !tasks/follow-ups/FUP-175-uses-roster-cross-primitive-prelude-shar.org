@@ -1,0 +1,137 @@
+#+TITLE: %uses roster: cross-primitive prelude sharing sites + safe cutover protocol
+#+STATE: DONE
+#+SESSION_ID: 154a5223678cc3a4
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-08-04T09-20-40-862Z_154a5223678cc3a4.jsonl]]
+#+CUSTOM_ID: FUP-175-uses-roster-cross-primitive-prelude-shar
+#+COMPLETION_HASH: cfacdcb3c1dc65bc
+
+* Initial Message
+
+ok but I want the structural fix. How do you catch these earlier in the meta-transpiling process? Structurally?
+
+* Context
+
+PLAN-133 Move 2 (prelude-js owns shared JS) raised the question: what happens
+when a helper is needed by TWO DIFFERENT primitives? Prelude dedup is per
+primitive name, so cross-primitive sharing has no rail. User ruling
+(2026-08-04): solve it with `%uses` — prelude dependencies as registry data —
+and file this roster of the genuine application sites + a safe cutover plan.
+
+* Mechanism landscape (what already exists, 2026-08-04 survey)
+
+- Macro→primitive sharing WORKS TODAY via expansion composition: a macro body
+  calls the module primitive — `stdlib/dnd/macros/drag.st:52` and
+  `drop-zone.st:34` both invoke `dnd-runtime() -> { }`; the callee's prelude
+  emits once per page (dedup by name). `stdlib/dnd/runtime.st` (window.__stDnd)
+  and `stdlib/3d/primitives/three-pose.st` (window.__stPose, "ONE tested
+  implementation instead of N copies") are the exemplars: yield-less
+  namespace-installing primitives.
+- Primitive→primitive sharing DOES NOT EXIST: a primitive's body is `%emit js`
+  (a leaf), not an expansion — it cannot invoke another primitive. `%uses` is
+  precisely this edge. It is NOT a second module system; it gives primitives
+  the composition macros already have.
+
+* ROSTER — where %uses is genuinely useful
+
+Ranked by evidence of live duplication/drift. File:line verified 2026-08-04.
+
+** R1 — dual-channel publish (ST.setData + SpacetimeLocal proxy + fallback)
+   Copies: 4 — source.st:122-145, reactive-source.st:50-65,
+   computed-source.st:248, derived-signal.st:174. Each hand-writes the
+   proxy-check, the `_localState` fallback, the microtask defer, the signal
+   event. reactive-source.st:9 docstring admits it: "Publishes via the same
+   dual channel as data-source". SEMANTICS HAZARD: source.st:133 comment warns
+   the ordering races afterData consumers (@each) — the microtask timing is
+   load-bearing and must move verbatim into the shared fn.
+   → module `data-channel` owning `__stPublish(name, value)`.
+   Consumers %uses it; four inline copies deleted.
+   Risk: HIGH (ordering-sensitive) → migrate LAST of the data trio.
+
+** R2 — data-store init + record shape
+   `window.__spacetimeData = window.__spacetimeData || {}` — verbatim in
+   source.st:23 AND reactive-source.st:23 preludes. Pages using BOTH emit it
+   twice TODAY (dedup-by-name cannot catch cross-primitive copies — live proof
+   of the gap). The store record `{data, loading, error}` is also duplicated
+   (source.st:35, reactive-source.st:31).
+   → module `data-store` (or fold into data-channel) owning init + record ctor.
+   Risk: LOW (idempotent init) → good FIRST exemplar after locale.
+
+** R3 — locale resolution
+   THREE variants across 4 files — drift is already underway:
+   - source.st:53 and :83  `window.__st_locale || documentElement.lang || 'en'`
+     (two copies in ONE file even after the BUG-274 fix)
+   - dev-editable.st:54,60  `window.__st_locale || 'en'` — MISSING the
+     html-lang fallback. This is the BUG-274 pattern re-forming: copies
+     drifting semantically, not just textually.
+   - dev-inspect.st:68-72   a third variant reading `__st_locales`.
+   i18n.st:136 is the writer (`window.__st_locale = …`).
+   → module `locale` owning `__stResolveLocale()` (the full chain:
+   __st_locale → documentElement.lang → 'en').
+   Risk: LOWEST (pure read, trivially verifiable) → FIRST cutover target.
+
+** R4 — URL resolution + {locale} templating + fetch lifecycle
+   source.st:53-56 resolves `{locale}` in the URL against the registry;
+   reactive-source.st:37-47 hand-writes `currentUrl()` normalization
+   (root-relative → absolute). Fetch + `[Spacetime Runtime Error]` reporting
+   exists ONLY in source.st; dev-editable fetches locale JSON without it.
+   → module `data-source` owning `__stResolveUrl(tpl)` + `__stFetchJson(url, …)`
+   with the error reporter inside (BUG-274's structural home).
+   Risk: MEDIUM (two primitives' fetch paths converge).
+
+** R5 — __stHosts registry init
+   `window.__stHosts = window.__stHosts || {}` — THREE verbatim copies:
+   signal.st:58, signal.st:587 (two different primitives in one file — dedup
+   by name can't help), host-register.st:33.
+   → module `host-registry` (or fold into host-register; the other two %uses).
+   Risk: LOW (idempotent) but cross-DOMAIN (signal ↔ host) — decide owner
+   carefully; the owner should be the primitive that semantically owns hosts
+   (host-register), not the biggest file.
+
+** WATCH LIST — single-owner today; %uses only when a second consumer appears
+   (do NOT pre-share; that is speculation, not dedup):
+   - interpolate.st:19 `__stGetEasing` (easing table) — next animation
+     primitive needing easings %uses it instead of copying.
+   - drivers.st:37 scroll-handler registry — same rule.
+   - entity-scope.st `__stWorld`/`ST.worldFacet`, element-ref.st `__stRefs` —
+     already correctly single-owner preludes; they are the shape others should
+     imitate.
+
+* Cutover protocol (per module, in roster order: R3 → R2 → R4 → R1 → R5)
+
+1. Behavior gates FIRST, in a PRIOR commit if missing. Already existing:
+   data: 24 integration tests + 8 v8 data_source tests + 3 v8 derived-signal
+   tests (BUG-273) + BUG-274 error-path gate. Locale/dev-editable have thinner
+   coverage — R3's first step is a v8 test asserting __stResolveLocale's full
+   fallback chain BEFORE any migration.
+2. ONE module per commit: create the module primitive, add `%uses` to every
+   consumer, DELETE every inline copy in the same commit. No transitional dual
+   state (cutover, not parallel impls).
+3. Deletion-completeness check in the commit: grep the old inline shape →
+   zero hits outside the module (e.g. `__st_locale ||` → only i18n.st writer
+   + the module).
+4. Semantics travel with the code: load-bearing comments (the source.st:133
+   microtask-race warning, the __stLocale fallback order) move INTO the module
+   verbatim. Byte-compatible behavior — this is a move, not a rewrite.
+5. Bundle-shape assertion (complement, not substitute, for behavior gates):
+   compiled fixture using two consumers contains exactly ONE copy of the
+   shared helper, before both usage fragments (topo order).
+6. Revert unit = one commit (no state, no schema).
+
+* Sequencing vs PLAN-133
+
+%uses itself is a PLAN-133 wave (between W2 and W3). This FUP executes AFTER
+it lands, in roster order. R3 (locale) doubles as the %uses exemplar: smallest
+surface, clearest drift, thinnest risk.
+
+* Non-goals
+
+- No content-hash dedup (fixes emit bloat, keeps source drift — rejected in
+  the design run).
+- No moving these helpers into st.js (user ruling: prelude-js, not the
+  toolchain runtime file).
+- No `%uses` between macros — expansion composition already covers it.
+- No pre-sharing watch-list items.
+
+NOTE [2026-08-04]: PLAN-133 landed R2 + R3 (worktree verse-plan-133): W2.5 commit 64559252 shipped %uses + locale module (R3 — source.st both sites, dev-editable.st drift fix; dev-inspect.st deliberately excluded, its read means 'is a locale active?'); W3 commit a5b4f6a5 shipped data-store module shared by data-source + reactive-source (R2). Remaining roster: R1 dual-channel publish (4 sites), R4 URL/{locale}/fetch+report (now partially absorbed into __stDataSource), R5 __stHosts (3 sites). Cutover order guidance in item body still applies.
+
+NOTE [2026-08-05]: ROSTER COMPLETE (2026-08-05, branch plan-133-generation-not-gates). All five items landed plus two scope completions: R5 4d1143cd (host-register owns __stHosts; FOURTH copy found in host-bridge-auth — per-usage defensive init, the dangerous shape); R4 f6f5c744 (data-url module: {locale} + root-relative = one transform; data-source now root-normalizes too — deliberate unification; i18n.st excluded, its replace is build-time over GIVEN locales); R1 e7166211 (data-channel: __stPublish + __stPublishSignal; SIX copies found vs roster's 4 — collection + event-source un-rostered but identical; computed/derived had drifted to no-registry-channel + synchronous dispatch, the exact race the canonical defer prevents; collection raiseError deliberately excluded, genuinely different channel). computed-source 87b4c34b (sexpr-row: RED→GREEN lambda-param gate; rewriteExpr/desugarPipes/leafProjector/new-Function ×4 deleted; QUERY_HELPERS on ST.filters; object-map lowers per-leaf with quotes intact). derive-match 715c8a02 (sexpr-arms: lower_cond_arms compiles embedded record strings; third+last rewriter copy deleted). Single-consumer wave ce2d7f70 (user ruling 2026-08-05 overrides the watch-list non-goal: easing, scroll-registry, entity-world, element-refs extracted; per-usage defensive re-inits deleted as the drift shape). CONSTRAINT LEARNED: %uses targets must be param-free — %uses derived-signal silently yielded no prelude; helper extraction to a module is the move (signal-watch). All in docs/language/primitive-authoring.md §3/§4.

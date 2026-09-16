@@ -1,0 +1,55 @@
+#+TITLE: Layout assertions SKIP instead of REFUSE on the headless backend
+#+STATE: ITEM
+#+SESSION_ID: 153497be379ff5cc
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-18T12-18-12-318Z_153497be379ff5cc.jsonl]]
+#+CUSTOM_ID: BUG-233-layout-assertions-skip-instead-of-refuse
+#+LAYER: testing
+
+Found while running the suites during PLAN-117 W1. Pre-existing, unrelated to
+that plan.
+
+* Symptom
+
+=cargo test --test import_resolution_test w1_refuse_to_fake_layout_on_logic_backend=
+fails:
+
+#+begin_example
+assertion `left == right` failed: both layout tests must be refused
+  stdout: { "passed": 1, "failed": 0, "skipped": 2, "total": 3 }
+#+end_example
+
+Expected: =passed: 1, failed: 2= — the two layout-needing assertions REFUSED
+(reported as failures naming the fidelity gap).
+Actual: they are SKIPPED, and the run is green.
+
+* Why it matters
+
+This is the exact invariant FEAT-057 exists to protect, and the test that guards
+it is the one failing. From =docs/testing/FIDELITY_LADDER.md=: a layout assertion
+on a layout-less backend must REFUSE, never silently pass. A skip is softer than
+a refusal — it produces a GREEN run for a suite whose layout claims were never
+evaluated. That is precisely the vacuous-green class the ladder was built to
+prevent.
+
+* Not caused by PLAN-117
+
+Found while running the suite during PLAN-117 W1. That session changed ZERO
+files under =src/= (verified: =git status --short -- src/= empty) and did not
+touch =tests/import_resolution_test.rs=. Pre-existing.
+
+* Investigation starting points
+
+- =src/cdp.rs:392= carries a related note: "@then-claims throws are currently
+  swallowed here (BUG-058)" — possibly the same swallowing path.
+- the rung/refusal logic that decides skip-vs-refuse for a backend that lacks a
+  fidelity level
+- whether =skipped= was ever intended to be reachable for a rung mismatch, or
+  only for explicitly-disabled tests
+
+* Acceptance
+
+- =w1_refuse_to_fake_layout_on_logic_backend= passes: 1 passed, 2 FAILED, and
+  both failures carry the "fidelity but the current backend" message
+- a suite of only layout claims run on =--headless= exits NON-ZERO
+- =docs/testing/FIDELITY_LADDER.md= states explicitly whether =skipped= is ever a
+  legal outcome for a rung mismatch (current answer should be: no)

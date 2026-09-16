@@ -1,0 +1,39 @@
+#+TITLE: MCP instance HTTP endpoint can wedge permanently (workbench unresponsive, unrecoverable except via new instance)
+#+STATE: ITEM
+#+SESSION_ID: 15250fe86b2ee48b
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-06T10-47-30-988Z_15250fe86b2ee48b.jsonl]]
+#+CUSTOM_ID: PLAN-067-mcp-instance-http-endpoint-can-wedge-per
+
+* Initial Message
+
+look up https://paper.design and check against the Spacetime workbench. Can you tell me what you can learn, design-wise (UI and UX and design language) to get something cool?
+
+## Summary
+
+During this session, `inst-1`'s HTTP endpoint (`http://127.0.0.1:39991/__mcp/instance/inst-1/`) became completely unresponsive: every `curl`/browser request to it (including bare `GET /`) hung indefinitely (`curl` never got a response after `Request completely sent off`; puppeteer `goto` timed out at 30s repeatedly across THREE fresh browser sessions). Meanwhile the MCP JSON-RPC control channel (`st_health`, `st_inspect` with no args, `st_unmount`) stayed fully responsive throughout.
+
+This means the workbench's live-preview HTTP surface can wedge independently of the MCP tool layer, with **no server-side signal** (no error, no timeout response, no diagnostic) — the only recovery was unmounting the instance and minting a new one (`st_workbench` → `inst-2`), which worked instantly.
+
+## What preceded the wedge (best-effort reconstruction — NOT a confirmed minimal repro)
+
+In the session prior to the freeze:
+1. `inst-1` had accumulated 4 open environments, 2 tabs, repeated `mcp_compose`/`st_env_open`/`st_tab_open` actions dispatched in quick succession via rapid puppeteer clicks (a burst of ~10 actions within a few seconds).
+2. I navigated the browser DIRECTLY to `http://127.0.0.1:39991/__mcp/instance/inst-1/input.json` as a top-level page load (not a `fetch()`), which resulted in a blank `about:blank` page and the browser session appearing wedged.
+3. Immediately after, ALL further requests to `inst-1` (not just `input.json` — the root page too) stopped responding, even from a brand-new headless browser session and from raw `curl`.
+4. `st_inspect{instance_id:"inst-1"}` (no other args) itself hung for 600s before erroring with "Request timeout after 600000ms" — notably this is an MCP tool call the server took, so whatever wedged might be inside a lock or handler shared between the JSON-RPC layer and the HTTP instance-serving layer for THAT SPECIFIC instance (other MCP calls like `st_env_list`, `st_unmount` stayed fast throughout, so it's scoped to `inst-1`, not global).
+
+## Suspected root cause (unverified — needs targeted repro)
+
+`instance_input_json` (src/mcp/live.rs) and other per-instance handlers take `store.lock().unwrap()` — a single global `Mutex<WorkbenchRegistry>` (per `src/mcp/state.rs`). If a request handler panics or blocks WHILE holding this lock, `.unwrap()` on a poisoned mutex would panic every subsequent lock attempt — but that would surface as a fast 500, not a silent hang. More likely: a long-running or blocking operation was invoked SYNCHRONOUSLY inside an async handler holding the store lock (e.g. `workbench_snapshot()`'s `discover_st_entries` does synchronous `std::fs::read_dir` calls — cheap normally, but if invoked repeatedly under lock contention from the burst of actions in (1), plus `st_inspect{instance_id}` also taking the same lock, a pileup of blocked lock-waiters on the SAME tokio worker thread could starve the async runtime for that specific instance's request-handling task queue).
+
+This needs a dedicated, isolated repro (this session's occurrence was incidental, discovered while testing an unrelated compose bug) — filed here so it isn't lost, NOT yet root-caused with certainty.
+
+## Impact
+
+An agent or human driving the workbench can hit an UNRECOVERABLE dead instance with zero diagnostic signal — no error toast, no timeout message, nothing but a hung request. The only known recovery is `st_unmount` (which stayed responsive) + `st_workbench` to mint a fresh instance, silently abandoning the old one's stage composition state.
+
+## Next steps (NOT done in this session — needs dedicated investigation)
+
+1. Write a targeted stress test: open N environments, dispatch a rapid burst of `mcp_compose`/`st_env_open`/`st_tab_open` actions against ONE instance, then poll `input.json` under load — see if the hang reproduces deterministically.
+2. Audit every handler that takes `store.lock()` for synchronous, blocking work done WHILE holding the lock (especially `workbench_snapshot()` and its `discover_st_entries` fs scan) — move any filesystem I/O out from under the lock, or bound it, or move to `spawn_blocking`.
+3. Add a request timeout at the axum layer (or a lock-acquisition timeout with a diagnostic response) so a wedge surfaces as a fast 503 instead of an infinite hang — the tool descriptions promise bounded behavior (`st_await` explicitly bounds to 28s; `input.json`/root page serving has no such bound).

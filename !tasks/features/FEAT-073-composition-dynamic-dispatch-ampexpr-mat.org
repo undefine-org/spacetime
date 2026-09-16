@@ -1,0 +1,198 @@
+#+TITLE: Composition: dynamic dispatch &amp;$expr() + @match-render + recursion
+#+STATE: REVIEW
+#+SESSION_ID: 14fc108ed3772fa8
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-04T14-32-37-965Z_14fc108ed3772fa8.jsonl]]
+#+CUSTOM_ID: FEAT-073-composition-dynamic-dispatch-ampexpr-mat
+
+* Initial Message
+
+hey what would it look like if the admin app were done multi-file? what reactive primitives and modular programming principles (and other missing constructs that you find) do you need to make this an amazing DX for developing this kind of app?
+
+* Parent
+[[id:PLAN-030-spacetime-app-platform-declarative-schem]] — Wave 3.
+DEPENDS: [[id:BUG-059-parse-component-body-drops-html-after-st]] (the segmenter must
+surface dispatch/match segments instead of swallowing them) and
+[[id:FEAT-071-scoped-state-codegen-emit-html-states-di]] (template lowering must be sound).
+
+* Summary
+The two composition primitives the schema-driven admin uniquely needs, plus recursion.
+User decision 2026-06-06: implement BOTH surfaces; @match LOWERS to dispatch; keep it
+general; implement in Spacetime (stdlib macros + meta-compiler capture), extending the
+meta-compiler as required.
+
+1. *Dynamic dispatch* =&$expr(args)= — invoke a template whose NAME is a runtime value.
+   #+begin_src spacetime
+   .h { &$node.widget($node, $value); }   // widget name chosen at runtime
+   #+end_src
+2. *@match as render* — emit a template per arm; lowers to dispatch.
+   #+begin_src spacetime
+   @match $node.widget {
+     "media"    => &media-field($node, $value)
+     "relation" => &relation-field($node, $value)
+     _          => &text-field($value)
+   }
+   #+end_src
+3. *Recursion* — a template may invoke itself (directly or mutually). Required for
+   nested schema (field → fieldset → field → list → field). Factories already register
+   by name in =Spacetime.templates= (a Map), so lazy name resolution at call time is
+   cycle-safe; the work is grammar recognition + a compile-time depth/cycle guard.
+
+* Why these are absent today (verified 2026-06-06)
+=&$w()=, =@match ... => &t()=, and =&self()= all currently parse WITHOUT error but are
+swallowed into the template html field as literal text (zero codegen). check passes;
+nothing runs. BUG-059's segmenter must recognize them as typed segments; this FEAT
+implements their LOWERING.
+
+* Design — dispatch
+- Grammar: =&$<expr>(<args>);= where =<expr>= yields a string template name. Restrict
+  =<expr>= to a binding/field-access shape (=$x=, =$x.field=, =$item.kind=) initially —
+  NOT arbitrary JS — to keep it analyzable; widen later if needed (OPEN QUESTION in
+  PLAN-030). Emit: =Spacetime.invokeTemplate(<expr>, <args>)= appending to the scoped
+  container (reuse invoke-template primitive path).
+- Validation: if =<expr>= is a literal string, resolve at compile time and validate the
+  template + arg arity exist (same checks as static =&name()=). If dynamic, defer to
+  runtime with a dev-mode warning when =templates.get(name)= is missing.
+
+* Design — @match-render
+- New macro =@match $sel { <lit> => &tmpl(args)  ... _ => &tmpl(args) }= distinct from
+  the state-machine =@match= (which lives in state-machine.st and matches union
+  variants). This is a RENDER construct in selector/template-body scope.
+- Capture: arms as a list; reuse =CaptureType::Template= per arm or add a =MatchArms=
+  capture (OPEN QUESTION — decide by what the segmenter can cleanly produce; prefer
+  reusing TemplateInvocation per arm to avoid a new CaptureType if possible).
+- Lowering: a =switch=/if-chain on the evaluated selector that calls the matching arm's
+  template (i.e., dispatch). =_= is the default arm. Reactive: if the selector is a
+  signal, re-render on change (mount/unmount the matched template) — model on bind-if.
+
+* Design — recursion
+- Allow a template body to reference its own name (or a mutually-recursive name).
+  Resolution is lazy (Map.get at invoke time), so definition order/cycles are fine.
+- COMPILE-TIME guard: detect a static self/mutual cycle and require a base case guarded
+  by =@if=/=@match= (cannot statically prove termination, so EMIT a runtime depth cap +
+  a dev-mode diagnostic when exceeded). Depth cap default (e.g. 64) overridable.
+- Diagnostic E-code: unbounded recursion without a conditional guard → warning at
+  compile, hard cap at runtime (never a stack overflow).
+
+* Files
+- =src/syntax/events/form_compiler.rs= — recognize dispatch-call + match-block segments
+  (stubs added in BUG-059; fill parsing here).
+- =src/parser/meta_ast.rs= — new CaptureType only if MatchArms is unavoidable.
+- =stdlib/macros/dispatch.st= — NEW: =&$expr(args)= surface.
+- =stdlib/macros/match.st= — NEW: =@match … => &tmpl= render surface (NOT state-machine).
+- =stdlib/primitives/template.st= — invoke-template: accept a runtime name; recursion-safe.
+- =src/pipeline/expand.rs= + =src/emit/js.rs= — lower dispatch/match to invokeTemplate;
+  reactive re-render for signal selectors.
+- =src/diagnostics/codes.rs= — new codes: dispatch arity/missing-template, recursion depth.
+
+* Edge cases
+- dispatch name not found at runtime → dev warning, no crash, no partial DOM.
+- @match with no matching arm and no =_= → render nothing (document this).
+- @match selector is a signal → re-render swaps the mounted arm; old arm cleaned up.
+- recursion base case via @if false → stops; via @match =_= → stops.
+- mutual recursion A→B→A with a guard → terminates; without → depth cap + diagnostic.
+- args forwarding: =&$w($node, $value)= passes through positional + named args intact.
+
+* Test plan (emitted-JS asserted + behavioral)
+- UNIT: segmenter yields dispatch/match segments (not html); arms parsed with arity.
+- SNAPSHOT: dispatch emits invokeTemplate(name,…); @match emits the if-chain.
+- V8: dispatch with a literal name renders the right template; with a variable name
+  renders per value; @match selects the right arm incl =_=.
+- HEADLESS (the key gate): =&field= renders a 3-LEVEL nested schema
+  (fieldset → list → field) — proves recursion + dispatch together. Provide the fixture.
+- NEGATIVE: unbounded recursion fixture → compile diagnostic + runtime depth cap (no
+  stack overflow), asserted.
+- FULL SUITE green.
+
+* Acceptance criteria
+- [ ] =&$expr(args)= invokes the value-named template; arity validated when static.
+- [ ] =@match … => &tmpl= selects arms incl default; reactive on signal selectors.
+- [ ] recursion renders a 3-level nested schema in headless.
+- [ ] unbounded recursion is caught (diagnostic + cap), never a crash.
+- [ ] emitted JS asserted for all; full suite green; no check-only greens.
+
+* COURSE CORRECTION (2026-06-07) — idiomatic metasystem, html5ever, NO Rust per-construct
+
+** What was wrong
+The first FEAT-073 attempt added per-construct RUST: `ComponentMatch`/`MatchArm` structs
+(form_match.rs), `parse_match_block` + `&$` detection (form_compiler.rs), E0402 carve-outs
+(mod.rs). This is a DUAL implementation competing with the metasystem — forbidden by
+AGENTS.md ("DO NOT write Rust parsers/fallbacks for constructs defined in stdlib") and
+metasystem/ARCHITECTURE.md ("Adding a new @directive: define primitive/macro/capture_type
+in .st — NO Rust code changes needed").
+
+** Root cause of the temptation
+A @template body is `$body:component_body`, and `component_body` is a RUST-BUILTIN
+`CaptureType::ComponentBody` parsed by the monolithic ~700-line `parse_component_body`
+(form_compiler.rs). So every template-body construct currently MUST be hand-coded in Rust.
+parse_component_body IS the central clash: a Rust re-implementation of grammar that should
+be composed stdlib `%capture_type`. (Same for template_invocation/template/html_block —
+all Rust-builtin; whereas on_action/keyframes/mutation are correctly stdlib %capture_type.)
+
+** Corrected architecture (user-directed)
+FULL self-describing, using html5ever (already a dep: html5ever 0.39 + lol_html 2; mature
+src/html/ module with treesink.rs/parser.rs/selector.rs to reuse):
+- A thin, construct-AGNOSTIC segmenter (the BUG-059 scanner, generic infra — KEEP) splits a
+  template body into HTML-runs vs Spacetime-construct segments.
+- HTML-runs → html5ever (spec-correct: void elements, raw-text, quoted attrs) — DELETE the
+  bespoke scan_html_tag tag-walking.
+- construct segments → generic %capture_type engine driven by stdlib definitions:
+    %capture_type component_body { ( $item:component_item )* }
+    %capture_type component_item { state_decl | injection | class_toggle | on_block
+                                   | template_invocation | dispatch | match_block | html_run }
+    %capture_type match_block { "@match" $subject:expr "{" ( $arms:match_arm )* "}" }
+    %capture_type match_arm  { $pat:match_pat "=>" $inv:template_invocation ";"? }
+- @match / &$expr dispatch / recursion-base-case → pure .st (%capture_type + %macro +
+  %primitive %emit js). The runtime logic lives in %primitive %emit js (where it belongs),
+  fed by metasystem-parsed data, NOT Rust structs.
+
+** Plan
+- Phase A (now): SURGICAL UNDO of the Rust-parser dual-impl (re-edit, not git-revert per
+  user). Remove ComponentMatch/MatchArm/matches-field, parse_match_block, &$ detection,
+  E0402 skip, matches:vec![] insertions, Rust @match unit tests. KEEP the idiomatic
+  %emit js in template.st: recursion depth guard (standalone) + the dispatch/match runtime
+  (reads rawBody defensively, dormant until Phase C re-feeds it via .st).
+- Phase B: make `component_body` self-describing — segmenter + html5ever for HTML, generic
+  capture engine for constructs. Shrink/retire parse_component_body's per-construct Rust.
+  May require extending the generic %capture_type engine where weaker than the bespoke parser.
+- Phase C: define @match / &$expr / recursion as stdlib %capture_type + %macro + %primitive.
+  Re-prove via V8 (the existing feat073 V8 tests are the acceptance harness — they stay).
+
+** Keep / known-good (do NOT undo)
+- BUG-059 keystone (generic segmenter — legitimate infra).
+- FEAT-071 (parser+runtime for already-Rust-defined directives).
+- Recursion depth guard %emit js in template.st (idiomatic, standalone).
+- The feat073_* V8 tests (acceptance harness for the re-implementation).
+
+* PHASE A DONE (2026-06-07, commit 243c2248) — dual-impl removed, &$ kept idiomatic
+
+Distinction applied (user clarification): `&$` is SYNTAX within the template_invocation
+grammar (already a Rust-builtin capture type) + behavior in .st -> KEEP as a grammar
+extension. `@match` is a whole NEW construct -> must be %macro+%capture_type+%primitive,
+not a Rust parse_match_block -> REMOVED.
+
+Removed: ComponentMatch/MatchArm structs, matches field, parse_match_block, @match branch,
+serialization, all matches:vec![] inits, @match unit tests. The 2 @match V8 tests are now
+#[ignore] as the executable SPEC for Phase C.
+Kept + verified: &$expr dispatch (feat073_dynamic_dispatch passes), recursion depth guard,
+E0402 $-skip.
+Gates: lib 2131/0, integration 162/0, v8 300/12 pre-existing + 12 ignored.
+
+Remaining: Phase B (make component_body self-describing via segmenter + html5ever + generic
+%capture_type engine) and Phase C (@match as stdlib %macro/%capture_type/%primitive;
+un-ignore the V8 spec tests). These are the substantial idiomatic-cutover work.
+
+* COMPLETE (2026-06-08) — all three composition primitives, idiomatically
+
+- Dynamic dispatch &$expr(): grammar extension to template_invocation + .st runtime (commit
+  243c2248). V8-proven (render-by-value).
+- Recursion: runtime depth guard in template.st %emit js (commit 4e62557a). V8-proven (cap not
+  overflow).
+- @match render: PURE stdlib %capture_type grammar (stdlib/capture-types/match-block.st) +
+  generic-engine parse + thin reifier (parse_match_block_via_engine) + .st runtime dispatch.
+  NO Rust parser (the earlier Rust dual-impl was removed; this is the correct self-describing
+  re-impl, unblocked by B-Wave 1 multi-token literals). Commit f41be91c. feat073_match V8 spec
+  tests un-ignored + PASS.
+
+Validates the self-describing thesis on a real construct: grammar in .st, logic in %emit js,
+zero Rust dual-implementation. Gates: lib 2149/0, v8 308/12 (pre-existing) +10 ignored,
+unkn builds. Pending: reviewer swarm on the engine-reifier path.

@@ -1,0 +1,70 @@
+#+TITLE: mutation body under @on $sig.change silently falls to the DOM event dispatcher
+#+STATE: ITEM
+#+SESSION_ID: 1534a2eae1903af0
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-18T13-07-01-638Z_1534a2eae1903af0.jsonl]]
+#+CUSTOM_ID: BUG-265-mutation-body-under-on-sig-change-silent
+
+* Initial Message
+
+bro stop running cargo test overall for every tiny change
+
+* The bug
+`@on $sig.change { $dst <- $src + 1; }` — a MUTATION body under the signal
+`.change` head — never reaches the change-driver. The emitted site code binds
+`eventType = "change"` + `addEventListener("change", handler)`: the OLD DOM
+event dispatcher silently watches a DOM event named "change" instead of the
+signal. Only MOTION bodies (`opacity: 0 -> 1`) correctly reach the
+change-driver. Proven empirically by compile+emit probe (agent 48, 2026-08-03).
+
+Ninth member of the silent-acceptance family: the page compiles green, the
+author asked for a signal reaction, the runtime listens to a DOM event that
+will never carry it.
+
+* Why it matters beyond itself
+It blocks the BUG-263 deletion gate: `@effect`'s ~15 live consumers
+(stdlib/__admin__ x11, __host__, __inspector__, app-shell, 2 test files) need
+immediate:true mount-seeding + arbitrary mutation bodies. The @on signal rail
+cannot carry them until (a) mutation bodies under `$sig.change` route to the
+change-driver (THIS bug) and (b) change-driver grows `immediate:`/`debounce:`
+params (signature today: `(&el, signal, duration)`).
+
+* Unblock path (agent 48's recommendation, endorsed)
+1. Fix THIS: mutation bodies under `@on $sig.change` route to the
+   change-driver, never silently to the DOM dispatcher. Ambiguous body →
+   compile error, per the arc's rule.
+2. Extend change-driver with `immediate:`/`debounce:` (registry data, not a
+   new mechanism).
+3. Migrate the ~15 @effect consumers; THEN delete both effect.st files and
+   the gate item flips honestly.
+
+* Evidence
+- Probe: `@on $src.change { $dst <- $src + 1; }` → emitted JS shows
+  `addEventListener("change", …)` — DOM dispatcher, not the signal rail.
+- PLAN-124 line 178 lists @effect under "Remaining for W3.4b"; the W3
+  implementation report Q3 says @effect was "left current". The premise
+  "W3 replaced @effect" was FALSE.
+- Neither migration capsule (2026-06-09-reactive-surface, 2026-07-26-on-cutover)
+  covers @effect.
+
+* FIXED 2026-08-03 (agent 58 + orchestrator)
+
+Routing rule (exactly as filed): the subject's SIGIL decides the rail —
+`$sig.change` is ALWAYS the signal rail (change-driver, mutation or motion
+body); `&.change`/`&el.change` is the DOM change event. A MIXED body (motion +
+mutation under one signal head) refuses loudly with E0949 rather than silently
+running one half. change-driver grew `immediate:` (seed once at mount — the
+@effect semantic) and `debounce:` as registry data.
+
+Found while gating: `ST.runMutations` accepted ONLY `{ js_statements: [...] }`
+— a plain-string body fell through every branch and silently ran nothing
+(tenth silent-drop instance, runtime edition). Now normalized at the head of
+public/runtime/st.js.
+
+Gates: tests/on_sig_change_rail_test.rs 9/9; CDP
+tests/unit/animations/on-sig-change-mutation.test.st 5/5 (signal mutation
+reaches a second signal; DOM event on element subject; runMutations string
+body; immediate seeds at mount; debounce coalesces). The last gate was RED
+until the string normalization — that RED->GREEN is the discrimination proof.
+
+UNBLOCKS: the @effect consumer migration (BUG-263 item 1) — the rail now
+carries immediate:true mount-seeding + mutation bodies.

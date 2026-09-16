@@ -1,0 +1,59 @@
+#+TITLE: BUG-221 — @doc(content:) never decoded escape sequences (documented example was broken)
+#+DATE: 2026-07-24
+
+* BUG-221 @doc(content:) never decoded escape sequences
+:PROPERTIES:
+:CUSTOM_ID: BUG-221
+:STATE: DONE
+:END:
+
+** Symptom
+
+=@doc(content: "# Title\n\nSome prose")= rendered as ONE line of literal noise:
+the markdown reached snarkdown with a literal backslash-n instead of a newline,
+so no heading, no paragraph breaks — just the raw escape text on screen.
+
+This is the exact spelling shown in =stdlib/md/macros/doc.st='s OWN docstring,
+so a documented feature was broken for every user who used it.
+
+** Root cause
+
+=.st= string literals are captured RAW — the lexer does not process escape
+sequences. The =content:= capture therefore reached the =render-markdown=
+primitive with backslash-n as two characters.
+
+=@doc(src: "x.md")= was UNAFFECTED because =inject_doc_content= replaces its
+capture with the file's raw bytes post-parse. The two spellings of the same
+feature silently disagreed: identical prose rendered correctly via =src:= and
+as garbage via =content:=.
+
+Also note: a literal (unescaped) newline inside the string does not work either
+— the capture comes back EMPTY. So before this fix there was no working way to
+write multi-line inline markdown.
+
+** Fix
+
+=src/compiler.rs= =inject_doc_content=: decode escape sequences (=\n=, =\t=,
+=\r=, =\\=, =\"=, =\'=) for the inline =content:= spelling, in the same pass
+that inlines =src:= bytes. Unknown escapes pass through VERBATIM — markdown has
+its own backslash escapes (e.g. =\*literal asterisks\*=) and eating them would
+be a second bug.
+
+The injection gate (=has_doc_src=) widened to fire when a =@doc= carries a
+=content:= holding a backslash, not only when it names a =src:= file.
+
+** Tests
+
+- =compiler::tests::doc_content_decodes_escape_sequences_like_src_does= — the
+  emitted JS must carry a real newline escape, never a doubled backslash.
+- =compiler::tests::doc_content_preserves_unknown_markdown_escapes= — =\*= survives.
+
+** Discovery
+
+Surfaced by SIP-002 wave 1: literate documents turn ALL prose into
+=@doc(content:)=, so the defect went from "rare hand-written spelling" to
+"every literate page". The first served fixture rendered visible =\n= noise —
+caught by a SCREENSHOT, not by the compile check, which passed happily.
+
+Lesson recorded: "it compiles" is not "it renders". A visual check belongs in
+the loop for anything that produces user-visible output.

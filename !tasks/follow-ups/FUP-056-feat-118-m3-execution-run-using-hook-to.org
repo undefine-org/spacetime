@@ -1,0 +1,37 @@
+#+TITLE: FEAT-118 M3 execution: run %using hook to inject scoped defs at @use
+#+STATE: ITEM
+#+SESSION_ID: 1508cbf54b12d2b0
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-14T11-53-10-188Z_1508cbf54b12d2b0.jsonl]]
+#+CUSTOM_ID: FUP-056-feat-118-m3-execution-run-using-hook-to
+
+* Initial Message
+
+look at ~/code/ora/verse and how it generates tree-sitter from the meta-compiler language.
+
+your goal is to look at how pi-* crates manage dynamic language profiles. Consider runtime/kdl/some other addition (also consider something specific to Spacetime. Weigh in all the options and show me your reasoning).
+
+Please understand the nuances of the work here. You are also free to propose improvements to the tree sitter generator and to the Spacetime LSP to make it world-class, as it hasn't been touched in a while and could benefit from some love. Since I am the creator of both Spell and Spacetime, I would LOVE to make the two seamlessly work with each other (also look at the Spacetime MCP btw).
+
+Deep architecture dive first, then come back with your insights, revelations, challenges (to me and to you), questions, and overall state of things
+
+Parent: FEAT-118 M3. The DATA layer is done (commit e8e3745a): %using { %claims / %capture_type / %default } parses into ModuleManifest.using (UsingHook). This is the EXECUTION layer.
+
+GOAL: when a file does @use "scene" and scene's MODULE.st has a %using hook, RUN the hook \u2014 inject its claims (namespace-rewrite rules), capture-types (scoped sub-grammars), and defaults into the IMPORTING file's scope. The Elixir use/__using__ semantic = "modules as scoped dialects".
+
+DEPENDS ON: FUP-055 ImportScope. You must know WHICH importing scope to inject into (the file that @use'd the module), which is exactly what the per-file ImportScope provides. So this builds directly on FUP-055.
+
+PARTS:
+1. At @use resolution (resolve_imports / dispatch), look up the imported module's manifest.using.
+2. Inject: claims -> register namespace-rewrite for those directives in the importing scope; capture_types -> activate those sub-grammars ONLY in this file's regions (the hard part: scoped grammar activation interacts with the capture-type matcher); defaults -> scope-local default values.
+3. SCOPED ACTIVATION is the deep piece: a %using capture_type must be valid only where the module is used, not globally. This interacts with parse_matches / the extractor registry (currently capture-types are global per registry). May need a per-scope augmented registry (rematch_with_registry already augments a registry \u2014 a seam).
+
+NB raw_body is preserved on UsingHook for re-parsing at execution. The static Spell profile (unification spec \u00a73.7) deliberately does NOT model per-scope %using activation \u2014 the live MCP lane closes that gap. Lower priority (C): the differentiator feature but the most complex; the rest of the module system works without it.
+
+NOTE [2026-06-15]: READER SURFACE DONE (commit a183f970): registry.using_hook(ns) returns the retained .st UsingHook{claims,capture_types,defaults,raw_body} for a namespace. The self-hosted policy surface exists.
+
+EXECUTION still gated on FUP-057 (ImportScope), NOT contention: running the hook at @use needs to know WHICH importing file's scope to inject into = exactly the per-file ImportScope. Without it there's no 'where' to inject. The 3 hook effects:
+- %claims @camera: install ns-rewrite so bare @camera in the importing scope resolves to scene/camera. Connects to the FQN dispatch (FUP-055 core, done) + needs ImportScope to know the file opted in.
+- %capture_type: scoped sub-grammar activation \u2014 DEEPEST piece, needs the rematch_with_registry augmented-registry seam (capture-types are global per registry today; scoping them per-file is real matcher work).
+- %default: scope-local default values.
+
+CORRECT SEQUENCE: FUP-057 (ImportScope) FIRST, then FUP-056 execution layers on it. Both reader surfaces (using_hook for 056, is_public/module_reexports for M2) are DONE and self-hosted in registry.rs. The remaining work (057 ImportScope build + 056 injection + M2 private-ref rejection at @use) all share the ImportScope as the common substrate \u2014 contention now CLEARED (other agent committed FEAT-119 W3/W4; parser/mod.rs clean).

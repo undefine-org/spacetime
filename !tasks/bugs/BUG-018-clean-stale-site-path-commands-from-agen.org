@@ -1,0 +1,142 @@
+#+TITLE: Clean stale site path commands from agent prompts
+#+STATE: DONE
+#+SESSION_ID: 14cb4663c8d20fb9
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-04-27T17-02-15-332Z_14cb4663c8d20fb9.jsonl]]
+#+CUSTOM_ID: BUG-018-clean-stale-site-path-commands-from-agen
+#+LAYER: tooling
+
+* Initial Message
+
+Implement these audit recommendations from org://AUD-006-audit-implementation:
+
+## Audit findings
+
+Sorted by effort-to-impact ratio.
+
+---
+
+- **What**: Stale `cargo run -- serve site/` / `check site/` / `build site/` and "Site Directory (`site/` and subdirectories)" ownership in agent context prompts.
+- **Where**:
+  - `.claude/agents/site-designer.md` — multiple, including `## Tools & Technologies` "`cargo run -- serve site/` for live development server", `## Owns / Site Directory (`site/` and subdirectories)`, `## Notes / Development Workflow` step 1 "Start dev server: `cargo run -- serve site/`", debugging tips `RUST_LOG=trace cargo run -- serve site/`, plus `site/examples/todo-app` example.
+  - `.claude/agents/pipeline-engineer.md` — the shell block under `## Notes / Key Debugging Commands` contains `RUST_LOG=spacetime::pipeline=trace cargo run -- serve site/`, `cargo run -- check site/`, `cargo run -- build site/`.
+  - `.claude/agents/code-quality-guardian.md` — 1 example mention `site/examples/todo-app`.
+- **Why**: `site/` no longer exists in the repo. Subagents loaded under these identities will paste broken commands and propose changes to a non-existent directory. This is precisely the work item FEAT-014::update-skills was meant to cover (the plan explicitly listed "Update only verbatim copy-paste-ready commands"); execution missed `.claude/agents/`.
+- **Effort**: trivial (3 files, literal find/replace `site/` → `projects/<name>/`, plus rename "Site Directory" ownership stanza to point at `projects/`).
+
+---
+
+- **What**: `# Or from the Spacetime repo root: cargo run -- serve <cd_target>` hint in `run_init` success output assumes the caller's cwd is the Spacetime repo root.
+- **Where**: `src/main.rs::run_init` ~line 1782–1783.
+- **Why**: When `cd_target = projects/<name>` the hint is correct only if cwd was already the repo root (so `projects/` was the in-repo gitignored dir). When `cd_target = <name>` (no `projects/` parent), the hint prints `cargo run -- serve <name>`, which only resolves to the right place if the user's cwd happened to be the Spacetime repo root. Misleading for users who installed `spacetime` and ran `init` from a personal scratch dir without `projects/`.
+- **Effort**: trivial (gate the "Or from the Spacetime repo root" hint behind the `cd_target.starts_with("projects/")` branch, or drop the hint entirely).
+
+---
+
+- **What**: `resolve_init_target_returns_pathbuf` test is a tautological type assertion duplicating `resolve_init_target_no_projects_dir`.
+- **Where**: `src/main.rs` ~lines 3736–3741.
+- **Why**: Adds noise without coverage. The function signature already declares `-> PathBuf`; the cargo build proves the type. Dead test.
+- **Effort**: trivial (delete).
+
+---
+
+- **What**: No test for `projects/` being a broken symlink (target missing).
+- **Where**: `src/main.rs::init_target_tests`.
+- **Why**: `std::fs::metadata` follows symlinks; on a broken symlink it returns `Err`, so `unwrap_or(false)` falls back to cwd/name. Behavior is correct but unverified. Adjacent to the existing `with_projects_symlink_to_dir` test, easy to add.
+- **Effort**: trivial.
+
+---
+
+- **What**: Tracked compiler bug documentation (`bugs/BUG-000-each-template-rendering-overview.md` … `BUG-003-template-invocation-js-serialization.md`) moved to gitignored `scratch/bugs/`.
+- **Where**: `scratch/bugs/` (was root `bugs/`, listed in plan as "non-Spacetime debris").
+- **Why**: Reading file contents, these are Spacetime-compiler-specific BUG notes (template-invocation extractor stub, body capture quantifier loop, etc.). They look like the older equivalent of the `!tasks/bugs/` org-mode bug tracker. Demoting them to gitignored `scratch/` removes them from the main repo's history going forward and from anyone cloning the repo. The plan scoping called this a "decision" but the deletion is irreversible after the next prune; consider whether they should instead be archived under `!tasks/` or `docs/legacy-bugs/` before falling out of git visibility.
+- **Effort**: small (move tracked-but-still-needed entries into `!tasks/bugs/` legacy area; or `git mv scratch/bugs docs/legacy-bugs` and adjust .gitignore exception).
+
+---
+
+- **What**: `tests/PHASE8_SUMMARY.md` and other historical task summaries still contain absolute `/home/user/code/ora/spacetime/...` paths.
+- **Where**: `tests/PHASE8_SUMMARY.md` lines 19, 62, 163, 378; `.serena/memories/STDLIB_JS_EMISSION_TRACE.md:273` references `cargo run -- serve site/`.
+- **Why**: Plan deliberately scoped historical notes out ("only forward-facing instructional docs change"), but `tests/PHASE8_SUMMARY.md` is in `tests/`, not under `!tasks/` or `@tasks/`, and might get crawled by future readers as if it were current docs. Borderline — flagged for awareness, not necessarily action.
+- **Effort**: trivial (one sed-style substitution) if you choose to action.
+
+* Scope
+** In scope
+- Update stale references introduced by the projects/ reorganization in these agent context prompt files:
+  - =.claude/agents/site-designer.md=
+  - =.claude/agents/pipeline-engineer.md=
+  - =.claude/agents/code-quality-guardian.md=
+- Replace copy-pasteable commands using =site/= with =projects/<name>/= examples.
+- Rename the site-designer ownership stanza from =Site Directory (`site/` and subdirectories)= to a projects-based responsibility that matches the current repository layout.
+- Replace the example =site/examples/todo-app= with a current equivalent such as =projects/todo-app= or =projects/<name>=.
+
+** Out of scope
+- Do not rewrite agent identities, skill boundaries, or policy text unrelated to stale paths.
+- Do not touch =.claude/skills/= unless verification discovers a remaining copy-pasteable =serve site/= command there; a prior audit found no skill hits.
+- Do not edit historical task journals under =!tasks/= or =@tasks/= for this item.
+
+* Existing Patterns
+- PLAN-015 established the canonical user-site path as =projects/<name>/= and removed =site/= from the repository.
+- Top-level =AGENTS.md= and =CLAUDE.md= now use =cargo run -- serve projects/<name>/= and describe =projects/= as the gitignored private sites repo.
+- Agent files under =.claude/agents/*.md= are markdown prompt packs. They may be long single-line markdown files; use literal text replacements carefully and preserve surrounding prose.
+
+* Tests
+- Grep scenario A: =grep -rn 'serve site/\|check site/\|build site/' .claude/agents/site-designer.md .claude/agents/pipeline-engineer.md .claude/agents/code-quality-guardian.md= returns zero hits.
+- Grep scenario B: =grep -rn 'Site Directory (`site/`\|site/examples/todo-app' .claude/agents/site-designer.md .claude/agents/code-quality-guardian.md= returns zero hits.
+- Grep scenario C: =grep -rn 'projects/<name>\|projects/todo-app' .claude/agents/site-designer.md .claude/agents/pipeline-engineer.md .claude/agents/code-quality-guardian.md= returns expected updated references.
+- Manual review scenario: agent role boundaries still describe the same expertise; only stale path examples/ownership changed.
+
+* Implementation
+** ITEM Capture failing grep evidence (TDD: before implementation)
+:PROPERTIES:
+:CUSTOM_ID: BUG-018-clean-stale-site-path-commands-from-agen::capture-agent-prompt-grep
+:END:
+- Run the Tests section grep commands before editing and save the hit list for the completion report.
+- Expected initial hits include =cargo run -- serve site/= in site-designer, =serve/check/build site/= in pipeline-engineer, and =site/examples/todo-app= in code-quality-guardian.
+
+** ITEM Update agent prompt path examples
+:PROPERTIES:
+:CUSTOM_ID: BUG-018-clean-stale-site-path-commands-from-agen::update-agent-prompt-paths
+:DEPENDS: BUG-018-clean-stale-site-path-commands-from-agen::capture-agent-prompt-grep
+:END:
+- In =.claude/agents/site-designer.md=:
+  - Replace =cargo run -- serve site/= with =cargo run -- serve projects/<name>/=.
+  - Replace debugging =RUST_LOG=trace cargo run -- serve site/= with =RUST_LOG=trace cargo run -- serve projects/<name>/=.
+  - Replace =Site Directory (`site/` and subdirectories)= with =Projects Directory (`projects/` and subdirectories)= or equivalent.
+  - Update prose so demo/user sites live under =projects/<name>/=, not =site/=.
+- In =.claude/agents/pipeline-engineer.md=:
+  - Replace =cargo run -- serve site/= with =cargo run -- serve projects/<name>/=.
+  - Replace =cargo run -- check site/= with =cargo run -- check projects/<name>/=.
+  - Replace =cargo run -- build site/= with =cargo run -- build projects/<name>/=.
+- In =.claude/agents/code-quality-guardian.md=:
+  - Replace the =site/examples/todo-app= example with =projects/todo-app= or =projects/<name>=.
+
+** ITEM Verify agent prompt cleanup
+:PROPERTIES:
+:CUSTOM_ID: BUG-018-clean-stale-site-path-commands-from-agen::verify-agent-prompt-cleanup
+:DEPENDS: BUG-018-clean-stale-site-path-commands-from-agen::update-agent-prompt-paths
+:END:
+- Run all Tests section grep commands.
+- Confirm no stale =site/= commands remain in the three target agent files.
+- Record exact command outputs in the plan completion report.
+
+* Edge Cases
+- These files may be stored as very long markdown lines. Use replacements that do not reflow the full file unless necessary.
+- Avoid replacing generic English words like "site" when they mean a website concept rather than the deleted =site/= directory.
+- If a remaining =site/= reference is historical and not copy-pasteable, leave it only if it is not misleading after surrounding prose is read; otherwise rewrite it to the projects convention.
+
+* Acceptance Criteria
+- The three target agent files contain no =serve site/=, =check site/=, =build site/=, =Site Directory (`site/`=, or =site/examples/todo-app= references.
+- The site-designer prompt tells agents to work in =projects/<name>/= for live site development.
+- Pipeline debugging examples use =projects/<name>/= for serve/check/build commands.
+- Code-quality examples no longer point at the removed =site/examples/= tree.
+
+** Completion [2026-04-27]
+*** Verification
+- =grep -on 'serve site/|check site/|build site/' .claude/agents/site-designer.md .claude/agents/pipeline-engineer.md .claude/agents/code-quality-guardian.md= → 0 hits.
+- =grep -on 'Site Directory.*site/|site/examples/todo-app' .claude/agents/site-designer.md .claude/agents/code-quality-guardian.md= → 0 hits.
+- =grep -oc 'projects/<name>|projects/todo-app|Projects Directory' .claude/agents/site-designer.md .claude/agents/pipeline-engineer.md .claude/agents/code-quality-guardian.md= → 1 line per file (expected; .md files are single-line pandoc output).
+- =scripts/sync-agents.fish= regenerated all four touched agent =.md= files from updated org sources.
+*** Artifacts
+- Source org edits: =@tasks/agents/site-designer.org=, =@tasks/agents/pipeline-engineer.org=, =@tasks/agents/code-quality-guardian.org=.
+- Generated agent prompts: =.claude/agents/site-designer.md=, =.claude/agents/pipeline-engineer.md=, =.claude/agents/code-quality-guardian.md=.
+*** Deviations
+None.

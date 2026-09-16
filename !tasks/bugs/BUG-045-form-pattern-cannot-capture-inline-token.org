@@ -1,0 +1,67 @@
+#+TITLE: Form pattern cannot capture inline tokens between ) and { (returnType dropped)
+#+STATE: DONE
+#+SESSION_ID: 14f48ced503111a7
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-05-29T18-28-09-664Z_14f48ced503111a7.jsonl]]
+#+CUSTOM_ID: BUG-045-form-pattern-cannot-capture-inline-token
+#+COMPLETION_HASH: d0a650ca9e05d532
+
+* Initial Message
+
+ok cool, show me what changes you'll do to cart-demo and ruthlessly delete legacy and any path that supported it and any other deprecated/legacy path you encounter along your exploration to fulfil FEAT-047 (maximalist interpretation)
+explain the bugs you filed
+
+* Symptom
+A `%form` pattern with a capture BETWEEN the parenthesized arg-list `)` and the body `{`
+is silently dropped — never compiled into the matcher, never captured at match time.
+
+Concretely, both stdlib macros that use the shape `@name($params) : $returnType { $body }`
+lose `$returnType`:
+  - `@fn $name:ident($params:params) : $returnType:typeref { $body:expr }`
+  - `@compute $name:ident($deps:param_list) : $returnType:typeref { $body:expr }`
+
+`@fn` SURVIVES only because its primitive (fn-registry) declares `returnType: typeref?`
+(optional), so a missing capture is tolerated. `@compute` BREAKS: compute-fn declares
+returnType REQUIRED, so the missing capture raises:
+  error[E0804]: Missing required parameter 'returnType' (provided: deps, body, name)
+
+* Repro
+  @compute total($cart): number { return 0; }      -> E0804
+  @fn fp(price: number): string { "x" }             -> parses but returnType is NOT captured
+                                                       (caps = name, body, params only)
+Impact: projects/jallete (the only real @compute user; checkout-helper.st) has NEVER compiled.
+
+* Root cause (verified)
+src/parser/meta_ast.rs::FormClause (line ~286) models a directive form as THREE ordered
+segments only:
+    @name  <inline_elements>   ( <params> )   { <body_params> | body_capture }
+            (before `(`)          (inside ())     (inside {})
+There is NO field for tokens AFTER `)` and BEFORE `{`.
+
+src/parser/mod.rs::parse_form_pattern (~3476) computes `after_params = &pattern[)+1..]`
+then only does `after_params.find('{')` to grab the body — the run between `)` and `{`
+(`: $returnType:typeref`) is never parsed into inline elements. So the FormClause built at
+mod.rs:3594 has no record of returnType, and the matcher (form_compiler.rs::try_match) has
+nothing to match it with (its segments are: inline_elements before ARG_LIST, params from
+ARG_LIST, body_params/body_capture from BODY).
+
+* Fix direction (design — see PLAN)
+Add a fourth segment, e.g. `FormClause.post_arg_inline: Vec<FormInlineElement>` (serde
+default for back-compat), parse the `)`..`{` run in parse_form_pattern via the existing
+parse_form_inline_elements, and match it in try_match AFTER step 3 (ARG_LIST params) and
+BEFORE step 4 (BODY) against the main inline cursor — including the no-arg-list path. Then
+@fn/@compute returnType is captured generally. Operator-algebra note: `: T` here is a type
+annotation, consistent with `:`-is-type.
+
+* Acceptance
+- `@fn fp(p: number): string {…}` captures returnType == "string".
+- `@compute total($cart): number {…}` compiles (returnType captured) and projects/jallete
+  builds clean.
+- A regression test for each (capture present + correct value) + golden snapshots updated.
+- No regression in existing forms that have NOTHING between `)` and `{`.
+
+* Context
+Surfaced during FEAT-047 project migration (jallete @compute). Pre-existing (the @fn
+returnType drop predates this session; @compute never worked). @compute's deps also needed
+param_list (was params) to accept `$`-prefixed signal refs — fixed in the same arc.
+
+NOTE [2026-06-02]: DONE via PLAN-025 (commit 1dcd9ac3 + absorbed model/parser/scorer in 5888eeb4..7860a561). FormClause gained post_arg_inline: Vec<FormInlineElement>; parse_form_pattern parses the )..{ run; try_match step 3.5 matches it (optional when absent). @fn returnType captured (="string"); @compute returnType captured (was E0804). Remaining jallete blocker is BUG-046 (body-paren-$), a distinct lexer bug.

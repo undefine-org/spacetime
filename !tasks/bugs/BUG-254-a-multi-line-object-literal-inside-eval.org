@@ -1,0 +1,72 @@
+#+TITLE: A multi-line object literal inside @eval is truncated at the first key: — emits broken JS, kills the page at load
+#+STATE: ITEM
+#+SESSION_ID: 153f5ed0617636c7
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-26T21-12-46-213Z_153f5ed0617636c7.jsonl]]
+#+CUSTOM_ID: BUG-254-a-multi-line-object-literal-inside-eval
+
+* Initial Message
+
+Please review the full arc and the cross-refs in light of recent changes to the codebase and tell me what is still relevant, what is even more relevant, and what capabilities on the rest of Spacetime this could unlock (be bold and creative)
+
+* Symptom
+
+A multi-line object literal inside `@eval` emits BROKEN JavaScript: the eval string is truncated at the first `key:`, and the emitted bundle contains a fragment ending in a bare identifier plus `;;`. The page then dies at load with `Uncaught SyntaxError: Invalid or unexpected token`.
+
+* Minimal repro (observed 2026-07-31 while writing tests/unit/animation/color-interpolation.test.st)
+
+#+BEGIN_SRC spacetime
+@test "object literal in eval" {
+  @fixture { <div class="probe"></div> }
+
+  @eval (eval("                                                          \
+    var a = ST.parseColor('#000000');                                     \
+    var b = ST.parseColor('#ffffff');                                     \
+    window.__mid = {                                                      \
+      oklch: ST.interpolateColor(a, b, 0.5),                              \
+      rgb: ST.interpolateColorRgb(a, b, 0.5)                              \
+    };                                                                    \
+  "))
+
+  @assert (window.__mid.oklch !== null) "..."
+}
+#+END_SRC
+
+Emitted JS (from `cargo run -- build`, around the eval site):
+
+#+BEGIN_EXAMPLE
+(eval("                                                          \
+    var a = ST.parseColor('#000000');                                     \
+    var b = ST.parseColor('#ffffff');                                     \
+    window.__mid = {                                                      \
+      oklch;;
+})();
+#+END_EXAMPLE
+
+The string is cut at `oklch` — i.e. at the first `key:` INSIDE the object literal — and terminated with `;;`.
+
+* Scope
+
+- Single-line object literals inside `@eval` were not tested; the repro is the multi-line continuation form (`\` line continuations), which is the idiom every existing test in tests/unit/ uses.
+- Scalar assignments are unaffected: `@eval (eval("window.__x = 1;"))` and even long multi-line scalar sequences work. That is the shape tests/unit/data/sanitizer.test.st and tests/unit/i18n/locale-html.test.st happen to use, which is why this has not been hit before.
+- WORKAROUND IN USE (deliberate, documented at the top of the test file): tests/unit/animation/color-interpolation.test.st assigns one scalar global per value instead of one object. That file's header explains why, so the workaround is visible rather than folklore.
+
+* Suspected root cause (NOT yet verified — do not treat as diagnosis)
+
+The `:` inside the eval string is being read as a structural colon by the capture that grabs the eval argument (a value-position colon, or a property split), so the balanced/expr capture ends the run there. That would make this the same FAMILY as the delimiter-vs-content confusions tracked in PLAN-122: a delimiter's meaning belongs to the grammar that owns the text, and an `@eval` argument is FOREIGN CODE (JavaScript), not Spacetime structure. Compare BUG-040/041, where a quote inside a `%emit js` regex char class was read as a Spacetime string opener (fixed 2026-07-31, commit aae443a8, by making the lexer's EOF recovery symmetric with its newline rule).
+
+If that is right, the fix belongs with the eval-argument capture rather than with any per-test escaping.
+
+* Why it matters
+
+`@eval` is the escape hatch the entire headless test suite runs on. A silent truncation there means a test can emit broken JS and take the whole page's runtime down at load — and the failure surfaces as a SyntaxError at a bundle offset (`at :7006:7`), pointing nowhere near the test that caused it. The diagnostic distance is the expensive part: the author sees "Invalid or unexpected token" and has to bisect their own test to find which line the capture ate.
+
+* Acceptance
+
+- The repro above compiles to valid JS and its assertions run.
+- `node --check` on the emitted bundle passes for a test containing a multi-line object literal in `@eval` (the BUG-250 gate style: assert the emitted JS PARSES, not merely that strings appear in it).
+- A test-level regression fixture enshrines an object literal with at least two `key: value` pairs inside `@eval`.
+- tests/unit/animation/color-interpolation.test.st can drop its scalar-globals workaround and use one object; its header note is removed in the same commit.
+
+* Relation
+
+Discovered while gating BUG-202 (FUP-160 first step). Same family as BUG-040/041 (foreign-code content read as Spacetime structure) and BUG-250 (emitted JS not gated on parsing). Cross-ref PLAN-122's thesis: the value/foreign-code layer is where these silent breaks live.

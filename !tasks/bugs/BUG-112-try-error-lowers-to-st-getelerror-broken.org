@@ -1,0 +1,71 @@
+#+TITLE: @try $error lowers to ST.get(el,"error") — broken catch binding (invalid LHS + bare el ref)
+#+STATE: DONE
+#+SESSION_ID: 150f010ca09ac05e
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-19T07-36-00-898Z_150f010ca09ac05e.jsonl]]
+#+CUSTOM_ID: BUG-112-try-error-lowers-to-st-getelerror-broken
+#+COMPLETION_HASH: d2f8553cb395cdb6
+
+* Initial Message
+
+FUP-069 && BUG-109
+
+* Summary
+The `@try { $body } catch: $error` testing macro (stdlib/testing/test.st ~L1308) emits
+`var $error = null; try { %$body.js } catch (__e) { $error = __e; }`. The `$error`
+signal-reference lowers through the JS emitter to `ST.get(el, "error") = __e`, which is
+BOTH an invalid left-hand-side assignment AND references a bare `el` that no longer exists
+for selectorless test directives (after FUP-072 dropped the `const el = document.body`
+preamble). Result: every `@try`-using assertion test fails with either "Invalid left-hand
+side in assignment" or "el is not defined".
+
+* Impact
+- 7 residual failures in tests/unit/assertions/state.test.st (3× "el is not defined", 4×
+  "Invalid left-hand side"), plus the binding.test.st `@try` cases. All the same root.
+- Pre-existing (the `ST.get(...) = __e` invalid-LHS form failed even WITH the old preamble);
+  FUP-072's preamble removal surfaced the `el is not defined` half more clearly. NOT a
+  FUP-072 regression — FUP-072 explicitly listed `$error` cross-step sharing as out of scope.
+
+* Root cause
+`$error` is intended as a plain catch-bound local (the macro doc shows `@assert $error !== null`),
+but the `$`-prefix makes the JS emitter treat it as a Spacetime SIGNAL and lower both the
+declaration and the assignment through `ST.get(el, ...)` / signal-set. There is no `el` in a
+`@try` (it is selectorless), and a signal-get is not a valid assignment target.
+
+* Fix direction
+Make `@try`'s error binding a plain JS local that `@assert $error` can read by the same name,
+WITHOUT signal lowering. Options:
+1. Emit `var __st_error = null; ... catch(__e){ __st_error = __e; }` and have `@assert`'s
+   `$error` read resolve `$error` -> `__st_error` (a reserved test-local alias).
+2. Generalize: a `$name` declared by `var $name` in a test-macro emit is a TEST-LOCAL, not a
+   page signal — the emitter should not lower it through ST.get/ST.set. Ties into the
+   FUP-072 one-scope model (test-body steps share one lexical scope; `$error` becomes a
+   normal `let` visible to later `@assert` steps).
+
+* TDD (RED -> GREEN)
+- RED: `@try { @then .x should have_state "active" } @assert ($error !== null)` on a
+  fixture in the wrong state -> currently "el is not defined" / "Invalid LHS".
+- GREEN: the assertion sees the caught error; tests/unit/assertions/state.test.st and
+  binding.test.st `@try` cases pass.
+
+* Provenance
+Found 2026-06-19 while landing FUP-069/FUP-072/BUG-101 (testing-stdlib cluster). state.test.st
+went 18/41 -> 23/7 after the FUP-072 el_init fix; the residual 7 are all this `@try $error`
+lowering bug. Files: stdlib/testing/test.st (`@try` macro), the JS emitter's `$`-signal
+lowering (src/emit/js.rs runMutations/resolve), and @assert's `$error` read.
+
+NOTE [2026-06-19]: FIXED 2026-06-19. Root cause confirmed at the byte level via `inspect --layer emit`: the @try `%emit js` body's bare `$error` tokenized as `EmitSegment::Signal` -> `ST.get(el, "error") = __e` (invalid LHS) + bare `el` (undefined for selectorless test directives post-FUP-072). Meanwhile @assert's `%$condition` spliced `$error` as a LITERAL identifier, and the `var $error` decl became `var __PH0__` — three inconsistent lowerings of one name.
+
+Fix (chose direction-adjacent to option 1, but generalized as a reusable escape rather than a reserved alias): added a `$$` -> literal-`$` escape to the emit tokenizer (src/emit/emit_tokenizer.rs), the exact sibling of the existing `%%` -> `%` rule. It is the only way an emit body can write a bare `$ident` that survives verbatim instead of signal-lowering. Then @try (stdlib/testing/test.st) emits `$$error = null` / `$$error = __e` — a bare (global) assignment like @let, so the binding crosses the per-step IIFE and @assert reads the same literal `$error` global. Single `$` still tokenizes as a Signal (unchanged).
+
+Why a tokenizer escape and not a Rust special-case for the name "error": it fills a genuine, general gap (no prior way to emit a literal `$`), it is DATA-driven (any emit body can use it), it deletes the inconsistency rather than adding a parallel path, and it is testable by the same machinery it generalizes. Verified safe: the only existing `$$name` uses (stdlib/macros/type-data.st) live in `%binds` blocks, which never pass through `tokenize_emit` (only `%emit` content does).
+
+Verification:
+- Emit now correct: `$error = null;` / `$error = __e;` / `const __cond = ($error !== null);` — all literal, consistent, valid JS.
+- tests/unit/assertions/state.test.st: 23/7 -> 30/0.
+- tests/unit/assertions/binding.test.st: -> 29/0 (the @try cases recovered).
+- Full headless suite: 513 passed / 105 failed -> 527 passed / 91 failed (-14, exactly the 7 state + 7 binding @try cases).
+- RED->GREEN unit test added: emit_tokenizer::tests::tokenize_escaped_dollar_is_literal_not_signal.
+- No regressions: cargo test --lib 2364/0 (was 2363 + this 1 new test); integration 172/0; snapshot_tests 13/0 (zero new snapshot drift — site emit unchanged, @try is test-only). The 9 residual v8_runtime failures are all media_dedup/selector_init = BUG-039 (@media emits JS), confirmed pre-existing and orthogonal (matchMedia, not $$/@try).
+- @try macro doc updated to document the `$$`-escape test-local mechanism.
+
+Files: src/emit/emit_tokenizer.rs (escape rule + test), stdlib/testing/test.st (@try emit body + doc).

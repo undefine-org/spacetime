@@ -1,0 +1,79 @@
+#+TITLE: Brand forms catalog — prelude forms, @data forms, splice expansion, brand-catalog demo, showcase restyle
+#+STATE: ITEM
+#+SESSION_ID: 1534a2eae1903af0
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-18T13-07-01-638Z_1534a2eae1903af0.jsonl]]
+#+CUSTOM_ID: PLAN-135-brand-forms-catalog-prelude-forms-data-f
+
+* Initial Message
+
+I want you to look at how demos/spacetime-docs uses registries to load macros and their definitions. I would like to do the same kind of thing with forms, and have some sort of globally imported brand attributes so that we can have an automatically generated catalog with a sidebar, etc. with a mix of .st.md files and the auto-generated element showcase from the registry. Explore first to understand what I mean. This would also mean changing the style of the showcases to leverage --form a lot, lot more, which might unearth some bugs with using the video and score and other Spacetime affordacnes within the `@form`, but we can do it
+
+* Context
+
+Exploration of `demos/spacetime-docs` (`index.st` sidebar reader + `reference.st` registry-driven macro catalog) established the pattern to generalize: `@data registry` / `@data dispatch` are compile-time injections (`src/compiler.rs:1128-1152`, FEAT-084/FEAT-089) that rewrite to `@data inline <json>` → `@each` SSG-unroll → live cards. Neither enumerates `@form` *declarations* — the missing third source for a brand catalog.
+
+User decisions (2026-08-05):
+- Global brand attributes: extend `_prelude.st` to merge `@form` declarations into every page (compiler change, matches the comment-type overlay model).
+- Fix both unearthed silent-acceptance bugs NOW (style splice expansion + custom easing body shipping) — prerequisites for the showcase restyle.
+- Catalog lives in a NEW `demos/brand-catalog` (spacetime-docs untouched).
+- Catalog covers all six form kinds; unconsumed kinds (value/markup) render as spec cards.
+
+* Consumption matrix (verified empirically, /tmp/formprobe)
+
+| kind | consumption | status |
+|------|-------------|--------|
+| easing | `easing: --name;` → sigil stripped, runtime map by bare name | ✓ (but custom curve body never ships — BUG filed) |
+| motion | `@on &.driver: --form(args);` → resolve_form_with_args (drivers.rs) | ✓ |
+| score | fragment splice in `@score` bodies (score.rs score_fragment_body) | ✓ |
+| style | statement splice `--name;` parsed + validated (E0947) | ✗ expansion never landed ("W3 scope" in parser/ast.rs) |
+| value | — | ✗ no consumer (spec cards only) |
+| markup | — | ✗ no consumer (spec cards only) |
+
+* Waves
+
+** W1 — `_prelude.st` carries form declarations
+`load_project_overlay` (compiler.rs:965) registers meta_defs only; prelude `@form` declarations are silently dropped. Extend: parse prelude matches, filter to form-declaring macros (matched_macro registers category `form`), stamp source_file, merge into every page's AST before validate_form_refs / score / motion resolution / @data forms injection. Cache key already hashes prelude presence+mtime (compiler.rs:76-94). A non-form directive in the prelude → loud error pointing at the prelude (prelude stays declaration-only).
+Gate: RED test — page uses `@form easing/motion/score/style` declared ONLY in `_prelude.st` → compiles, expands; unknown form still E0947; prelude form visible to `@data forms`.
+
+** W2 — style splice expansion (BUG-xxx companion)
+`--card-surface;` in a scope splices the declared body's declarations into that scope's CSS at the splice's source position (CSS order matters), with param substitution (`--surface(pad: 2rem);`). Kind check: non-style form in bare-scope statement position → hard error (motion forms belong to @on driver slots, score to @score bodies). Reuse drivers.rs substitute_params machinery where shapes align.
+Gate: RED test — /tmp/formprobe case: emitted CSS contains background+border-radius; E0947 still hard; kind mismatch errors; params substitute. CDP gate: element actually styled per BUG-252.
+
+** W3 — custom easing body shipping (BUG-xxx companion)
+`@form easing --custom-smooth { cubic-bezier(0.4,0,0.2,1) }`: the curve body currently goes nowhere; JS gets the bare name and the runtime falls back to easings.linear SILENTLY. Fix: collect easing form declarations from the merged AST, emit a runtime registration (camelCase key to match easing.js convention) so `easings["customSmooth"]` resolves to the declared curve (cubic-bezier factory; spring(...) if the runtime has one). Unknown easing name (no declaration, not in runtime map) → loud compile error, never a silent linear fallback.
+Gate: CDP — animated element mid-flight value differs from linear (discrimination proof).
+
+** W4 — `@data forms $x [from kind "style"]` injection
+New macros `data-forms-all` / `data-forms-filtered` in stdlib/macros/data-kind.st (mirror data-registry-all/filtered shape). Compiler: has_forms_data / inject_forms_data at the existing seam. Row shape: { name, kind, params: [{name, default}], body, doc, source }. Doc = leading `///` lines walked back from the match span (same-file from AST source; imported/prelude read from disk via source_file). Registry retains stdlib form-declaration matches at stdlib load so the 28 stdlib easings also appear (forms-as-registry-data, mirroring comment types).
+Gate: unit — a page with 3 form kinds gets 3 rows with correct fields; filter narrows; rows flow to @each (SSG DOM assertion); RED first.
+
+** W5 — demos/brand-catalog
+`_prelude.st` = brand forms: style (surfaces, type treatments), easing (--brand-smooth), motion (--brand-rise), score (--brand-intro), markup (--brand-badge), value (--brand-unit). Pages: index.st sidebar shell (spacetime-docs pattern) + .st.md prose + auto-generated catalog: sidebar groups by kind; each card USES the form it documents (style → swatch spliced with the form; easing → dot on the curve; motion → driven tile; score → mini timeline; value/markup → spec card showing declaration source).
+Gate: CDP per BUG-252 — catalog cards render, live cards move; sidebar anchors navigate.
+
+** W6 — showcase restyle
+stdlib/showcases/* from bespoke --showcase-* vars to brand/@form-first style (style splices, shared motion/easing forms). Explore video/score/scene affordances inside @form bodies here (markup forms with <video>, score forms driving .playback) — file bugs as found.
+Gate: cargo run -- check stdlib/showcases/index.st; CDP render of a restyled showcase.
+
+* Dependencies
+W1 → W4 → W5 → W6. W2, W3 independent of each other, both gate W5/W6.
+
+* References
+- form macros: stdlib/macros/form.st (six kinds, %registers form)
+- injection seam: src/compiler.rs:1128-1152 (inject_registry_data/inject_dispatch_data)
+- overlay: src/compiler.rs:960-1030 (load_project_overlay)
+- splice validation: src/parser/mod.rs:2187-2260 (validate_form_refs)
+- motion resolution: src/pipeline/drivers.rs:2212 (resolve_form_with_args)
+- score splice: src/pipeline/score.rs:1500 (score_fragment_body)
+- runtime easing map: public/runtime/easing.js (camelCase keys)
+- SIP-001c: docs/specs/SIP-001c-reusable-chunks-sigil.org
+
+NOTE [2026-08-06]: 2026-08-05: W1–W4 landed.
+W1 (22fc6a8e): _prelude.st merges @form declarations (ProjectOverlay.form_matches, compile-pipeline clone seam; build/check set site_dir).
+W2 (22fc6a8e): style form splices EXPAND (expand_style_form_splices, span-ordered, param substitution; E0959 kind mismatch, E0960 unknown arg; cross-file via import merge + overlay). BUG-298 DONE.
+W3 (e3a3148e): easing form bodies reach the runtime — compiler registration IIFE (prepended), ST.cubicBezier/springCurve/registerEasing, apply-animations getEase global hop, dev-server ST.easings wipe fixed (merge-on-reload), unknown easing is E0962, binds_consumed resurrection trap fixed. BUG-297 DONE. Real-browser end-to-end: 0.776 vs 0.500 at scroll midpoint.
+W4 (this commit): @data forms — the declaration catalog as a static data source ({name,kind,params,body,doc,source}; page + imports + overlay + stdlib presets; CSS-like later-overrides dedup; filter mirrors @data registry semantics). FormMatch.doc filled at parse time (doc_comment_before: leading-inside-span + swallowed-by-previous-span placements — events-parser spans cover leading AND trailing trivia). from_file stamps main-file matches' source_file. 5/5 integration tests green; lib suite parity with HEAD (3 pre-existing reds filed as BUG-308).
+Harness gaps found while gating and filed: BUG-303 (visible one-shots don't tick under @clock), BUG-304 (CDP IO never fires), BUG-305 (no headless scroll model), BUG-306 (playback mid-playhead red under CDP), BUG-307 (the unfiled BUG-272 editable red).
+Remaining: W5 demos/brand-catalog (mixes .st.md prose via @doc + the @data forms catalog), W6 stdlib/showcases restyle onto @form.
+
+NOTE [2026-08-06]: 2026-08-05 W6 DONE (413ec0c7): stdlib/showcases restyled onto @form. _schools.st declares the six schools as form chunks (style forms + shared --sc-enter-glide/--sc-enter($distance)/score forms); all 10 patterns splice, keep only layout, and self-import _schools.st (CATALOG self-contained contract). hero/motion is genuinely scroll-choreographed now (--sc-mtn-hero score form + @on &.clip, browser-verified exact at 5 scroll positions). hero/media.st written as the playback stressor but deliberately unimported — it exposed BUG-310 (__stRefs has readers, zero writers: named element refs dead end-to-end; playhead-driven overlay choreography has NO working authoring shape today) and BUG-311 (dev server no Accept-Ranges → media non-seekable). The wave's biggest find: BUG-312 — PLAN-122's scalar flattening silently killed score measure lowering (String("50%") vs typed Length arms); fixed consumer-side, score_window_map_test 10/18 → 18/18 (8 gates had been red at HEAD unnoticed), browser-verified bb=(0.945-0.5)/0.5 exact. Also fixed the W2 walker gap (imported files parsed validate=true → stale E0947 in check; now unvalidated, assembled-page seam judges) and restored integration_tests compilation (W4 sweep miss) which unmasked 15 pre-existing lane failures (BUG-308 note, baseline-verified not ours). Remaining carry-over: hero/media.st lands with BUG-310's fix wave; demos/score-launch §3 BUG-266 workaround status.

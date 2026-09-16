@@ -1,0 +1,191 @@
+#+TITLE: PLAN: kill the shared-primitive class — row-keyed lookup, primitive_args, bundle-identity gate
+#+STATE: DONE
+#+SESSION_ID: 1534a2eae1903af0
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-18T13-07-01-638Z_1534a2eae1903af0.jsonl]]
+#+CUSTOM_ID: PLAN-127-plan-kill-the-shared-primitive-class-row
+
+* Initial Message
+
+other bugs we need to solve? also, weren't we supposed to implement the rest of SIP-001 with `@score` and stuff? Please recall
+
+* Intent
+
+Make BUG-253's class IMPOSSIBLE BY CONSTRUCTION, not merely fixed.
+
+BUG-253: `@on &.click:` listens for mouseenter. So do `.focus`, `.submit`,
+`.key`. All five event rows emit `const trig = "hover"`.
+
+The naive fix ("pass the trigger") leaves the class alive. This plan removes
+the three separate ways the class can occur: the miskeyed lookup that causes
+it, the missing declaration slot that makes it necessary, and the absent gate
+that let it ship.
+
+* Evidence (observed, this session — not inferred)
+
+Built the same page five times, once per event driver, diffed the bundles:
+
+  diff click.js submit.js
+  <   const timelineName = "__drive_click_1";
+  >   const timelineName = "__drive_submit_1";
+
+That is the ENTIRE difference. Identical trig, identical listeners, identical
+logic. The driver's identity reaches the LABEL and nothing else.
+
+Full 20-row sweep (each row built in isolation, bundle diffed vs an empty
+baseline):
+  LIVE + CORRECT (11): visible scroll mouse pointer time loop load change
+                       done text-change, prev(expression position)
+  BROKEN (5):          hover click focus submit key
+  HONEST-DEAD (4):     steps playback clip running — `planned:` prefix, so
+                       E0948 at compile. LOUD. This is the system working:
+                       an UNIMPLEMENTED driver is unusable, while a
+                       MISIMPLEMENTED one shipped silently to five rows.
+
+* Root cause — the wrong ROW is consulted, deterministically
+
+src/pipeline/drivers.rs:2072 `driver_param_args()` finds its registry row by
+PRIMITIVE NAME:
+
+  .find(|(_, c)| matches!(registry.entry_field(c, "primitive"),
+                          Some(Ident(p)) if p == primitive))
+
+`.find` returns the FIRST match. All five event rows declare
+`primitive: event-driver`, so all five read HOVER's row. It is not that an
+argument is missing — the wrong row is read, by first-match. Any per-row data
+added to `submit` today would still be unreachable. `param_map` on a shared
+primitive is dead surface.
+
+Three sibling lookups in the SAME FILE (lines 183, 696, 1486) key correctly on
+`registry.entry_key(c) == Some(member)`. Exactly ONE deviates, and it is the
+broken one. A one-off inconsistency in a codebase that already knows the idiom.
+
+Confirmed in-scope: all three call sites (572, 1392, 1857) already resolve
+`clause` by `entry_key(member)` (site 3's resolution is at :1486) and then
+DISCARD it in favor of the by-primitive search. The correct row is already in
+hand at every call site. That is what makes layer 1 surgical.
+
+* Layer 1 — delete the miskeyed lookup (kills the class)
+
+Change `driver_param_args` to take the ALREADY-RESOLVED row instead of
+searching:
+
+  fn driver_param_args(
+      params: Option<&CapturedValue>,
+      registry: &MetaRegistry,
+      primitive: &str,
+      clause: &RegisterClause,   // <- the row, passed in
+  ) -> Vec<BindArg>
+
+and read `param_map` from `clause` directly. Delete the `.entries_of("driver")
+.find(by primitive)` block entirely.
+
+Call sites: 572 and 1857 have `clause` in scope already. 1392
+(`expand_two_slot_body`) must thread it from its single caller at 1642, which
+resolved it at 1486.
+
+WHY THIS IS STRUCTURAL: after this change NO code path searches the driver
+registry by primitive. A row can only ever read its OWN data, because the
+lookup that could return a sibling's row no longer exists. A future row on a
+shared primitive cannot inherit a sibling's config — not "must remember not
+to", but cannot.
+
+* Layer 2 — `primitive_args`: make the row's identity declarable
+
+Layer 1 makes per-row data READABLE; nothing yet SUPPLIES the trigger. Add a
+registry slot for constant primitive arguments:
+
+  %registers driver(submit) {
+    primitive: event-driver
+    primitive_args: "trigger:submit"
+    ...
+  }
+
+Applied to all five event rows (hover/click/focus/submit/key). Parsed with the
+same `split(',')` + `split_once(':')` shape `param_map` already uses, then
+emitted as `BindArg::Named`, typed through the existing `typed_primitive_arg`
+so string params quote correctly.
+
+DESIGN NOTE — one need, one implementation (AGENTS §2). `param_map` RENAMES a
+caller-supplied arg; `primitive_args` SUPPLIES a constant. Adjacent but not the
+same need, and `param_map` has exactly one user (text-change:335). Evaluate
+folding both into one slot during implementation; if they stay separate, both
+must be read from the row (layer 1) so neither can read a sibling's.
+
+Author-supplied args must WIN over `primitive_args` (a constant is a default,
+not an override) — assert this with a test.
+
+Then DELETE the now-unreachable hardcoded dispatch in
+stdlib/primitives/animation/drivers.st:552-565 — the `if (trig === 'hover')` /
+`else if (trig === 'click')` branches exist only because the trigger never
+arrived. With real triggers the generic
+`addEventListener(trig, forward)` else-branch handles every row. Net deletion.
+CAUTION: hover's reverse-on-mouseleave and click's toggle-on-second-press are
+BEHAVIOR, not dispatch — they must survive, as row data
+(`reverse: true`, a toggle flag) or they are a regression. Verify with the
+CDP negatives before deleting.
+
+* Layer 3 — the bundle-identity gate (catches the whole class, forever)
+
+Mechanize the hand-diff that found this:
+
+  Compile one minimal page per driver row. Normalize away cosmetic
+  identity (timeline names, `_st_init_<hash>` guards). Hash the result.
+  TWO ROWS PRODUCING IDENTICAL LOGIC IS A FAILURE, naming both rows.
+
+Deliberate alias exemption: mouse/pointer intentionally share `mouse-driver`.
+Exempt via an explicit registry declaration (e.g. `alias_of: mouse`), NOT a
+hardcoded allowlist in the test — the exemption is data, and declaring an
+alias is then a deliberate act rather than an accident that looks identical.
+
+This gate needs NO per-row expectations, so it cannot rot as rows are added,
+and it generalizes past drivers to ANY registry where N entries share one
+implementation.
+
+Plus a registry invariant test: if ≥2 rows share a `primitive` and none is
+declared an alias, each MUST carry row-distinguishing data — fail naming the
+rows.
+
+* Layer 4 — CDP behavior gates with NEGATIVES (per AGENTS.md, BUG-252 rule)
+
+Every existing driver test is positive-only, which is precisely why five wrong
+drivers passed. The negative IS the assertion:
+  - `.click` animates on click AND DOES NOT animate on hover  <- the one that fails today
+  - `.submit` animates on form submit
+  - `.focus` animates on focus, not on hover
+  - `.key` animates on keydown, not on hover
+  - `.hover` still animates on mouseenter (no regression)
+  - hover's reverse and click's toggle still work (guards the layer-2 deletion)
+
+* Sequence (TDD — RED before each fix, per the standing directive)
+
+1. Layer 3 gate written FIRST. It must go RED naming hover/click/focus/submit/
+   key as identical. This is the executable form of the bug.
+2. CDP negative for `.click` (animates on click, not on hover) — RED.
+3. Layer 1 (row-keyed lookup). Gates stay RED — no behavior change yet, but
+   per-row data becomes readable. Full suite must stay green (pure refactor).
+4. Layer 2 (`primitive_args` + the five rows). Layer 3 gate goes GREEN, CDP
+   negatives go GREEN.
+5. Delete the hardcoded trig dispatch; re-run CDP incl. hover-reverse and
+   click-toggle. Net deletion recorded.
+6. Registry invariant test + alias declaration for mouse/pointer.
+7. Full battery: lib, integration, v8, SIP gates, headless, both CDP suites.
+   Snapshots regenerated and REVIEWED (trigger strings will change — every
+   changed line must be an intended trigger, not a surprise).
+
+* Acceptance
+
+- `@on &.click:` fires on click and NOT on hover, asserted on real Chromium.
+- No code path searches the driver registry by primitive name.
+- Adding a sixth event driver is a registry row with ZERO Rust changes.
+- Two rows compiling to identical logic fails the suite by name.
+- Net line count in src/ + stdlib/ does not increase (P23 spirit: the
+  hardcoded dispatch deletion should pay for `primitive_args`).
+
+* References
+
+- BUG-253 (the bug), BUG-252 (same class: registry data not reaching a primitive)
+- src/pipeline/drivers.rs:2060-2116 (driver_param_args), :183,:696,:1486 (correct idiom)
+- stdlib/macros/drivers.st:42-140 (the five event rows), :335 (param_map's only user)
+- stdlib/primitives/animation/drivers.st:485 (trigger default), :551-565 (dispatch to delete)
+- stdlib/macros/on-event.st:53,77,101 (pre-cutover surface that passed trigger correctly)
+- PLAN-121 P4 ("one @test per driver row" — unmet; this plan meets it for the event rows)

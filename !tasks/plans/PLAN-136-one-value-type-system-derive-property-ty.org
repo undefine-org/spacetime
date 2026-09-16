@@ -1,0 +1,155 @@
+#+TITLE: One value-type system: derive property types, make every capture type check
+#+STATE: ITEM
+#+SESSION_ID: 153f5ed0617636c7
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-26T21-12-46-213Z_153f5ed0617636c7.jsonl]]
+#+CUSTOM_ID: PLAN-136-one-value-type-system-derive-property-ty
+
+* Initial Message
+
+focus on where you still stopped short. I want the structural solution that lets us support all of CSS and make our own extensions with full rich type support. please go through what's left and present it in one coherent report, capability- and feature-oriented
+
+Worktree: /home/user/code/ora/verse-fup181, branch `fup-181-derive-property-types`.
+Closes FUP-179, FUP-180, FUP-181. Follows PLAN-122 (native CSS value types).
+
+* The finding that reframes the work
+
+FUP-181 asked: can property->type be derived from the `%scalar_type` table
+instead of hand-written? Investigation says yes, the types ARE already declared
+(`easing: $easing:easing`) — but deriving them surfaces something larger.
+
+Measured with `capture_type_accepts` (src/syntax/events/mod.rs:123):
+
+  | capture type | 60 | 60ms | #e8eef7 | abc | verdict          |
+  |--------------+----+------+---------+-----+------------------|
+  | number       | Y  | Y    | Y       | Y   | accepts anything |
+  | bool         | Y  | Y    | Y       | Y   | accepts anything |
+  | string       | Y  | Y    | Y       | Y   | accepts anything |
+  | ident        | Y  | Y    | Y       | Y   | accepts anything |
+  | color        | n  | n    | Y       | n   | DISCRIMINATES    |
+  | time         | n  | Y    | n       | n   | DISCRIMINATES    |
+
+Every capture type backed by a RUST ENUM ARM accepts everything. Only the ones
+backed by a STDLIB GRAMMAR check anything. And:
+
+  344 of 409 typed form params (84%) use a Rust enum arm.
+
+So the type annotations across the stdlib are 84% decoration. `bool` accepting
+`abc` is not a CSS-coverage gap — it is the type system not being connected.
+
+* The second finding: the conflicts are not conflicts
+
+16 properties are declared with different types in different forms. Scoped to
+the form that owns them:
+
+  same-DIRECTIVE conflicts: 3   (down from 16 global)
+
+And all 3 are deliberate: `@data refresh` is `duration?` in the productive form
+and `expr` in a SIBLING form whose only job is to error on the invalid spelling
+(comment at stdlib/macros/data-kind.st:352 says so). Same for `@cycle field`
+and `@on-mutation target`.
+
+The other 13 are DIFFERENT PROPERTIES SHARING A NAME:
+  - `size: $size:number = 1` in @object is scene units (3D)
+  - `size: $size:string = "24px"` in @cursor is a CSS length
+  - `color: $color:color` in @light is a THREE.js colour; `:string` in @cursor is CSS
+
+∴ the map key is (directive, property), NOT property. A global property->type map
+would have forced 13 false reconciliations and broken the 3D macros. This is why
+the derivation is the right shape and the hand-written table was not: the table
+had no place to put the scope.
+
+* Design
+
+** D1. Key by (directive, property) — derive, never write
+
+`SyntaxRegistry::all_forms()` (src/syntax/registry.rs:247-290) already enumerates
+every registered form. `FormParam.name` retains the property label and
+`FormCapture.capture_type` its type (src/parser/meta_ast.rs:419-464). The map is
+a fold over data that is already in memory. No new file, no new table, no new
+`%directive`.
+
+Conflict policy: a same-(directive, property) disagreement is a DIAGNOSTIC, not a
+silent winner. It would fire 3 times today; each of the 3 is a legitimate
+sibling-form pair, so the check must be scoped to one form clause, not to the
+directive's whole form set. Gate must be seen to fail.
+
+** D2. `CaptureType` enum arms are the rot — route the value-ish ones to stdlib
+
+AGENTS: "a closed Rust enum whose arms the runtime doesn't all enforce is rot —
+prefer a registry-keyed reference (kinds-as-data)."
+
+`number`, `bool` and `ident` are exactly that. The precedent is already set and
+proven: `color`/`length`/`time`/`duration`/`easing` were DELETED from
+`parse_capture_type` in PLAN-122 W1.2 and now resolve through `Custom(String)`
+against stdlib grammars. The same route, for the same reason.
+
+  W1: add `%capture_type number`, `bool`, `ident` to stdlib/capture-types/,
+      delete their arms from parse_capture_type (src/parser/mod.rs:7666-7671).
+
+`string` and `expr` stay Rust: a string is a lexer token, and `expr` is
+deliberately permissive (it means "hand this to JS").
+
+** D3. Token references, admitted ONCE, not per-scalar
+
+Blocker: the scalar grammars refuse `--ease-out-expo` and `var(--ink)`, and
+`easing: --ease-out-expo` is authored code TODAY (demos/spacetime-docs/index.st:148).
+Tighten before admitting and a correct fix produces a red build.
+
+The explore agent recommended one shared `%capture_type token_ref` plus an arm
+in each of six leaf scalars, and flagged its own defect: a future scalar does
+NOT inherit the arm. That is the drift class this arc exists to delete — the
+same shape as the seven hand-synced scalar lists already removed.
+
+Instead: `capture_type_accepts` (and the extractor path) admits a token
+reference for any capture type that is a REGISTERED SCALAR, read from
+`SyntaxRegistry::scalar_captures()` — the set FEAT-168 already maintains. One
+place. A new `%scalar_type` row inherits it for free, which is the same negative
+acceptance test FEAT-168 shipped: adding a scalar needs zero Rust edits.
+
+`var()` and `--token` are values of the type whose resolution is deferred, which
+is precisely the argument that already makes `var()` a deferral rather than an
+error in the declaration validator (src/validation/css.rs). One rule, two places
+it was needed.
+
+** D4. Enforce the derived map, and close the two coverage holes
+
+  - FUP-179: `@style`/`@media`/`@supports`/`@keyframes` bodies are `RawCssBlock`
+    raw text (src/parser/ast.rs:215), never lowered to `CssDeclaration`, so
+    `.a { color: #e8ee1 }` is refused at file scope and SILENT inside a block.
+    535 decls / 111 files. Parse the block's source, run the SAME validator,
+    offset spans by the block's start.
+  - FUP-180: 735 design tokens exempt; 80% probe as a scalar we have a grammar
+    for. Needs a declared type (`@tokens Brand { --ink color; }`) — DEFERRED to
+    its own wave; it is a new author-facing surface and this plan is already
+    large. Filed, not folded in (elegance bar: it fails "no new subsystem").
+
+* Waves
+
+  W1  capture types as data: %capture_type number/bool/ident in stdlib;
+      delete the three arms from parse_capture_type. RED first: `bool <- abc`
+      must be refused, `number <- #e8eef7` must be refused.
+  W2  token refs admitted once, keyed off scalar_captures(). RED first:
+      `easing <- --ease-out-expo` accepted; `color <- var(--ink)` accepted;
+      `easing <- not-a-curve` still refused.
+  W3  derive the (directive, property) -> capture type map from all_forms();
+      conflict diagnostic scoped per form clause.
+  W4  enforce it on directive-body properties, with the E-code and span shape
+      already used by E0958/E0961. RED first: `easing: not-a-curve` refused,
+      `stagger: 60ms` accepted, `stagger: 60` accepted.
+  W5  reconcile the 13 same-name-different-scope declarations by TIGHTENING the
+      weak ones at their sites (`stagger:number` -> `:time`, `easing:ident` ->
+      `:easing`) now that W1/W2 make that safe.
+  W6  RawCssBlock validation (FUP-179).
+  W7  did-you-mean + LSP read the derived map; delete
+      src/diagnostics/suggestions.rs:16 CSS_PROPERTIES (98 names, no types) —
+      the last hardcoded property list.
+
+* Acceptance
+
+  - No file in the repo lists a property beside a type (the map is derived).
+  - Adding a `%scalar_type` row still needs zero Rust edits (FEAT-168's negative
+    must keep holding, now also covering token refs).
+  - Every gate written RED first and SEEN to fail.
+  - Full corpus (stdlib, demos, examples, fixtures, projects) compiles with zero
+    new diagnostics — or every new diagnostic is a real defect, triaged and
+    filed like BUG-295 was.

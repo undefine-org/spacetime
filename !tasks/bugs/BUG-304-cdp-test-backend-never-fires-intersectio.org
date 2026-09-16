@@ -1,0 +1,22 @@
+#+TITLE: CDP test backend never fires IntersectionObserver — @on visible timelines untestable in real Chromium
+#+STATE: ITEM
+#+SESSION_ID: 1534a2eae1903af0
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-18T13-07-01-638Z_1534a2eae1903af0.jsonl]]
+#+CUSTOM_ID: BUG-304-cdp-test-backend-never-fires-intersectio
+
+* Found
+2026-08-05, while building the BUG-297 easing behavior gate.
+
+* Evidence
+`cargo run --features cdp,headless -- test tests/repro/gh-6-hold-end-state/hold-end-state.test.st --cdp` FAILS: "one-shot visible timeline must RETAIN end keyframe opacity:1 after completion". The same test passes under --headless (where an IntersectionObserver shim fires on a microtask). Under CDP — real Chromium — the IO callback never fires, so `@on visible` timelines never start. A wall-time probe (`@wait 1000ms` on a 2000ms animation, no @clock) also reads opacity 0 for BOTH a custom-easing and a linear element.
+
+* Impact
+Every `@on visible` behavior test is headless-only, and the headless IO shim is a heuristic (fires on observe for anything not obviously offscreen). The real-browser code path — IO-driven animation start — has NO gate at all. BUG-252-class risk concentrated exactly where the fidelity ladder is supposed to be strongest.
+
+* Suspected mechanism (unverified)
+The CDP harness's warm-Chromium page may be backgrounded/occluded (IntersectionObserver requires a visible viewport to compute intersections), or the fixture document lacks a viewport-sized layout so intersection ratios stay 0. Possibly the page loads with `visibilityState: hidden`.
+
+* Repro
+#+begin_src sh
+cargo run --features cdp,headless -- test tests/repro/gh-6-hold-end-state/hold-end-state.test.st --cdp
+#+end_src

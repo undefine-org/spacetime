@@ -1,0 +1,86 @@
+#+TITLE: Host widget redesign: collapsed pill + dark glass panel + dev links
+#+STATE: DONE
+#+SESSION_ID: 153483dcc7307f91
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-18T10-51-20-732Z_153483dcc7307f91.jsonl]]
+#+CUSTOM_ID: FEAT-155-host-widget-redesign-collapsed-pill-dark
+
+* Initial Message
+
+ok my friendest,
+
+can you please show me how you would make the spacetime host button actually really good looking and leveraging Spacetime? And also, able to show me the actual dev links and be the right Spacetime Host button? Ask me questions if needed. It looks horrible right now and is almost unusable.
+
+User request: the Spacetime Host button "looks horrible and is almost
+unusable" -- make it good-looking, leverage Spacetime, and show the
+actual dev links.
+
+Design decisions (user-confirmed via ask):
+- Interaction: collapsed pill (mark + "HOST" + status dot + chevron),
+  click to expand full panel -- Vercel-toolbar style.
+- Links: preview/production URLs from the REAL deployed hostname scheme
+  ({project}.preview.{HOST_BASE_DOMAIN} / {project}.{HOST_BASE_DOMAIN};
+  live box runs HOST_BASE_DOMAIN=spacetime.undefine.org per
+  infra/beam/environments/spacetime-host/prod/settings.toml).
+- Visual: dark glassy dev-tool aesthetic (backdrop-filter blur, subtle
+  white-alpha borders, mono accents), always dark, color-scheme: dark
+  (BUG-187's mechanism, direction flipped from the old light panel).
+- Motion: spring-eased expand/collapse (overshoot cubic-bezier), orange
+  status-dot pulse (@keyframes st-host-pulse), staggered panel-children
+  reveal via nth-child transition-delay. All pure Spacetime/CSS -- zero
+  custom JS, per AGENTS decisionmaking rule.
+
+* Server half (commercial/host repo)
+- spacetime-host-server::status::StatusResponse gained preview_url /
+  production_url (Option<String>, null until the corresponding hash
+  exists -- a link to a never-written edge pointer would 404).
+- Derived via deploy.rs's OWN preview_hostname/production_hostname
+  helpers (now pub(crate)) -- one module owns the hostname scheme.
+- Tests extended: never-pushed => both null; turquoise => preview only;
+  green => both, production without the .preview. segment. All 81
+  server unit tests + status_flow integration tests pass.
+
+* Widget half (verse repo, stdlib/__host__/index.st)
+- New $isExpanded pill/panel toggle ($x <- !$x idiom).
+- New derives: $previewUrl/$productionUrl (from statusData, ||-chain
+  shape -- ternaries in derive-RHS remain untested per this file's own
+  history), $previewUrlText/$productionUrlText (scheme stripped),
+  $stateLabel (one human phrase per state incl. NEW $isNeverPushed arm:
+  200 + null hashes previously left the header at "Checking…" forever
+  -- observed live), $hasPreviewPush/$showPromote (promote now hidden
+  until a preview push exists -- promoting with no preview 409s
+  server-side, NoPreviewDeploy).
+- Markup: pill (mark/label/dot/chev) + panel (head with state+project,
+  actions, links nav with reactive href <- bindings, device-code,
+  no-project, domains). Panel children stagger in.
+- Stylesheet: full dark-glass rewrite. `.is-hidden`/display cascade
+  convention PRESERVED (BUG-184/BUG-032 ordering: display-setting rules
+  for gated elements sit BEFORE .is-hidden). Container is
+  pointer-events: none (it's a 320px transparent layout box even when
+  collapsed -- must not swallow page clicks); pill and open panel
+  restore pointer-events themselves.
+- Mark: pure-CSS conic-gradient spark through a radial mask, no SVG.
+
+* Bundle regeneration
+- examples/extract_host_widget_bundle.rs recreated as a KEPT example
+  (was a deleted throwaway; widget_bundle.rs's doc comment described
+  it). Regenerates commercial/host/frontend/host-widget/dist/ with
+  sentinels intact (verified: all 4 __SPACETIME_HOST_*__ present).
+
+* Live verification (headless Chromium, real dev server)
+- ora-ventures.com (has @deploy): pill renders, panel expands, state
+  label "Connected — nothing pushed yet" against the REAL
+  spacetime.undefine.org status.json (200, null hashes), promote
+  hidden.
+- Simulated turquoise (preview_hash != production_hash + URLs): dot
+  turquoise, both link rows visible with real hrefs bound, promote
+  visible. Simulated green + domain row: "Live & current", dot green,
+  domain chip renders.
+- sakazuki (no @deploy): "Not connected", purple dot, no-project panel
+  with create-project form, domains section hidden.
+- Collapse: max-height 0, opacity 0, pointer-events none. Click-through
+  above the pill reaches the page.
+- Screenshots: scratch/host-widget-{collapsed,expanded-2,turquoise,green,noproject}.png
+
+* Test results
+- verse: cargo test --lib 2611 passed. Widget compiles clean.
+- commercial/host: server 81 + cli 8 + integration suites all pass.

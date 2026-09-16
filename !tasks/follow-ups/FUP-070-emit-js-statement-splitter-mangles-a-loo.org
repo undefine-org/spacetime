@@ -1,0 +1,71 @@
+#+TITLE: %emit js statement splitter mangles a loop-bearing helper function (for/forEach collapses, continue hoisted)
+#+STATE: ITEM
+#+SESSION_ID: 150ccb99745d347e
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-17T14-25-31-601Z_150ccb99745d347e.jsonl]]
+#+CUSTOM_ID: FUP-070-emit-js-statement-splitter-mangles-a-loo
+
+* Initial Message
+
+Dig into the FUPs and explain to me
+1. what got done
+2. what you can do with it
+3. what we should do next
+
+treat this as an overall report to explain things to me from scratch
+
+#+DEPENDS: PLAN-044-plan-044-kit-value-collection-mcp-submit
+
+* Parent / sibling
+Same family as FUP-063 (comment-aware splitter) and BUG-040/041. Surfaced building PLAN-044's mcp-submit primitive.
+
+* Summary
+Inside a `%emit js { ... }` block, a HELPER FUNCTION that contains a loop (`for (...) {}` or `arr.forEach(function(c){ ... })`) with nested `if/else` is serialized INCORRECTLY by the emit-js statement splitter (src/emit/js_parser.rs). The loop header is swallowed into the preceding `if (...) {` block, the body statements are re-parented, and a `continue`/`return` ends up with no surrounding iteration — producing JS that throws at load: `SyntaxError: Illegal continue statement: no surrounding iteration statement` (or silently wrong structure). The whole page's runtime then fails to initialize (ST never attaches), so a mounted function renders an inert shell.
+
+* Reproduction
+A %primitive %emit js containing:
+#+begin_src js
+function collectValues(regionEl) {
+  var values = {};
+  if (!regionEl || !regionEl.querySelectorAll) return values;
+  var controls = regionEl.querySelectorAll('input[name]');
+  controls.forEach(function (c) {
+    var name = c.getAttribute ? c.getAttribute('name') : '';
+    if (!name) return;
+    values[name] = c.value;
+  });
+  return values;
+}
+#+end_src
+emits (via `cargo run -- inspect --layer emit <file>`) as roughly:
+#+begin_src js
+function collectValues(regionEl) {
+  var values = {};
+  if (!regionEl || !regionEl.querySelectorAll) {     // <-- early-return `if` BODY got replaced
+    var name = c.getAttribute ? ...;                 // <-- forEach header swallowed; `c` undefined
+    if (!name) return;
+    values[name] = c.value;
+  }
+  );                                                  // <-- stray `);` from the forEach close
+  return values;
+}
+#+end_src
+The `for (var i...) {}` variant mangles identically (a hoisted `continue` -> "Illegal continue statement"). Verified with `cargo run -- inspect --layer emit stdlib/__mcp__/kit/form.st` against an inline-loop version of mcp-submit-event.
+
+* Root cause (hypothesis, grounded)
+src/emit/js_parser.rs splits a `%emit js` chunk into statements at top-level `;`/brace boundaries via find_semicolon_at_depth_zero + split_chunks_at_boundaries + try_parse_if/try_parse_else/try_parse_return/try_parse_statement. It does NOT model: (a) a `for(;;){}` header (the two `;` live at paren-depth 1 but the splitter's boundary logic still mis-associates the trailing block), and (b) a function-EXPRESSION argument `foo(function(){ ... })` whose body braces are mistaken for the enclosing statement's block. The result re-parents the loop body under the previous `if` and drops the loop header. This is the same "the splitter is a heuristic, not a JS parser" limitation as FUP-063.
+
+* Current workaround (shipped in PLAN-044)
+Loop-bearing DOM gather logic was MOVED OUT of the primitive into the runtime: `ST._mcpCollectValues(regionEl)` in public/runtime/st.js (where hand-written `querySelectorAll` + forEach loops already live and are NOT re-parsed). The primitive's %emit js now calls it as a SINGLE call expression, which the splitter serializes intact. `node -c` on the full emitted runtime is clean; the live smoke passes. So PLAN-044 is unblocked — this FUP is the underlying fix so future primitives can contain loops directly.
+
+* Research / design questions
+- Should %emit js be parsed by a REAL JS parser (the project already has js_parser.rs for a reason — extend it) instead of the heuristic statement splitter? What did the splitter optimize for that a full parse would lose (the %yield/%&ref/%cleanup interpolation points)?
+- Minimal fix: teach split_chunks_at_boundaries to treat a `for (...) { }` and a `name(function (...) { })` as ONE statement (brace-balanced, paren-aware) rather than splitting inside. A focused fix that recognizes `for`/`while`/`function(` headers may be enough without a full parser.
+- Are there OTHER constructs that mangle (switch/case, try/catch, do/while, arrow `=>` bodies)? Audit %emit js across stdlib for loops-in-helpers; most primitives keep loops in st.js, which is why this stayed hidden.
+
+* Acceptance (RED -> GREEN)
+- A js_parser.rs unit test: a `%emit js` chunk containing a `for(){}` AND a `arr.forEach(function(){...})` helper round-trips to byte-equivalent (or at least syntactically valid, brace-balanced) JS. RED today.
+- `node -c` (or the V8 harness) on the emitted output of a primitive that contains an inline loop passes.
+- Re-inline ST._mcpCollectValues into the mcp-submit primitive and confirm it emits valid JS (the workaround becomes unnecessary) \u2014 optional cleanup once the parser is fixed.
+
+* Out of scope
+- Rewriting the whole emit pipeline (a focused brace/paren-aware boundary fix is preferred per the elegance bar).

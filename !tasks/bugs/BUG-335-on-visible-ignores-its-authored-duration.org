@@ -1,0 +1,102 @@
+#+TITLE: @on &.visible ignores its authored duration and always emits 300ms
+#+STATE: ITEM
+#+SESSION_ID: 154d0baaa942d918
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-08-06T12-08-13-733Z_154d0baaa942d918.jsonl]]
+#+CUSTOM_ID: BUG-335-on-visible-ignores-its-authored-duration
+
+* Initial Message
+
+exlpain #30, and for #14 and #11, does the new @on's text-change facet solve this?
+
+#+STATE: ITEM
+#+PRIORITY: A
+
+* Symptom
+
+The duration an author writes on `@on &.visible(...)` never reaches the emitted timeline. Every
+spelling produces the same hardcoded 300ms:
+
+| authored                                  | emitted        |
+|-------------------------------------------+----------------|
+| `@on &.visible(2000ms) { … }`             | `duration: 300` |
+| `@on &.visible(2m) { … }`                 | `duration: 300` |
+| `@on &.visible(6f) { … }`                 | `duration: 300` |
+| `@on &.visible(duration: 2000ms) { … }`   | `duration: 300` |
+
+Reproduction (built binary, /home/user/.cache/cargo-target/debug/spacetime):
+
+#+begin_src spacetime
+@import "stdlib"
+<div class="m">x</div>
+.m { @on &.visible(2000ms) { opacity: 0 -> 1; } }
+#+end_src
+
+  $ spacetime build <dir> -o out && grep -oE 'duration: ?[0-9]+' out/spacetime.js
+  duration: 300
+
+300 is the fallback in `pipeline::drivers::parse_duration_ms` for an unparseable value — so the
+authored token is not merely mis-converted, it is not reaching the converter at all.
+
+* Scope
+
+`&.load` and `&.hover` emit NO duration key at all under the same shape, so this is not
+uniform across drivers and the fix should establish which drivers take a duration and make the
+answer consistent rather than patching `visible` alone.
+
+* Why this matters more than it looks
+
+A wrong-but-plausible animation is the failure mode this project keeps rediscovering (GH-14's
+silent default icosahedron, GH-11's unfiltered list). The author writes 2 seconds, sees
+something animate, and has no reason to suspect it ran for 300ms. Nothing fails; the page just
+does not do what the source says.
+
+It also means every `@on &.visible` duration in every demo, example and project page in this
+repo is currently decorative.
+
+* Discovered by
+
+PLAN-141 W4, while verifying the duration-parser unification behaviorally rather than trusting
+the unit tests. The unification is correct and independently gated
+(`g3_duration_parity_tests`, 3/3: `2m` = 120000ms through both entry points). Confirming it
+END TO END is what exposed that the value never arrives — a unit test over the parser could
+never have seen this, because the parser is not the broken link.
+
+That is the AGENTS rule paying out again: a source-level assertion is not a behavior assertion.
+
+* Fix direction
+
+Trace the `@on &.<driver>(...)` positional/named duration capture from `%form` through
+`%binds` to the emitted timeline record, and find where it is dropped in favor of the default.
+Suspect the driver-arm lowering in `src/pipeline/drivers.rs` around the `resolved("duration")`
+call — the capture may be named differently by the `@on` cutover grammar than the lookup
+expects, so `resolved` returns None and the default wins silently.
+
+* Gate
+
+A `.test.st` asserting the emitted timeline duration equals the authored one for each driver
+that accepts a duration, plus a `--cdp` gate asserting an element animated for the authored
+time rather than 300ms. Positional AND named spellings.
+
+
+* RESOLVED 2026-08-07 — fixed by BUG-322's driver-argument fix, verified end to end
+
+`@on &.visible(...)` now honours its authored duration. Verified on the built binary by
+building a page per unit and grepping the emitted bundle for the expected millisecond value:
+
+| authored   | expected | found in bundle |
+|------------+----------+-----------------|
+| `3700ms`   |     3700 | yes             |
+| `2m`       |   120000 | yes             |
+| `7f`       |      116 | yes             |
+| `1h`       |  3600000 | yes             |
+
+The cause was NOT the duration parser — it was the positional driver argument binding by index
+into the wrong param, fixed by a concurrent session as BUG-322/BUG-323 (commit 19c50b4a,
+"a driver argument reaches the param the author meant"). My W4 unification is what makes the
+non-`ms` rows correct: before it, `2m` would have reached the driver and been read as 300ms by
+the second parser, and `7f` was not a unit the grammar accepted at all.
+
+So the two fixes compose, and neither alone would have produced this table. Worth recording
+because the original diagnosis in this file ("suspect the driver-arm lowering ... `resolved`
+returns None and the default wins") was right about the layer and wrong about nothing —
+the argument genuinely never arrived.

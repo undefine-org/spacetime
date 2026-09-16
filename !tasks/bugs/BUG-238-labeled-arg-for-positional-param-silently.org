@@ -1,0 +1,60 @@
+#+TITLE: A labeled argument for a positional %form param silently drops the whole directive
+#+STATE: ITEM
+#+CUSTOM_ID: BUG-238-labeled-arg-for-positional-param-silently
+
+* Symptom
+
+A `%form` param declared POSITIONALLY cannot be passed by name, and passing it
+by name does not error — the entire directive vanishes.
+
+`stdlib/macros/fade-in.st:51` declares:
+
+#+begin_src spacetime
+%form {
+  @fade-in-up(
+    $duration:time = 600ms,          // positional
+    distance: $distance:length = 30px,   // labeled
+    easing: $easing:easing = ease-out    // labeled
+  )
+}
+#+end_src
+
+#+begin_src spacetime
+.app { @fade-in-up(500ms) }               // ✓ expands
+.app { @fade-in-up(duration: 500ms) }     // ✗ NO expansion, and check was GREEN
+#+end_src
+
+`inspect --layer expansion` on the second prints "No macro expansions found".
+The animation simply never applies.
+
+* Why this matters
+
+`examples/mobile-tasks/index.st:43` ships `@fade-in-up(duration: 500ms)` — a
+shipped example whose animation has silently never run.
+
+Worse, the ONLY difference between the working and broken call is whether the
+author wrote the param's own name. Writing `duration:` in front of a duration is
+the most natural thing an author can do, and the language's answer was silence.
+
+* Found by
+
+BUG-229's E0946 gate. Before that gate, this class of failure was invisible by
+construction: a directive that matched no form was dropped without a diagnostic.
+This bug is therefore EVIDENCE FOR the gate — it is a real defect that a green
+`check` was hiding.
+
+* Fix directions (not yet decided)
+
+1. Accept a labeled argument for a positional param when the label equals the
+   param name (`duration:` for `$duration`). Most forgiving; likely what authors
+   expect, and makes the two spellings equivalent.
+2. Reject it with a clear diagnostic naming the expected shape.
+
+(1) is preferable if `%form` param matching has the name available at that point;
+it removes a distinction authors have no reason to hold in mind. Whichever is
+chosen, silence is not an option.
+
+* Acceptance
+
+- `@fade-in-up(duration: 500ms)` either expands, or errors naming the problem.
+- `examples/mobile-tasks/` compiles clean and its entrance animation demonstrably runs.

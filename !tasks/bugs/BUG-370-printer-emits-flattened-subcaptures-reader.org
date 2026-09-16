@@ -1,0 +1,77 @@
+#+TITLE: The EDN printer emits flattened sub-captures the reader rejects — printer output does not round-trip
+#+STATE: ITEM
+#+CUSTOM_ID: BUG-370-printer-emits-flattened-subcaptures-reader
+
+* Summary
+
+`spacetime edn <file>` then `spacetime st <that file>` FAILS for any form whose
+`%form` pattern uses a `%capture_type` with its own inner captures:
+
+: $ spacetime edn elixir/spacetime_lv/frontend/counter.st > /tmp/rt.edn
+: $ spacetime st /tmp/rt.edn
+: EDN source: data-live-stream: `:arms` is not a capture of this form
+:              — declared captures are ["name", "type", "host"]
+
+The printer writes `:arms`, `:sum`, `:target`, `:verb`, `:mode`, `:ephemeral` —
+the captures INSIDE `send_clause` / `receive_block` / `policy_clause`, flattened
+to top level. The reader's `declared_captures` (src/edn/read.rs:249) walks only
+the `%form` pattern's own inline elements, so every flattened name is rejected.
+
+* Why the corpus gate did not catch it
+
+`tests/edn_corpus_roundtrip.rs` measures `.st` → EDN → **`.st`** → parse. It
+never feeds EDN back through `read_forms`. So the printer half and the reader
+half were each tested against `.st`, and never against EACH OTHER — the one
+direction a generator actually uses.
+
+Found while emitting EDN from a beam-lisp `defcontract` term (PLAN-021): the
+generated document was rejected, and the printer's own output turned out to be
+rejected identically.
+
+* Two candidate fixes
+
+1. *Reader accepts flattened sub-captures* — `declared_captures` resolves each
+   capture's `%capture_type` through the registry and includes its inner capture
+   names (recursively, with cycle protection). Matches what the printer already
+   emits; nothing on disk changes.
+
+2. *Printer nests them* — emit `:send {:verb emit :target "inc"}` instead of
+   `:verb emit :target "inc"`. Structurally cleaner but changes every printed
+   document and the SPEC's examples.
+
+(1) is preferred: the flattened shape is what SPEC §3 already shows
+(`(data-inline :name $x :value …)`), and the corpus's 1491 printed forms are all
+in that shape.
+
+* Acceptance
+
+- `spacetime edn F > E && spacetime st E` succeeds for every corpus file
+- a NEW gate asserts EDN → FormMatch → EDN is stable (the direction the existing
+  corpus gate does not cover)
+- corpus round-trip stays green
+
+* Follow-on found while closing this: signal/stream BODIES do not re-print
+
+`spacetime edn F | spacetime st` now succeeds for 396/403 files, but a
+`@data signal` prints WITHOUT its body:
+
+: input   @data signal $inc() to $counter { send emit "inc" receive to IncResult {...} policy latest }
+: output  @data signal $inc to $counter;
+
+The captures survive the round trip (the reader accepts `:arms`, `:verb`,
+`:target`, `:mode` — that is what this bug fixed), but the PRINTER does not
+reassemble them into the braced body. Same for `@data stream`.
+
+Not a regression and not caused by the ingress work: verse's own
+`edn`-then-`st` shows it identically. It is the printer-side twin of this bug —
+the reader now understands flattened sub-captures, the printer does not yet
+re-nest them.
+
+Consequence: the round trip is currently STRUCTURE-preserving (every form and
+capture is carried) but not TEXT-preserving for these two forms. Fine for the
+compile path, which consumes `FormMatch` and never the printed text; wrong for
+`spacetime st` as an authoring tool.
+
+Tracked here rather than filed separately because the fix is the same
+mechanism — teach `grammar_text` to render a capture_type's sub-captures back
+into their clause shape — and should be done with this fresh in mind.

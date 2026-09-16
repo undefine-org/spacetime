@@ -1,0 +1,141 @@
+#+TITLE: Four missing generalizations a reviewer swarm found — each would have caught a bug that shipped
+#+STATE: ITEM
+#+SESSION_ID: 154d0baaa942d918
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-08-06T12-08-13-733Z_154d0baaa942d918.jsonl]]
+#+CUSTOM_ID: PLAN-140-four-missing-generalizations-a-reviewer
+
+* Initial Message
+
+exlpain #30, and for #14 and #11, does the new @on's text-change facet solve this?
+
+#+STATE: ITEM
+#+PRIORITY: A
+
+* Why this exists
+
+PLAN-137 landed six invariants and PLAN-138 a seventh. A five-reviewer swarm then audited that
+work with disjoint lenses. Three findings were fixed immediately (commit 7bb200f6). What
+remains are GENERALIZATIONS — places where a fix closed one instance while the same class of
+defect stays reachable. Each item below names a bug that ACTUALLY SHIPPED this session and the
+rule that would have caught it before it did.
+
+Ordered by "would have caught something real", not by effort.
+
+* G1 — A declared capability that nothing references is dead, and dead code MISEXPANDS  [#A]
+
+** Evidence (measured)
+205 `%primitive` declarations in stdlib; **20 are referenced by nothing** — no `%binds`, no
+`%uses`, no filter pipe, no Rust caller:
+
+  animate-color · animate-transform · async-action · bind-css-var · change-driver ·
+  css-property · dev-collection-crud · dom-action · element-ref · entity-scope-impl ·
+  graphql · media-driver · persist-remote · prev-signal · reactive-binding ·
+  sanitize-html · score-window · script · signal-arms · steps-driver
+
+** Why it matters — this is not tidiness
+`element-ref` (stdlib/primitives/dom.st:42) is in that list, and it is the primitive that
+BUG-328 mis-expanded. `stdlib/primitives/dom.st` is not even imported by `stdlib/index.st`:
+the whole broken `const el = ".rect.width"...` block was synthesized out of a misread, from a
+primitive no page can legitimately reach.
+
+So dead declarations are not inert. They remain matchable, and a matcher bug turns them into
+emitted code. Deleting or marking them shrinks the surface where that can happen.
+
+`animate-color` is also here — the subject of GH-9, whose fix was verified by a Rust gate but
+whose primitive is reachable from nothing in stdlib. Worth confirming whether GH-9's fix is
+live on any authored path at all.
+
+** The rule
+A `%primitive` (and `%macro`) that nothing names is a build WARNING listing the orphans, with
+an explicit opt-out marker for genuinely-public-but-unbound surfaces. Same shape as the
+existing E0964 capture-consumer lint and the "every pub analyze_* has a production caller"
+test — both of which came out of this same class. This is the third instance; it should be a
+rule now, not a fourth patch.
+
+* G2 — A test whose SUBJECT never initialized is as vacuous as one that asserts nothing  [#A]
+
+** Evidence
+BUG-325: `@fixture`-mounted elements are never handed to the element-init path, so they are
+never registered with the IntersectionObserver. Every viewport-driven `.cdp` gate in the repo
+therefore asserts against a subject that was never armed. Confirmed by a direct probe: a
+`@on &.visible` reveal never reaches `opacity: 1` under `--cdp`, while the same shape on a real
+page works.
+
+Compounding it: `needs layout` / `needs paint` tests SKIP on `--headless` and the run still
+exits 0. `0 passed, 0 failed, 3 skipped` is what a whole dead file looks like in a green suite.
+
+** Why the existing rule does not cover it
+BUG-309's zero-assertion rule makes "a `@test` executing zero assertions FAILS". These tests DO
+execute assertions — against an element that was never initialized. The assertion runs; the
+feature under it was never turned on.
+
+** The rule
+A fixture that mounts markup must run the same element-init path a real page load runs (GH-19
+fixed exactly this for the headless backend — reuse it, do not fork a second path). Plus: a
+`needs <rung>` test that has never been observed RUNNING on any backend should be reported at
+the end of a run, so "skipped everywhere, always" stops reading like green.
+
+* G3 — Semantic duplicates of stdlib constructs (each one a latent GH-11)  [#B]
+
+** Evidence (reviewer-confirmed, file:line on both sides)
+GH-11's root cause was three implementations of one filter set that had drifted — `capitalize`
+was declared in stdlib and implemented in NEITHER runtime table, so it failed at build time and
+at runtime. The same shape exists elsewhere:
+
+- easing/interpolation: `stdlib/primitives/animation/apply-animations.st:58-116,173-207`
+  versus `public/runtime/easing.js:17-124` and `public/runtime/interpolate.js:36-88`
+  (RGB versus OKLCH — a real semantic divergence, not just duplication)
+- duration parsing: `src/score.rs:1194`, `src/pipeline/drivers.rs:1365`,
+  `public/runtime/st.js:1476` all differ from `src/syntax/conversions.rs:5`
+
+** The rule
+Where stdlib DECLARES a construct in Spacetime, the Rust/JS side must not hold a second
+definition of the same semantics. The GH-11 fix has the pattern to copy: evaluate the
+primitive's own `%emit js` rather than mirroring it. Where that is impractical, a parity gate
+that ENUMERATES the declared surface (as `ssg_filters::parity_tests` now does for filters) is
+the minimum — it fails when the two sides disagree instead of waiting for a user to find it.
+
+* G4 — Headless shims that return a PLAUSIBLE value instead of refusing  [#B]
+
+** Evidence
+`src/headless_shims.js` — reviewer-confirmed fakes: selection/range (66-108),
+IntersectionObserver (113-157), WAAPI (159-207), matchMedia (341-367).
+
+The IntersectionObserver shim fires once with `ratio: 1`. That is exactly why BUG-323
+(`@on &.visible` frozen mid-animation) was invisible to the headless suite by construction, and
+shipped into a demo page.
+
+** Why the existing rule does not cover it
+GH-17 established that a backend which cannot provide a rung must REFUSE by name. That was
+applied to `getComputedStyle`. It was never applied to the rest of the shim set, so the other
+stubs keep answering questions they cannot actually answer.
+
+** The rule
+Every shim either implements the real semantics or refuses naming the rung and `--cdp`. A stub
+that returns a plausible constant is worse than a missing one: it converts "cannot test this
+here" into a green assertion. Audit the four above and convert each.
+
+* Also filed separately (not generalizations, but found by the same swarm)
+
+- BUG-333 — `&$b` (element reference to an undeclared name) emits a dead bundle instead of a
+  diagnostic.
+- LSP: `did_change` runs the FULL compiler diagnostics chain synchronously per keystroke
+  (42-55ms per publication, 249ms for five rapid edits, no debounce or cancellation). Correct
+  but not yet fast; needs debounce + `spawn_blocking`.
+- LSP: `src/wasm.rs:469` keeps a parallel unknown-directive rule (E171) that disagrees with the
+  shared pipeline, and `src/lsp/workspace/import_resolver.rs:244-306` keeps a hardcoded stdlib
+  module list that already omits the live `%macro handle`. Both are surviving fragments of the
+  GH-28 "two sources of truth" defect.
+
+* Verified sound (useful signal, do not re-audit)
+
+- E0946 zero-item custom captures refuse correctly; optional inline groups roll back correctly.
+- GH-14 distinguishes anonymous `_` drops from named capture drops.
+- `.`, `(` and `::` suffixes after `$name` do not become element-ref matches (`[` did, and was
+  fixed in 7bb200f6).
+- The live stdlib registry is cached via the compiler's mtime-based cache, NOT rebuilt per
+  keystroke.
+- `cargo test --test lsp_tests` 173/0.
+- 11 of 14 repro shell gates are sound; GH-13, GH-20 and GH-27's shell gates were flagged as
+  weak (they assert a condition that can hold for unrelated reasons) — worth tightening, though
+  each has a stronger sibling gate.

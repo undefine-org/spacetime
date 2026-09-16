@@ -1,0 +1,174 @@
+#+TITLE: value-change-driver overflow toggle flips inline-block baseline mode, shifting enclosing line-box height
+#+STATE: DONE
+#+SESSION_ID: 152939d2e5b25e66
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-09T16-24-34-454Z_152939d2e5b25e66.jsonl]]
+#+CUSTOM_ID: BUG-175-value-change-driver-overflow-toggle-flip
+
+* Initial Message
+
+bro the chagne in sizing still does and i think it's from letter spacing, and i'm talking about vertical height overall. please observe properly
+
+* Summary
+
+Real user-reported bug, distinct from BUG-172 (width-snap) and BUG-172's
+underlying height-wrap fix — this one is a VERTICAL height/positioning shift
+of the *enclosing* line, not the animated element's own box.
+
+User report (verbatim): "the chagne in sizing still does and i think it's
+from letter spacing, and i'm talking about vertical height overall."
+
+Confirmed NOT letter-spacing: sampled ~`.ora-hero__flap`'s computed
+`letter-spacing` every 100ms across multiple full transition cycles — held
+constant at `-1.911px` throughout, zero deviation.
+
+Real defect: ~`.ora-hero__title`~ (the enclosing `<h1>`, `stdlib/primitives/animation/drivers.st::value-change-driver`
+consumer at `projects/ora-ventures.com/index.st::.ora-hero__flap`) — its
+`getBoundingClientRect().height` was observed oscillating between two
+discrete values in exact lockstep with the flap's animation state:
+
+| state | titleH | turnTop | flap.overflow |
+|---|---|---|---|
+| rest (locked) | 329.6px | 374px | `hidden` |
+| mid-transition | 315.3px | 359px | `visible` |
+
+A ~14.3px swing, shoving the sibling `.ora-hero__turn` ("Ours does.") line
+up/down by the exact same amount on EVERY single `@cycle` tick (every
+2800ms) — even though the flap's OWN bounding box (`flapH`, `flapTop`) never
+changed shape between the two states. This is the "vertical height overall"
+shift the user was seeing; it reads as the whole hero title jittering.
+
+* Root cause
+
+CSS2.1 §10.8.1 baseline rule for atomic inline-level boxes (inline-block /
+inline-flex / inline-grid / inline-table):
+
+  "If the box has no aforementioned inline-level descendants, the baseline
+  is the bottom margin edge... unless it has `overflow` other than
+  `visible`, in which case the baseline is the bottom margin edge. When
+  overflow computes to `visible`, the baseline is the last line box's
+  baseline (or the box's own baseline if it has content lines)."
+
+`.ora-hero__flap` is authored `display: inline-block; overflow: hidden;`
+(`projects/ora-ventures.com/modules/_hero.st::.ora-hero__flap`).
+`value-change-driver`'s Phase 2 (overflow setup, `stdlib/primitives/animation/drivers.st`
+~L868-869) legitimately sets `%&el.style.overflow = 'visible'` during the
+transition (needed so the clip-path reveal isn't double-clipped), then
+Phase 5 cleanup resets it back to `''` (→ authored `hidden`) once the
+transition settles.
+
+Each toggle FLIPS which baseline rule the browser applies to this atomic
+inline-level box. Flipping the baseline rule changes how much ascent/descent
+the box contributes to the surrounding anonymous line box inside
+`.ora-hero__title` — which changes the ENCLOSING line box's computed height,
+even though the flap's own rect stayed the same shape.
+
+Direct proof (forced state toggle via puppeteer `evaluate`, same DOM, same
+text, only `overflow`/`vertical-align` changed):
+
+```
+current (overflow: visible, vertical-align: baseline)        → titleH = 315.25px
+force overflow: hidden  (vertical-align: baseline, default)  → titleH = 329.36px
+force overflow: visible (vertical-align: baseline, default)  → titleH = 315.25px
+force overflow: visible + vertical-align: bottom             → titleH = 315.25px  (stable)
+force overflow: hidden  + vertical-align: bottom              → titleH = 315.25px  (stable)
+```
+
+Pinning `vertical-align: bottom` makes BOTH overflow states agree on
+315.25px — proving the coupling and the fix in one probe.
+
+* Fix
+
+`stdlib/primitives/animation/drivers.st::value-change-driver` — pin an
+explicit, FIXED `vertical-align` on the target element ONCE at mount time
+(not just during the transition window), so the CSS2.1 baseline-computation
+mode never depends on which `overflow` value happens to be set at any given
+instant:
+
+```js
+var initialCs = getComputedStyle(%&el);
+var initialDisplay = initialCs.display;
+var isAtomicInlineBox = initialDisplay === 'inline-block' ||
+  initialDisplay === 'inline-flex' || initialDisplay === 'inline-grid' ||
+  initialDisplay === 'inline-table';
+if (isAtomicInlineBox && initialCs.verticalAlign === 'baseline') {
+  %&el.style.verticalAlign = 'bottom';
+}
+```
+
+Placed right before the `MutationObserver` setup (after `currentText` init,
+before `observer = new MutationObserver(...)`), so it runs once per driver
+instance mount, unconditionally of any subsequent transition cycles.
+
+Design choices:
+- Scoped to atomic inline-level `display` values only (`inline-block`,
+  `inline-flex`, `inline-grid`, `inline-table`) — block-level elements don't
+  participate in inline baseline alignment, so the coupling is a non-issue
+  for them; skipping avoids an unnecessary style write.
+- Conditioned on the element's CURRENT computed `vertical-align` being the
+  default `baseline` — if an author already set an explicit
+  `vertical-align` (e.g. `top`, `middle`), that choice is respected instead
+  of being silently overridden.
+- `bottom` chosen (not `top`/`middle`) because it matches the existing
+  per-word container convention already used inside the same driver
+  (`wc.style.verticalAlign = 'bottom'`, Phase 3 word-container setup) — one
+  consistent alignment mode top-to-bottom through the whole component.
+
+* Verification
+
+Live, on real dev server (`cargo run -- serve projects/ora-ventures.com/`),
+via puppeteer DOM sampling (not screenshots alone — direct
+`getBoundingClientRect()` + `getComputedStyle()` reads every 100ms across
+multiple full `@cycle` transitions):
+
+Before fix: `titleH` oscillated 315.3px ↔ 329.6px, `turnTop` oscillated
+359.4px ↔ 374px, in lockstep with `flap.overflow` hidden↔visible toggle.
+
+After fix: `titleH` held flat at 315.3px across all 40 samples (4 full
+seconds, spanning both rest AND transitioning states of at least one
+complete `@cycle`), `turnTop` held flat at 359.4px — zero deviation. Width
+animation (BUG-172's fix) unaffected: still eases smoothly 520px→542px→520px.
+
+Full regression suite: `cargo test --lib` → 2593 passed, 0 failed.
+`cargo test --test integration_tests` → 189 passed, 0 failed, 1 ignored.
+`cargo run -- check projects/ora-ventures.com/index.st` → passed.
+
+* Regression coverage
+
+New Rust unit test
+`test_value_change_driver_pins_vertical_align_to_stop_baseline_flip` in
+`src/pipeline/integration_tests.rs`, asserting the compiled driver source
+contains:
+- `isAtomicInlineBox` classification (display-value guard)
+- `el.style.verticalAlign = 'bottom'` (the actual pin)
+- `initialCs.verticalAlign === 'baseline'` (author-intent-respecting condition)
+
+Chose a source-assertion unit test over a CDP pixel fixture for the same
+reason documented in BUG-172: this session's earlier CDP fixture work
+(`tests/fixtures/native-template/value-change-inline-width-wrap.test.st`)
+hit two separate, already-filed harness bugs (BUG-173, BUG-174) around
+`.selector{}` CSS blocks and keyframe-arrow syntax nested inside `@mount`
+bodies — a pixel-precise baseline-height fixture would hit the same class
+of harness gap. The Rust unit test is a durable, harness-independent guard;
+restoring/writing the CDP fixture is deferred to whenever BUG-173/174 land.
+
+* Files touched
+
+- `stdlib/primitives/animation/drivers.st` — the fix (vertical-align pin at
+  mount time, ~30 lines incl. comment, placed before MutationObserver setup)
+- `src/pipeline/integration_tests.rs` — new regression test
+  `test_value_change_driver_pins_vertical_align_to_stop_baseline_flip`
+
+* Relationship to BUG-172
+
+BUG-172 fixed two DISTINCT defects in the same primitive:
+1. height false-wrap (containerWidth measured via offsetWidth on an
+   auto-width inline element, causing incoming wider text to falsely wrap to
+   2 lines) — fixed via block-level `containerWidth` guard.
+2. width instant-snap (width was never WAAPI-animated, only height was) —
+   fixed via `measureNaturalWidth` + locked-width + combined box animation.
+
+This bug (baseline-mode flip → enclosing line-box height shift) is a THIRD,
+independently-discovered defect in the same primitive, found via renewed
+live investigation after the user reported the fix was incomplete. All
+three are now fixed in the same file; the user's report was correct and
+led directly to this root cause.

@@ -1,0 +1,49 @@
+#+TITLE: Style form splice `--name;` validates but never expands — body silently dropped from CSS
+#+STATE: DONE
+#+SESSION_ID: 1534a2eae1903af0
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-18T13-07-01-638Z_1534a2eae1903af0.jsonl]]
+#+CUSTOM_ID: BUG-298-style-form-splice-name-validates-but-nev
+
+* Initial Message
+
+I want you to look at how demos/spacetime-docs uses registries to load macros and their definitions. I would like to do the same kind of thing with forms, and have some sort of globally imported brand attributes so that we can have an automatically generated catalog with a sidebar, etc. with a mix of .st.md files and the auto-generated element showcase from the registry. Explore first to understand what I mean. This would also mean changing the style of the showcases to leverage --form a lot, lot more, which might unearth some bugs with using the video and score and other Spacetime affordacnes within the `@form`, but we can do it
+
+* Symptom
+
+A statement-position style form splice validates but NEVER expands:
+
+#+begin_src
+@form style --card-surface { background: #121722; border-radius: 9px; }
+.card { --card-surface; color: white; }
+#+end_src
+
+compiles GREEN; the emitted CSS is only `.card { color: white; }` — the spliced
+body's declarations are silently dropped. Verified empirically 2026-08-05
+(/tmp/formprobe, `cargo run -- build`).
+
+* Root cause
+
+`--name;` in a scope parses to FORM_REF (BUG-241) and `validate_form_refs`
+(src/parser/mod.rs:2187) rejects unknown names with E0947 — but expansion was
+deferred: `src/parser/ast.rs:98` — "Validated by `validate_form_refs`;
+expansion is W3 scope." That wave never landed. `form_refs` are read nowhere
+in src/emit or src/pipeline.
+
+This is the arc's banned silent-acceptance class: the page compiles green
+while the author's declarations vanish.
+
+* Fix (PLAN-135 W2)
+
+Splice the declared body's declarations into the scope at the splice's source
+position (CSS order matters), with param substitution for parameterized forms
+(`--surface(pad: 2rem);`). Non-style kinds in bare-scope statement position →
+hard error naming the kind that belongs there (motion → @on driver slot,
+score → @score body).
+
+* Gate
+
+RED first: the probe above must emit background+border-radius. E0947 stays
+hard for unknown names. Params substitute. CDP: the element is actually
+styled (BUG-252: source assertion ≠ behavior assertion).
+
+NOTE [2026-08-06]: LANDED 2026-08-05/06 (PLAN-135 W2+W1): `expand_style_form_splices` (parser/mod.rs) splices a style form's declarations into the scope's CSS at the splice's source position with call-site param substitution (named/positional/defaults). New codes: E0959 (non-style kind in statement position), E0960 (unknown/missing form argument). Cross-file forms resolve: expansion is authoritative post-import-merge at the compile-pipeline clone seam (compiler.rs), which re-runs the idempotent validate_form_refs — the parse-time file-local E0947 for imported forms was a false positive and clears. `_prelude.st` form declarations merge into every page (load_project_overlay → ProjectOverlay.form_matches; build/check set site_dir to the file's dir). Suite: tests/bug_298_style_form_splice_expansion_test.rs 8/8 green. Two stale siblings fixed: sip_001_w2_form_surface_test score case (PLAN-128 tightened the capture) + tl-probe (set-style never existed). Three pre-existing lib failures filed as BUG-302 (not this wave's).

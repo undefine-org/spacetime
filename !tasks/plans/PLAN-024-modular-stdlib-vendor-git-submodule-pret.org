@@ -1,0 +1,224 @@
+#+TITLE: Modular stdlib + %vendor (git-submodule) + pretext text module
+#+STATE: DONE
+#+SESSION_ID: 14f94e45c6c3f247
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-02T11-06-49-499Z_14f94e45c6c3f247.jsonl]]
+#+CUSTOM_ID: PLAN-024-modular-stdlib-vendor-git-submodule-pret
+#+LAYER: stdlib
+#+COMPLETION_HASH: fc0bf8772efaca6e
+
+* Initial Message
+
+let's think about how we'll extend the stdlib for Spacetime using this as a philosophical underpinning: https://www.gingerbill.org/article/2025/09/08/package-managers-are-evil/
+
+
+In the context of integrating pretext to make text layout much simpler in Spacetime, especially in ora-ventures.com's hero section (projects/ora-ventures.com/ has some older syntax which the implementation agent will have to fix).
+
+Gather your thoughts and come up with your own understanding of the nuances of going that way for this project. Remember that the stdlib/ folder is going to go from having `macros/` and `primitives/` to a modular architecture for folders, which is how we are going to make the pretext macros btw.
+
+This is pretext: https://github.com/chenglou/pretext
+
+Also think about stuff we could put in the demos/ folder to showcase the integration with pretext and the latest Spacetime features. Let's not do ora-ventures.com just yet, let's first think about a nice framework for making the stdlib library both lean and "fusion-engine-included", and showcase that with pretext. Consider all angles
+
+Establish a modular stdlib architecture (module = vertical vendoring slice), a
+%vendor meta-construct backed by GIT SUBMODULES (no npm in the pipeline), and a
+first module `stdlib/text/` that vendors chenglou/pretext for reflow-free text
+measurement + balanced/fit/flow layout. Showcase via demos. Keep stdlib LEAN
+(demand-driven emission of vendored blobs) and FUSION-INCLUDED (heavy engines
+ship in-tree, opt-in by import).
+
+* Philosophy (gingerbill, reconciled with repo reality)
+
+gingerbill's 4 distinctions: package ≠ repository ≠ build-system ≠ package-manager.
+The /package manager/ is the evil (automation of dependency hell). Spacetime already
+lives the Go-style ideal: batteries-included stdlib vendored into the binary
+(=stdlib_embedded.rs= via =include_str!=), no resolver, no lockfile, no transitive
+graph. The build system IS the compiler. AGENTS.md "no custom JS in sites" = the same
+instinct: don't import liabilities you don't own.
+
+∴ We do NOT add a package manager. We add a DISCIPLINED VENDORING UNIT:
+- pin (git submodule @ commit) · provenance · own-behind-a-primitive · manual bump (friction = feature)
+- each dependency is a liability we are responsible for (José Valim's point)
+
+* Decisions (locked with user)
+
+1. Vendoring source = GIT SUBMODULE, not npm. The existing
+   =@chenglou/pretext= devDependency + package-lock.json are DELETED.
+2. pretext repo ships TS =src/= (dist/ is gitignored). A one-shot bundle
+   (=bun=) flattens src → a single JS artifact. This is a MAINTAINER build
+   step, not "npm in spacetime": no resolution, no lockfile, no transitive graph.
+3. Bundle artifact = GENERATED, not committed-by-hand. build.rs regenerates it
+   from the pinned submodule — but LAZY: skip rebundling when
+   =vendor/pretext.bundle.js= exists AND matches the submodule commit. Keeps
+   =cargo build= working without bun for anyone not touching pretext.
+4. Delivery to browser = embed/concat the bundle as an IIFE exposing a global,
+   into the page runtime blob — ONLY when a text primitive fired (demand-driven
+   "lean rail"). Non-text pages stay lean.
+5. =cargo run -- vendor build text= = a STDLIB HOT-RELOAD concern, NOT a site
+   =build= concern. It regenerates =vendor/pretext.bundle.js= on disk; the stdlib
+   incremental-cache hot-reload picks it up and re-emits the affected primitive.
+   No binary recompile, no site rebuild.
+6. ONE bundler routine, TWO triggers (DRY): build.rs (embed path) and
+   =vendor build= (filesystem/hot-reload path) call the same code.
+7. Module name = =text/= (measurement+layout, broader than "typography").
+8. =*.test.st= live in a per-module =tests/= subfolder (new convention,
+   codified in stdlib/AGENTS.md). Tests run via the EXISTING playwright_st
+   harness (real Chromium → Intl.Segmenter + Canvas present); harness updated
+   if needed.
+9. stdlib/AGENTS.md written LAST, against settled reality.
+
+* Three disjoint "build" verbs (must not bleed)
+
+| verb                          | compiles      | vendoring? |
+|-------------------------------|---------------|------------|
+| =cargo build=                 | Rust binary   | build.rs LAZY rebundle → embedded |
+| =cargo run -- build <site>=   | a website     | NONE — consumes registry as-is |
+| =cargo run -- vendor build text= | stdlib asset | regenerates blob → hot-reload |
+
+* Module anatomy (generalized from stdlib/mobile/)
+
+#+BEGIN_SRC
+stdlib/text/
+  MODULE.st            manifest + %vendor block + public surface
+  index.st             @import re-exports
+  macros/              @measure @balance @fit @no-widows @flow
+  primitives/          measure-text · balance-engine · fit-text · flow-text
+  vendor/
+    pretext/           git submodule, pinned @ commit (provenance + pin)
+    pretext.bundle.js  GENERATED owned artifact (build.rs + vendor build)
+    PROVENANCE.md      repo · commit SHA · license=MIT · why-we-depend
+  tests/               measure.test.st … (playwright_st, real Chromium)
+#+END_SRC
+
+%vendor declaration (final form):
+#+BEGIN_SRC
+%vendor pretext {
+  source:  submodule "vendor/pretext"     // pinned git commit
+  entry:   "src/layout.ts"                 // bundler root
+  bundle:  bun                             // one-shot flatten; `direct` if dep already 1 file
+  exports: { prepare, layout, prepareWithSegments, walkLineRanges, measureNaturalWidth }
+  out:     "vendor/pretext.bundle.js"      // generated, hot-reload-tracked
+  license: MIT
+}
+#+END_SRC
+
+* pretext facts (verified)
+
+- @chenglou/pretext@0.0.3, MIT, ~15KB gzipped, zero deps.
+- dist/ = 5-file ESM graph: layout.js → bidi.js, analysis.js, measurement.js,
+  line-break.js (~94KB raw). Needs bundling to one file.
+- requires Intl.Segmenter + Canvas2D measureText (browser only → playwright path).
+- Use-case 1: prepare()+layout() → height/lineCount, NO DOM reflow.
+- Use-case 2: prepareWithSegments + walkLineRanges/layoutNextLineRange → manual
+  per-line layout (balance, flow-around-image, shrinkwrap).
+
+* text module surface (pretext → @-macros)
+
+| macro     | pretext API                  | kills |
+|-----------|------------------------------|-------|
+| @measure  | prepare+layout               | reflow-free reactive height/lineCount; feeds others |
+| @balance  | walkLineRanges binary-search | ragged headlines (true balanced wrap, resize-stable) |
+| @fit      | measureNaturalWidth+layout   | headline overflow / shrink-to-fit |
+| @no-widows| line-range inspection        | lone trailing word |
+| @flow     | layoutNextLineRange + svg/canvas | text-wrap-around-image (CSS can't) |
+
+FUSION proof: stdlib/primitives/reveal.st split:"lines" currently groups by
+=span.offsetTop= (forces reflow per resize). Re-drive it on pretext line ranges
+→ existing macro becomes faster + reflow-free by depending on the new module.
+
+* Lean rail (demand-driven emission) — what + scope
+
+TODAY: format_js_with_runtime() (src/pipeline/emit.rs:272) concatenates ALL 9
+runtime modules unconditionally, every page. Vendoring pretext onto that =
+every text-importing page ships 15KB even when @measure never fires. Anti-lean.
+
+FIX (scoped): capability-tag the vendored blob; emit its IIFE only when a
+primitive referencing the %vendor fired. Walk resolved/expanded primitive set →
+emit transitive closure of referenced vendored capabilities, deduped, once.
+SCOPE: vendored blobs + the text module ONLY this pass. The 9 core runtime
+modules' always-on bundle is LEFT UNTOUCHED (separate, riskier cleanup later).
+
+* Hot-reload wiring (makes decision 5 literally true)
+
+incremental_cache.refresh_if_needed() (src/metasystem/incremental_cache.rs:150)
+today scans *.st mtimes only. Extend: a %vendor out: blob (vendor/*.js) becomes
+a tracked stdlib asset. =vendor build= rewrites it → mtime change → re-emit the
+owning primitive → browser hot-reloads. No recompile, no site build.
+
+* Execution waves
+
+** W0 — Spec (docs only)
+MODULE.st grammar · %vendor manifest grammar · =vendor build= CLI contract
+(stdlib tooling, hot-reload-wired) · three-build-verbs boundary doc.
+
+** W1 — %vendor + bundler + build.rs + CLI
+Parse %vendor. Shared bundler routine (submodule src → single IIFE JS,
+exposing exports as a global). build.rs LAZY trigger (skip if bundle matches
+submodule SHA / bun absent + bundle present). =cargo run -- vendor build text=
+subcommand. sha + PROVENANCE generation/verification (=check= re-verifies).
+
+** W2 — Hot-reload + demand-driven emit
+incremental_cache tracks vendor/*.js. Demand-driven IIFE emission for vendored
+blobs (lean rail, scoped to vendor + text). Non-text pages prove zero pretext bytes.
+
+** W3 — Submodule + text module + npm removal
+git submodule add pretext @ pinned SHA. DELETE package.json devDep +
+package-lock.json. stdlib/text/ MODULE.st, index.st, primitives
+(measure-text/balance-engine/fit-text/flow-text), macros
+(@measure/@balance/@fit/@no-widows/@flow).
+
+** W4 — Fuse + tests
+reveal split:"lines" → pretext line ranges (kill offsetTop reflow). text/tests/
+*.test.st via playwright_st; update harness to serve vendored bundle if needed.
+
+** W5 — Demos
+balanced-headline · fit-to-box · editorial-flow · reveal-lines-reflow-free ·
+text-engine (flagship: pretext @measure feeds @balance + @reveal + a @scene
+backdrop reacting to $lines/$height; tree-shaken bundle = core+text+scene only).
+Each README states exactly what JS the page ships (the lean proof).
+
+** W6 — stdlib/AGENTS.md
+Written against settled reality: gingerbill distinctions · module=vertical-slice
+anatomy · where JS is allowed · vendoring discipline · lean law · tests/ convention.
+
+** W7 — (separate thread) ora-ventures hero
+Migrate .ora-hero__title onto @balance + reveal-lines; fix the older
+@cycle/@value-change/@reveal syntax in projects/ora-ventures.com/index.st.
+
+* Risks
+
+- bun as build.rs dep → mitigated by LAZY rebundle escape (decision 3).
+- pretext browser-only APIs → tests go through playwright (real Chromium), not V8 headless.
+- DO NOT write a Rust segmenter/fallback (AGENTS.md: metasystem self-describing;
+  CJK/RTL correctness lives in pretext).
+- Submodule init friction for contributors → documented; bundle artifact present
+  in-tree means cargo build still works without `git submodule update`.
+
+* Acceptance
+
+- =cargo build= works with + without bun (lazy escape).
+- =cargo run -- vendor build text= regenerates bundle; running =serve= hot-reloads.
+- A demo page using @measure ships pretext; a sibling page not using text ships ZERO pretext bytes.
+- reveal split:"lines" produces no forced reflow on resize (perf-counter demo).
+- text module tests green under playwright_st.
+- npm fully removed (no package.json devDep, no lockfile).
+
+* Child items (execution)
+
+- W0+W1 :: [[id:FEAT-048-vendor-meta-construct-shared-bundler-bui]] — %vendor + shared bundler + build.rs lazy embed + vendor CLI
+- W2 :: [[id:FEAT-049-lean-rail-hot-reload-vendor-blobs-demand]] — lean rail: hot-reload vendor blobs + demand-driven emission
+- W3 :: [[id:FEAT-050-stdlib-text-module-submodule-pretext-pri]] — stdlib/text module: submodule pretext, primitives+macros, remove npm
+- W4+W5 :: [[id:FEAT-051-fuse-reveal-splitlines-onto-pretext-text]] — fuse reveal/lines + tests + demos
+- W6 :: [[id:FEAT-052-stdlib-agents-md-module-organization-cha]] — stdlib/AGENTS.md charter
+- W7 :: (separate thread) ora-ventures hero migration + older-syntax fix
+
+* Pre-existing bugs found & fixed mid-flight (W3)
+
+Directory-module imports were wholly broken before this plan; uncovered while
+wiring stdlib/text. All fixed in commit e1076acf.
+
+- [[id:BUG-047-bare-import-no-semicolon-swallows-follow]] — bare @import swallows next scope (CST + events parsers)
+- [[id:BUG-048-imported-binds-macros-never-expand-remat]] — rematch excluded main-file scopes post-import
+- [[id:BUG-049-import-resolver-misses-directory-modules]] — resolver missed <module>/index.st + site-relative stdlib path
+- [[id:BUG-050-imported-meta-defs-lose-source-file-tag]] — merge_ast dropped source_file (broke %vendor blob path)
+
+NOTE [2026-06-02]: W0-W6 complete. Commits: 5888eeb4(W0-W1 grammar/registry) fc9f0524(W1 bundler/buildrs/cli) 7860a561(W2 lean rail) e1076acf(W3 text module + 4 import bugfixes) 912f9925(W4 fuse+harness) b1d02cde(W5 macros+demos) 0f8f2c3c(W6 charter). Delivered: %vendor meta-construct (git-submodule, no npm) + shared bundler + lazy build.rs embed + vendor CLI; demand-driven lean rail; stdlib/text module vendoring pretext with @measure/@balance/@fit + reveal-lines fusion; 4 demos (tree-shaking proven); stdlib/AGENTS.md. FEAT-048/049/050/051/052 all DONE. Found+fixed 4 pre-existing import bugs (BUG-047..050). Surfaced critical BUG-051 (.test.st assertions vacuous) -> deferred to PLAN-026; W4 .test.st gating blocked on it. @flow macro deferred (no demo needed it). Verification: lib 2093 + integration 162 + text_module 8 green; playwright baseline unchanged (zero regressions).

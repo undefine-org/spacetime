@@ -1,0 +1,92 @@
+#+TITLE: Extend @match patterns + @type sum variants (the unified matcher foundation)
+#+STATE: ITEM
+#+SESSION_ID: 1507711255a45786
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-13T10-37-35-958Z_1507711255a45786.jsonl]]
+#+CUSTOM_ID: BUG-104-extend-match-patterns-type-sum-variants
+
+* Initial Message
+
+look at the Spell MCP features. I would like the interfaces to be defined as functions that are loaded into the live environment, so that it is a fully live environment from scratch, instead of just a 'prompt thing'.
+
+1. look at anything that's pending in that thread of work
+2. find your own insights w.r.t what I just said
+3. come back to me with your realisations
+
+* Parent
+[[id:PLAN-038-signal-reactive-output-the-sibling-of-da]] — WAVE 0. The keystone
+the whole reactive-I/O model matches on. Design: [[file:../../research/spacetime-signal-S0.org]] §S1.
+
+* Why this is W0 (a foundation, filed as BUG because it extends an existing surface)
+@data signal/stream's `receive` decode + @handle both reuse @match's pattern
+grammar (one matcher, three host positions — see S1 pillar 3). Today match_pat is
+only `string | ident` (stdlib/capture-types/match-block.st). To carry the model it
+must grow, and @type must gain SUM variants. This is a STDLIB capture-type + @type
+extension (NO Rust parser) per the metasystem self-describing rule.
+
+* Verified ground truth
+- match grammar is stdlib: stdlib/capture-types/match-block.st defines match_pat
+  (`string | ident`), match_arm (`$pat => $inv ;?`), match_block (`@match $subj { arms }`).
+  Reified by the component-body parser via the generic %capture_type engine.
+- @type exists (stdlib/macros/type-data.st: `@type Name { $fields:properties }`) but
+  is PRODUCT-only (records). No sum/variant form today.
+- @match arm body is `template_invocation` only; must generalize to also accept
+  `=> statements` (effects) and `=> Variant(expr)` (construct).
+- BUG-074 (dotted-path args in @match arms) is ADJACENT: the shared arg resolver this
+  work introduces should fix it in passing (one resolveArg walking dotted paths).
+
+* Scope (W0)
+1. Extend match_pat capture: add number literal, bool literal, RANGE (`200..299`
+   and `2xx` sugar), CONSTRUCTOR (`Created($x)`), STRUCT (`{ status: 200, body: $b }`),
+   BINDING (`$x` whole-subject), GUARD (`$pat when <expr>`). Each a bounded leaf
+   capture (per match-block.st authoring rule: bounded leaves before literals).
+2. Generalize match_arm body: `=> &template(args)` (exists) | `=> { statements }`
+   (effects) | `=> Variant(expr)` (construct). One arm grammar, three consequences.
+3. @type SUM form: `@type AddResult { Created(Todo) | Invalid(Errors) | Failed }`
+   registers variants (name + optional carried type). Reuse the type registry that
+   @type product form already writes.
+4. `as` ASCRIPTION leaf: `<expr> as Type` in arm RHS; registers the output type,
+   which flows to the binding type at the consuming match (decl↔use).
+5. Exhaustiveness: a match over a known sum @type must cover every variant or carry
+   `_` → compile error (new diagnostic; mirrors metasystem ArgTypeMismatch path).
+6. ONE shared resolveArg walking dotted paths (closes BUG-074 in passing).
+
+* Edge cases
+- range overlap (`409` before `4xx`): first-match-wins, ordered (existing @match order).
+- nested constructor/struct (`Created({ id: $i })`): recursion through the same capture.
+- guard referencing outer signals: deps discovered like @match subjects.
+- sum @type with a nullary variant (`Failed`): no carried type; binds nothing.
+- `as` on a non-sum (plain ascription `$.body as Todo`): allowed (type hint only).
+- a match NOT over a sum (e.g. @match on a string): exhaustiveness NOT required (open).
+
+* Tests (stdlib capture + V8)
+- RED→GREEN per pattern kind: number/range/constructor/struct/guard/binding arm
+  compiles + dispatches correctly (V8).
+- @type sum registers variants; a 2-variant sum + a match missing one variant → E-code.
+- `as` ascription: arm output type recorded; downstream binding inferred.
+- BUG-074 regression: dotted arg resolves in a @match arm (the shared resolver).
+- existing @match (string/ident → &template) UNCHANGED (no regression).
+
+* Acceptance (W0)
+- match_pat covers literal/number/range/constructor/struct/guard/binding.
+- @type sum variants register + drive exhaustiveness.
+- `as` ascription flows decl→use.
+- ONE shared dotted-path arg resolver (BUG-074 closed).
+- cargo test --lib + V8 + existing @match fixtures all green; NO Rust parser changes.
+
+* Files (expected)
+- stdlib/capture-types/match-block.st        (extend match_pat / match_arm)
+- stdlib/capture-types/ (new leaf captures: range, constructor, struct, guard, ascription)
+- stdlib/macros/type-data.st                  (@type sum form)
+- src/metasystem/ (exhaustiveness diagnostic + type registry for variants)
+- stdlib/primitives/template.st               (shared resolveArg; closes BUG-074)
+
+* Closes-in-passing
+[[id:BUG-074-match-template-ref-arm-args-lack-dotted]] (dotted-path args via the shared resolver).
+
+NOTE [2026-06-13]: SCOPE REFINEMENT (2026-06-13, §S1 TYPE CREATION): there is NO anonymous sum. @type sum variants are ONE type-creation mechanism at TWO scopes — `@type Name { A(T) | B(U) }` (file scope, shareable) and `receive Name { pat => A($.x as T); }` (signal-local scope; the decode arms ARE the variant definition). Both register ONE named sum in the type registry; the reifier gathers variants from arms identically and binds a NAME (never a nameless sum). This DELETES the anonymous-sum special case → leaner. W0 deliverable: the variant-gathering + registry binding must accept BOTH a file-scope @type decl and a signal-scoped `receive Name` decl, producing identical registry entries differing only by scope. `as` in an arm is the in-scope carry-type declaration (not mere ascription). Composition: an arm may spread a referenced sum (`_ => $.body as ApiError`). Name optional → auto-named scoped type. Keep external @type fully powerful (sharing/recursion).
+
+NOTE [2026-06-13]: `to <Sum>` THROUGH-LINE (2026-06-13, §S1): the receive/match grammar must accept the optional response-type connective. Forms (all additive; current `receive Name {}` and `receive {}` unchanged): `receive to AddResult {}` (sum named via connective), `receive Response to AddResult {}` (+ optional envelope alias left of `to`, aliasing $.), `@handle $sig to AddResult {}` (through-line restated). DISAMBIGUATION: single name AFTER receive = the SUM; name LEFT of `to` = envelope alias. `to` = pipeline forward-target (same relation as `send to $host`); stage keyword disambiguates host-value vs sum-type — NOT an overload. W0 grammar work: extend the match_block / receive capture to parse an optional `(<alias> )? to <SumName>` head before the `{ arms }`. Envelope alias never mandatory (@host fixes the type).
+
+NOTE [2026-06-13]: CORRECTION to the prior `to <Sum>` note (2026-06-13, §S1 POSITION DECIDES ROLE): a LONE `receive Name { }` (bare name, no `to`) is FORBIDDEN — a name's role must not flip on a later token. Position alone decides: name LEFT of `to` = envelope alias (input, aliases $.); name RIGHT of `to` = the SUM (output). Grammar head: `receive (<alias>)? (to <SumName>)? { arms }` with NO lone-name alternative. Valid: `receive { }` · `receive to AddResult { }` · `receive Response to AddResult { }` · `@handle $sig { }` · `@handle $sig to AddResult { }`. To name the sum you ALWAYS go through `to` (the short named form names the valuable sum, never the cosmetic envelope). Envelope alias never mandatory (@host fixes its type).
+
+NOTE [2026-06-20]: W0 PROGRESS [2026-06-20]: SUM @type SHIPPED (commit 170592c4). Delivered: stdlib/capture-types/type-variants.st (variant_list/variant_alt/variant_def/variant_payload), second %macro type-sum, TypeDef.variants+is_sum(), from_form_matches reify, body-capture specificity ranking (constrained > permissive — general, not @type-specific), CST empty-[] array-marker fix (arg + body-item positions). 4 new tests green; full lib 2397 green. Grammar-as-discriminator (no Rust dispatch branch). REMAINING for BUG-104: extend @match patterns (number literals, variant-destructure `Created($t)`) — the receive matcher's shared arm grammar. Status-class `2xx` deferred (lexes as NUMBER 2 + IDENT xx — needs lexer work; file FUP if pursued). The `to <Sum>` head + receive keyword land with @data signal/@handle (FEAT-110), not standalone (receive has no host until then).

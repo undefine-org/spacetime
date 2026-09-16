@@ -1,0 +1,91 @@
+#+TITLE: Stdlib resolution is cwd-relative, so check's verdict depends on where you stand
+#+STATE: ITEM
+#+SESSION_ID: 153497be379ff5cc
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-18T12-18-12-318Z_153497be379ff5cc.jsonl]]
+#+CUSTOM_ID: BUG-326-stdlib-resolution-is-cwd-relative-so-che
+
+* Initial Message
+
+ok can you explain to me waht's left to make the whole thing pass with the leniency removal? YOu can also pinpoint parts of the stdlib that would need updates anyway, if you believe breaking but necessary changes would go in the way of SPacetime (e.g. like we did with `@on)
+
+* Symptom
+
+The SAME file gets a DIFFERENT verdict depending on the shell's cwd.
+
+#+begin_src sh
+$ cd /repo && spacetime check demos/editable-blog/index.st
+⚠  error[E0811] %migration · error[E0946] @edit-toggle · warning[W0201]
+
+$ cd /repo/demos/editable-blog && spacetime check index.st
+✗ Import resolution failed: Could not resolve import 'editable'
+#+end_src
+
+Measured over 459 =.st= / =.st.md= files in =examples/=, =demos/=, =stdlib/=,
+=tests/fixtures/=:
+
+| invocation | files w/ errors | E0811 | E0956 | E0947 | imports unresolved |
+|------------+-----------------+-------+-------+-------+--------------------|
+| from repo root | 332 | 320 | 3 | 86 | 0 |
+| from each file's own dir | 146 | 0 | 35 | 85 | 80 |
+
+Not a small drift: E0811 goes 320 → 0, E0956 goes 3 → 35, and 80 files stop
+resolving their imports at all.
+
+* Root cause
+
+=load_stdlib_registry= (=src/compiler.rs:721=) probes for the stdlib with a
+RELATIVE path:
+
+#+begin_src rust
+let dirs = crate::metasystem::STDLIB_DIRS;   // "stdlib/capture-types", …
+let any_dir_exists = dirs.iter().any(|dir| Path::new(dir).exists());
+if any_dir_exists {
+    for dir in dirs { registry.load_stdlib_collecting_errors(Path::new(dir)); }
+} else {
+    load_embedded_stdlib(&mut registry, &mut all_errors);   // ← silent fallback
+}
+#+end_src
+
+=Path::new("stdlib/capture-types").exists()= is answered against the PROCESS
+CWD. So:
+- cwd = repo root → the working-tree stdlib loads (authoritative, current)
+- cwd = anywhere else → the probe fails and the binary silently falls back to
+  the stdlib EMBEDDED AT COMPILE TIME
+
+The fallback exists for a good reason (an installed binary with no source
+tree). The defect is that it is chosen by cwd rather than by whether a source
+stdlib is ASSOCIATED WITH THE FILE BEING COMPILED, and that the choice is
+silent — nothing in the output says which stdlib answered.
+
+=@import "stdlib/…"= resolution has the same cwd-relativity, which is why 80
+files fail to resolve from their own directory. Note =STDLIB_DIRS= also OMITS
+=stdlib/editable=, =stdlib/mobile=, =stdlib/dnd=, =stdlib/fields= — those reach
+the registry only via =@import=, so they are doubly exposed.
+
+* Why this matters more than the error counts
+
+Every corpus measurement in BUG-300 (and any future one) is only meaningful
+once it names its cwd. Worse, the two verdicts DISAGREE ABOUT WHICH STDLIB IS
+REAL: from a project directory the compiler validates a page against a stdlib
+snapshot frozen at the last =cargo build=, so an author editing =stdlib/*.st=
+sees stale grammar with no indication why. That is the same "two answers for
+one question" shape as BUG-301 (=check= vs =build=), one layer lower.
+
+It also silently weakens the =--headless= test suite and any tooling that
+shells out from a subdirectory.
+
+* Fix direction (not yet implemented)
+
+1. Resolve the stdlib root from the SOURCE FILE's ancestry (walk up for a
+   directory containing =stdlib/=), falling back to an env var
+   (=SPACETIME_STDLIB=), and only THEN to embedded. cwd stops being an input.
+2. Make the fallback AUDIBLE: when embedded is used, say so under =--verbose=,
+   and record which stdlib answered in =inspect=.
+3. Add =stdlib/editable=, =stdlib/mobile=, =stdlib/dnd=, =stdlib/fields= to
+   whatever roster governs discovery, or document why they are import-only.
+
+* Gate
+
+A test that compiles one fixture TWICE — once with cwd = repo root, once with
+cwd = the fixture's directory — and asserts the diagnostic sets are IDENTICAL.
+That single assertion covers the whole class and fails today.

@@ -1,0 +1,181 @@
+#+TITLE: @on event dispatcher was deleted in Dec 2025 and only BUG-268 revealed it
+#+STATE: ITEM
+#+SESSION_ID: 153497be379ff5cc
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-18T12-18-12-318Z_153497be379ff5cc.jsonl]]
+#+CUSTOM_ID: BUG-329-on-event-dispatcher-was-deleted-in-dec-2
+
+* Initial Message
+
+ok can you explain to me waht's left to make the whole thing pass with the leniency removal? YOu can also pinpoint parts of the stdlib that would need updates anyway, if you believe breaking but necessary changes would go in the way of SPacetime (e.g. like we did with `@on)
+
+* Symptom
+
+=@on click { … }= — the single most-used directive shape in the corpus (219
+sites) — does not compile. Minimal case:
+
+#+begin_src spacetime
+@import "stdlib/macros/on"
+$c: 0;
+<main><button class="b">go</button></main>
+.b { @on click { $c <- $c + 1; } }
+#+end_src
+
+#+begin_example
+error[E0946]: directive does not match its declared grammar: Unexpected 5 extra inline token(s)
+error[E0956]: unknown primitive: on
+#+end_example
+
+Corpus-wide (459 =.st= / =.st.md= in =examples/=, =demos/=, =stdlib/=,
+=tests/fixtures/=, checked from repo root with a pinned binary): 128 files
+fail, and =E0956= accounts for **100 of them**. Unknown-primitive breakdown:
+
+| primitive | files |
+|-----------+-------|
+| =on= | 30 |
+| =type= | 24 |
+| =score= | 18 |
+| =local-state= | 6 |
+| =editable-mark= | 4 |
+| (15 others) | 1-3 each |
+
+Bare-event =@on= usage in the corpus: =@on click= 219 · =@on visible= 55 ·
+=@on hover= 25 · =@on input= 24 · =@on change= 6 · =@on submit= 5.
+
+* Root cause
+
+=stdlib/macros/on-event.st= still carries this header:
+
+#+begin_src spacetime
+/// On Event Dispatcher
+///
+/// Routes @on to the appropriate event-specific macro.
+
+                                    ← the dispatcher was HERE
+#+end_src
+
+Three blank lines. The =%macro on= that the comment describes was deleted in
+=d5952cb3= ("feat: eliminate config.json — pure primitive animation system",
+2025-12-23). Its siblings survived: =%macro on-hover=, =%macro on-click=,
+=%macro on-focus=, =%macro on-visible= are all still declared and still bind
+=event-driver=. Only the ROUTER from =@on <event>= to =@on-<event>= is gone.
+
+=@on= today resolves ONLY through =stdlib/macros/on.st=, whose head is
+=%form { @on $driver:driver_expr … }= with
+
+#+begin_src spacetime
+%capture_type driver_expr { ( "&" $subject:ident? | "$" $ssubject:ident ) "." $member:ident … }
+#+end_src
+
+i.e. it requires a SIGIL and a MEMBER — =@on &.visible=, =@on $sig.change=. A
+bare event name (=click=) matches no alternative, so the head fails and the
+name falls through to primitive resolution, where nothing answers to =on=.
+
+* Why it stayed invisible for eight months
+
+The deletion was survivable while an unresolved primitive DEGRADED: expand
+emitted a =// Primitive not found:= comment into the bundle and the build went
+green with a silently dead handler. BUG-268 correctly made that a hard E0956
+(=src/pipeline/expand.rs=, test at :2499 — "an unknown primitive must FAIL the
+build, never emit a comment stub"). That is when eight months of dead =@on
+click= became visible all at once.
+
+Same shape as BUG-299 and BUG-300: a leniency was load-bearing for a
+documented surface, and removing the leniency surfaced a debt rather than
+creating one. **The E0956 wave is not damage — it is the first honest report
+that these 219 call sites never worked.**
+
+* The docs teach the shape that does not exist
+
+- =docs/CREATIVE.md:84=, =:323= — =@on click { … }=
+- =docs/language/form-syntax.md:306= — =@on click { $loading <- true; }=
+- =stdlib/macros/on-event.st:14-19= — its OWN =@example click= block
+- =tests/fixtures/test-runner/index.st:258= — a TODO reading "Implement click
+  handler when imperative =@on click= is supported", 645 lines above =:903=
+  which uses =@on click= as if it were.
+
+* Fix direction (decision needed — see below)
+
+Two coherent options, and they are not equivalent:
+
+1. **Restore the dispatcher.** Re-declare =%macro on= in =on-event.st= routing
+   =@on <event-name> …= to the surviving =@on-<event>= macros. Keeps 219 call
+   sites and every doc example working. Cost: =@on= now has TWO grammars (the
+   driver head in =on.st=, the event head here) that must not overlap —
+   =driver_expr= requires a sigil, a bare ident cannot match it, so they are
+   disjoint by construction.
+2. **Cut over to =@on &.click=.** Make the sigil form the ONLY =@on=, and
+   migrate the corpus with a =%migration= capsule (the =on-cutover= entry of
+   2026-07-26 is the precedent and the machinery already exists). Cost: a
+   breaking change to the most common shape in the language, plus doc rewrites.
+
+Option 2 is more harmonious (ONE =@on= grammar, one meaning) and has a
+precedent capsule; option 1 is far cheaper and preserves what every doc
+teaches. This wants a human ruling — it is a language-surface decision, not a
+repair.
+
+* Gate
+
+Whichever is chosen: a test that COMPILES a page using the blessed spelling and
+asserts an actual click listener is EMITTED (=addEventListener('click'=) — not
+that a string appears in a form table. Per AGENTS "a source assertion is not a
+behavior assertion", the behavior gate belongs on =--cdp=.
+
+NOTE [2026-08-07]: ROOT CAUSE CORRECTED [2026-08-07] — the deletion is real but is NOT why
+=@on click= fails today. Do not act on the original diagnosis.
+
+The dispatcher WAS deleted in =d5952cb3= (that part stands), but two
+replacement macros were later written and are live in =stdlib/macros/on-event.st=:
+
+#+begin_src spacetime
+%macro on-mutation-dispatcher {          // :205
+  %form { @on $event:event_name $target:selector { $body:mutation_actions } }
+  %binds { on-mutation-handler(&self, event: $event, target: $target, actions: $body) }
+}
+%macro on-mutation-dispatcher-simple {   // :221
+  %form { @on $event:event_name { $body:mutation_actions } }
+  %binds { on-mutation-handler(&self, event: $event, actions: $body) }
+}
+#+end_src
+
+The second one declares EXACTLY =@on click { mutations }=, and
+=%primitive on-mutation-handler= (=stdlib/primitives/animation/drivers.st:1964=)
+is present and implemented, documented as "the primitive backing for
+=@on click { mutations }= syntax".
+
+*The defect is that =event_name= and =mutation_actions= DO NOT EXIST.*
+
+#+begin_src sh
+$ grep -rn '%capture_type event_name' stdlib/       # nothing
+$ grep -rn '%capture_type mutation_actions' stdlib/ # nothing
+$ git log --all -S'%capture_type event_name'        # never existed, in any commit
+#+end_src
+
+They are referenced at four sites (=on-event.st:211,225=, =when-guard.st:23=,
+and =portal.st:37= for =event_name=) and declared at none. A =%form= naming an
+undeclared capture type does not fail at LOAD — it fails at USE, as a grammar
+mismatch pointing at the author's page:
+
+#+begin_example
+error[E0946]: Unexpected 5 extra inline token(s) after directive
+  = hint: check the `%form` this directive declares (and any `%capture_type` it names)
+#+end_example
+
+∴ this is the SAME class as BUG-299 and the selector-less =@then=, one level
+deeper: not a clause the grammar forgot to declare, but a TYPE the grammar
+names and nothing defines. Corrected minimal repro now yields E0946 only (no
+E0956 — the earlier E0956 reading came from a file whose imports differed).
+
+*A registry lint is the durable fix for the class.* =load_stdlib_registry=
+already runs post-load validations (=capture_consumption_load_errors=, i4/gh-18:
+"every =%form= capture has a consumer"). Its mirror — every capture TYPE a
+=%form= names is DECLARED — does not exist, which is exactly how four phantom
+references survived indefinitely. That lint would have failed the commit that
+introduced them.
+
+USER RULING [2026-08-07]: cut over to =@on &.click=. Spacetime is not public;
+a hard break is acceptable. So the dispatcher is NOT restored — the phantom
+macros are removed with it, and the bare-event surface migrates to the sigil
+form. Scope measured: 174 real code sites across 61 files, 16 distinct event
+names (=click= 124, =hover= 12, =visible= 11, =input= 11, =enter= 4, =load= 3,
+=mousemove= 2, =change= 2, and 8 singletons). The target form is already live
+at 20 =@on &.click= sites, so this converges the two spellings onto one.

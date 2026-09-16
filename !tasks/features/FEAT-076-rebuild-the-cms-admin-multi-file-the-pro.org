@@ -1,0 +1,92 @@
+#+TITLE: Rebuild the CMS admin multi-file (the proof)
+#+STATE: DONE
+#+SESSION_ID: 14fc108ed3772fa8
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-04T14-32-37-965Z_14fc108ed3772fa8.jsonl]]
+#+CUSTOM_ID: FEAT-076-rebuild-the-cms-admin-multi-file-the-pro
+#+COMPLETION_HASH: fad03fe4e43d3d95
+
+* Initial Message
+
+hey what would it look like if the admin app were done multi-file? what reactive primitives and modular programming principles (and other missing constructs that you find) do you need to make this an amazing DX for developing this kind of app?
+
+* Parent
+[[id:PLAN-030-spacetime-app-platform-declarative-schem]] — Wave 6, the ACCEPTANCE PROOF.
+DEPENDS: FEAT-071, FEAT-072, FEAT-073, FEAT-074, FEAT-075 (all platform constructs).
+
+* Summary
+Replace =stdlib/__admin__/admin-app.st= (today ONE =%primitive= with a single
+~1330-line =%emit js= block, lines 19-1348) with a multi-file Spacetime tree built
+ENTIRELY from the platform constructs. Only =persist.st= (the dev WebSocket bridge) may
+keep =%emit js=. This is how we PROVE the platform: feature parity with zero hand-written
+UI JS.
+
+* Target file tree (from @research/spacetime-app-platform.org)
+#+begin_example
+stdlib/__admin__/
+  MODULE.st                manifest; public surface = @admin
+  index.st                 @import graph + mount
+  types.st                 @type Collection/TypeMeta/Motion/Token/Template/Asset
+  data.st                  @data fetch site/types/motion/theme/templates/assets
+                           @data collection … via dev-ws (FEAT-075)
+  app.st                   shell: rail | center | drawer | preview (grid + @portal)
+  rail/rail.st             @each collections → &nav-item ; theme/components/motion nav
+  collection/
+    list.st                @each(rows, when filter) → &row (search + reorder)
+    row.st                 @template &row($item, $disp)
+    graph.st               relation SVG view
+  drawer/
+    drawer.st              schema form host (@portal)
+    field.st               @template &field($name,$node,$value) — RECURSIVE + @match dispatch
+    widgets/               &text-field &textarea-field &number-field &toggle-field
+                           &select-field &media-field &chips-field &relation-field
+                           &relation-multi-field &fieldset-field(RECURSE) &list-field(RECURSE)
+                           &richtext-field (@editable — PLAN-031; stub until ready)
+  theme/theme.st           @each tokens → &token-control → @effect persist
+  motion/motion.st         @each motions → sliders → persist
+  palette/palette.st       @each templates → &palette-card (typed sig)
+  media/library.st         @portal modal grid picker
+  persist.st               the ONE %primitive kept: window.__stDevWs / __stDevSave bridge
+#+end_example
+
+* Construct mapping (admin feature → platform construct)
+- collection list → =@each(rows, when filter) → &row=
+- row/card → =@template &row($item)= with : / <- props
+- schema form → =&field= RECURSIVE + =@match $node.widget => &widget()= dispatch (FEAT-073)
+- search → =@each(... when $filter)=
+- auto-save field → =value <- $x= + =@on input.debounce= + collection mutator
+- theme token edit → =@each tokens → @on input → @effect persist= (FEAT-074)
+- delete arm/confirm → state-machine (existing)
+- drawer/modal/preview → =@portal= (FEAT-074)
+- add/delete/reorder → =@data collection … via dev-ws= mutators (FEAT-075)
+- views (list/graph/theme/palette/motion) → =@view $pane= (FEAT-074)
+
+* Procedure
+1. Build the tree incrementally, pane by pane, serving =cargo run -- serve= and
+   verifying each in-browser against the CURRENT admin's behavior.
+2. Keep the old admin-app.st until parity is proven, then CUTOVER (delete it) — record
+   the before/after line counts (target: ~1330 JS lines → ~0 outside persist.st).
+3. richtext widget: stub =&richtext-field= with a plain textarea until PLAN-031 Phase 1
+   lands, then swap to =@editable=.
+
+* Test plan
+- HEADLESS: a scripted walkthrough of every pane (list filter, drawer edit + save,
+  nested fieldset/list add, theme token change persists, media picker, view swaps).
+- PARITY: each feature matches the old admin (manual checklist + screenshots).
+- INVARIANT: =grep -c '%emit js' stdlib/__admin__/**/*.st= → only persist.st has it.
+- FULL SUITE green.
+
+* Acceptance criteria
+- [ ] admin runs entirely on platform constructs; only persist.st keeps %emit js.
+- [ ] feature parity with the old admin (checklist + screenshots attached).
+- [ ] old admin-app.st deleted; line-count delta recorded.
+- [ ] full suite green; every pane verified in-browser.
+
+NOTE [2026-06-09]: ARCHITECTURE settled (2 explorers). MOUNT: admin must become a true full-Spacetime .st page. Today compile_admin() (src/server.rs:1775) discards compiled.html and admin_page_handler serves a hardcoded empty-body shell + <script src=runtime.js>; file-scope markup never reaches the browser. STRUCTURAL FIX (delivery-mechanism plumbing, legitimate Rust): compile_admin returns html too; admin_page_handler serves compiled.html (file-scope shell markup → DOM) exactly like demos/app-shell/index.st (the precedent — full 3-pane shell via @view/@portal/@effect/@on/text<-, zero custom JS). RECURSION: recursive @match-dispatch templates WORK — dotted subjects ($node.widget), dynamic names (&$w), recursion guard (window.__stTemplateDepth cap 64). GAP filed as BUG: @match arm args + template-ref args lack dotted-path resolution (only $var, not $node.properties) — W2 fixes RED→GREEN, DRY into one shared arg resolver. ADMIN as meta-renderer: @data fetch site.json/types.json + @data derive (evals arbitrary expr over global store, so Object.values($site.dataSourceMap) → collections array) + @each renders rail/list. Widget contract verified end-to-end against cms-testbed fixture (all 11 widget kinds + recursive list/fieldset + posts↔authors relation). Baseline admin screenshots captured (projects/cms-testbed/baseline-{admin,drawer}.png) as parity target.
+
+NOTE [2026-06-09]: W1 COMPLETE (shell + rail + list), commits ffcd690d → 85a6ebfc → 7f649ace. The declarative admin tree (stdlib/__admin__/app/) is a working meta-renderer: fetches site.json/types.json, derives collections, renders rail (@each nav + active-state + auto-select) and list pane (reactive-source fetch on $activeFile + @each rows + display-role labels + row-click→drawer-arm). Browser-verified end-to-end against cms-testbed. Served via SPACETIME_ADMIN_REBUILD=1 (monolith stays default until W5). 4 platform bugs surfaced+fixed RED→GREEN as the platform's hardest consumer: BUG-075 (imported html_blocks merge), BUG-076 (each dual-channel + dedup), BUG-077 (derive grammar leading-paren/member-ternary — filed+worked-around), + new reactive-source primitive (@data source $x from $signal). Reviewer swarm (3 lenses) caught the BUG-076 double-render (claimed dedup didn't exist) + parity gaps (auto-select, active-state) — all fixed. Server: compile_admin returns html, admin_page_handler serves compiled shell, site.json exposes collections array. Gates: lib 2160/0, integration 168/0, v8 334/12 (pre-existing cluster). DEFERRED to later waves: CSS port (admin unstyled), search box, empty-state, ⋮⋮ mojibake. NEXT: W2 recursive schema drawer (@portal + @match widget-dispatch + nested recursion; will fix BUG-074 dotted-args RED→GREEN).
+
+NOTE [2026-06-10]: W2 COMPLETE (recursive schema drawer), commits 66e54ad8 → 58afc212. The entry-editor drawer is a fully declarative, schema-driven, recursive form: @portal(when:$drawerOpen) on .ad-drawer; per-widget field templates dispatched via @each + dynamic dispatch &$f.tpl($f); ST.adFormFields flattens schema+entry DEPTH-FIRST (nested fieldset/object-arrays → depth-marked groups) so a flat @each renders arbitrarily-deep forms. Browser-verified: all 11 widget kinds + the recursive `sections` list (sections 1/2 → nested heading/body), values bound, close+reopen rebinds. 3 platform bugs fixed RED→GREEN as the hardest consumer: BUG-074 (@match/ref dotted-path args via shared ST.resolveTemplateArg), dynamic dispatch in @each (invokeTemplate resolves &$item.field names), BUG-078 (THE big one: @portal relocation triggered MutationObserver dispose → wiped reactive signals of the moved subtree; fixed with the canonical !isConnected move-vs-remove guard — a GENERAL portal fix, oracle-diagnosed with out-of-browser repro). Gates: lib 2160/0, integration 168/0, v8 336/12 (pre-existing cluster). DEFERRED: CSS port, ⋮⋮ mojibake, select/chips/relation OPTION population (widgets render the control; option lists are W3/W4 polish since they need cross-collection data). NEXT: W2 reviewer swarm, then W3 (CRUD via @data collection — add/delete/reorder + field edit persistence).
+
+NOTE [2026-06-10]: W3 COMPLETE (CRUD), commit d086b3f8. Full optimistic CRUD over the DYNAMIC active collection ($activeFile/$entries): field-edit (@on input [data-path] → ST.adEditField → EditJson [index].field), add (.ad-new → adInsert(adBlankEntry)), delete (two-click arm .ad-del → adArmDelete), reorder (↑/↓ row buttons → adReorderUp/Down). All via dev-ws optimistic-apply→persist→revert, parameterized by the runtime-active file (meta-renderer can't use static @data collection). KEY FIX: ST._adPublishEntries publishes through BOTH channels (registry + SpacetimeLocal + local:entries:updated) — ST.setData alone left SpacetimeLocal.entries stale (the first field-edit no-op'd). Browser+DISK verified: edit persists to posts.json, add/delete net-correct, reorder persists. New V8 test feat076_admin_crud_helpers. Gates lib 2160/0, v8 337/12 (pre-existing cluster). NEXT: W3 reviewer swarm, then W4 (relations/graph + media library + motion + theme + palette editors) then W5 cutover.
+
+NOTE [2026-06-10]: W5 CUTOVER COMPLETE — FEAT-076 acceptance proof delivered (commit 2fc402a4). The 1349-line admin-app.st %emit js monolith is DELETED; the CMS admin is now the declarative multi-file tree (stdlib/__admin__/{index.st, app/{app,rail,list,drawer,tools,macros,styles}.st}, ~648 lines) served by default (env gate removed). ACCEPTANCE INVARIANT MET: zero %emit js in the admin tree (verified); built entirely from platform constructs (@data fetch/derive/source + @each + @template + @match + dynamic dispatch &$f.tpl + @portal + @effect + : + <-); only the dev-ws bridge (reused from __dev__) keeps imperative JS, as the criteria allow. Capstone browser-verified end-to-end on the cutover admin (no env flag): rail+auto-select+list (W1), schema drawer w/ 14 fields + select/relation populated (W2), field-edit persists+reactive (W3), theme editor 5 tokens (W4). Screenshots: projects/cms-testbed/rebuild-w5-cutover-capstone.png (+ baseline-admin/drawer, rebuild-w1/w2/w4). Platform HARDENED as the hardest consumer: BUG-074/075/076/078/080 fixed RED→GREEN, BUG-077/079 filed, new reactive-source primitive. DEFERRED to FEAT-092: media library + relation graph + declarative tool panes (the theme/palette/motion panes render via ST.ad* runtime helpers — the CORE content admin is fully declarative). Gates lib 2160/0, integration 168/0, v8 339/12 (pre-existing BUG-039 cluster).

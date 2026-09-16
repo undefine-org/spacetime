@@ -1,0 +1,212 @@
+#+TITLE: CSS scalar value types as stdlib %capture_type — color/length/duration/angle/easing + css_wide + dynamic production (W1)
+#+STATE: DOING
+#+SESSION_ID: 153f5ed0617636c7
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-26T21-12-46-213Z_153f5ed0617636c7.jsonl]]
+#+CUSTOM_ID: FEAT-165-css-scalar-value-types-as-stdlib-capture
+
+* Initial Message
+
+@data inline $brand Brand : {
+  "ink":    "#e8eef7",
+  "bg":     "#0b0e14",
+  "panel":  "#121722",
+  "accent": "#5eead4",
+  "dim":    "#8b96a8",
+  "rule":   "#222b3a"
+};
+
+Could we have this be written like { ink: #e8eef7; ... } instead of that? Basically, if I define a field to be color, then I can use CSS, and basically if ther's a serialised data, it's the string (or it's the Js repr of it? let me know what the representations should look like). This is part of a wider effort to support all CSS value types more natively in Spacetime (tell me what that would mean that I didn't see yet)
+
+* Initial Message
+
+Wave 1 of PLAN-122. Express the CSS leaf scalars as stdlib %capture_type entries over the W0 pattern terminal, dissolving the five Rust CaptureType arms (Color/Length/Time/Duration/Easing) and their extractors into data. This is FEAT-109's Tier-4 north star ("self-describing literal shapes, zero Rust to add angle") delivered as the value-layer dual of the self-describing grammar.
+
+* Target
+
+- NEW stdlib/capture-types/css-values.st — the domain value grammars.
+- src/parser/meta_ast.rs — delete CaptureType::{Color, Length, Time, Duration, Easing} arms after cutover.
+- src/syntax/events/extractors/simple.rs:150-172, 426-474 — delete time→ms / length→LengthValue / color-text Rust extractors.
+- src/syntax/events/form_compiler.rs:1935-1988 — delete the Rust type-name→variant mapping; custom capture types resolve by registry like all others.
+
+* Change
+
+1. stdlib definitions (shape):
+
+   %char_class xdigit { [0-9a-fA-F] }
+   %capture_type color {
+       "#" $hex:xdigit{3|4|6|8}
+     | $fn:("rgb"|"rgba"|"hsl"|"hsla"|"hwb"|"oklch"|"oklab"|"lab"|"lch"|"color")
+       "(" $args:balanced(')') ")"
+     | $named:keyword(css-colors)      // 148 named + system colors, data table
+     | css_wide
+   }
+   %unit_set length { px em rem vh vw ch vmin vmax ex cap ic lh rlh vi vb fr? }
+   %unit_set angle  { deg rad grad turn }
+   %unit_set time   { s ms us fps }    // membership per W0 unit audit (C7)
+   %capture_type length   { $n:number $u:unit(length) | css_wide }
+   %capture_type duration { $n:number $u:unit(time)   | css_wide }
+   %capture_type angle    { $n:number $u:unit(angle)  | css_wide }
+   // + percentage, easing (keywords + cubic-bezier()/steps()/linear() fns), resolution, integer, ratio
+
+2. css_wide: shared %capture_type for inherit/initial/unset/revert/revert-layer (+ currentColor/transparent for color) — included by reference in every value type (composition mechanism already proven: optmark/collmark in param_list.st).
+3. DYNAMIC PRODUCTION per type (PLAN-122 tier-b honesty): calc()/min()/max()/clamp(), var()/env()/attr(), color-mix()/light-dark(), gradients — balanced-args arm tagged `dynamic`. Recognition + span, NOT validation (lightningcss owns validation); editor widgets degrade on dynamic captures. Function args must tolerate $refs (reactive holes already legal in value parts).
+4. REPR = identity string (PLAN-122 decision 1): captured source text IS the value; conversion machinery deletes rather than relocates. Duration's ms-conversion moves to the animation boundary — this is the fix-of-record for BUG-138 / FUP-099.
+
+* Edge
+
+- Named-color/system-color tables are frozen stdlib data; user-named colors are var()'s job, not the grammar's.
+- easing includes the NEW linear() function (stop lists) — function arm, dynamic args.
+- Case-fold handled by W0 terminal flag, not by duplicating alternations.
+- Consumers of the deleted CapturedValue::{Color,Length,Time} shapes (serializer, LSP, form_scoring) migrate to the new capture result shape — audit list from the ~26 Color / ~12 NUMBER_WITH_UNIT consumer files measured in design.
+
+* Accept (RED→GREEN)
+
+- stdlib grammars parse every CSS value literal in the corpus (stdlib/demos/examples/tests/fixtures/projects) — run as a corpus grammar-coverage test.
+- CaptureType enum retains only engine terminals; the 5 arms + Rust extractors are deleted and nothing references them.
+- BUG-138 + FUP-099 repros green under string-repr + boundary conversion.
+- cms-testbed motion/color tokens (scarlet/ink/surface/radius/reveal) capture through the new stdlib types with identical emitted JS.
+- Full suites green.
+
+* Relation
+
+Parent: PLAN-122. Blocked by W0 (pattern terminal FEAT). Blocks W2 (typed seeds) and W3 (kernel lexer). Delivers FEAT-109 Tier 4; fixes BUG-138, FUP-099, BUG-192 (one color grammar, all consumers).
+
+NOTE [2026-08-02]: 2026-07-31 re-verify: this wave now has a live stdlib CONSUMER. Uncommitted stdlib/macros/score.st (PLAN-128 W4) declares `%capture_type score_measure { ( $len:length ) | ( $time:duration ) }` — a stdlib grammar composing the Rust-implemented scalar terminals this FEAT moves into stdlib. Consequences: (a) landing W1 is a SUBSTITUTION under a live grammar, which is the honest test — PLAN-128's gates must stay green with zero score.st edits; (b) PLAN-128's R1 ruling ("the driver owns the time domain; `at 2s` under &.scroll is E0951") reads its vocabulary from the driver registry's domain: column, but the SPELLINGS it accepts come from the lexer's hardcoded unit bag — which still contains the fossil `m` (crack C7). The C7 audit is therefore no longer cosmetic: it decides whether `at 2m` is a legal score measure. Sequence note: if score.st commits first, W1 must treat score_measure as a regression fixture; %unit_set time { s ms us fps } cannot freeze before the C7 verdict.
+
+NOTE [2026-08-02]: BLOCKING FINDING [2026-07-31, verified by probe at HEAD bc2941ee] — W1 AS WRITTEN CANNOT WORK. The wave order in PLAN-122 is inverted.
+
+* What was measured (not reasoned)
+
+Two throwaway probes compiled into the tree, run, then removed (tree verified clean afterwards).
+
+Probe 1 — what token shape does a hex colour actually take?
+
+| source                  | tokens                                    |
+|-------------------------+-------------------------------------------|
+| `a { color: #e8eef7; }` | ... COLON, **COLOR "#e8eef7"**, SEMICOLON |
+| `a { color: #123456; }` | ... COLON, **COLOR "#123456"**, SEMICOLON |
+| `{ ink: #e8eef7; }`     | ... COLON, **COLOR "#e8eef7"**, SEMICOLON |
+| `$x : #e8eef7 ;`        | ... COLON, **COLOR "#e8eef7"**, SEMICOLON |
+| `#e8eef7` (bare)        | **HASH "#", IDENT "e8eef7"**              |
+| `a { color: #e8ee1; }`  | ... COLON, **COLOR "#e8ee1"**, SEMICOLON  |
+
+Probe 2 — can a stdlib grammar `"#" $hex:xdigit{3|4|6|8}` match in a value position?
+
+: token at value position: COLOR text="#e8eef7"
+: LiteralExtractor("#") on COLOR token          -> None
+: CharClass counted directly on COLOR token     -> None
+
+BOTH None. The grammar fails in EXACTLY the position it exists to serve.
+
+* Why
+
+`is_color_value_position` (src/syntax/cst/lexer.rs:778) promotes `#hex` to ONE ATOMIC COLOR token after a COLON, inside a value function's parens, after a value comma, or mid-declaration-value. The extractor contract is `fn extract(&self, tokens: &[TokenData], source: &str)` returning tokens-CONSUMED — a whole number of tokens. A grammar can therefore never consume "the `#` of a COLOR token and then four of its characters": there is no half-token in the protocol.
+
+The counted-class terminal I shipped in W0 (commit 05f83468) scans BYTES, so it can cross token boundaries — but only from a token START. It cannot begin inside a token. HASH+IDENT works (its gates prove it); atomic COLOR does not.
+
+So the situation is exactly backwards from the plan's assumption: the counted terminal works in the position where nobody writes a colour (bare `#e8eef7` at statement level) and fails in every position where colours are actually written.
+
+* Consequence for the plan — W3 is not "after W1"
+
+FEAT-165 says "Blocked by W0"; FEAT-167 (W3, kernel lexer) says "Blocked by W1 (grammars must own the domains before the lexer stops pre-committing them)". That circularity is now proven REAL, not stylistic: the lexer pre-commits the domain by MERGING, and a merged token is opaque to any grammar. W1 cannot own a domain the lexer has already fused into a single token.
+
+The dependency is not W1 → W3. It is: **the DEMOTION of the four tier-2 lexer passes must land WITH or BEFORE the grammars that replace them.** They are one cutover, not two waves.
+
+Same argument applies to `NUMBER_WITH_UNIT` (lexer.rs:332-371) — `8px` is one token, so `$n:number $u:unit(length)` (two captures) can never match it. Confirmed by the same mechanism; no separate probe needed since it is the identical merge-then-opaque shape.
+
+* Revised W1 shape (supersedes the "Change" section above)
+
+Do NOT write the stdlib grammars first and hope to swap the lexer later. Sequence instead:
+
+- **W1.0 — DEMOTE, don't delete.** Behind a flag, stop emitting COLOR and NUMBER_WITH_UNIT; emit the kernel shapes (HASH+IDENT / HASH+NUMBER, NUMBER+IDENT). Keep the merge code alive and default-on so the corpus stays green. This is FEAT-167's P0/P1 pulled EARLIER — it is the enabling step, not the victory lap.
+- **W1.1 — golden token baseline FIRST** (FEAT-167 P0), because W1.0 is precisely the change that would silently rewrite goldens if taken afterwards. NB the C2 e-notation gap (`1e3px` unlexable) must be settled BEFORE snapshotting, per the W0 audit.
+- **W1.2 — the grammars**, written against demoted tokens, which the W0 terminal already handles (that is the shape its gates cover).
+- **W1.3 — flip the default**, migrate the ~13 consumer files (4 touch SyntaxKind::COLOR, 9 touch NUMBER_WITH_UNIT, 12 touch CapturedValue::{Color,Length,Time}), then delete the merge passes and the harness.
+
+An alternative was considered and REJECTED: teach the extractor protocol sub-token consumption (byte offsets instead of token counts). It would let a grammar look inside COLOR without touching the lexer — but it changes `ExtractResult` for EVERY extractor, keeps the domain knowledge in the lexer permanently, and leaves two mechanisms for "what is a colour". That is the parallel-implementation failure the arc exists to remove. Demoting is less code and one mechanism.
+
+* An unexpected argument FOR the wave (user-visible, verifiable now)
+
+There is NO hex validation anywhere in the pipeline today. Verified end to end:
+
+: .probe { color: #e8ee1; background: #zzz; }
+: $ cargo run -- check   → ✓ All 1 file(s) passed
+: emitted spacetime.css  → .probe { color: #e8ee1; background: #zzz; }
+
+`#e8ee1` is a 5-digit hex — not a legal CSS colour in any spelling — and `#zzz` is not hex at all. Both pass `check` silently and reach the emitted stylesheet, where the browser drops the declaration and the author sees an element that simply renders wrong with no diagnostic anywhere. lightningcss (src/validation/css.rs) validates at STYLESHEET level and does not catch it on this path.
+
+So W1's counted grammar is not merely a refactor that relocates existing behaviour — it is the first thing in the system that would ever reject a malformed colour. `{3|4|6|8}` makes `#e8ee1` a PARSE ERROR WITH A SPAN. That is a real acceptance criterion to add:
+
+- `color: #e8ee1;` and `color: #zzz;` produce a spanned diagnostic at the value.
+- The 4-digit and 8-digit alpha forms (`#fffa`, `#11223344`) still pass — a naive "3 or 6" fix would regress them, which is exactly why the count set is DATA.
+
+* Scope correction to the "Target" section
+
+`stdlib/capture-types/` currently holds nine files (claims, component-body, handle-block, keyframes, on-actions, param_list, properties, signal-receive, type-variants) — no scalars, as the design said. But note the naming convention: this directory is grammar PRODUCTIONS. `%unit_set` and `%char_class` as written in the Change section DO NOT EXIST as directives — the parser recognizes only `%capture_type`, `%claims`, `%default`, `%hint` (plus the MetaDef variants: Primitive, Macro, Preset, RuntimeRegistry, CaptureType, Vendor, Migration, CommentType). Adding two new meta directives fails the AGENTS elegance bar (new subsystem, not an extension). Express unit sets as ordinary `%capture_type` unions instead — `%capture_type length_unit { "px" | "em" | ... }` — which is the mechanism `on.st` already uses throughout (`on_leaf`, `on_pat`, `on_consequence`). One directive, composed; no new grammar surface.
+
+Likewise `$hex:xdigit{3|4|6|8}` in the Change section is not the shipped spelling. W0 attaches counts to a CHAR CLASS, so it is `[0-9a-fA-F]{3|4|6|8}` — deliberately, because a Group would compose per-character matches and lose the length constraint that IS the token shape. Update the grammar sketches before implementing.
+
+* Still-true premises (re-verified, no change needed)
+
+- `score.st` IS committed and live: `%capture_type score_measure { ( $len:length ) | ( $time:duration ) }` (stdlib/macros/score.st:53). W1 remains a substitution under a live grammar — PLAN-128's gates must stay green with zero score.st edits.
+- The Rust scalar arms are all still present (Color, Length, Time, Duration, Easing in CaptureType) and `parse_capture_type` still maps the names before falling through to Custom — so a stdlib `%capture_type color` would be SHADOWED by the Rust arm today. The name-resolution precedence must flip as part of W1.3, and that flip is itself a RED gate: define `%capture_type color` in stdlib, assert it wins.
+- The lexer UNITS bag is `fps ms us vmin vmax rem px em vh vw ch fr turn deg rad s m %` — the C7 verdict stands (`m` = minutes, keep).
+
+NOTE [2026-08-02]: W1.0 + W1.1 IMPLEMENTED [2026-07-31]. The demotion landed behind `LexTier`, and the wave's central claim is now MEASURED rather than argued.
+
+* What shipped
+
+`LexTier::{Domain, Kernel}` on `Lexer`, with `Lexer::with_tier(src, tier)` beside `Lexer::new` (which still means Domain, asserted). Four merge sites gated: the number+unit merge, the number+percent merge, the two negative-number variants (`-45deg`, `-50%`), and the hash→COLOR promotion. Nothing else in the lexer changed.
+
+Deliberately a PARAMETER, not a second lexer — so both tiers can be compared on the same input over the real corpus. It is a migration harness with a delete date (W1.3), not a shipped choice, and the doc comment says so.
+
+* C2 SETTLED (it was a prerequisite for goldens, and the answer dissolves the problem)
+
+Probed the e-notation gap: `1e-9` lexes `NUMBER("1") IDENT("e-9")`, `1e3px` → `NUMBER("1") IDENT("e3px")`, `1.5e-3` → `NUMBER("1.5") IDENT("e-3")` — and **every one round-trips**. So e-notation is SPLIT, never lost. `.5` and `-1.5` are already correct. There is no wrong tokenization to enshrine, so the "fix C2 before snapshotting goldens" precondition is discharged without a code change. The only real-world e-notation in the corpus (`1e-9` in stdlib/testing/timing.st) sits inside JS blocks, which pass through as foreign text anyway.
+
+* W1.1 CHANGED SHAPE: parity gate, not committed goldens
+
+The plan called for a token-stream golden taken before the demotion. Rejected in favour of a live parity test, because while both tiers are in one binary the STRONGER question is directly answerable: not "did the stream change since I snapshotted?" but "do the two tiers agree, right now, on every file in the repo?" A golden also rots on any `.st` edit and grows stale silently; the parity test recomputes from source and keeps holding as the corpus grows.
+
+`tests/lexer_tier_parity_test.rs`, 4 tests, green:
+1. `both_tiers_are_byte_lossless_over_the_corpus` — the load-bearing invariant. Demotion may only SPLIT; concatenated text must equal the source at BOTH tiers.
+2. `tiers_differ_only_at_color_and_number_with_unit` — bounds W1.3's migration: handle those two kinds and you have handled the entire delta.
+3. `kernel_tier_demotes_to_grammar_visible_shapes` — pins the demoted shapes.
+4. `domain_tier_still_fuses_exactly_as_before` — proves W1.0 is a pure addition; without it "suites green" would only prove the tests avoid the affected shapes.
+
+* CORPUS INVENTORY (measured, 420 `.st` files across stdlib/demos/examples/tests-fixtures)
+
+- 109 files contain tier-2 tokens; **777 COLOR**, **3708 NUMBER_WITH_UNIT**; roundtrip failures **0**.
+- Units actually used: px 1810 · rem 720 · ms 426 · % 301 · em 131 · s 85 · vw 68 · deg 57 · vh 48 · fr 41 · ch 19 · **m 2**. Unused from the lexer's bag: `fps us vmin vmax turn rad`. C7 verdict CONFIRMED by usage, not just by grep — `m` is live.
+- **Illegal-length hex in the corpus: 0.** The demotion cannot regress an existing page, and the new diagnostic starts from a clean corpus.
+
+* THE GATE CAUGHT A REAL DEFECT ON ITS FIRST RUN (and a design error of mine)
+
+I first made the kernel path re-lex the `#…` remainder so `#123456` would demote to HASH + NUMBER rather than HASH + IDENT — "honest kinds". The parity test failed in 5 files, and the failure taught two things:
+
+1. **COLOR promotion is ALREADY inconsistent at Domain tier.** `color: #6b7280` promotes, but `border-right: 1px solid #232634` does NOT — `solid` is not a recognized value position, so that hex is already HASH + IDENT today. The tier-2 pass does not mean "this is a colour"; it means "this is a colour in one of four syntactic neighbourhoods". Consumers reading COLOR are therefore already seeing a partial view. Worth carrying into W1.3: migrating them is not "replace COLOR with a grammar result", it is "start seeing the colours the lexer was silently missing".
+
+2. My honesty pass widened the tier delta beyond the two fused kinds, destroying the bound test #2 exists to hold. REVERTED. The counted terminal scans BYTES from a token start, so the remainder's kind is irrelevant to matching, and a uniform shape is the easier one to write a grammar against. Reasoning recorded in the test so it is not re-attempted.
+
+* THE PAYOFF, MEASURED
+
+`colour_grammar_matches_only_once_the_lexer_stops_fusing` (in extractors/custom.rs, beside the other counted-class gates) runs the REAL compiled terminals — `LiteralExtractor("#")` then `CharClassExtractor{counts:[3,4,6,8]}` — from source, at a value position, exactly as the form compiler assembles `%capture_type color`:
+
+| source          | Domain | Kernel        |
+|-----------------+--------+---------------|
+| `#fff`          | None   | Some("fff")   |
+| `#fffa`         | None   | Some("fffa")  |
+| `#e8eef7`       | None   | Some("e8eef7")|
+| `#E8EEF7`       | None   | Some("E8EEF7")|
+| `#11223344`     | None   | Some(...)     |
+| `#e8ee1` (5)    | None   | **None**      |
+| `#e8eef71` (7)  | None   | **None**      |
+| `#zz`           | None   | **None**      |
+
+Domain fails EVERYTHING, including the valid colours — which is the blocker, stated as a measurement. Kernel accepts exactly the legal lengths and refuses the rest. Writing the stdlib grammars before the demotion would have produced grammars that compiled, matched nothing, and failed silently in the one position they exist to serve.
+
+* NEXT (W1.2)
+
+Write the grammars in stdlib against Kernel-tier shapes. Note for the implementer: `parse_capture_type` maps "color"/"length"/"duration"/"time"/"easing" to Rust arms BEFORE falling through to Custom, so a stdlib `%capture_type color` is shadowed today. Flipping that precedence is itself the RED gate for W1.2. Grammars must be written as `%capture_type` unions (no `%unit_set`/`%char_class` directives exist, and adding them fails the elegance bar) — `on.st` is the model.
+
+Suites at time of writing: parity 4/4, extractors::custom 50/50, full lib+integration re-running.

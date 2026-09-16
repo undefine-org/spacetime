@@ -1,0 +1,64 @@
+#+TITLE: Design tokens carry a knowable type but are never checked
+#+STATE: ITEM
+#+SESSION_ID: 153f5ed0617636c7
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-26T21-12-46-213Z_153f5ed0617636c7.jsonl]]
+#+CUSTOM_ID: FUP-180-design-tokens-carry-a-knowable-type-but
+
+* Initial Message
+
+focus on where you still stopped short. I want the structural solution that lets us support all of CSS and make our own extensions with full rich type support. please go through what's left and present it in one coherent report, capability- and feature-oriented
+
+* Measured
+
+735 custom-property declarations in the corpus. Probing each value against the
+scalar sentinels gives their real shapes:
+
+  | shape        | count |
+  |--------------+-------|
+  | color        |   367 |
+  | length/%     |   232 |
+  | font-family  |    52 |
+  | duration     |    23 |
+  | easing       |    22 |
+  | other        |    22 |
+  | var()/calc() |    17 |
+
+589 of 735 (80%) are a scalar this compiler ALREADY has a grammar for. All 735
+are exempt, because `validate_declaration_value` returns early on `--`.
+
+** Why the exemption was right, and why it is now wrong
+
+Per spec a custom property accepts any token stream, so there is no CSS-derived
+type to check against — the early return is correct AS CSS.
+
+But these are not arbitrary token streams. They are a DESIGN SYSTEM, and this
+compiler now has a type language for exactly these values (`%scalar_type`). A
+theme's `--bd-coral-deep: #B43E4A` is a colour in every sense that matters to
+the author; only the spec's permissiveness says otherwise.
+
+That is the capability gap: PLAN-122 gave us types for CSS values, and the
+largest body of values in the corpus that WANTS typing cannot be typed.
+
+** The structural answer (not a special case)
+
+A token declares its type once, and the declaration is the schema:
+
+    @tokens Brand {
+      --ink    color;
+      --pad    length;
+      --reveal duration;
+    }
+
+Then `--ink: #e8ee1` is refused by the SAME `capture_type_accepts` that refuses
+`color: #e8ee1`; `var(--ink)` in a colour position is known-good without parsing
+the fallback; and FUP-162 gets the type information it needs to fold safely.
+
+Deliberately NOT inferring type from the first value: inference makes the first
+value written into law, so correcting a token's type becomes a silent behaviour
+change. A declared type is a promise; an inferred one is an accident.
+
+** Depends
+
+Shares the `%scalar_type` join with FEAT-168 and the accept-check with FEAT-166.
+Unblocks FUP-162 (constant-fold derived tokens) and FUP-161 (compile-time WCAG —
+which needs to know which tokens ARE colours).

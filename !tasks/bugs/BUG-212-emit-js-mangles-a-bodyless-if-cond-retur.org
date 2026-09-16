@@ -1,0 +1,174 @@
+#+TITLE: %emit js mangles a bodyless `if (cond) return;` — guard inverts, following statement absorbed, declarations dropped
+#+STATE: DONE
+#+SESSION_ID: 153cb1f969f16d98
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-24T19-20-39-591Z_153cb1f969f16d98.jsonl]]
+#+CUSTOM_ID: BUG-212-emit-js-mangles-a-bodyless-if-cond-retur
+#+PRIORITY: #A
+
+* Initial Message
+
+ok my friend, can you please tell me how you would bring in the most important parts of the automatically-generated Webflow-like interfaces in the workbench (auto-generated editing components with rich inputs by type, and tree structure seeker) into a pill format, similar to the host pill and the migration pill?
+
+Found while implementing PLAN-112 W2 (stdlib/fields). A `%primitive`'s `%emit js` body containing an early-return guard is rewritten into semantically DIFFERENT JavaScript. Silent: no diagnostic, compiles clean, the primitive simply never works.
+
+* Minimal reproduction
+
+Source (`scratch/miniprobe/index.st`):
+
+#+begin_src spacetime
+%primitive mini-guard(&el) {
+  %emit js {
+    const x = %&el.querySelector('.q');
+    if (!x) return;
+    const f = () => { x.dataset.hit = '1'; };
+    x.addEventListener('input', f);
+  }
+}
+%macro mini-guard { %form { @mini-guard() } %binds { mini-guard(&self) } }
+body { <div class="m"><input class="q"></div> }
+.m { @mini-guard; }
+#+end_src
+
+Emitted (`cargo run -- build scratch/miniprobe/`):
+
+#+begin_src js
+  const x = el.querySelector('.q');
+  if (!x) {
+    x.dataset.hit = '1';
+  }
+  ;
+  x.addEventListener('input', f);
+#+end_src
+
+* What went wrong (three distinct corruptions in one statement)
+
+1. `return` is DELETED from the guard.
+2. The guard becomes a BLOCK that absorbs the body of the NEXT statement — so the logic inverts: work that must happen when `x` EXISTS now runs only when it is MISSING (and dereferences the very thing just proven absent → TypeError).
+3. `const f = () => {...}` is dropped entirely; the following `addEventListener('input', f)` then references an undeclared `f` (ReferenceError / silently binds undefined).
+
+* Impact
+
+Any primitive using the ordinary `if (!thing) return;` early-guard idiom is silently broken. Discovered because `stdlib/fields`'s `field-range-control` never fired: sliders rendered but composed no value. Its sibling `field-color-control` — same file, same shape, but written WITHOUT an early return — emits correctly, which is what isolated the trigger.
+
+This is a correctness hazard well beyond this one module: the emitted code is not merely wrong, it is wrong in a way that reads plausibly in review (the guard is still "there").
+
+* Not the cause
+
+- Not the macro bridge: with `%macro` wiring correct, the color control works and the range control does not.
+- Not test-harness flakiness: reproduced in a plain `cargo run -- build`, no tests involved.
+- Not `%cleanup`: the minimal repro above has none.
+
+* Workaround in use (PLAN-112 W2)
+
+Write the guard as a positive-condition block instead of an early return:
+`if (x) { ...everything... }`. `stdlib/fields/primitives/field-value.st` uses this shape and emits correctly.
+
+* Suspected area
+
+The `%emit js` body reformatter/brace-reconstructor (a bodyless `if` followed by a statement is being re-braced by joining the two). Look at how emitted primitive bodies are re-indented/re-braced rather than passed through verbatim.
+
+* Acceptance
+
+- The minimal repro emits JS semantically identical to its source (guard keeps its `return`, no statement absorption, no dropped declarations).
+- A regression test at the emit level asserting a bodyless `if (…) return;` round-trips.
+- Re-audit existing `%emit js` bodies for the same idiom (grep `) return;` under stdlib/) — any hit is a live silent bug.
+
+* TRIGGER NARROWED (empirical, four-way differential)
+
+The corruption needs BOTH halves. Built each variant with `cargo run -- build` and read the emitted JS:
+
+| # | source shape | emitted | verdict |
+|---|---|---|---|
+| 1 | `if (!x) return;` + plain statement | `if (!x) return;` preserved | ✓ CORRECT |
+| 2 | `if (!x) return;` + `const v = 5;` + statement | preserved | ✓ CORRECT |
+| 3 | `if (!x) { return; }` (BRACED) + arrow decl | `if (!x) { return; }` preserved | ✓ CORRECT |
+| 4 | `if (!x) return;` (BODYLESS) + `const f = () => {...};` | guard becomes a block absorbing the arrow's BODY; `return` deleted; `const f` dropped | ✗ CORRUPT |
+
+∴ trigger = **bodyless `if (…) return;` immediately followed by an arrow-function declaration**. The reformatter appears to treat the arrow's `{ … }` as the missing body of the preceding bodyless `if`, splicing them and discarding both the `return` and the `const f =` binding.
+
+This explains why the 205 existing `) return;` occurrences across stdlib are mostly SAFE: they are followed by ordinary statements (variant 1/2), not by an arrow declaration. The exposure is real but narrow — audit should target `) return;` whose NEXT statement declares an arrow function, not every early return.
+
+Audit command:
+#+begin_src sh
+grep -rn -A 1 ") return;" --include=*.st stdlib/ | grep -B 1 "=> {"
+#+end_src
+
+* Two fixes needed
+
+1. The reformatter must not absorb a following statement into a bodyless `if`. (Root cause.)
+2. Until then: braced guards (`if (!x) { return; }`) are safe and are the recommended shape in `%emit js`.
+
+* SCOPE FINALIZED — top level of the `%emit js` body only
+
+Two further differentials:
+
+| # | source shape | emitted | verdict |
+|---|---|---|---|
+| 5 | the SAME corrupting pair nested inside an arrow (`const outer = () => { … if (!x) return; const f = () => {…}; … };`) | preserved verbatim, correct indentation | ✓ CORRECT |
+| 6 | shipped `stdlib/primitives/data/each-inline.st:255` (`applyFilter` — bodyless return followed by `items.forEach((el) => {`), built through a real `@each(… when …)` page | preserved | ✓ CORRECT |
+
+∴ the corruption requires the bodyless `if (…) return;` + arrow-declaration pair to sit at the **TOP LEVEL of the `%emit js` body** — i.e. in the statements spliced directly into the generated `init(el)` function. Nested arrow scopes pass through untouched.
+
+** Live exposure: NONE in shipped stdlib
+
+The audit's only other hit (`each-inline.st:255`) is nested inside `const applyFilter = () => {…}`, so it is variant 5 and emits correctly — verified against the real emitted bundle of an `@each … when` page, not by inspection. `stdlib/fields` was the sole affected site and is fixed by using a positive-condition guard.
+
+So this is a latent trap rather than an active outage: it will silently corrupt the NEXT primitive someone writes with a top-level early-return guard. That is exactly the shape a competent JS author reaches for first, and the failure is invisible in review because the guard still "looks" present in the source.
+
+** Recommended fix priority
+
+Still #A despite zero current outage: the failure mode is silent, plausible-looking, and the corrupted output dereferences the pointer the guard just proved null. A compile-time diagnostic would be an acceptable interim if the reformatter fix is deep.
+
+* ROOT CAUSE LOCATED (independent review, W2R)
+
+`src/emit/js_parser.rs`:
+- `convert_segments_to_ir` (:301-321) classifies a top-level chunk that begins with a control-flow keyword and routes it to `try_parse_if`.
+- `try_parse_if` (:620-627) delegates to `extract_cond_and_body` (:631-700), which searches FORWARD for a brace after the condition. It models only BRACED bodies.
+- ⇒ for a bodyless `if (…) return;` the scan runs past the `return;` and adopts the NEXT `{` it finds — which, when the following statement is an arrow declaration, is the ARROW'S body. That single mis-association produces all three observed corruptions at once (guard re-braced around foreign code, `return` dropped, `const f =` binding lost).
+
+Why nested occurrences are safe: a nested pair is already inside a declaration/arrow statement, collected by `try_parse_statement` at non-zero brace depth, and never re-classified as a top-level `if`. This confirms the empirical four-way differential above from the parser side.
+
+** Concrete fix
+
+In `extract_cond_and_body`, require the `{` to appear IMMEDIATELY after the condition (skipping only whitespace/comments). When it does not, the `if` is bodyless: consume the single following statement as its body (or emit the guard verbatim). Never scan forward past a statement terminator for a brace.
+
+** Test to add (emit level)
+
+Round-trip a `%emit js` body containing a top-level bodyless `if (…) return;` followed by, in turn: a `const`/`let`/`var` arrow declaration, a plain statement, and a nested block — asserting the emitted JS is semantically identical to the source in each case. No such regression test exists today (searched).
+
+* RESOLVED (2026-07-25, PLAN-113 W1.2)
+
+Root cause was exactly where the item predicted: `extract_cond_and_body`
+(`src/emit/js_parser.rs`), the `BetweenParenBrace` phase. It skipped every
+character after the condition's `)` until it found a `{` ANYWHERE ahead, so for a
+bodyless `if` it discarded the intervening statement text and adopted the NEXT
+brace in the file as the if's body. One skip, three corruptions.
+
+Fix: in that phase, only whitespace may precede the `{`. A non-brace token means
+the `if` is bodyless, and the function returns `None` — the caller then passes the
+statement through verbatim, which is correct since the source is already valid JS
+and needs no restructuring.
+
+** Verified
+
+The item's minimal repro now emits JS identical to its source (guard keeps its
+`return`, arrow declaration survives, nothing absorbed). 4 tests in
+`tests/bug_212_bodyless_if_guard_test.rs` cover the reported case plus the three
+shapes that must NOT change: a braced `if`, a bodyless `if` with a plain
+statement, and a brace on the line after the condition. Sabotage-verified —
+restoring the skip fails both bodyless tests and leaves the braced ones green,
+which is the correct discrimination.
+
+** Audit re-run
+
+`grep -rn -A 1 ") return;" --include=*.st stdlib/ | grep -B 1 "=> {"` returns
+ONE hit, `each-inline.st:319`, which is nested inside `const applyFilter = () => {…}`
+(variant 5) and always emitted correctly. Live exposure remains zero, as recorded.
+
+** Workaround notes updated
+
+The positive-condition guard style is no longer REQUIRED. The three files carrying
+that instruction — `stdlib/fields/primitives/field-value.st`,
+`stdlib/__inspector__/primitives/inspect-write.st`, `inspect-data-write.st` — now
+say the constraint is lifted and the style is a preference. A stale "do not write X"
+note is its own trap.

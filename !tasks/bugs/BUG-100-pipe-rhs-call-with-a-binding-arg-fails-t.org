@@ -1,0 +1,23 @@
+#+TITLE: Pipe RHS call with a $binding arg fails to parse in @data derive balanced expr
+#+STATE: ITEM
+#+SESSION_ID: 14fc108ed3772fa8
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-04T14-32-37-965Z_14fc108ed3772fa8.jsonl]]
+#+CUSTOM_ID: BUG-100-pipe-rhs-call-with-a-binding-arg-fails-t
+
+* Initial Message
+
+can you check how that looks like in the admin? Can you compare that with stuff that is present in Framer/online/in mockups? I want it to look good please
+
+Found during FEAT-108. In a `@data derive $x : <expr>;` the value is captured via $value:balanced(';'). A pipe whose RHS is a function CALL containing a $binding argument fails to parse:
+
+FAIL: @data derive $a : $brand.surface | mix($brand.scarlet, 0.06);
+      → "expected '{' after selector" at the $brand inside mix(...)
+OK:   @data derive $a : $brand.surface | mix("#FF0020", 0.06);   (literal arg)
+OK:   @data derive $a : $brand.scarlet | darken(0.12);           (no $ in call)
+OK:   @data derive $a : mix($brand.surface, $brand.scarlet, 0.06); (fn-call form, no pipe)
+
+So the trigger is specifically: pipe operator + RHS call + a $binding inside the call's arg list. Likely the balanced(';') terminal or the directive-grammar lookahead mis-reads the `$brand.x` inside the piped call as a new selector/binding start (the "expected { after selector" suggests the $binding is being treated as a scope head). darken(0.12) works because no $ in the call; the bare fn-call mix($a,$b,c) works because no pipe.
+
+IMPACT: low — the fn-call form is an equivalent workaround (FEAT-108 testbed uses mix($brand.surface, $brand.scarlet, 0.06)). But the pipe should compose uniformly.
+
+FIX: trace balanced(';') capture + how the events/CST grammar handles a $binding after a top-level `|` in a directive value. Both parsers (CST + events) per the two-parser rule. Add a derive-with-piped-binding-call parse test.

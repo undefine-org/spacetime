@@ -1,0 +1,104 @@
+#+TITLE: A `&template(...)` invocation written in markup becomes literal page text — silently
+#+STATE: DONE
+#+PRIORITY: #A
+#+CATEGORY: BUG
+#+CUSTOM_ID: BUG-344
+
+* Symptom
+
+Write a template invocation where the pattern should appear:
+
+: <div class="frame">
+:   &showcase-hero-minimal("Title", "Subtitle", "Start")
+: </div>
+
+The build reports success. The page renders:
+
+: <div class="frame">
+:   &amp;showcase-hero-minimal("Title", "Subtitle", "Start")
+: </div>
+
+The invocation is HTML-escaped and shipped as body copy. No diagnostic, no
+warning, `Pages: 1`, exit 0. A whole gallery of ten patterns produced ten lines
+of escaped source text and reported a clean build.
+
+* The correct spelling
+
+A template invocation is a DIRECTIVE, so like every other directive it binds
+through a selector, never through nesting (the same rule `@each` enforces
+loudly — "directive `@each` cannot be nested inside HTML markup"):
+
+: <div class="frame slot--hero-minimal"></div>
+: .slot--hero-minimal { &showcase-hero-minimal("Title", "Subtitle", "Start"); }
+
+That renders the real element. `examples/cart-demo/index.st:69` uses this shape
+inside `@each`, which is the only place in the repo a template is invoked.
+
+* The defect
+
+`@each` in markup REFUSES with a clear diagnostic naming the rule. A template
+invocation in markup accepts and silently degrades to text. Same rule, same
+mistake, opposite behavior — so the language teaches the rule in one surface
+and hides it in the other. That asymmetry is the bug: "knowing one thing should
+tell you the next" (AGENTS), and here knowing `@each` tells you nothing,
+because the failure is invisible.
+
+Worse, it is invisible to TESTS too. A gate asserting `html.contains(
+"showcase-hero-min")` PASSES on the escaped text of a pattern that never
+rendered — the class name appears in the invocation's own source. I wrote
+exactly that gate, watched it go green, and only caught it because a second
+pattern was missing for an unrelated reason. Any string-level assertion about
+rendered markup is defeated by this bug.
+
+* Acceptance
+
+1. `&name(...)` appearing in an HTML markup context is REFUSED with a
+   diagnostic in the shape `@each` already uses — name the invocation, state
+   that a directive binds through a selector, and show the selector-block
+   spelling. Do not render it as text.
+2. The diagnostic fires for an invocation of a DECLARED template and for an
+   unknown name alike (an unknown `&foo(...)` in markup is equally silent
+   today).
+3. A gate that puts an invocation in markup and asserts the refusal, plus one
+   asserting the selector-block form renders the element. RED-check both.
+4. Consider: `&name` with no parens is legitimate literal text in some
+   contexts. Scope the refusal to a call shape `&ident(` so prose is untouched.
+
+* Notes
+
+Found building demos/showcase-gallery — the first page in the repo to
+instantiate the stdlib showcase patterns at all. The gallery now uses the
+selector-block form and asserts `!html.contains("&amp;showcase-")` so this
+class of silence cannot come back unnoticed on that page.
+
+Related: BUG-343 (templates invisible to `@data forms`). Same root theme — the
+template surface is under-served compared to `@form`.
+
+** NOTE FIXED (PLAN-144 W1, commit 087d42dc)
+Settled as option C, in full: the HOLE FORM NOW EXPANDS A COMPONENT. `` ` ``
+keeps one meaning — interpolate the thing named here — so a value hole
+interpolates a value and a component hole interpolates a component.
+
+Cheaper than expected: `parse_hole_inner` already re-parsed a hole as a full
+expression emitting ELEMENT_REF. The hole then reached `emit_text_hole`, which
+treats every hole as a SIGNAL expression, evaluated the call to nothing, and
+emitted `<span data-st-hole="N"></span>`. `expand_component_holes` runs on the
+skeleton before that, reusing `render_static_template` — the same renderer the
+selector path uses. One expansion path, two spellings.
+
+Markup and file-scope calls now refuse, mirroring the `@each`-in-markup
+diagnostic (same site, same E0900, same wording). Scoped strictly to `&ident(`
+so a bare `&name` score subject is untouched — gated first, since a refusal that
+caught bare names would silently kill the motion hero.
+
+WORSE THAN FILED: an orphan call at file scope does not merely vanish, it
+SWALLOWS THE REST OF THE FILE — the CST shows it taking the following markup AND
+the next rule as its own selector and body. A selector containing `<` is the
+tell, and now the refusal.
+
+Gates: tests/bug_344_component_hole_test.rs (6), RED-checked 2/6 (the 2 passing
+were the deliberate controls).
+
+Known boundary: a DYNAMIC name (`` `&$row.name("a")` ``) still renders
+literally — the pass resolves a literal `&name(` only. Documented in
+demos/showcase-gallery/README.md.

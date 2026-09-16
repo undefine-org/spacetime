@@ -1,0 +1,48 @@
+#+TITLE: @style/@media/@supports/@keyframes bodies bypass every value check
+#+STATE: ITEM
+#+SESSION_ID: 153f5ed0617636c7
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-26T21-12-46-213Z_153f5ed0617636c7.jsonl]]
+#+CUSTOM_ID: FUP-179-style-media-supports-keyframes-bodies-by
+
+* Initial Message
+
+focus on where you still stopped short. I want the structural solution that lets us support all of CSS and make our own extensions with full rich type support. please go through what's left and present it in one coherent report, capability- and feature-oriented
+
+* Measured
+
+  `.a { color: #e8ee1; }`            file scope -> E0958  ✓
+  `.a { color: red; .b { ... } }`    nested     -> E0958  ✓
+  `@style { .a { color: #e8ee1; } }` in a block -> SILENT ✗
+
+Same bytes, same property, same malformed colour. Whether it is refused depends
+on which BLOCK it sits in. That is the two-answers-for-one-question shape this
+arc exists to delete, and I shipped a validator with it.
+
+** Why
+
+`@style`/`@media`/`@supports`/`@keyframes` bodies are captured as
+`RawCssBlock { source: String, span }` (src/parser/ast.rs:215), pushed at
+src/parser/mod.rs:738 and :1090. They are never lowered to `CssDeclaration`, so
+`declaration_value_diagnostics` — which walks `scope.css_declarations` and
+`nested_scopes` — cannot see them. Nothing is broken; the values never arrive.
+
+** Blast radius
+
+535 declarations across 111 files (2.5% of 21,203 corpus declarations).
+
+Small in share, but `@media` is where responsive overrides live: a malformed
+value inside one is a rule that silently does nothing at ONE breakpoint, which
+is the hardest class of visual bug to catch by eye.
+
+** Fix
+
+Parse a `RawCssBlock`'s source into declarations and run the SAME
+`validate_declaration_value` over them, offsetting each span by the block's
+`span.start` so the diagnostic points at the value, not the block. No new rule,
+no second implementation — the existing rule reaching text it cannot see.
+
+** Acceptance
+
+RED first: `@style { .a { color: #e8ee1; } }` must produce E0958 at the value's
+range, and the file-scope and nested forms must keep producing exactly ONE each
+(no double-report once both paths see the same declaration).

@@ -1,0 +1,171 @@
+#+TITLE: Fix EditAst subfolder rejection by emitting workspace-relative data-st-origin
+#+STATE: DONE
+#+SESSION_ID: 14d059b2d0d17c1f
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-05-01T15-39-01-315Z_14d059b2d0d17c1f.jsonl]]
+#+CUSTOM_ID: PLAN-022-fix-editast-subfolder-rejection-by-emitt
+#+EFFORT: S
+#+LAYER: compiler
+#+PRIORITY: #A
+
+* Initial Message
+
+sync] Received EditAst for _work.st
+[sync] EditAst for _work.st: rejected — File not found: _work.st
+[sync] Received EditAst for _work.st
+[sync] EditAst for _work.st: rejected — File not found: _work.st
+
+
+i think EditAst has a bug with files that are in subfolders thank you
+
+[[id:BUG-024-fix-data-st-origin-stripping-subfolder-p]]
+
+* Context
+
+User-visible symptom (verbatim from dev server log):
+
+#+begin_example
+[sync] Received EditAst for _work.st
+[sync] EditAst for _work.st: rejected — File not found: _work.st
+#+end_example
+
+The user's hypothesis is correct: =EditAst= breaks for =.st= files in subfolders. The =_work.st= source actually lives at =projects/<name>/modules/_work.st=, but the dev panel sends just the basename because that's what the compiler stamped into the =data-st-origin= attribute.
+
+** Root cause (single line)
+
+=src/syntax/form_match.rs::inject_provenance_into_matches:1401= calls =extract_filename(source_file_raw)=, which discards the directory component. The dev panel forwards that flattened value as =EditAst.file=, and =src/sync/handlers.rs::validate_file_path:124= cannot resolve a basename when the file is in a subdirectory.
+
+** Why this is a one-line semantic change with three-line surface area
+
+The compiler already has =workspace_root: &Path= available at the call site (=src/compiler.rs::Compiler::from_file:270=). The pipeline just doesn't thread it through =inject_provenance_into_matches=. The HTML provenance pass (=inject_content_provenance=) already takes a relative path from its callers (=src/server.rs:607,712,844,1071,1187=) and works correctly for subfolder HTML files. We are bringing the =.st= flow in line.
+
+** Why not "fix on the server"
+
+- Searching =site_dir= for any file matching =_work.st= is ambiguous (two repos already have =projects/unkn/modules/_work.st= AND =projects/undefine.org/modules/_work.st=).
+- The dev-panel JS in =stdlib/__dev__= cannot reconstruct a relative path either; it only sees =data-st-origin=.
+- Compile-time emission is the single source of truth.
+
+** Affected and unaffected flows
+
+| Flow | File set in EditAst.file | Source | Affected? |
+| Inline content edit (data-t locale) | =locales/<lang>.json= | =stdlib/__dev__/primitives/dev-editable.st:60= | ✗ already correct |
+| Inline content edit (=.st= templates) | from =data-st-origin= | =src/syntax/form_match.rs::inject_provenance_into_matches= | ✓ THE BUG |
+| Inline content edit (HTML) | from =data-st-origin= | =src/server.rs::inject_content_provenance= caller | ✗ already correct (callers pass URL path) |
+| Animation property edit (=@scroll= duration etc.) | =prop.source_file= | =src/sync/handlers.rs::handle_inspect_element:1177= via =strip_prefix(site_dir)= | ✗ already correct |
+
+Only one flow needs to change.
+
+* Verification
+
+Run from repo root, in order:
+
+1. =cargo build= — debug build succeeds.
+2. =cargo build --release= — release build succeeds (proves =#[cfg(not(debug_assertions))]= stub signature stayed in sync).
+3. =cargo test --lib= — all unit tests pass; specifically =src/syntax/form_match.rs::tests=:
+   - new =test_inject_provenance_subfolder_relative_path_preserved=
+   - new =test_inject_provenance_outside_workspace_falls_back_to_filename=
+   - new =test_inject_provenance_canonicalizes_when_workspace_relative=
+   - updated =test_inject_provenance_into_matches_pass=
+   - unchanged =test_inject_provenance_skips_non_template= (with arg added)
+4. =cargo test --test integration_tests= — all integration tests pass; specifically:
+   - updated =tests/integration/provenance_tests.rs= (3 tests, all =inject_provenance_into_matches= calls take new =workspace_root= arg)
+   - new =tests/integration/edit_ast_subfolder_roundtrip.rs= (or =subfolder_edit_protocol_test.rs= as a downgraded protocol-only test)
+5. Manual smoke against =cargo run -- serve projects/unkn/=:
+   - Pick a page rendered from a template defined in =modules/_work.st=.
+   - Inspect a text element; confirm =data-st-origin= now contains =modules/_work.st::= (not =_work.st::=).
+   - Edit that element inline via the dev panel.
+   - Confirm the server log shows =Ack= (no =File not found= line) and =projects/unkn/modules/_work.st= on disk has been updated.
+6. Regression smoke: edit a text element rendered from a top-level =index.st= and confirm it still works (its origin reads =index.st::=).
+
+* Execution Manifest
+
+** Wave 1 — TDD failing tests
+:PROPERTIES:
+:wave: 1
+:END:
+
+- [[id:BUG-024-fix-data-st-origin-stripping-subfolder-p::failing-tests][BUG-024::failing-tests]] — Add the three new unit tests in =src/syntax/form_match.rs= and the new integration test (or its protocol-only downgrade) in =tests/integration/edit_ast_subfolder_roundtrip.rs=. All four cases MUST fail against the unmodified compiler (compile-time signature mismatch is fine; the helpful failures are the assertion failures once the signature update lands without the path-rewrite logic).
+
+** Wave 2 — Implementation
+:PROPERTIES:
+:wave: 2
+:END:
+
+- [[id:BUG-024-fix-data-st-origin-stripping-subfolder-p::update-injection-fn][BUG-024::update-injection-fn]] — Add =workspace_root: &Path= argument to both the debug and release variants of =inject_provenance_into_matches= in =src/syntax/form_match.rs=; add the private =workspace_relative_path= helper that prefers canonical-prefix stripping and falls back to =extract_filename=. Keep =extract_filename=.
+- [[id:BUG-024-fix-data-st-origin-stripping-subfolder-p::update-call-site][BUG-024::update-call-site]] — Pass =workspace_root= at =src/compiler.rs:296=. Single line change.
+
+** Wave 3 — Migrate existing tests
+:PROPERTIES:
+:wave: 3
+:END:
+
+- [[id:BUG-024-fix-data-st-origin-stripping-subfolder-p::update-existing-tests][BUG-024::update-existing-tests]] — Update =src/syntax/form_match.rs::tests::test_inject_provenance_into_matches_pass=, =test_inject_provenance_skips_non_template=, and the three integration tests in =tests/integration/provenance_tests.rs= (=test_template_provenance_injected_in_debug=, =test_template_provenance_no_op_in_release=, =test_template_instances_share_same_origin=) to pass the new =workspace_root= argument. Use a tempdir as workspace_root and place the test source files at the workspace root so existing assertions about origin format still hold.
+
+** Wave 4 — Verify
+:PROPERTIES:
+:wave: 4
+:END:
+
+- [[id:BUG-024-fix-data-st-origin-stripping-subfolder-p::verify][BUG-024::verify]] — Run the verification commands listed above and capture the manual smoke results.
+
+** File-level DAG
+
+#+begin_src
+[BUG-024 (this work item, single file)]
+#+end_src
+
+This bug is implemented entirely within a single =BUG-024= item that owns sub-outlines. There is no inter-item file DAG.
+
+** Subfeature-level DAG
+
+#+begin_src
+failing-tests
+    └── update-injection-fn
+            └── update-call-site
+                    └── update-existing-tests
+                            └── verify
+#+end_src
+
+Strictly linear: each wave depends on the previous. Failing tests land first (TDD); the injection function gains the =workspace_root= parameter; the compiler call site fills it in; existing tests are migrated to the new signature; verification gates the result.
+
+* Files Touched (summary)
+
+- =src/syntax/form_match.rs= — signature + helper + unit tests.
+- =src/compiler.rs= — single-line call-site update.
+- =tests/integration/provenance_tests.rs= — three test signature updates.
+- =tests/integration/edit_ast_subfolder_roundtrip.rs= — NEW (or downgraded =subfolder_edit_protocol_test.rs= protocol-only).
+
+* Out-of-Scope Notes
+
+- =stdlib/__dev__= JS sample fixtures (=dev-content-edit.test.st=, =dev-content-propagation.test.st=) hard-code =card.st::= origin samples; their JS parser logic (=indexOf('::')=) is unchanged by this fix and they remain valid.
+- Windows path separators in =data-st-origin= are not actively tested by this work; record as a follow-up if a Windows user reports issues.
+- =metasystem/registry.rs= =source_file= assignments to macro definitions are untouched; those paths flow through the inspect-element flow which is already correct.
+
+** Completion [2026-05-01]
+
+*** Implementation Summary
+- Added workspace_root: &Path parameter to inject_provenance_into_matches (debug + release variants)
+- Added workspace_relative_path() helper that computes relative paths via strip_prefix with canonicalize tolerance
+- Updated compiler.rs:296 call site to pass workspace_root through
+- Kept extract_filename() as fallback for outside-workspace paths
+- Return type changed from &str to String to accommodate canonicalize-allocated paths
+
+*** Verification
+- cargo build: ✓ debug build succeeds
+- cargo build --release: ✓ release build succeeds (no-op variant signature matches)
+- cargo test --lib: 2002 passed, 1 pre-existing insta snapshot failure, 0 regressions
+- cargo test --test integration_tests: 123 passed, 1 pre-existing light primitive failure, 0 regressions
+- New unit tests: 3 new (all pass), 2 existing updated (all pass)
+- New integration test: 1 new (passes), 3 existing updated (all pass)
+- cargo run -- check projects/unkn/: ✓ all 30 files pass including subfolder imports
+
+*** Files Changed
+- src/syntax/form_match.rs: +workspace_relative_path helper, updated signatures, new/updated tests
+- src/compiler.rs: 1-line call site update
+- tests/integration/provenance_tests.rs: updated 3 existing tests + 1 new test
+
+*** Pre-existing Failures (unrelated to this change)
+- compiler::snapshot_tests::snapshot_data_directive — insta snapshot mismatch
+- integration::responsive_nested_directives::light_with_nested_loop_emits_guarded_js — Primitive not found: light
+
+*** Child Items
+- [[id:BUG-024-fix-data-st-origin-stripping-subfolder-p][BUG-024]] — DONE

@@ -1,0 +1,49 @@
+#+TITLE: CSS emitter drops @media blocks — no breakpoint responsiveness
+#+STATE: DONE
+#+SESSION_ID: 15052f2e47ce81ee
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-11T16-32-45-343Z_15052f2e47ce81ee.jsonl]]
+#+CUSTOM_ID: BUG-087-css-emitter-drops-media-blocks-no-breakp
+#+COMPLETION_HASH: 034a9b798b5c023e
+
+* Initial Message
+
+my dude, I want you to make a modular project in projects/backdesk-hospitality that follows the rough COPY of ~/code/ora/highlead/clients/backdesk-hospitality (JUST THE COPY), and then you make a FUCKING AMAZING mobile-ready landing page for our campaign, in French, that leverages the latest Spacetime features and has a really cool admin interface-ready code organisation and is super well modularised (not the _*.st bullshit you had before, I want you to use this as a testing ground for Spacetime as a fully fledged language and whatnot).
+
+You need to go through design inspirations. Please write a set of design specs in projects/backdesk-hospitality/design/ that cites specific WOW award-winning showcases from awwwards.com and other sources, that you have carefully studied for both the visual and the lead experience and the convertion potential. You'll include puppeteer screenshots in your research and explain all the facets that you intend on using from them for the backdesk hospitality website, and your reasoning and taste for why you went in a certain way. Then you'll show me how you will turn this in to a consistent experience with a clear CTA and quick form (we'll worry about hoking the form to a live server later, right now I want copy + style + experience)
+
+* Symptom
+`.st` `@media(...)` blocks do not appear in the compiled `/__spacetime/styles.css`.
+Verified: backdesk-hospitality authored ~15 `@media (max-width: …)` blocks → compiled CSS contains ZERO `@media` rules (`grep -c @media` = 0). Confirmed environment-wide: serving projects/unkn (which uses `@media("max-width: 800px")` extensively) ALSO yields 0 `@media` in compiled CSS. A standing code comment in projects/unkn/modules/_about-trusted.st line 134 says: "Spacetime's CSS emitter does not yet emit @keyframes or @media blocks."
+
+* Impact
+Breakpoint-based responsive layout is impossible. Any `.st` page that uses `@media` for layout changes (grid → single column on mobile, hiding desktop nav, showing a mobile menu, sticky mobile CTA gated by width) will render its DESKTOP layout at every width. For a "mobile-first" site this is severe.
+
+* Two syntaxes seen in the wild, neither emits:
+- `@media (max-width: 800px) { … }`  (standard CSS form)
+- `@media("max-width: 800px") { … }`  (parenthesized-string form, used by unkn)
+Both are dropped.
+
+* Root cause (hypothesis)
+The CSS lowering/emitter has no arm for at-rule blocks (`@media`, `@keyframes`) — selectors/decls inside an at-rule are parsed but the wrapping at-rule is not serialized, so the inner rules are either dropped or hoisted without their condition. (Same family as the missing `@keyframes` emission noted in the same comment.)
+
+* Required fix
+CSS emitter must serialize `@media(<query>) { <rules> }` (and `@keyframes`) to the output stylesheet, preserving the condition and nested rules. Accept both the standard `@media (…)` and the `@media("…")` parenthesized-string forms (normalise to standard CSS).
+
+* Workaround (project standard until fixed)
+Use INTRINSIC responsiveness — no breakpoints:
+- fluid type/space via `clamp(min, vw, max)`
+- wrapping rows via `flex-wrap: wrap` + `flex: 1 1 <basis>`
+- collapsing grids via `grid-template-columns: repeat(auto-fit, minmax(<min>, 1fr))`
+- two-up → one-up via `minmax(min(100%, <Xrem>), 1fr)` so a column that can't fit wraps
+- avoid width-gated show/hide (e.g. desktop nav vs mobile menu) — prefer layouts that reflow.
+backdesk-hospitality is being converted from `@media` collapses to this intrinsic model.
+
+* Acceptance
+- Authoring a `@media (max-width: 760px){ … }` in a `.st` produces a matching `@media` block in compiled CSS, and the rule applies at that width in a real browser.
+- backdesk-hospitality hero/night/demo/parcours/langues grids collapse to one column on a 390px viewport.
+
+* Refs
+- projects/unkn/modules/_about-trusted.st:134 (the standing limitation note)
+- BUG-086 (sibling: motion appliers) — same "emitter half-implements a construct" family
+
+NOTE [2026-06-12]: FIXED (commit 8548b21f). Root cause: CST->StFile conversion (cst_to_stfile in src/parser/mod.rs) had no arm for @media/@supports/@keyframes top-level directives — they hit catch-all `_ =>` and were dropped. Fix: new StFile.raw_css_blocks field; capture directive.syntax().text() verbatim; normalize_raw_css_at_rule() converts @media("q") string form -> @media (q); propagate through BOTH import mergers (parser::merge_ast AND loader); append after base CSS (breakpoints win cascade). Verified in real browser: 1365px->base (red/48px), 390px->@media applies (blue/16px). Regression tests: authored_media_block_emits_to_stylesheet, authored_media_string_form_normalized. NB: related to BUG-039/BUG-057 (@media-with-styles emits JS matchMedia) — that's a different code path (styles inside @media at selector scope); this fixes plain authored @media blocks.

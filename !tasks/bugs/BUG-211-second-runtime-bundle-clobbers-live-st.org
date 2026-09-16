@@ -1,0 +1,56 @@
+#+TITLE: BUG-211 — Second runtime bundle clobbers live ST registries (freezes all animations)
+
+* BUG-211 second runtime bundle clobbers live ST registries
+:PROPERTIES:
+:CUSTOM_ID: BUG-211
+:STATE: DONE
+:END:
+
+** Symptom
+
+On any dev-served page, every =@on visible= reveal and =@scroll= scrub freezes
+mid-flight (elements stuck at opacity ~0.3–0.7, `--st-*` vars stop at
+intermediate values). Reproduced on projects/backdesk-new AND the previously
+verified projects/backdesk-v2 — site code not at fault.
+
+** Root cause
+
+The dev server injects THREE full runtime bundles per page:
+=/__spacetime/runtime.js?entry=index.st=, then =migrations/runtime.js=, then
+=host/runtime.js= (each embeds the whole =public/runtime/*.js= prelude).
+
+=st.js= is idempotent for =_dataRegistry= / =_selectorInitializers= (BUG-069
+comment) but NOT for the other stateful registries. Each later bundle re-ran:
+
+- =ST.signals = new WeakMap()= → every element's signal store + watcher set
+  (the =d= dependency sets driving =applyStyle=) orphaned. In-flight
+  animations kept calling =ST.set= into the NEW store; the OLD watchers that
+  write inline styles never fire again → freeze.
+- =ST._raf = { … }= → live coordinator replaced; its callbacks Set lost
+  (observed: =running:false, cbs:0= while animations mid-flight).
+- Same class: =cleanups=, =_bridgedExports=, =_cleanup=, =timelines=,
+  =_clock=, =_purity=, =_colorUtils=, =_timing=, =_rung=, =_portalStack=,
+  =_adBrandTimers=, =_adMotionTimers=, =_adRelCache=.
+
+Trigger evidence: instrumented =ST._raf.stop= — the fatal stop arrives from
+=host/runtime.js:3026= (its raf re-registration path) while page animations run.
+
+** Fix
+
+=X || fallback= guards on every stateful registry across
+=public/runtime/{st,raf-coordinator,timelines,purity,color}.js= — same doctrine
+as the existing BUG-069 =_dataRegistry= guard. Pure function definitions stay
+last-writer-wins (harmless, identical code).
+
+** Test-suite fallout fixed alongside
+
+- =feat074_view_emits_reactive_mount= asserted the RETIRED
+  =document.addEventListener('local:'+sigHead+':updated')= wire; dispatch
+  switched to =ST.watchScoped= (FUP-094 watch-mirrors-resolve, commit
+  b77149cb). Assertion updated to the current contract.
+
+** Verification
+
+- backdesk-new + backdesk-v2: all reveals settle at opacity 1; scrub publishes
+  0→1 (=--st-bnrun= 0.5 at mid-track); scroll-spy nav theming works.
+- =cargo test --lib= 2733 ✓ · =integration_tests= 191 ✓ · =v8_runtime_test= 437 ✓.

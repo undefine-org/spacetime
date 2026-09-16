@@ -1,0 +1,53 @@
+#+TITLE: Reactive-output W2 polish — alias, ws transport, policy, host runtime, scoped sums
+#+STATE: DONE
+#+SESSION_ID: 1507711255a45786
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-13T10-37-35-958Z_1507711255a45786.jsonl]]
+#+CUSTOM_ID: FUP-081-reactive-output-w2-polish-alias-ws-trans
+#+COMPLETION_HASH: e5cf226593952e32
+
+* Initial Message
+
+receive AddResult { }             │ sum named (current — unchanged) 
+
+This is confusing because maybe we're actually saying `receive Response` without the `AddResult`? Either remove that or make `receive Response` the thing... what's your take on this?
+
+* Parent
+[[id:FEAT-110-signal-core-reactive-output-post-emit-th]] — PLAN-038 W1 follow-ups
+(smaller polish items; FUP-080 is the big decode-codegen one).
+
+* Items (each independent)
+1. ENVELOPE ALIAS left of `to`: `receive Response to AddResult { … }` — the optional
+   envelope alias (cosmetic; @host fixes the envelope type, so the alias only buys
+   `Response.status` self-doc). Dropped from recv_head in W1 because an optional
+   LEADING capture inside a capture-type grammar (`( $alias:ident )? "to" $sum`) didn't
+   compile cleanly. Revisit the capture-grammar's optional-leading handling, then
+   restore `( $alias:ident )?` before `"to"` in receive_block/handle_receive. §S1
+   POSITION DECIDES ROLE: name LEFT of `to` = envelope alias; RIGHT = sum.
+
+2. WS TRANSPORT in signal-call: only HTTP is wired (stdlib/primitives/signal.st). Add
+   the ws path — resolve @host ws($sock), send `{ type, payload }` over the socket,
+   correlate the reply by a runtime-invisible correlation id (≈ makeAff fiber), route
+   to the receive arms by message `type`. The @host ws envelope = Message{type,payload}.
+
+3. POLICY threading: the policy mode ($mode) is captured but not threaded to runtime
+   (signal-call defaults policyMode='latest'). Wire queue/parallel/drop + the optional
+   `timeout T` / `retry n` tails (policy_clause already parses them).
+
+4. @host RUNTIME registration: @host currently only %registers a fact. For signal-call
+   to resolve `window.__stHosts[key]` at runtime, @host must EMIT JS that populates
+   __stHosts with { url, headers } (or { socket }). Add a host %primitive (sibling of
+   dev-ws) bound by @host, OR have signal-call read the registered host fact at compile
+   time and inline the config. Decide which is harmonious.
+
+5. SCOPED-SUM registration from receive arms (§S1 TYPE CREATION): `receive to AddResult
+   { … }` should DEFINE a named sum `AddResult` in the signal's scope (arms ARE the
+   variant definition). Today the arms are captured but not reified into a named registry
+   sum. Reuse the W0 sum-@type variant-gathering (TypeRegistry) to register the scoped
+   sum, so reference.st / the MCP registry can introspect the response interface.
+
+* Acceptance
+Each item independently testable. (1) parse test for the alias form; (2) headless ws
+round-trip; (3) emit test showing policy mode in JS; (4) emit test showing __stHosts
+populated; (5) registry test showing AddResult registered as a sum from the receive arms.
+
+NOTE [2026-06-20]: DONE [2026-06-20]: all five W2 polish items shipped. (1) ENVELOPE ALIAS left of `to`: receive head is now an inline Choice ( "to" $sum ) | ( $alias "to" $sum ) | ( $alias ), literal `to` tried first so `receive to AddResult` binds sum (never mis-captures `to` as alias). Pure stdlib grammar, no Rust special-case. (2) WS TRANSPORT: doRequest dispatches by host.transport; ws path opens a pooled WebSocket per @host, sends correlated {type,payload,__corr} frames, resolves on matching reply; uncorrelated msgs publish directly (stream case). (3) POLICY threading: all four modes (latest/queue/parallel/drop) + timeout (abort) + retry (re-fire) wired to runtime. (4) @host RUNTIME registration: new host-register primitive emits window.__stHosts[key]={url,headers|socket}; signal-call resolveHost reads it (was always empty). Fixed pre-existing W1 E0923 @host dispatch ambiguity (body-form penalty in form_scoring) + E0804 on optional single-field body (is_form_param_optional now parses body_capture strings). (5) SCOPED-SUM: receive to <Sum> registers a named sum from its arms (ctor=variant, `as Type`=payload) in the type registry; explicit @type wins. Commits: 843767ae (host-reg), 0b94a662+auto (policy+ws), 899cfb10 (scoped-sum), 0f050260 (alias), 9f78702c (tests). Remaining niceties (non-blocking, documented in docs/language/reactive-output.md §7): alias not yet threaded as typed binding (self-doc only); ws reconnect delegated to browser; live transport config-only.

@@ -1,0 +1,69 @@
+#+TITLE: Type-driven zero-value seed for @data subscribe (synthesize initial from @type)
+#+STATE: DONE
+#+SESSION_ID: 153c9c68ea93c166
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-24T17-46-26-602Z_153c9c68ea93c166.jsonl]]
+#+CUSTOM_ID: FUP-149-type-driven-zero-value-seed-for-data-sub
+#+COMPLETION_HASH: 1eb630ff6d17eaf0
+
+* Initial Message
+
+please exlain all you deferred and file with root causes and impacts and fix steps and opportunities
+
+Deferred from FUP-144 / PLAN-118 (2026-07-24).
+
+* The opportunity
+FUP-144 shipped an EXPLICIT seed: `@data subscribe $x T from $h : a { initial: <literal>; }`.
+The seed value is hand-written. But the subscribe already KNOWS its type `T`
+(the `$type:typeref?` slot registers `binding($name, type: T)`). A type fully
+determines its zero value: number→0, string→"", bool→false, T{...}→{field:
+zero(field) …}, T[]→[]. So the seed could be SYNTHESIZED from the type — the
+author writes `@data subscribe $form FormEnvelope from $h : form ;` and the
+compiler seeds the FormEnvelope zero-value automatically, making every read
+total before the first server diff with ZERO hand-written seed.
+
+* Why deferred
+The explorer agent confirmed (agent://0-SubscribeInternals) there is NO
+zero-value machinery in TypeRegistry today — no `zero_value(typeref) -> expr`.
+Building it is a NEW capability, not a small extension of W1's additive slot, so
+it failed the elegance-bar "adopt now" test and was scoped out.
+
+* Root cause of the gap
+TypeRegistry stores shapes for checking but exposes no constructive
+"materialize a zero instance" method. The seed today is therefore literal-only.
+
+* Impact of NOT having it
+- Authors hand-write seeds that DUPLICATE what the type already says (a
+  FormEnvelope seed restates {values:{}, errors:{}, valid:false}). Drift risk:
+  add a field to the type, forget the seed.
+- Nested envelopes can't be seeded at all right now (blocked on BUG-228), so a
+  type-driven seed is the clean escape once BUG-228 lands: derive the nested
+  zero-value structurally instead of parsing a nested literal.
+
+* Fix steps
+1. Add `TypeRegistry::zero_value(&self, typeref) -> Expr` (recursive:
+   scalar→literal, record→object of field zero-values, array→[]). Guard
+   cycles/opaque types (return null + a W-note for un-zeroable types).
+2. Grammar: a bodyless typed subscribe with a `!` or a `{ initial: auto; }`
+   marker (pick one, harmonize with existing sigils) opts into synthesis.
+   PREFER: typed subscribe seeds its zero-value BY DEFAULT unless the author
+   writes an explicit `initial:` — least surprise, no new sigil. Decide via the
+   "one sigil one meaning" rule.
+3. Emit the synthesized object exactly where data-subscribe-seeded emits its
+   literal (`_localState[assign] = <zero>` + the local:updated dispatch).
+4. RED→GREEN: `@data subscribe $c number from $h : c ;` seeds 0 with no body;
+   `$form FormEnvelope` seeds the nested zero-record (depends on BUG-228 for the
+   emit path if nested, or emit structurally to sidestep the parser entirely —
+   NB synthesizing bypasses the balanced-capture bug because we build the AST,
+   not parse a literal).
+
+* Dependency note
+Synthesizing the seed STRUCTURALLY (building the object AST from the type) may
+SIDESTEP BUG-228 entirely for nested envelopes, since nothing is parsed from a
+`{ … }` literal. That makes this a candidate FIX for the nested-forms case even
+before BUG-228's parser fix. Worth a spike to confirm.
+
+* Relation
+FUP-144 (parent, shipped the explicit seed). BUG-228 (nested literal seed;
+this item may leapfrog it). FUP-142 (forms — the total-reads win lands here).
+
+NOTE [2026-07-26]: DONE 2026-07-24 via PLAN-119 W3a (commit 45283fc7). TypeRegistry::zero_value builds a type's zero instance as serde_json::Value; compiler.rs inject_subscribe_zero_value_seeds fills a typed bodyless @data subscribe's seed with it at the shared pipeline seam. Because the value is built structurally + serialized (never re-parsed), NESTED envelopes work — LEAPFROGGING BUG-228 for the forms case, as PLAN-119 predicted. Browser-proven on signup.st: SpacetimeLocal.form is the full nested FormEnvelope zero-value at mount (values/errors objects, valid:false, errors.email==""), form loop still GREEN. Untyped subscribes byte-stable (seed null). Explicit {initial:} still wins. Tests: FUP-144 headless suite +1 nested-auto-seed (4 pass); 2882 lib + 202 integration green.

@@ -1,0 +1,65 @@
+#+TITLE: Deferred half-implemented macros (E0964): 30 macros with dropped captures to wire
+#+STATE: ITEM
+#+SESSION_ID: 154dbfde15c2d944
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-08-06T12-08-13-733Z_154d0baaa942d918/16-W4Final.jsonl]]
+#+CUSTOM_ID: BUG-320-deferred-half-implemented-macros-e0964-3
+
+* Follow-up to PLAN-137 W4 / I4 (capture-consumption lint E0964)
+
+The capture-consumption lint now runs over ALL of stdlib with ZERO violations. 30
+genuinely half-implemented macros had their unconsumed `%form` captures
+`_`-prefixed (the established intentionally-unused convention) to reach zero.
+Each one below is a REAL finding of the same genus as gh-18: a capture bound and
+never consumed — author intent that silently vanishes at compile time. The
+`_`-prefix is a lint-exemption, NOT a fix. These need wiring.
+
+Deeper root cause worth attacking once: the macro-body clauses `%transitions`,
+`%template`, `%iterates`, and `%includes` are DROPPED by the parser
+(`convert_cst_directive_to_macro_body_item` returns None for them). That is why
+the each/fade-in/conditional families are half-implemented — their wiring clause
+never reaches the AST. Wiring these clauses (and the `media`/`now`/etc. primitives
+to accept the dropped inputs) is the class fix.
+
+## Deferred macros and the exact capture each drops
+
+- each — $enterAnim, $exitAnim, $moveAnim (:entering/:exiting/:move keyframes; `%transitions` clause is parser-dropped)
+- each-filtered — $enterAnim, $exitAnim, $moveAnim (same)
+- for-range — $template, $var (`%template`/`%iterates` parser-dropped; @for emits nothing)
+- repeat — $template (`%template` parser-dropped; @repeat emits nothing)
+- conditional — $condition, $thenTemplate (`%when` condition parses empty; `%template` dropped)
+- conditional-else — $elseTemplate
+- fade-in — $customKeyframes, $delay, $distance, $duration, $easing (TODO bodies; never animates)
+- fade-in-up — $distance, $duration, $easing (`%includes` parser-dropped; expands to unknown primitive)
+- fade-in-down — $distance, $duration, $easing (never animates)
+- fade-in-stagger — $childSelector, $distance, $duration, $stagger (never animates)
+- media-query — $children (nested directives in @media body dropped; `media` prim gets styles only)
+- dark-mode — $children (same)
+- light-mode — $children (same)
+- reduced-motion — $children (same)
+- container-query — $children (same)
+- breakpoint — $children (only; $name IS consumed by the %if dispatch — lint now sees it)
+- portrait — $children
+- landscape — $children
+- print — $children
+- websocket — $handlers (message handlers never routed; TODO)
+- presence — $name (alias captured, never forwarded)
+- presence-short — $name (same)
+- presence-custom — $name (same)
+- realtime — $name, $order ($name alias + $order expr dropped)
+- realtime-short — $name
+- realtime-custom — $name
+- use — $alias, $filter (optional alias/filter clauses never forwarded; only $path is imported)
+- magnetic-glow-macro — $color, $intensity (magnetic-effect gets strength/radius/lerp only)
+- test-skip — $body (test body deliberately skipped, but the capture is still unused)
+- now-macro — $body (component body never rendered; `now` primitive writes textContent directly)
+
+## Wired (not deferred) in this wave
+- breakpoint $name, on-event-dispatcher $event — the lint's `%if` scan now emits the
+  sigiled LHS operand ($name / $event), so a genuinely branch-consumed capture is seen.
+- data-derive-match $uitype — marked `%pipeline-consumed`: the pipeline reads `$uitype`
+  (inline_union_variants) for the type registry, the lint's name-scan cannot see it.
+
+## Deeper parser gaps recorded (not this wave's scope)
+- `%transitions` / `%template` / `%iterates` / `%includes` macro-body clauses dropped by
+  the parser → the each/fade-in/conditional macros can never wire their bodies without
+  first teaching the parser to store these clauses.

@@ -1,0 +1,71 @@
+#+TITLE: Admin + dev integration — fld-richtext on @editable; delete dev-rich-toolbar
+#+STATE: DONE
+#+SESSION_ID: 1503ca05d05c0c62
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-10T14-32-18-497Z_1503ca05d05c0c62.jsonl]]
+#+CUSTOM_ID: FEAT-100-admin-dev-integration-fld-richtext-on-ed
+#+COMPLETION_HASH: bd01ce8cca726ede
+
+* Initial Message
+
+PLAN-031 -> read it, show me the boldest version of implementing @editable, and how you'd integrate it to the current admin
+
+Parent: [[id:PLAN-031-editable-structured-rich-text-input-mult]] — Wave 2. Depends: FEAT-098, FEAT-099(server validation).
+
+* Target
+- stdlib/__admin__/index.st (+@import "../editable")
+- stdlib/__admin__/app/drawer.st (+&fld-richtext template)
+- public/runtime/st.js (adFormFields ~1408: richtext FALLBACK→KNOWN, tpl
+  'fld-richtext', value stays AST OBJECT not stringified; adFieldInput ~1307:
+  accept object for richtext paths; adHydrateControls untouched)
+- stdlib/__dev__/primitives/dev-rich-toolbar.st (DELETE)
+- stdlib/__dev__/primitives/dev-editable.st (content-edit branch mounts
+  editable-surface instead of raw contenteditable+innerHTML)
+- stdlib/__dev__ macro composing dev editor (drop dev-rich-toolbar bind)
+
+* Change
+#+begin_src spacetime
+@template &fld-richtext($f) {
+  <div class="ad-field ad-field--rich" data-path="$f.path">
+    <label class="ad-flabel">$f.label</label>
+    <div class="ad-richtext" data-path="$f.path" data-widget="richtext">
+      @editable(bind: $f.value) {
+        marks: &bold &italic &code &link;
+        blocks: &h2 &p &quote &list;
+      }
+    </div>
+  </div>
+}
+#+end_src
+Dispatched by EXISTING &$f.tpl dynamic dispatch — no @match added. Persistence:
+zero new plumbing — $doc → data-path → ST.adFieldInput → dev-ws → server
+validate (FEAT-099) → disk; optimistic-revert inherited. Server widget mapping
+already done (server.rs test_w3_richtext_type_emits_flag_and_widget).
+One engine two hosts: admin drawer + on-page dev edit share editable-surface.
+
+* Acceptance
+- @drive "/__spacetime/admin/" (AUTOMATION.md; --cdp): open cms-testbed entry
+  with richtext body → drawer shows block editor; type + mod+b + set h2 →
+  $doc updates; saved AST round-trips через dev-ws; reload → identical render.
+  NB BUG-058: @capture in @drive blocked — assert-only.
+- rg 'execCommand' stdlib/ → empty; dev-rich-toolbar.st gone
+- cargo test --test integration_tests; admin compile (compile_admin) green
+- projects/cms-testbed manual pass: legacy HTML body field lifts + edits
+
+NOTE [2026-06-11]: DONE 2026-06-10.
+- public/runtime/st.js: richtext promoted FALLBACK→KNOWN widget (maps to
+  fld-richtext); value kept as the document AST OBJECT (keepObject, not
+  stringified). adFieldInput gains a richtext branch — persists the AST the
+  surface stores on el.__stDoc (not el.value) via adEditField→EditJson.
+- stdlib/__admin__/app/drawer.st: &fld-richtext template mounts
+  @editable(bind:$f.value, marks/blocks) — reached via the existing dynamic
+  dispatch &$f.tpl($f), no @match edit. Surface fires bubbling `input` → existing
+  .ad-form @on input [data-path] persist wiring carries the AST. Admin imports
+  ../editable/index.st.
+- stdlib/__dev__/: DELETED dev-rich-toolbar.st (the execCommand floating toolbar);
+  @rich-editor macro no longer binds it (keeps dev-media-picker). execCommand is
+  GONE from stdlib + runtime (gate: grep execCommand stdlib/ public/runtime/ = clean).
+Tests: feat100_admin_richtext_field_keeps_ast_object (richtext→fld-richtext, AST
+object preserved, adFieldInput persists stored AST). admin+dev compile. Lib 2201
+green (5 st.js snapshots accepted — additive richtext changes).
+Persistence path end-to-end: surface → __stDoc → input event → adFieldInput →
+EditJson → server validate_richtext_ast (FEAT-099) → disk. Zero new plumbing.

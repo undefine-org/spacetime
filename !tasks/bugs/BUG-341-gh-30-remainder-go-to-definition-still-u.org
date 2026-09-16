@@ -1,0 +1,84 @@
+#+TITLE: GH-30 remainder: go-to-definition still unwired for variables and templates
+#+STATE: DONE
+#+SESSION_ID: 154d0baaa942d918
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-08-06T12-08-13-733Z_154d0baaa942d918.jsonl]]
+#+CUSTOM_ID: BUG-341-gh-30-remainder-go-to-definition-still-u
+
+* Initial Message
+
+so what's next? are there reviewers in swarms or smething else to keep going with the triage, structurally?
+
+#+STATE: ITEM
+#+PRIORITY: B
+
+* Status
+
+GH-30 asked for go-to-definition across FOUR symbol classes. It was closed having fixed two.
+
+| class | asked | state |
+|-------------------+-------+-------|
+| stdlib directive (`@scroll`) | yes | DONE — resolves via `Url::from_file_path(&prim.source_file)` (definition.rs:66) |
+| project macro invocation     | yes | DONE — same path via `sig.source_file` (definition.rs:52) |
+| variable (`$items`)          | yes | **NOT DONE** — `src/lsp/definition.rs:77` is still literally `// TODO: wire up variable definition lookup` |
+| template reference           | yes | **NOT DONE** — `src/lsp/definition.rs:81` still `// TODO: wire up template definition lookup` |
+
+The two TODOs the issue text called out BY NAME ("Variable and template branches are explicit
+TODOs") are still in the file, unchanged.
+
+* Why the tests look green
+
+`cargo test --test lsp_tests definition` is 4/4 passing, including `context_variable` and
+`context_template`. Those assert the CONTEXT CLASSIFIER — that the cursor position is recognised
+as a variable/template site. They do not assert that a location comes back. So the suite is green
+on exactly the half that does not work, which is the zero-assertion pattern this repo already has
+a rule against: a passing test named for a feature that never exercises the feature.
+
+* Also unverified from the original fix direction
+
+- "expose a stable virtual document URI for truly embedded-only source" — no such scheme exists;
+  grepping definition.rs for `st-stdlib`/`virtual` returns nothing. Both resolvers go through
+  `Url::from_file_path(...).ok()?`, which returns None for any embedded registry entry whose
+  `source_file` is a fake relative path like `timeline` — the precise failure GH-30 described.
+  Whether real stdlib entries now carry absolute paths is not asserted anywhere.
+- No JSON-RPC test exists for "imported binding" (cross-file), which the issue also requested.
+
+* Acceptance
+
+One JSON-RPC test per class asserting a RESOLVED LOCATION (uri + span), not a classification:
+local binding, imported binding, template, project macro, stdlib directive. Plus one for an
+embedded-only primitive, proving the virtual-URI path returns something rather than None.
+
+Write them RED first — `context_variable` passing today while variable lookup returns None is
+the demonstration of why.
+
+
+* RESOLVED (verified 2026-08-07)
+
+All four GH-30 symbol classes now resolve to LOCATIONS, asserted as such (uri + span), not as
+classifications. `lsp_tests` 173/0 -> **182/0**.
+
+Both TODO arms in src/lsp/definition.rs are gone. New passing tests: local binding, imported
+binding (cross-file), template, shadowed binding (nearest enclosing), stdlib directive, stdlib
+primitive, plus two NEGATIVE tests proving not everything resolves to something.
+
+The virtual-URI scheme GH-30 asked for was built: `resolve_source_location` emits a real `file://`
+URI when the source is on disk and a stable `spacetime://stdlib/<path>` document URI for
+truly-embedded source, with the range computed over the embedded content.
+
+** Two real defects found while finishing this, both fixed here
+
+1. **Clicking the FIRST character of a primitive name did nothing.** The `%binds` classifier
+   derived the identifier only from text BEFORE the cursor, so an empty `trimmed` (cursor on the
+   name's first char, nothing but whitespace behind it) took an early `return None`. Offsets 14+
+   resolved; offset 13 — the natural click target — did not. Now falls through and lets the
+   after-cursor text supply the name.
+
+2. **`imported_binding_resolves_cross_file` was testing nothing.** It called `add_root` (which
+   scans the workspace to build the index) BEFORE writing the two .st files, so the index was
+   empty and the lookup could only ever return None. Cross-file resolution was already working;
+   the test's ordering was the bug. Files are now written first.
+
+** Polarity proven, not assumed
+
+Stubbing `nearest_enclosing_binding_def` to a no-op turned the definition suite RED (12 passed /
+1 failed); restoring returned it to GREEN. The gates discriminate.

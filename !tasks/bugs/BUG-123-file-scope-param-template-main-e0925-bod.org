@@ -1,0 +1,84 @@
+#+TITLE: File-scope @param + @template &main() → E0925 (body scope not built)
+#+STATE: ITEM
+#+SESSION_ID: 150fc68a85585789
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-19T21-58-52-181Z_150fc68a85585789.jsonl]]
+#+CUSTOM_ID: BUG-123-file-scope-param-template-main-e0925-bod
+
+* Initial Message
+
+Check that latest few plans around the MCP/the workbench and the BUG-121 and BUG-122. Can you do another round of checking whether it achieves the Squarespace/Framer/Figma/etc killer vision? Showcase then tell me the gaps that you see.
+
+* Initial Message
+MCP workbench round-4 test-drive (2026-06-19, post PLAN-048/BUG-121/BUG-122). Re-checking the Squarespace/Framer/Figma-killer vision.
+
+* Summary
+A file-scope `@param` declaration followed by a body-bearing `@template &main(){…}`
+makes the whole function UNMOUNTABLE with an INTERNAL compiler-invariant error
+(E0925 "template body scope '@template:main' was not built (primitive
+'register-template')"). E0925's own hint says it is "a compiler invariant break,
+NOT an author error … Please file a bug with the source that triggered it."
+
+This is a REGRESSION + escalation of round-3's C1a. Round 3
+(@research/mcp-workbench-review-2026-06-19-round3.org R3-C1a) found file-scope
+`@param` produced an EMPTY contract (soft, mountable). It is now a HARD crash —
+the function cannot be registered/mounted at all.
+
+* Live repro (verified 2026-06-19 against the running MCP server)
+RED (fails):
+  @param $name string = "world"
+  @template &main() {
+    <p>Hi `$name`</p>
+  }
+→ st_fn_put: "registered with 1 diagnostic(s) -- NOT mountable until fixed:
+   x [E0925] internal: template body scope '@template:main' was not built
+   (primitive 'register-template')"
+
+CONTROL (compiles clean — isolates @param as the trigger):
+  @template &main() {
+    <p>Hi there</p>
+  }
+→ "Function fn-9 revision 1 compiled and registered." ✓
+
+So the trigger is the file-scope `@param` decl preceding the template, not the
+template itself.
+
+* Why it matters (vision impact)
+"Declare page params at file scope, then a main template" is an idiomatic
+authoring style for a parameterised mini-page — exactly what the workbench
+gallery/inspector wants to introspect and seed. Today that style is a hard
+crash with an INTERNAL error message (not an author-facing diagnostic). The
+signature-param form (`&main($name string = "world")`) DOES work and extracts
+type+default correctly (verified round-4) — so the two surfaces have diverged
+(AGENTS harmony: one need, one impl). The param registry should not care whether
+a param was declared in the signature or with `@param`.
+
+* Root cause (source-traced, needs the implementer to localize)
+- E0925 = CompileErrorKind::BodyScopeMissing, emitted at src/compiler.rs:~1609.
+- Invariant: "every body-bearing construct (@template, &name(){}, @editable-*) is
+  named and its World-A scope is built during parsing." A file-scope `@param`
+  preceding the template apparently perturbs scope-building so the `@template:main`
+  body scope is never built before `register-template` runs.
+- Scan site for register-template definitions: src/pipeline/mod.rs:~708-771.
+- Likely: the file-scope `@param` consumes/!shifts the scope sequence (an
+  unterminated-directive-swallows-following-scope shape, cf. the BUG-047/BUG-070
+  family), so `@template &main` is mis-segmented and its body scope is absent.
+
+* Acceptance
+- The RED source above compiles, registers, and mounts.
+- Its contract carries `name` with type=string, default="world" — IDENTICAL
+  extraction to the signature-param form (harmony: file-scope `@param` and
+  signature params unify into one contract).
+- A unit/integration test (RED→GREEN) in the compiler/pipeline tests asserting
+  file-scope `@param` + `@template &main()` builds the main body scope.
+- No internal E0925 reachable from any author-level source (if it IS author
+  error, it must become a real author-facing diagnostic; but here it is the
+  documented invariant break → fix the scope build).
+
+* Provenance
+- E0925 emit: src/compiler.rs:~1609 (CompileErrorKind::BodyScopeMissing).
+- register-template scan: src/pipeline/mod.rs:~708.
+- Round-3 prior state (empty contract, soft): R3-C1a in
+  @research/mcp-workbench-review-2026-06-19-round3.org.
+- Round-4 test-drive session; memory EP-6f819249d9ac1617.
+- Related working surface: signature params extract type+default correctly
+  (FEAT-132 / PLAN-048 verified round-4).

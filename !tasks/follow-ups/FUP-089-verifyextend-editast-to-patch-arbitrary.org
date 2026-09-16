@@ -1,0 +1,124 @@
+#+TITLE: Verify+extend EditAst to patch arbitrary macro/template params (builder v1 keystone risk)
+#+STATE: ITEM
+#+SESSION_ID: 1510d7e0efe8848c
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-20T17-53-05-983Z_1510d7e0efe8848c.jsonl]]
+#+CUSTOM_ID: FUP-089-verifyextend-editast-to-patch-arbitrary
+
+* Initial Message
+
+launch the workbench and let me drive it for a bit (give me the link) while you explore the various plans that it was building upon (all the way to PLAN-049) and we thoroughly design the multi-frame drag-canvas (W4's strip is the non-canvas bridge), file-scope page mounts (FUP-061), the
+ __mcp__/__admin__/__dev__ convergence (north-star, two-consumer rule).
+
+* Why #A
+This is the SINGLE BIGGEST v1 unknown for the introspection-generated inspector
+(PLAN-051 + @research/mcp-editor-introspection-design-2026-06-20.org PART B).
+Everything else in v1 (widget table, projection, selection) is verified; this is
+the one routing link that must be proven before the inspector can edit params.
+
+* The question
+handle_edit_ast (src/sync/handlers.rs:485-600) parses a selector
+"<css-selector> §<directive>" and applies a patch = JSON object mapping PROPERTY
+NAMES -> new values. VERIFIED it works for: __content edits, and known directives
+(e.g. @scroll). UNVERIFIED: does it accept a param-keyed patch for ARBITRARY
+macro/template calls?
+  - @object(roughness: 0.15) -> EditAst{ selector: ".hero §object", patch:
+    {roughness: 0.3} } : does the AST patcher locate the @object call and rewrite
+    its roughness arg?
+  - &card($title) -> patch a template invocation's named arg?
+
+* Investigation (do first, before any builder param-edit work)
+1. Read handle_edit_ast_inner fully: how it locates the directive AST node by
+   (css_selector, directive) and how it applies patch props. Does it map a patch
+   key to a macro PARAM (form arg) or only to specific known directive fields?
+2. Test EditAst against a real @object/@light call + a &template invocation in a
+   fixture; observe Ack vs Reject + the .st diff.
+3. Identify the gap: if it only patches hardcoded directive fields, design the
+   generalization: patch key P -> the call's arg P (using the macro's %form param
+   list to know P is a valid named arg + its position/CaptureType).
+
+* Extend (if needed)
+Generalize the AST patcher to rewrite a macro call's named/positional args from a
+param-keyed patch, driven by the macro's registered %form (the param list is the
+source of truth for which keys are valid + how they serialize). Correct-by-design:
+reject a patch key that is not a form param; coerce the value to the param's
+CaptureType serialization (Color->#hex, number->bare, Union->one opt, string->
+quoted). Same path serves @template invocations (named args).
+
+* Address-source note (verified this session)
+data-st-origin is injected on TEXT-BEARING tags only + DEBUG builds only
+(form_match.rs:1317). Non-text macro nodes (@object) have NO origin attribute;
+their EditAst address comes from the SERVER STRUCTURE PROJECTION (PLAN-051 W3),
+not the DOM. This FUP is about the WRITE side; the projection supplies the
+address.
+
+* Acceptance
+- A param edit on @object (roughness) and on a &template invocation (a named arg)
+  round-trips: EditAst Ack -> .st source updated -> hot-reload re-renders the new
+  value.
+- An invalid param key is rejected (correct-by-design).
+- Value serialization per CaptureType is correct in the written .st.
+- Tests: handler unit tests per construct kind (macro call, template invocation);
+  a live builder gate editing a 3d @object param.
+
+* Blocks
+PLAN-051 W4 (edit routing) + the @editor inspector's write path. The READ path
+(widgets from introspection) does NOT depend on this; build read first, then this.
+
+* RESOLVED (2026-06-20 investigation) — keystone is MOSTLY ALREADY SHIPPED
+Read handle_edit_ast_inner + apply_text_patch end-to-end (src/sync/handlers.rs
+1127-1290 + 626-768). The "biggest v1 unknown" is now precise, and largely
+positive: EditAst patches by TEXT REPLACEMENT within a directive's source span,
+NOT AST-field rewriting.
+
+** Mechanism (verified)
+1. Address resolves to a SOURCE SPAN: "<css> §<directive>" (scoped directive) or
+   "$name §data" (file-scope binding). Resolved by scanning ast.scopes for the
+   scope whose matches contain the directive (handles a selector appearing in
+   multiple blocks).
+2. apply_text_patch(content, span.start, span.end, patch): for each patch key,
+   find "key:" (bare directive arg) or "\"key\":" (object-literal entry) WITHIN
+   the span, replace the value up to the next DEPTH-0 , ; ) ] } (respects nested
+   ()[]{} + quoted strings).
+
+** What ALREADY WORKS (no new code)
+- @macro(named: arg) PAREN-ARG-LIST params are patchable: the value-terminator
+  logic EXPLICITLY handles "the ) of a paren-param list" (BUG-098 comment). So
+  @object(roughness: 0.15) + patch {roughness: 0.3} rewrites the arg TODAY, once
+  the address resolves. THE KEYSTONE EDIT WORKS.
+- Directive-body props (duration: 800ms;) — the original shipped case.
+- Value coercion is correct-by-design upstream: the widget emits a string/number;
+  apply_text_patch writes it verbatim (bare) or JSON-escaped (quoted object entry,
+  BUG-093 sanitization).
+
+** The PRECISE remaining gaps (were vague; now sharp)
+G1. ABSENT defaulted params need INSERTION, not replacement. @object(roughness:
+    0.15) with NO metalness in source -> patch {metalness: X} fails "Property not
+    found". Setting a defaulted-but-omitted param must INSERT "metalness: X" into
+    the arg list (using the %form param list to know it's valid + where to place
+    it). Build task: teach apply_text_patch (or a sibling) an insert mode keyed
+    by the form.
+G2. &template INVOCATIONS are NOT FormMatch directives — they are
+    ElementRefStmt/ElementRef CST nodes (src/syntax/cst/ast.rs:549). So
+    parse_ast_selector (matches by macro_name) WON'T locate them. The @editor
+    (&template) target needs a DISTINCT addressing path: resolve a template call's
+    span via the element-ref AST, then patch its named args with the SAME
+    apply_text_patch span logic. Build task: an element-ref address resolver +
+    EditAst arm for template invocations.
+G3. POSITIONAL params (no "key:") can't be found by key. Low priority: stdlib
+    uses named args throughout; defer until a positional case appears.
+
+** Revised plan
+- v1 READ path (widgets from introspection) — UNBLOCKED, depends on none of this.
+- v1 WRITE path for @macro named params — WORKS TODAY; just wire the inspector to
+  emit EditAst{selector:"<css> §<macro>", patch:{param: val}} + verify with a 3d
+  @object live test.
+- G1 (insert absent param) — small, needed for editing defaulted params (common).
+- G2 (&template invocations) — needed for the &template editor target + the
+  two-level INSTANCE mode (a &card call's args). Medium.
+- G3 — deferred.
+
+** Downgrade
+Priority stays #A for G1+G2 (they gate common edits + the &template target), but
+the SCARE is gone: the core mechanism is shipped, the gaps are small + specific.
+Acceptance unchanged (param edit on @object + &template round-trips), now with a
+known implementation path per gap.

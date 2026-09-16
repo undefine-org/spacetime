@@ -1,0 +1,113 @@
+#+TITLE: Five .st files do not parse — invisible to migration, will hit E0911 with no warning
+#+STATE: ITEM
+#+SESSION_ID: 153497be379ff5cc
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-18T12-18-12-318Z_153497be379ff5cc.jsonl]]
+#+CUSTOM_ID: AUD-010-five-st-files-do-not-parse-invisible-to
+
+* Initial Message
+
+can you list all the migratins, and what needs to be done, and what root causes they share, and what your plan is? then keep going autonomously until the end (use the todo tool to record everything)
+
+* Why this matters
+
+`spacetime migrate` SKIPS a file it cannot parse:
+
+#+begin_example
+⚠ ./web/index.st does not parse — skipped
+#+end_example
+
+A skipped file is invisible to the migration: it is not counted in "N sites
+pending", not rewritten, and not `@version`-stamped. When the project's
+`@version` reaches a wave date, any retired syntax inside it becomes E0911
+with no prior warning — the migration will have reported success while
+stepping over it.
+
+So "0 sites pending" is only trustworthy once every file parses. Found during
+the AUD-009 sweep.
+
+* The five files, five distinct causes
+
+** 1. tests/parser/syntax/scopes.st:202 — array-typed declaration
+
+#+begin_src spacetime
+$list string[]: ["a", "b", "c"];
+#+end_src
+#+begin_example
+× expected '{' after selector
+#+end_example
+
+Likely the SAME family as BUG-342 (`$u object: { … }` fails E0946): a typed
+declaration whose type carries a delimiter (`[]` here, `{}` there) is not
+handled by the declaration grammar. Worth fixing together — one `balanced`
+capture may cover both.
+
+** 2. web/index.st:10 — retired `~name` presets, NO capsule
+
+#+begin_src spacetime
+@preset easing ~zypsy-smooth: cubic-bezier(0.19, 1, 0.22, 1);
+#+end_src
+#+begin_example
+× `~name` preset references are retired: use a `@form easing --name` form
+  or the bare CSS keyword
+#+end_example
+
+The most interesting one. This syntax was retired with a hand-written parser
+error and NO `%migration` capsule, so there is no rewrite rule, no hint entry,
+and `spacetime migrate` cannot help — the user is told what to do but given no
+tool that does it. Multiple occurrences in the file.
+
+→ Candidate for a capsule: the transformation is mechanical
+  (`~name` → `--name`), exactly the shape `%rewrite` exists for.
+
+** 3. projects/jallete/checkout-helper.st:11 — `$` inside @compute body
+
+#+begin_src spacetime
+@compute cartTotal($cart, $checkoutConfig) : number {
+  if (!$cart || $cart.length === 0) return 0;
+#+end_src
+#+begin_example
+× expected R_PAREN, found DOLLAR
+#+end_example
+
+A `$signal` reference inside a parenthesised expression in an `@compute` body
+does not parse. NOT YET VERIFIED whether this is a genuine grammar gap or the
+file predates the current `@compute` surface. (projects/ is a separate repo,
+gitignored — low priority, but the parse gap may be real and shared.)
+
+** 4. tests/fixtures/expander/brace-regex.st:9 — unbalanced brace by design?
+
+#+begin_example
+× expected scope block, directive, or declaration
+#+end_example
+
+Name suggests a deliberate NEGATIVE fixture (brace-in-regex handling). If so
+it SHOULD fail to parse and the only action is to confirm that and record it,
+so the warning is understood as expected rather than re-triaged every sweep.
+
+** 5. tests/fixtures/test-runner/index.st:799 — same shape, 800-line file
+
+#+begin_example
+× expected scope block, directive, or declaration
+#+end_example
+
+Error lands right after a `/// }` doc-comment line, which hints the doc-comment
+run is being absorbed incorrectly and eating the closing brace. This is the
+test-runner UI fixture — a tracked, load-bearing file, so this one is likely
+REAL and worth fixing.
+
+* Suggested order
+
+1. #5 (tracked, load-bearing, plausible doc-comment bug)
+2. #1 together with BUG-342 (same family, one grammar fix)
+3. #2 — decide whether `~name` earns a capsule (it is the mechanical case
+   `%rewrite` is for, and today the error tells users to migrate by hand)
+4. #4 — confirm intentional, annotate
+5. #3 — projects/ is out-of-repo; verify the grammar gap in a tracked repro first
+
+* Acceptance
+
+- every tracked `.st` file either parses, or is annotated as an intentional
+  negative fixture
+- `spacetime migrate .` reports zero "does not parse — skipped" warnings for
+  tracked files
+- only then is a "0 sites pending" reading trustworthy

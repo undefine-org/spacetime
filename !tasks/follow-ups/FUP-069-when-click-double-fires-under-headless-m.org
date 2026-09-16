@@ -1,0 +1,46 @@
+#+TITLE: @when click double-fires under headless @mount (n increments 2× per click)
+#+STATE: DONE
+#+SESSION_ID: 150e2db01d01263f
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-18T16-12-33-780Z_150e2db01d01263f.jsonl]]
+#+CUSTOM_ID: FUP-069-when-click-double-fires-under-headless-m
+#+COMPLETION_HASH: 940390835baf5984
+
+* Initial Message
+
+open BUG-107 and understand it deeply
+
+* Summary
+Under the `--headless` V8 runner, a `@mount`-ed reactive component driven by `@when .sel click` increments its signal TWICE per click. `w3_mount_drive_observe_live_component` (tests/import_resolution_test.rs) drives 3 clicks and asserts `$n == 3`, but gets `6`; a sibling test drives 1 click expecting `5` (a deliberate FAIL gate) and gets `2`. So every click fires the `@on click` handler twice.
+
+* Reproduction (single test, single file — NOT cross-file)
+#+begin_src sh
+cat > /tmp/w3solo.test.st <<'EOF'
+@import "stdlib/testing/test"
+@test "drive real counter to 3" {
+  @mount { <button class="b1">+</button>
+    .b1 { $n number: 0; @on click { $n <- $n + 1; } } }
+  @when .b1 click
+  @when .b1 click
+  @when .b1 click
+  @then .b1 { $n == 3; }
+}
+EOF
+cargo run --features headless -- test /tmp/w3solo.test.st --headless
+#   => @then .b1: $n == 3 (got 6)   (1 failed)
+#+end_src
+
+* Why this is NOT BUG-107
+Reproduces with ONE @test in ONE file (a single fresh V8 context). BUG-107's per-file isolation fix only governs BETWEEN-file state leakage; the single-file run path is byte-identical before/after that fix. `public/runtime/st.js` and `stdlib/testing/*` (the @mount/@when machinery) were untouched by the BUG-107 work. ∴ this is an independent `@mount`/`@when` double-binding (or double-dispatch) defect, surfaced — not caused — once BUG-107 dropped the harness noise floor.
+
+* Likely cause (to confirm, not yet verified)
+Either (a) the `@on click` handler is bound twice during `@mount` init (e.g. init runs once eagerly + once via the MutationObserver `_scheduleInit` when the fixture is appended), or (b) `@when` dispatches the click event in a way that bubbles to two listeners. The doubling factor is exactly 2×, consistent with a single duplicate binding. Investigate `@mount` init order vs the st.js observer's `_scheduleInit`, and whether `@when`'s `__st_dispatch` reaches the element twice.
+
+* Acceptance
+- RED→GREEN: the repro above reports `1 passed, 0 failed` ($n == 3 after 3 clicks).
+- `cargo test --features headless --test import_resolution_test w3_mount_drive_observe_live_component` passes (1 pass / 1 gate-fail as designed).
+- A unit/integration pin asserts exactly ONE increment per `@when click` on a mounted `@on click` counter.
+
+* Provenance
+Discovered 2026-06-18 while landing BUG-107 (per-file headless isolation). w3 was the lone failure in `import_resolution_test` (23 passed / 1 failed) after the fix; proven orthogonal by a solo single-test repro. Files: stdlib/testing/test.st (@mount/@when/@on), public/runtime/st.js (init + observer `_scheduleInit`), src/main.rs `run_headless_tests`/`new_headless_runtime` (harness, not the cause).
+
+NOTE [2026-06-19]: FIXED 2026-06-19. Root cause (proven via emitted-JS + handler-fire instrumentation): a `.sel{ $n; @on click{} }` block inside an OPAQUE `:block` directive body (@mount/@test/@fixture) was lowered TWICE — once correctly by the macro's recompiled `%$content.js` (selector-init bound to the mounted button) and once WRONGLY at file scope (`const el = document.body` → handler bound to BODY, an ancestor). A bubbling click fired both handlers → 2× increment. The CST nested correctly; the leak was in the event-based FormMatch extractor returning interior `@on`/`local-state` matches that fell through to `file.matches` (no enclosing registered scope). Fix: new registry predicate SyntaxRegistry::has_opaque_block_body (a `:block` body whose `%emit js` recompiles via `%$<cap>.js`); src/parser/mod.rs collects those directive BODY spans from the CST and drops any FormMatch strictly inside them (they belong to the sub-program). Registry-derived, not a hardcoded macro set; docs `@example` (inlines via `.html`/`.source`) correctly stays non-opaque. Tests: parser unit test_opaque_block_body_interior_matches_suppressed; st-level tests/unit/macros/mount-on-click-single-fire.test.st (1 & 3 click); acceptance import_resolution_test::w3_mount_drive_observe_live_component passes. Snapshot test_and_fixture updated (leaked file-scope @assert removed).

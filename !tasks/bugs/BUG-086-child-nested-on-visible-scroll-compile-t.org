@@ -1,0 +1,110 @@
+#+TITLE: @on visible / @scroll property appliers never run — anims emitted as string[] not {properties,scopes}
+#+STATE: DONE
+#+SESSION_ID: 15052f2e47ce81ee
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-11T16-32-45-343Z_15052f2e47ce81ee.jsonl]]
+#+CUSTOM_ID: BUG-086-child-nested-on-visible-scroll-compile-t
+#+COMPLETION_HASH: db38a85a14c97a3b
+
+* Initial Message
+
+my dude, I want you to make a modular project in projects/backdesk-hospitality that follows the rough COPY of ~/code/ora/highlead/clients/backdesk-hospitality (JUST THE COPY), and then you make a FUCKING AMAZING mobile-ready landing page for our campaign, in French, that leverages the latest Spacetime features and has a really cool admin interface-ready code organisation and is super well modularised (not the _*.st bullshit you had before, I want you to use this as a testing ground for Spacetime as a fully fledged language and whatnot).
+
+You need to go through design inspirations. Please write a set of design specs in projects/backdesk-hospitality/design/ that cites specific WOW award-winning showcases from awwwards.com and other sources, that you have carefully studied for both the visual and the lead experience and the convertion potential. You'll include puppeteer screenshots in your research and explain all the facets that you intend on using from them for the backdesk hospitality website, and your reasoning and taste for why you went in a certain way. Then you'll show me how you will turn this in to a consistent experience with a clear CTA and quick form (we'll worry about hoking the form to a live server later, right now I want copy + style + experience)
+
+* Symptom
+A motion directive whose body nests CHILD SELECTORS:
+
+#+begin_src st
+.bd-hero {
+    @on visible hero-entrance(900ms, immediate: true) {
+        .bd-hero__h1 { opacity: 0 -> 1; translate-y: 44px -> 0; easing: ~bd-smooth; at: 0.1; }
+        .bd-hero__sub { opacity: 0 -> 1; ... at: 0.25; }
+    }
+}
+#+end_src
+
+compiles to an applier IIFE whose animation data is EMPTY: `const anims = [];`. The timeline DRIVER runs (sets the `hero-entrance` progress signal 0→1, reaches 1) but NO applier ever writes styles to the children. Result: children keep CSS defaults (opacity 1, no transform) — animation silently dead. Same for `@scroll NAME(start,end){ .child { ... } }`.
+
+Verified in browser: `[...document.querySelectorAll('[style*=opacity],[style*=transform]')].length === 0` for the backdesk hero; `.bd-hero__h1` has no init flag and no inline style, while `.bd-hero` reports `ST.get(el,'hero-entrance') === 1`.
+
+* Scope
+Inspected compiled `/__spacetime/runtime.js` for ora-ventures.com and unkn:
+- Every child-nested `@on visible` applier also emits `const anims = [];` (dead) in ora — ora's visible reveals actually come from `@import "stdlib/text"` (`.st-reveal-char`) + scrubbed `@scroll` CSS-vars, NOT from child-nested `@on visible`.
+- unkn's WORKING `@on visible` puts properties DIRECTLY on the element (no child selector):
+  `.unkn-chero__title { @on visible reveal(900ms) { opacity: 0 -> 1; translate-y: 28px -> 0; } }`
+- unkn's WORKING `@scroll` is scrubbed and publishes a CSS VARIABLE consumed by descendants:
+  `.unkn-hero { @scroll p(start,end, scrub: true){ --unkn-hero-progress: 0 -> 1; } }`
+  then `.child { opacity: calc(... var(--unkn-hero-progress) ...) }`.
+
+* Likely root cause (hypothesis)
+The codegen for child-nested motion blocks needs to emit a `%scope` (nested-selector scope) so each child selector becomes a populated entry in the applier's `anims.scopes[]` (with `selector` + `properties` + `at`/`stagger`). Currently the nested-child branch produces the applier scaffold (`processScope`, `root.querySelectorAll(selector)`) but `anims` is left `[]`, so `anims.scopes` is undefined and nothing binds. I.e. the parser/lowering recognises the block enough to emit a driver + applier shell, but drops the child property scopes on the floor.
+
+Expected: child-nested `@on visible` / `@scroll` should populate `anims` (root `properties` and/or `scopes[{selector, properties, at, stagger, easing}]`) so the applier's existing `processScope` + `querySelectorAll` path animates the children — with the children inheriting the driver progress signal/var from the scope root.
+
+* Repro
+projects/backdesk-hospitality (pre-fix git state of modules/hero-motion.st + modules/night.st) — child-nested form produced zero appliers; per-element rewrite fixed it.
+
+* Workaround (applied)
+- `@on visible`: put the directive on EACH animated element with properties directly inside; use `stagger`/`delay:` for sequencing.
+- `@scroll` scrollytelling: `.section { @scroll n(start,end, scrub:true){ --p: 0 -> 1 } }` then consume `var(--p)` in descendant `opacity`/`transform`/`calc()`.
+- `@loop`: child-nested DOES work (loops are fine).
+
+* Acceptance
+- A child-nested `@on visible` / `@scroll` block emits a populated `anims` (scopes for each child selector) and the children receive inline styles / animate.
+- backdesk-hospitality hero can move its per-element reveals back into a single child-nested `@on visible` block and still animate.
+
+* Refs
+- CON-spacetime-motion-directives--per-element (memory)
+- src/emit/* animation codegen (processScope / anims emission)
+
+* ROOT CAUSE (corrected after deeper runtime inspection)
+The problem is NOT specific to child-nesting. The animation APPLIER IIFE in the
+compiled runtime expects its `anims` to be an OBJECT:
+  anims.properties = [{ property, keyframes, easing }, ...]
+  anims.scopes     = [{ selector, properties, at, stagger, easing }, ...]
+and only then calls `applyInitialState(...)` / `processScope(...)` → `applyStyle()`
+→ writes `el.style.opacity` / `el.style.transform`.
+
+But codegen EMITS `anims` as a raw STRING ARRAY:
+  const anims = ["opacity: 0 -> 1", "translate-y: 44px -> 0", "easing: ~bd-smooth"];
+So `anims.properties` and `anims.scopes` are BOTH `undefined`. The guard
+`if (!anims) return;` passes (non-empty array is truthy), every
+`if (anims.properties && ...)` / `if (anims.scopes && ...)` is skipped, and
+applyStyle is NEVER called. The ONLY thing that runs is the driver-var binding:
+  ST.watch(root, "<name>", p => root.style.setProperty('--st-<name>', p));
+i.e. the element gets `--st-<name>: <0..1>` published but no real opacity/transform.
+
+Verified identical in unkn (`const anims = ["opacity: 0 -> 1", ...]`) — meaning
+unkn's plain `@on visible { opacity: 0->1 }` reveals ALSO don't actually animate;
+unkn's visible motion really comes from `@import "stdlib/text"` (.st-reveal-char,
+a separate codegen path) and from scrubbed `@scroll` whose `--var` is consumed by
+hand-written `calc()` CSS. So the string[]-anims bug is environment-wide, not a
+backdesk regression.
+
+** Where to fix
+The codegen that builds the applier IIFE (src/emit/* animation lowering): the
+parsed keyframe properties must be serialized into the object shape
+`{ properties: [...], scopes: [...], staticProperties: [...] }` the runtime
+applier already consumes — instead of `JSON`-ing the raw `"prop: a -> b"` strings
+into a flat array. The runtime side already has the full machinery
+(interpolateKeyframes/applyStyle/processScope); only the emitted `anims` literal
+is malformed.
+
+** Reliable workaround (now the project standard)
+Treat every `@on visible` / `@scroll` as a PROGRESS-VAR PUBLISHER and consume the
+var in CSS:
+  .el { @on visible bd-x(700ms, immediate:true) { opacity: 0 -> 1; } }  // publishes --st-bd-x: 0->1
+  .el { opacity: var(--st-bd-x, 0); }                                    // CSS consumes it
+For scrollytelling:
+  .sec { @scroll p(start,end, scrub:true){ --p: 0 -> 1; } }
+  .sec .child { opacity: clamp(0, calc((var(--p,0) - 0.2)/0.25), 1); transform: ... }
+`@loop` ... `--v: a -> b -> c` + CSS `var(--v)` consumption works the same way.
+
+** Revised acceptance
+- Codegen emits `anims` as the object the applier expects; a per-element
+  `@on visible { opacity: 0->1; translate-y: 40px->0 }` writes real inline
+  opacity/transform (browser shows `[style*=opacity]` count > 0) with NO CSS-var
+  consumer needed.
+- Child-nested form populates `anims.scopes[]` and animates descendants.
+
+NOTE [2026-06-12]: FIXED (flat per-element case) — commit 8548b21f. Root cause confirmed empirically: the `animations` arg reaches apply-animations as CapturedValue::Keyframes; captured_to_js's Keyframes arm (src/pipeline/expand.rs:~1677) emitted a raw string array [\"opacity: 0 -> 1\"] instead of the { properties:[{property,keyframes}] } object the runtime applier consumes — so anims.properties was undefined, applyStyle never ran. Fix: route Keyframes through the existing build_keyframes_js_object (same builder the raw-body path uses); also added a Keyframes arm to get_raw_keyframe_body so initial-state FOUC CSS still generates (element starts hidden). VERIFIED in real browser: per-element @on visible reveal interpolates opacity 0->1 (0.15..0.87 sampled) on scroll-into-view, writes inline opacity+transform, no publish-var hack needed. Regression test: test_captured_keyframes_struct_converts_to_js_object. NB: the CHILD-NESTED case (Keyframes(len=0)) is a SEPARATE, deeper defect — the reify_keyframes extractor (KeyframeDef is flat property+values, no scope) drops .child{...} scopes at parse time; that path now emits a valid empty object {} (no crash) but still needs the per-element form for nested reveals. Filed as remaining work; per-element + scrubbed-@scroll covers all real scrollytelling needs.

@@ -1,0 +1,99 @@
+#+TITLE: E0946 on @edit-toggle is reported 94 lines from its cause, and only in a long file
+#+STATE: DONE
+#+SESSION_ID: 153497be379ff5cc
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-18T12-18-12-318Z_153497be379ff5cc.jsonl]]
+#+CUSTOM_ID: BUG-356-e0946-on-edit-toggle-is-reported-94-line
+#+COMPLETION_HASH: 304f6a6ec5462e0b
+
+* Initial Message
+
+explain what is remaining that is  'mine', and the source of the remaining 20 failrues
+
+* Summary
+
+`demos/editable-blog/index.st` fails to build (`build` exits 1) with:
+
+#+begin_example
+error[E0946]: directive does not match its declared grammar: Unexpected 2 extra inline token(s) after directive
+  --> demos/editable-blog/index.st:44:1
+   |
+44 | @edit-toggle
+   | ^^^^^^^^^^^^
+#+end_example
+
+The directive at line 44 matches its declared `%form` EXACTLY:
+
+- declaration: `stdlib/editable/edit-toggle.st:93-99`, `%form { @edit-toggle }`
+- usage: a bare `@edit-toggle` on its own line
+
+So the reported location is not the cause.
+
+* What was ruled out (verified, do not re-walk)
+
+- NOT a missing import. The file has `@import "stdlib/editable"` at line 14, and
+  the macro IS found — a genuinely unknown directive gives W0714/"not a known
+  directive", not a grammar mismatch.
+- NOT retired syntax. `@edit-toggle`, `@pull-refresh`, `@script` and `@log` are
+  all LIVE macros in opt-in modules (`stdlib/editable/edit-toggle.st:93`,
+  `stdlib/mobile/macros/components/refresh.st:21`,
+  `stdlib/scripting/script.st:183` and `:373`). BUG-300 filed these as
+  "residual retired syntax"; that premise is wrong.
+- NOT reproducible in isolation. Each of these compiles clean:
+  - `@import` + markup + `@edit-toggle`
+  - the same, with trailing CSS
+  - the same, with `@richtext(bind: …)` before it
+  - the same, with a `.post-body a { … }` rule after it
+
+* Bisect result — the trigger is 94 lines BELOW the reported line
+
+Truncating the real file at N lines and checking:
+
+| head -N | E0946 |
+|---------+-------|
+| 44..137 | no    |
+| 138     | YES   |
+| 179     | YES   |
+
+Line 138 is the `}` closing `.post-body a { … }`. The error appears only once
+the file reaches that length, and is then reported against line 44.
+
+CAUTION when re-bisecting: intermediate truncations (`head -60`, `head -125`)
+also report E0946 because they cut mid-construct, leaving an unbalanced brace.
+Those are artifacts, not signal — the result is non-monotonic, and only the
+monotonic boundary at 138 is real. An earlier bisect was also confounded by
+`E0504 Data source file not found` when the file was copied away from its
+`content/post.json`; bisect a copy of the WHOLE demo directory.
+
+* Why it matters beyond one demo
+
+The diagnostic points 94 lines away from the code that causes it. An author
+would edit a correct line indefinitely. "Unexpected 2 extra inline token(s)"
+also does not say WHICH tokens, so there is nothing to search for.
+
+Even after the underlying parse issue is fixed, E0946 should name the offending
+tokens and their span.
+
+* Reproduce
+
+#+begin_src sh
+cargo run -- check demos/editable-blog/index.st   # E0946 at :44
+cargo run -- build demos/editable-blog            # exits 1, no dist/
+#+end_src
+
+* Next step
+
+Find what accumulating parser state makes a matched `%form` stop matching past a
+length/nesting threshold. Suspicion (UNVERIFIED): an inline-token counter or
+lookahead window that is not reset per directive, so `@edit-toggle` is charged
+tokens belonging to a later construct. Confirm with `inspect --layer parse` on
+`head -137` vs `head -138` and diff the directive node.
+
+NOTE [2026-08-10]: Fixed in d3d9dbfb. Root cause: `:root` and `*` were missing from the newline-led statement-start guard in `inline_args` (events grammar) and its CST twin — the list that already held `.class`, `#id`, `<el`, bare element selectors, `&ref` and `ident:`. A bodyless `@edit-toggle` therefore swallowed the selector as an argument and the rule's `{ … }` as its body, blaming E0946 on the directive.
+
+The "94 lines above" and the non-monotonic bisect are both explained: the trigger was never line COUNT, it was whether a `:root`/`*` rule followed a terminator-less directive. That is also why it would not reproduce in isolation until the following rule was included.
+
+Ordering was the subtle half: in `inline_args` the guard must precede the value-colon branch, which consumes any COLON unconditionally. Placed after it, only the `*` half works — measured exactly that way before correcting.
+
+Gates in `tests/bug_216_silent_directive_drop_test.rs` (same family, not a parallel file): the target gate seen RED for both selectors, plus an over-widening companion proving `@data derive $area : $w * 3;` still parses.
+
+`demos/editable-blog` builds again (1 page); demos 20 → 21. lib 3174/0, integration 217/0, migrations 18/0, headless 729/18 unchanged.

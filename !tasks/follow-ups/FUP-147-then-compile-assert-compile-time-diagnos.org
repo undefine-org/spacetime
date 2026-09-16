@@ -1,0 +1,150 @@
+#+TITLE: @then compile — assert compile-time diagnostics from .test.st
+#+STATE: ITEM
+#+SESSION_ID: 153497be379ff5cc
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-18T12-18-12-318Z_153497be379ff5cc.jsonl]]
+#+CUSTOM_ID: FUP-147-then-compile-assert-compile-time-diagnos
+#+LAYER: testing
+
+Design accepted, implementation deferred. Raised by PLAN-117 W1, which had to
+fall back to a Rust companion because this surface does not exist.
+
+* The gap
+
+=.test.st= has NO way to assert a COMPILE-TIME diagnostic. The =@then= claim
+vocabulary is entirely runtime — DOM, text, signals, timelines, states
+(verified against =stdlib/testing/=). A =.test.st= can assert the *consequence*
+of a missing diagnostic (nothing rendered) but not the diagnostic CODE, its
+message, or its help text.
+
+So every diagnostic in the language — E0900..E0938 and everything after — is
+either tested in Rust or not tested at all. That is a hole in the doctrine:
+Spacetime tests Spacetime, except for the compiler's own voice.
+
+** Concrete cost, already paid
+
+=tests/lang/registry_addressing_diagnostics.rs= (11 tests) exists ONLY because
+of this gap. Its header says so. If this FUP lands, that file shrinks to nothing
+and its tests move into
+=tests/lang/registry-addressing/diagnostics.test.st=.
+
+* The design
+
+** Two directives, mirroring an existing pair
+
+A test asserting a compile error cannot contain the erroneous code at file
+scope — the file would not compile, and a RED matrix that fails to parse is a
+broken file, not a RED matrix (=tests/lang/README.md=). The bad code must live
+in a FIXTURE that is compiled *as data*.
+
+Precedent to copy exactly: =@doc(content:)= vs =@doc(src:)= — the same directive
+taking either literal content or a path, already shipped and already understood.
+
+#+begin_src spacetime
+// inline single-file fixture
+@compile(content: "$host string: \"a\";
+.x { text <- 1/$denominator; }")
+
+// on-disk fixture project (the multi-file case, which is most diagnostics)
+@compile(src: "./fixtures/dup-host/")
+#+end_src
+
+=@compile= is to a compile-claim what =@mount= is to a DOM-claim: it establishes
+the subject.
+
+** The claim: a new SUBJECT in the existing @then grammar
+
+=@then= already takes a subject then claims. Today every subject is a selector
+or a signal. This adds one more:
+
+#+begin_src spacetime
+@then compile should error "E-state-dup"
+@then compile should warn "W0703"
+@then compile should succeed
+
+// block form (FEAT-059 claim grammar, unchanged)
+@then compile {
+    error "E-state-dup";
+    message ~= "a.st";
+    message ~= "b.st";
+    help ~= "as";
+    errors == 1;
+}
+#+end_src
+
+Claim ops needed: =error= · =warn= · =succeed= · =message ~== · =help ~== ·
+=errors ==/>=/<=* · =code ==*. All are ordinary claim ops in the same table as
+=have_text= / =have_signal=, i.e. DATA in =stdlib/testing/=, not Rust match arms.
+
+** How it runs — the load-bearing idea
+
+The fixture is compiled at *test-BUILD* time, and its diagnostics are serialised
+into the emitted test JS as a plain array. The claim then inspects that array at
+runtime like any other claim inspects the DOM.
+
+#+begin_example
+test build:   @compile(src: …) → run the compiler on the fixture
+              → [{code, message, help, file, line}, …]
+              → inline as a JS literal beside the test
+test run:     @then compile { … } → iterate the array, evaluate the claims
+#+end_example
+
+Consequences worth stating:
+
+- *No new runtime capability.* The V8 world never needs a compiler; it gets
+  data. Identical shape to how =@then {claims}= already interpolates its claims
+  array as a JS literal (FEAT-059).
+- *Runs on =--headless=.* A diagnostic claim needs the =logic= rung only — no
+  layout, no timing, no paint. It never refuses on the fast backend.
+- *Deterministic.* No wall clock, no network, no DOM.
+
+** Recursion guard
+
+A =@compile= fixture that itself contains =@compile= must be refused (or
+depth-capped at 1). Compiling a compiler-invoking fixture inside a compile is a
+rabbit hole with no use case; name it in the spec and error on it.
+
+* Elegance-bar check (AGENTS.md)
+
+1. *small extension of existing grammar* — one new =@then= subject + one
+   directive that copies the =@doc(content:|src:)= shape. ✓
+2. *variants as data* — the claim ops are stdlib entries in the same table as
+   every other claim; a new op costs no Rust. ✓
+3. *deletes a special case* — removes
+   =tests/lang/registry_addressing_diagnostics.rs= entirely, and the =[[test]]=
+   entry in Cargo.toml that exists to register it. Any future
+   diagnostics-in-Rust file becomes unnecessary before it is written. ✓
+4. *tested by the machinery it generalises* — the claim-op table tests itself:
+   a deliberately-wrong expected code must FAIL (the W0 negative-gate pattern,
+   =tests/import_resolution_test.rs::w0_negative_gate_fails_false_assertions=). ✓
+
+* Honest costs
+
+- *Diagnostic codes become a public API.* Renaming =E0905= would break tests.
+  Arguably correct — codes are already user-facing, printed in every error — but
+  it should be a stated consequence, not a surprise.
+- *Compile-within-compile in the test builder.* Needs the recursion guard above
+  and a clear error when a fixture path does not resolve.
+- *Fixture sprawl.* Multi-file diagnostics need on-disk fixture projects.
+  Mitigation: =content:= covers the single-file majority; =src:= is for the
+  genuinely multi-file cases (duplicate declaration, ambiguity, visibility).
+
+* Acceptance
+
+- =@compile(content:)= and =@compile(src:)= both establish a compile subject
+- =@then compile should error "E0905"= passes on a fixture that triggers E0905
+- the same claim with a WRONG code FAILS (mutation-proven, non-vacuous)
+- =@then compile should succeed= passes on a clean fixture and fails on a dirty one
+- =message ~== / =help ~== match against the rendered diagnostic text
+- a =@compile= fixture containing =@compile= is refused with a clear message
+- =tests/lang/registry_addressing_diagnostics.rs= is DELETED, its 11 tests
+  reborn as =tests/lang/registry-addressing/diagnostics.test.st=, and the
+  =[[test]]= entry removed from Cargo.toml
+- =docs/testing/GUIDE.md= documents the subject + claim ops
+
+* References
+
+- gap recorded in: =!tasks/plans/PLAN-117= (W1 outcome, "Open decision")
+- the file this deletes: =tests/lang/registry_addressing_diagnostics.rs=
+- claim grammar precedent: FEAT-059 (=@then <subject> { <claim>; * }=)
+- content/src precedent: =@doc(content:)= / =@doc(src:)= (AGENTS.md, md module)
+- negative-gate pattern: =w0_negative_gate_fails_false_assertions=

@@ -1,0 +1,67 @@
+#+TITLE: Diagnostic suggestions and editor widgets as relation queries
+#+STATE: ITEM
+#+SESSION_ID: 153f5ed0617636c7
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-26T21-12-46-213Z_153f5ed0617636c7.jsonl]]
+#+CUSTOM_ID: FUP-191-diagnostic-suggestions-and-editor-widget
+
+* Initial Message
+
+ok so is there any point in keeping the worktree now? verify
+
+* Why
+
+Two hand-maintained mechanisms become queries over the `≤` table once it exists.
+
+** 1. Diagnostics that suggest the fix
+
+Today a type mismatch says what is wrong. With `≤` it can say what would work,
+because the table already knows which types are accepted at that slot:
+
+    expected `length`, got `color`
+      `length_percentage` accepts both — did you mean to widen the parameter?
+
+That second line is a QUERY (`{t : O ≤ t and E ≤ t}`), not a hand-written hint.
+Hand-written hints are the failure mode this arc has deleted eight of: they
+drift from the thing they describe.
+
+** 2. Editor widgets at a slot
+
+`%scalar_type` already carries `%widget`. Today an editor can only offer the
+EXACT type's widget. With `≤` it can offer every widget valid at that slot — a
+`length_percentage` parameter accepts a length picker AND a percentage slider,
+and the table says so without either being listed anywhere.
+
+* CodePath
+
+  src/diagnostics/suggestions.rs
+      the file that already lost CSS_PROPERTIES and EASING_PRESETS (two
+      hand-synced lists, tombstoned). This is the third: a suggestion becomes
+      `subtype()` closure over the registry, not a table of near-misses.
+  src/validation/css.rs::§line[text~="with_hint"]
+      every hint site — each is either a relation query or stays prose
+  stdlib/scalars/types.st::§line[text~="%widget"]
+      the widget column, now reachable through the relation
+  src/lsp/                                              the widget consumer
+  tests/suggestion_relation_test.rs                     NEW
+
+* Verification seeds
+
+- A suggestion must never suggest something that does NOT work. Gate: for every
+  suggested type `t` at slot `E`, assert `subtype(O, t) && subtype(E, t)` holds.
+  A suggestion that fails its own relation is worse than no suggestion.
+- Snapshot the current diagnostics over the corpus before/after; text may
+  improve, but no diagnostic should APPEAR or VANISH.
+- The widget query must be total: every `%scalar_type` row either yields a
+  widget set or is explicitly widget-less. No silent empty.
+
+* Deprecation sweep
+
+`src/diagnostics/suggestions.rs` currently holds `suggest_property()` and
+`edit_distance()` (moved there in PLAN-136 W7). Edit-distance suggestion is
+CORRECT for a MISSPELLED NAME and WRONG for a type mismatch — the two must not
+be conflated when this lands. Keep the former, replace the latter, and say which
+is which in the module doc.
+
+* Blocked on
+
+FUP-189.

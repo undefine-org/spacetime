@@ -1,0 +1,129 @@
+#+TITLE: MCP stdlib/server edits have no safe live-refresh path under the running server (target-dir isolation blind spot)
+#+STATE: DONE
+#+SESSION_ID: 150e2d6b06162626
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-18T16-11-23-032Z_150e2d6b06162626.jsonl]]
+#+CUSTOM_ID: FUP-071-mcp-stdlib-server-edits-have-no-safe-liv
+#+COMPLETION_HASH: 463849e8f1e8158c
+
+* Initial Message
+
+please look at the work recent work with the spacetime mcp and showcase it to me
+
+* Problem
+
+The MCP server target-dir isolation fix (commit fb944a4f, spell.kdl `--target-dir
+/home/user/.cache/cargo-target-mcp`) stops the AGENT's default-dir verification
+builds (`cargo check|test|build`) from crashing the live server. That half is
+solid and proven.
+
+But it leaves a BLIND SPOT: there is no safe way to make a `stdlib/__mcp__/*` or
+`src/mcp/*` change take effect LIVE while the server is running.
+
+Mechanism (observed 2026-06-18):
+- The live server runs from `cargo-target-mcp/debug/spacetime` (the isolated binary).
+- stdlib is compiled INTO that binary via `include_str!` in src/stdlib_embedded.rs,
+  so an edited kit/workbench/.st file is invisible to the running server until the
+  binary is rebuilt.
+- Rebuilding the ISOLATED dir (`cargo build --target-dir <isolated>`) relinks the
+  running server's OWN binary under it -> the SAME relink/mmap crash the isolation
+  fix was meant to prevent, just deliberately triggered. Nearly did this; caught
+  and cancelled the background build in time; server survived.
+- A running process also cannot hot-swap its embedded stdlib regardless.
+
+Net: the isolation fix prevents ACCIDENTAL crashes (agent verification builds) but
+the INTENTIONAL refresh of MCP source is still a stop-the-world operation. This
+session committed two MCP fixes (confirm-kit class collision 5698cb41, workbench
+right-rail occlusion fa7febd7) that compile clean but could NOT be shown live --
+they are deferred-live until a server restart.
+
+* Current (only) correct refresh path
+1. stop the MCP server,
+2. rebuild the isolated dir,
+3. reload Spell (respawns the server from the fresh binary).
+Steps 2-3 cannot happen under the live session that is serving the workbench.
+
+* Why this matters
+The whole value of the live MCP environment is tight edit->see-it loops. Today a
+stdlib/__mcp__ or src/mcp change has a cold, manual, stop-the-world refresh -- the
+opposite of live. Worse, the safe path is non-obvious (the naive "just rebuild"
+crashes the server), so it is a foot-gun for the next agent/session.
+
+* Options to evaluate (not yet decided)
+- A. Hot-reload stdlib from disk: have the MCP server read stdlib/__mcp__/*.st from
+  the FILESYSTEM at mount time (dev mode) instead of only from embedded include_str!
+  bytes. Then a kit/workbench edit is live on the next st_mount with zero rebuild.
+  Likely the real fix -- removes the rebuild from the inner loop entirely. Scope it:
+  a `--stdlib-dir` / env flag on `spacetime mcp` that overlays embedded stdlib with
+  on-disk files; production still uses embedded.
+- B. Blue/green server: build the new isolated binary to a SECOND dir, launch it on
+  a new port, hand off, retire the old. Heavier; needs Spell-side reload orchestration.
+- C. Document-only: codify the stop->rebuild->reload runbook in spell.kdl + docs and
+  accept the cold loop. Cheapest, but leaves the foot-gun and the slow loop.
+
+Recommendation: A (filesystem stdlib overlay in dev) is the principled fix -- it
+makes the live environment actually live for its OWN source, and matches the repo
+ethos (the metasystem is self-describing; the server should read its stdlib, not
+freeze it at compile time). B/C are fallbacks.
+
+* Acceptance (when picked up)
+- Editing a `stdlib/__mcp__/*.st` file and calling `st_mount`/`st_workbench` again
+  reflects the change with NO binary rebuild and NO server restart (option A), OR a
+  documented, crash-free one-command refresh (option B), OR at minimum a written
+  runbook + guard that makes the crash path impossible to hit by accident (option C).
+- The confirm-kit (5698cb41) and right-rail occlusion (fa7febd7) fixes are verified
+  live once the path exists.
+
+* Provenance
+Discovered while showcasing PLAN-043 kits + the workbench live. Related:
+- CON-spacetime-mcp-server-dies-when-agent-run (memory) -- the original isolation fix.
+- commit fb944a4f (spell.kdl --target-dir isolation).
+- PLAN-040 (auto-event-surfacing) -- adjacent live-loop UX work.
+
+NOTE [2026-06-19]: EMPIRICAL SCOPE REFINEMENT (2026-06-19, live server inst probes via /bundles endpoint). The FUP's blanket claim "an edited kit/workbench/.st file is invisible to the running server" is TOO BROAD. Tested 4 markers against the live server with NO rebuild/restart:
+- styles.st (imported plain CSS) edit → LIVE on next st_workbench (marker present in inst-2 bundle). resolve_imports reads @imported files from disk per-compile.
+- env.st BODY edit (the include_str! at tools.rs:360) → FROZEN (marker absent inst-3).
+- host.st %primitive JS body edit → FROZEN (marker absent inst-4).
+∴ Precise freeze surface is TWO things, not "all __mcp__ files":
+  1. env.st's OWN body — include_str! at src/mcp/tools.rs:360 (the workbench shell HTML/CSS authored directly in env.st).
+  2. Meta-defs (%primitive/%macro/%form) in __mcp__ — frozen because (a) %form grammar lives in STDLIB_REGISTRY LazyLock (frozen at first access), and (b) per-compile register_user_meta_defs (compiler.rs:587) hits DuplicatePrimitive/DuplicateMacro → skips silently, so an imported host.st redefinition can't override the already-registered body.
+EVERYTHING ELSE already live: env.st's @imported workbench/*.st (data/cards/lists/actions/styles) and all kit/*.st sources (agent passes file contents as source:) re-compile from disk every mount.
+
+CONSEQUENCE FOR THE FIX (option A, auto-detect + --stdlib-dir override chosen 2026-06-19): scope is NARROWER than the FUP implies. Need only:
+  (a) read env.st (and the kit sources that tools.rs include_str!s, if any) from disk-when-present instead of include_str! — gated to dev (on-disk stdlib/__mcp__ exists) with --stdlib-dir/SPACETIME_STDLIB_DIR override; AND
+  (b) make __mcp__ meta-defs refreshable: either add stdlib/__mcp__ to the incremental-cache dir list AND let imported meta-defs override on mtime change, OR route __mcp__ %form grammar through the refreshable MetaRegistry path rather than the frozen STDLIB_REGISTRY LazyLock.
+The confirm-kit (5698cb41) + right-rail (fa7febd7) fixes: right-rail is in styles.st (imported) → ALREADY LIVE today; confirm-kit class fix is in kit/confirm.st → ALREADY LIVE (kit source read from disk at mount). So both deferred-live fixes from the originating session were in fact already showable; only env.st-body and grammar edits need the fix.
+
+NOTE [2026-06-19]: CORRECTION to the prior note (2026-06-19, re-verified against CORRECT endpoints). My first probe round used the /bundles endpoint, which has NO `js` field (js_len:0) — so "primitive JS frozen" was a WRONG-ENDPOINT ARTIFACT, not a real freeze. Re-tested against the right endpoints (/js for JS, instance page "/" for HTML):
+
+VERIFIED LIVE-REFRESH SURFACE (live server, st_workbench remount, ZERO rebuild/restart):
+- workbench/styles.st (imported CSS)        → LIVE  (marker in /css + /bundles css)
+- primitives/host.st %primitive JS body      → LIVE  (string-literal marker present in /js, 400KB bundle) — CORRECTED, was wrongly "frozen"
+- env.st OWN body (HTML authored in env.st)  → FROZEN (page "/" still shows old text; marker absent) — the include_str! at src/mcp/tools.rs:360
+- kit/*.st sources                            → LIVE  (agent passes file contents as source: each mount)
+
+RECONCILED TWO-REGISTRY MODEL (explains every probe):
+- Parse-time grammar (%form/%capture_type) → STDLIB_REGISTRY LazyLock, bootstrapped by walking the WHOLE stdlib/ tree incl __mcp__ → frozen at first access for the process.
+- Compile-time expansion (%primitive JS bodies, %macro %binds) → cached MetaRegistry, which EXCLUDES __mcp__ (incremental_cache from_full_load lists only 6 dirs: capture-types/runtime/primitives/syntax/macros/testing). Because __mcp__ is NOT cached, env.st's @imported host.st meta-defs register FRESH PER-COMPILE from disk (resolve_imports → merge_ast carries imported meta_defs; register_user_meta_defs at compiler.rs:587 finds NO duplicate to skip) → primitive JS + macro binds are LIVE.
+- env.st body → include_str! → frozen.
+
+NET, CORRECTED FREEZE SURFACE = essentially ONE thing for everyday work: env.st's own body (include_str! at tools.rs:360). Plus a SECOND, narrower case: an EXISTING %form grammar whose syntax shape changes (the frozen STDLIB_REGISTRY clone matches the old form first; rematch_with_user_macros only adds NEW macro forms from disk-fresh ast.meta_defs, it doesn't override an existing frozen form). A brand-new macro's grammar liveness was not conclusively measured (binding names are mangled in /js, so grep-by-name failed) — flag for the implementer to settle with a compiled-template probe, not blocking.
+
+CONSEQUENCE FOR THE FIX (option A, auto-detect + --stdlib-dir override):
+1. PRIMARY: read env.st from disk-when-present instead of include_str! at tools.rs:360 (dev gate: on-disk stdlib/__mcp__/env.st exists; --stdlib-dir / SPACETIME_STDLIB_DIR override). This alone makes the workbench shell live. Apply the same disk-when-present rule to any other include_str! MCP source.
+2. SECONDARY (grammar): for an EXISTING %form whose shape changes, the frozen STDLIB_REGISTRY wins. Either add stdlib/__mcp__ to the refreshable grammar path, or accept that grammar-shape edits (rare) still need a restart and document it. Most __mcp__ authoring is content/CSS/JS-body/binds (all already live) — grammar-shape edits are the rare case.
+
+BOTH originating-session fixes were ALREADY live-showable: right-rail fa7febd7 (styles.st, imported CSS → live) and confirm-kit 5698cb41 (kit/confirm.st, source → live). The original FUP framing ("invisible until restart") over-generalized from the env.st-body freeze.
+
+NOTE [2026-06-19]: RESOLVED via option A (dev-mode filesystem overlay), commit 6b9390a7.
+
+WHAT SHIPPED:
+- src/mcp/stdlib_source.rs — resolve_mcp_stdlib_source(workspace_root, rel) with precedence: SPACETIME_STDLIB_DIR env override → <workspace_root>/stdlib/__mcp__/<rel> auto-detect → embedded mcp::FILES fallback.
+- src/mcp/tools.rs st_workbench — reads env.st through the overlay instead of include_str!.
+- src/main.rs — `spacetime mcp --stdlib-dir <dir>` flag, bridged to SPACETIME_STDLIB_DIR (set once at startup, unsafe block per edition-2024).
+- src/mcp/mod.rs — registers the module.
+
+TESTS (all green): 3 unit in stdlib_source.rs (embedded fallback; disk autodetect prefers disk; env override beats workspace) + 1 end-to-end in protocol.rs (st_workbench_reads_env_st_from_disk_overlay asserts mounted source_len == on-disk env.st trimmed len). Full lib suite 2346 pass; the one failure (compiler::snapshot_tests::snapshot_test_and_fixture) is PRE-EXISTING unrelated WIP in src/emit/metasystem_codegen.rs + its .snap (not touched by this work — verified via edit history).
+
+SCOPE NOTE (why narrower than the original FUP): empirical probing (recorded in the two NOTEs above) showed only env.st's OWN body was frozen; its @imported files and kit sources were already disk-live. So the fix targets exactly env.st. The grammar-shape edge (an EXISTING %form whose syntax changes is still matched by the frozen STDLIB_REGISTRY clone) remains — it is rare (most __mcp__ authoring is content/CSS/JS-body/binds, all live) and is documented here rather than fixed; spin a follow-up if grammar-shape live-reload is ever needed.
+
+LIVE VERIFICATION CAVEAT (honest): the currently-running MCP server still executes the OLD binary (from ~/.cache/cargo-target-mcp), so it cannot itself demonstrate the overlay until Spell reloads it from a freshly-built binary. The fix is proven by unit + end-to-end tests against the new code; first live confirmation will come on the next server reload. This is expected and not a regression.

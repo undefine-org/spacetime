@@ -1,0 +1,175 @@
+#+TITLE: project-style-protocol asset-tier inventory (Step 0 + brand-spec.md template)
+#+STATE: DONE
+#+SESSION_ID: 14cc890346343e2b
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-04-28T16-31-49-016Z_14cc890346343e2b.jsonl]]
+#+CUSTOM_ID: FEAT-028-project-style-protocol-asset-tier-invent
+#+DEPENDS: AUD-007-spacetime-design-skill-obsolete-content
+#+EFFORT: 3h
+#+LAYER: coding-agent
+#+PRIORITY: #A
+
+* Initial Message
+
+what makes huashu design so good? https://github.com/alchaincyf/huashu-design and is the spacetime-design applying that?
+
+* Intention & Purpose
+
+Promote =project-style-protocol.md= from "color tokens only" to a multi-tier asset protocol so the skill behaves like huashu-design's brand-asset rule: *Logo > product/hero imagery > UI screenshots > color > font > vibe*. Brand recognizability is a function of the assets present, not of the color tokens alone. Today the protocol asks the agent to grep var/literal usage and freeze a tokens file — but it never asks "is there a logo? is there a hero image?". An =index.st= that imports =tokens.st= correctly but renders without the brand's logo or hero photography is structurally clean and still off-brand.
+
+* Context & Narrative
+
+The huashu-design analysis (this session) showed the v1.1 升级 in their SKILL.md is exactly this: from "extract colors and fonts" to "logo + product image + UI screenshots > everything else". The DJI Pocket 4 example: an animation that walked the (color-only) protocol still produced a "generic black-bg + orange-accent + rounded rectangle" tech ad with zero DJI identity, because no DJI logo or product render was sourced.
+
+Spacetime websites typically hold their assets under =projects/<name>/images/= or =projects/<name>/assets/=. The asset-tier inventory step:
+1. =ls projects/<name>/= and identify image directories.
+2. Look for =logo.svg= / =logo.png= / =logo-*.png= patterns; if missing, halt and prompt user.
+3. For implied content types (product / portrait / scene), scan for hero imagery; if missing AND the site is content-driven, prompt user.
+4. Compose =projects/<name>/brand-spec.md= recording resolved asset paths + token references.
+
+The doctor finding is light: when a project root has =brand-spec.md= AND that file references asset paths that don't exist on disk, doctor emits a =CheckDiagnostic= with =severity: "warn"=, =rule: "brand-asset-missing"=. This is a check-phase diagnostic, NOT a runtime walker.
+
+* Scope
+
+In-scope:
+- =.claude/skills/spacetime-design/references/project-style-protocol.md= — full rewrite per [[id:AUD-007-spacetime-design-skill-obsolete-content]] §project-style-protocol.md:
+  - Insert NEW Step 0 (asset-tier inventory) before existing Step 1.
+  - Insert NEW Step 6 (compose brand-spec.md) after existing Step 5.
+  - Renumber existing 5 steps; existing content unchanged.
+  - Append "brand-spec.md template" section at file end (worked example using =projects/undefine.org/=).
+  - Edit =When the brand isn't documented= section: rewrite to reference Step 0 explicitly.
+- =.claude/skills/spacetime-design/SKILL.md= line 53 — minor edit to reflect new 7-step shape.
+- =src/cli/doctor.rs= — extend check phase with =brand-asset-missing= finding when =brand-spec.md= references missing asset paths.
+
+Out-of-scope:
+- Runtime walker for asset references inside compiled HTML — doctor's check phase suffices.
+- Brand-spec.md generation tooling — agent authors manually following template.
+- Changes to =Spacetime.review()= dim semantics — FEAT-032 owns that.
+- Asset acquisition automation (fetching logos from web) — the protocol ASKS the user, doesn't fetch.
+
+* Existing Patterns
+
+- =src/cli/doctor.rs::run_check_phase= (line 177) — appends to =Vec<CheckDiagnostic>=. Reuse.
+- =src/cli/doctor.rs::CheckDiagnostic= struct (line 116) — already has severity/rule/message/file/line.
+- =src/cli/doctor.rs::compute_pass= (line 139) — pass logic ignores warns; new finding doesn't fail gate (parity with existing brand-color warns).
+- =projects/undefine.org/AGENTS.md= already documents brand color (=Indigo: #3B3A9E=). Used as template worked example.
+- =@tasks/AGENTS.md= line 14 validate command for sanity check after editing skill files.
+
+* Tests
+
+T1 — *Skill content integrity*:
+- T1.1: =grep -c "Step 0 · Asset-tier inventory" .claude/skills/spacetime-design/references/project-style-protocol.md= returns 1.
+- T1.2: =grep -c "brand-spec.md" .claude/skills/spacetime-design/references/project-style-protocol.md= returns ≥ 4.
+- T1.3: SKILL.md line 53 (project-style code fence) shows 7 steps not 5.
+
+T2 — *Doctor brand-asset-missing finding*:
+- T2.1: =fn brand_asset_missing_emits_warn_when_path_referenced_but_file_absent()= — fixture project with =brand-spec.md= referencing =assets/logo.svg= but file absent → finding emitted with =Severity::Warn=, =rule = "brand-asset-missing"=.
+- T2.2: =fn brand_asset_missing_silent_when_paths_exist()= — fixture with both files present → no finding.
+- T2.3: =fn brand_asset_missing_silent_when_no_brand_spec()= — project without =brand-spec.md= → no finding (opt-in via file presence).
+- T2.4: integration: =cargo run -- doctor projects/<fixture>/ --format json= contains finding in =check_diagnostics[*]= when expected.
+
+T3 — *Validate baseline preserved*: net new errors = 0.
+
+Manual:
+- M1: walk the protocol on =projects/undefine.org/= as hand-test. Confirm Step 0 surfaces logo.svg presence (or absence). Compose sample brand-spec.md following template; confirm doctor passes silently.
+
+* Implementation
+
+** ITEM Author asset-tier rewrite of project-style-protocol.md (TDD: docs first; satisfies T1.1, T1.2)
+:PROPERTIES:
+:CUSTOM_ID: FEAT-028-project-style-protocol-asset-tier-invent::rewrite-protocol
+:END:
+
+File: =.claude/skills/spacetime-design/references/project-style-protocol.md=
+
+Concrete edits:
+
+1. *Insert NEW Section "## Step 0 · Asset-tier inventory"* before existing "## The 5-step procedure" heading. Body declares the asset hierarchy (Logo > product/hero imagery > UI screenshots > color > font > vibe), the inventory commands (=ls projects/<name>/=, =find projects/<name>/ -name "logo*"=), and the decision rules: logo missing → halt; product/hero missing AND site content-driven → ask; UI missing AND digital product → ask. Closes with "ask before proceeding" framing — not "fetch from web".
+
+2. *Renumber* existing "## The 5-step procedure" heading to "## The 5-step token procedure (after Step 0 inventory)". Existing 5 steps unchanged.
+
+3. *Append NEW Section "## Step 6 · Compose brand-spec.md"* after existing Step 5. Body explains brand-spec.md's role + provides full markdown template with: Logo paths, Hero imagery paths, UI screenshot paths, Tokens reference back to tokens.st, Forbidden-color list, Vibe descriptors. Notes that doctor's check phase reads this file and emits =brand-asset-missing= for unresolved paths.
+
+4. *Edit =When the brand isn't documented= section*: rewrite to reference Step 0 explicitly: "If Step 0 inventory comes back empty, do not proceed to token freeze. Ask the user; if user authorizes a placeholder run, mark every borrowed/inferred decision in =brand-spec.md= explicitly so it can be promoted later. Question 2 dovetails into [fallback-advisor.md](fallback-advisor.md) but only after Step 0 inventory is signed off."
+
+** ITEM Update SKILL.md project-style-protocol code fence (satisfies T1.3)
+:PROPERTIES:
+:CUSTOM_ID: FEAT-028-project-style-protocol-asset-tier-invent::update-skill-md
+:DEPENDS: FEAT-028-project-style-protocol-asset-tier-invent::rewrite-protocol
+:END:
+
+File: =.claude/skills/spacetime-design/SKILL.md= line 53-62 (5-step procedure code fence).
+
+Replace with 7-step block:
+
+#+begin_src
+0. Inventory project assets (logo, hero imagery, UI screenshots). Halt if logo missing.
+1. Read AGENTS.md, README, /docs/ for explicit declarations.
+2. Read the project's existing .st files for @apply / var(--*) usages.
+3. grep -rn "var(--" projects/<name>/  ->  inventory of tokens.
+4. grep -rn "#[0-9a-fA-F]" projects/<name>/  ->  unbound literals to promote.
+5. Freeze tokens.st (or equivalent) before authoring sections.
+6. Compose brand-spec.md recording asset paths + token references.
+#+end_src
+
+** ITEM Add brand-asset-missing check phase test scenarios (satisfies T2.1, T2.2, T2.3)
+:PROPERTIES:
+:CUSTOM_ID: FEAT-028-project-style-protocol-asset-tier-invent::tests
+:DEPENDS: FEAT-028-project-style-protocol-asset-tier-invent::rewrite-protocol
+:END:
+
+File: =src/cli/doctor.rs= tests module.
+
+Three unit tests as named in T2.1, T2.2, T2.3. Test fixtures live under =tests/fixtures/doctor-brand-spec/=:
+- =fixture-with-spec-and-asset/= — has =brand-spec.md= with logo path + the asset file.
+- =fixture-with-spec-only/= — has =brand-spec.md= with logo path but no asset.
+- =fixture-no-spec/= — no =brand-spec.md=.
+
+Tests boot via existing =DoctorReport::compute_pass= harness pattern (lines 517-572 in current =src/cli/doctor.rs=).
+
+** ITEM Implement brand-asset-missing check (satisfies T2.1-T2.4)
+:PROPERTIES:
+:CUSTOM_ID: FEAT-028-project-style-protocol-asset-tier-invent::impl-check
+:DEPENDS: FEAT-028-project-style-protocol-asset-tier-invent::tests
+:END:
+
+File: =src/cli/doctor.rs::run_check_phase=.
+
+Logic:
+1. After existing diagnostics collection, locate =<site>/brand-spec.md=.
+2. If present, read its contents; extract markdown link / inline-code paths matching =assets/.*\.(svg|png|jpg|jpeg|webp|avif)=.
+3. For each extracted path, check existence: =site.join(path).exists()=.
+4. For each missing path, push =CheckDiagnostic= with =rule="brand-asset-missing"=, =severity=Severity::Warn=, =message="brand-spec.md references <path> but file is missing"=, =file=Some(brand_spec_path)=, =line=Some(<line>)=.
+
+Best-effort: markdown parsing failures fall through silently rather than blocking the rest of doctor.
+
+** ITEM Run T1, T2, T3 + walk M1 (satisfies all)
+:PROPERTIES:
+:CUSTOM_ID: FEAT-028-project-style-protocol-asset-tier-invent::verify
+:DEPENDS: FEAT-028-project-style-protocol-asset-tier-invent::update-skill-md FEAT-028-project-style-protocol-asset-tier-invent::impl-check
+:END:
+
+Capture artifacts under =!tasks/plans/plan-artifacts/PLAN-020-doctrine-import/feat-028-*=:
+- =feat-028-grep.txt= — T1 grep harness output.
+- =feat-028-doctor-undefine.txt= — =cargo run -- doctor projects/undefine.org/ --format json= showing finding shape.
+- =feat-028-skill-diff.txt= — git diff of two .md files.
+
+* Edge Cases
+
+- *Project root has no =brand-spec.md=*: zero new findings (opt-in via file presence).
+- *brand-spec.md exists with no asset references*: zero findings (only fires per missing path).
+- *Asset path uses absolute filesystem path*: skip — only project-relative paths are checked. Document in rule docstring.
+- *Markdown extraction picks up backtick path that's just a CSS variable example*: filter only links/inline-code with path-with-extension-and-slash. T2.2 covers this.
+- *Race against PLAN-018's brand-dim runtime walker*: existing walker counts unbound hex literals at runtime. New doctor check is asset-presence at compile time. Different shapes (CheckDiagnostic vs review.findings); no conflict.
+- *Position in pretty output*: =render_pretty= already iterates =report.check_diagnostics=. New entries surface there; no formatting change needed.
+- *Multiple projects in one run*: doctor today operates on single =site=. Check is per-invocation; no cross-project bleed.
+
+* Acceptance Criteria
+
+1. T1.1, T1.2, T1.3 pass.
+2. T2.1, T2.2, T2.3, T2.4 pass via =cargo test --lib cli::doctor::=.
+3. T3 — 0 net new errors.
+4. M1: walking new 7-step protocol on =projects/undefine.org/= produces sensible =brand-spec.md= and passing =doctor= run.
+5. =git diff src/cli/doctor.rs= adds < 100 lines.
+6. =git diff .claude/skills/spacetime-design/references/project-style-protocol.md= shows ONLY the targeted edits.
+
+NOTE [2026-04-28]: project-style-protocol asset-tier rewrite + brand-spec.md template + doctor brand-asset-missing finding (CheckDiagnostic.rule + run_brand_asset_check + 5 unit tests, all passing).

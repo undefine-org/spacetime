@@ -1,0 +1,68 @@
+#+TITLE: named-ref template invocation never registers its element
+#+STATE: DONE
+#+SESSION_ID: 153497be379ff5cc
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-18T12-18-12-318Z_153497be379ff5cc.jsonl]]
+#+CUSTOM_ID: BUG-361-named-ref-template-invocation-never-regi
+
+* Initial Message
+
+please explain and cluster the remaining failures from zero context so that we may have a last push to fix them all
+
+* Summary
+
+~&inst &tpl(...)~ documented its contract as "the created element is stored
+under the ref name for later access". It stored the name in the SIGNAL store
+and never in the ELEMENT registry, so nothing could find it.
+
+- ~invoke-template~ (`stdlib/primitives/template.st`) called
+  ~ST.set(container, refName, element)~ — publishes a signal ON the container.
+- Every READER of a ref name — ~ST.ref(name)~, and therefore every ~&name~
+  assertion subject, ~$bounds~ capture and lowered ~%derives~ expression —
+  resolves against ~window.__stRefs~.
+
+Two disjoint maps. The name was written to one and read from the other, so
+~@then &inst should exist~ was false for an element that was demonstrably in
+the DOM.
+
+Grep confirmed the asymmetry: ~window.__stRefs[...]~ had exactly ONE writer in
+the entire tree (`stdlib/syntax/element-ref.st`, the `&name selector;` form) —
+the template path never wrote it at all.
+
+* Second, independent half: the block form bypassed the resolver
+
+~ST.subject()~ exists precisely to accept a `&name` / `&name .desc` subject and
+fall back to plain CSS. The inline form (~@then X should Y~) used it. NINE other
+subject-resolution sites called ~document.querySelector~ directly, so the SAME
+subject worked in one spelling and reported ~got undefined~ in another:
+
+- `stdlib/testing/test.st` — `then-claims` block form (+ its `count` claim),
+  `@when` target, `have_length`/`have_count`, and both `@wait_for` polls
+- `stdlib/testing/assertions/binding.st` — 2 sites
+- `stdlib/testing/assertions/state.st` — 1 site
+
+All now route through ~ST.subject~ / ~ST.subjectAll~.
+
+* Fix
+
+1. `stdlib/primitives/template.st` — register the created element in
+   ~window.__stRefs[refName]~ alongside the existing ~ST.set~ (both, not either:
+   the signal publication is a separate, working feature).
+2. The nine bypass sites above.
+
+* Gate
+
+`tests/fixtures/native-template/named-ref-registration.test.st` — 3 tests,
+RED→GREEN, asserting through the REGISTRY path (`&inst`), not through `.class`
+(which passed either way and is exactly why the break survived):
+- a named-ref invocation registers the element under its ref
+- two named invocations register independently
+- an unregistered ref still resolves to nothing (the null contract must
+  survive — an absent ref is null, not stale and not a throw; this one passed
+  BEFORE the fix too, which is what proves the instrument discriminates)
+
+* Effect
+
+`tests/fixtures/native-template/`: 2 → 5 passing. Headless suite 734 → 736.
+
+Uncovered while fixing (filed separately, not caused by it): BUG-360, a
+template invocation inside ~@mount~ renders twice.

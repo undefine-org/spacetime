@@ -1,0 +1,49 @@
+#+TITLE: No @pointer/@track macro to bind pointer coords to transforms (pointer primitive exists, no bindable driver)
+#+STATE: DONE
+#+SESSION_ID: 153497c78a510229
+#+CUSTOM_ID: BUG-195-no-pointer-coord-binding-macro
+#+COMPLETION_HASH: cafd4e372e63444d
+
+* Source
+GitHub issue #7 (undefine-org/spacetime), enhancement gap.
+
+* Symptom
+No declarative macro binds POINTER COORDINATES to a transform / CSS var.
+stdlib/primitives/pointer.st yields $normX/$normY/$centerX/$centerY/
+$pointerType, but its only consumers are the self-contained @magnetic and
+@cursor behaviors. `@pointer { ... }` is NOT a registered directive: it
+compiles as an unknown-at-rule passthrough (emit-verified: the block
+vanishes entirely -- no init, no keyframes) so nothing binds, silently.
+Sakazuki fell back to a static scroll-scrubbed scatter instead of pointer
+parallax.
+
+* What exists today (pinned green as control)
+@mouse (stdlib/macros/timeline.st %macro mouse-timeline) is a
+scalar-progress driver: pointer position -> single $progress 0..1 (or {x,y}
+with axis:"both") scrubbing keyframes. Covers tilt-style effects, NOT
+coord-binding into expressions (`translate-x: 0 -> $centerX * 40px` -- the
+issue's suggested surface).
+
+* Test pin (RED)
+tests/bugs/BUG-195-no-pointer-coord-binding-macro.test.st
+- 1 RED: file-scope @pointer + shimmed-rect mousemove must set a transform
+  (fails today: unregistered passthrough).
+- 1 GREEN control: @mouse drives a real transform (observed
+  translateX(100px)).
+Run: `cargo run --features headless -- test <file> --headless --format json`
+Authoring landmines documented in-file: driver must be at FILE SCOPE
+(BUG-194 swallows in-@test keyframes); the test world needs an
+AbortController polyfill first step (BUG-196) and a per-element
+getBoundingClientRect shim (LinkeDOM has no layout; the driver's
+rect.width === 0 guard early-returns); an unset inline style reads back
+`undefined` in LinkeDOM so assertions must require a genuinely set value.
+
+* Fix direction
+Register a @pointer/@track macro (or pointer-driver primitive) analogous to
+scroll-driver/mouse-driver that exposes $centerX/$centerY (and normalized
+coords) as bindable values in keyframe expressions. Mirror the existing
+mouse-driver machinery (additive, data-driven, no new subsystem). If the
+shipped surface differs in name/shape from the issue's sketch, update the
+RED pin to the shipped syntax -- the behavioral claim is the pin.
+
+NOTE [2026-07-19]: FIXED (PLAN-078): %macro pointer-timeline added to stdlib/macros/timeline.st, mirroring %macro mouse-timeline (same %form/@pointer name axis invert easing stagger staggerFrom + $body:keyframes, same %binds onto mouse-driver + apply-animations). No driver fork — mouse-driver already computes the needed progress. Pin 2/2 green (@mouse control unaffected). Fuller $centerX-in-expression coord binding remains future work per the issue.

@@ -1,0 +1,205 @@
+#+TITLE: Spacetime CMS Stage 2 & 3 — Squarespace killer → Framer killer
+#+STATE: ITEM
+#+SESSION_ID: 14f8685429e4ccf1
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-01T18-22-11-112Z_14f8685429e4ccf1.jsonl]]
+#+CUSTOM_ID: PLAN-029-spacetime-cms-stage-2-3-squarespace-kill
+#+DEPENDS: PLAN-028-spacetime-cms-v1-local-zero-config-conte
+
+* Initial Message
+
+ok let's think deeply deeply. What would a headless CMS for Spacetime look like? like a headless CMS that has all the nice features of a headless CMS and the power of Spacetime combined. Look at the stdlib and the __dev__ to understand some of the pre-existing experiments, and do a research on the state of headless CMSes, before coming back with your THOUGHTS AND REFLECTIONS (no decisions yet)
+
+* Goal
+The post-V1 arc of the Spacetime CMS: STAGE 2 (Squarespace killer) and STAGE 3 (Framer
+killer), still 100% LOCAL (no server, no auth, no hosting — those are a later layer).
+This plan is the design substrate; it depends on PLAN-028 (V1 local admin) landing first.
+It is intentionally comprehensive so a fresh agent reaches full understanding from it
+plus the two specs.
+
+THE SPINE (one property deepening across stages):
+  V1   admin reads TYPES        → generates FORMS         writes data/*.json
+  SQS  admin reads the TYPE GRAPH→ generates EDITORS       writes data/*.json (richer)
+  FRMR admin reads TEMPLATES    → generates a COMPOSER     writes @type + .st (source)
+The admin understands progressively MORE of the .st program and writes progressively
+MORE of it back. Never a separate database, never a foreign format, never custom JS
+(the admin is itself a Spacetime site).
+
+* REQUIRED READING
+- docs/specs/spacetime-cms-stage2-3.md — THE deep design (this plan operationalizes it).
+- docs/specs/spacetime-cms.md — master spec (thesis, polarities, V1, out-of-scope).
+- docs/specs/cms-mockups/stage3-page-builder.png   — Vein 1 (typed page composition).
+- docs/specs/cms-mockups/stage2-richtext-blocks.jpg — Vein 2 (rich text as blocks).
+- docs/specs/cms-mockups/stage2-relations-graph.png — Vein 3 (id(T) relations + graph).
+- PLAN-028 (V1) — the foundation this builds on.
+
+* USER DECISIONS folded in (binding)
+- 2A: relations use =id(Agent)=, NOT bare =Agent= (references, not nested data).
+      Parens type-args match the codebase direction (capture maps).
+- 2B: rich text is a CONSTRAINED SPACETIME AST (allowlist/denylist) — see the reframe
+      below. (Original "html5ever tree + bespoke traits" framing is SUPERSEDED.)
+- 3A: the admin exposes the WHOLE Spacetime surface — a true typed page builder.
+- 3B: brand/theme handled the Spacetime-native way, "as nice as @type", editable in UX.
+- 3C: source round-trip = EditAst, ALREADY handled (src/sync/handlers.rs).
+- 3D: prerender canvas wanted; build the admin IN Spacetime.
+
+* Substrate facts (VERIFIED in-repo — trust but re-verify)
+- html5ever 0.39 + lol_html 2 already in Cargo.toml.
+- Parameterized types via parens already parse (src/parser/mod.rs:3583; capture maps in
+  stdlib/capture-types/param_list.st).
+- TypeExpr today (src/parser/ast.rs:348) = Primitive | Array | Object |
+  Union(Vec<String>) | Reference. STRING-ONLY unions; no id(T), no object unions (those
+  exist in the state-machine subsystem, meta_ast.rs:136, if ever needed).
+- TEMPLATE REGISTRY already stores params: param_list = [{name, kind: binding|element,
+  optional}] (stdlib/macros/template.st:110). THIS IS THE FOUNDATION FOR TYPED
+  COMPOSITION: binding params = data needs, element params = SLOTS.
+- HtmlExpr IR (src/ir/code.rs:299) = Element{tag,attrs:Vec<(String,Vec<AttrPart>)>,
+  children} | Text | Hole(JsExpr) | Raw. html5ever parses INTO this via a custom
+  TreeSink (src/html/treesink.rs:1). AttrPart = Lit | Hole, so src=$.image round-trips.
+
+* ───────────────────────── VEIN 3 — id(T) relations ─────────────────────────
+(Presented first; the id(T) decision ripples through Veins 2 and all of Stage 3.)
+Decision: a relation is a REFERENCE typed =id(Agent)= (single) / =id(WorkCard)[]=
+(multi), stored as a bare id string / array of id strings (matches unkn's id/slug
+convention). A bare =Agent= would NEST a full object (denormalized); =id(Agent)= keeps
+Agent a first-class collection and the field a pointer.
+Type-system work (full detail in FUP-028):
+- new TypeExpr::Apply{ctor,args} (general primitive) parsing id(Agent), id(WorkCard)[].
+- JSON-schema: id(Agent) → {"type":"string","x-st-ref":"Agent"} — the signal the admin
+  reads to render a relation PICKER.
+- warn-level referential validation (dangling ref warns, not errors).
+Admin surface (mockup stage2-relations-graph.png): single → chip+picker; multi →
+multi-chip; a List|Graph toggle; the GRAPH VIEW falls out for free (nodes=entries,
+edges=id(T) fields). HIDDEN OPPORTUNITY: =@computed { where: … }= already exists →
+surface it as structured SAVED VIEWS ("Talents in Fashion") with no GROQ.
+Challenges: referential integrity on delete (warn-on-delete); rename cascade (FUP-033);
+backlinks (DERIVE, don't store).
+FUP: FUP-028 (id(T) relations), FUP-033 (id rename cascade).
+
+* ──────────── VEIN 2 — rich text = constrained Spacetime AST (REFRAMED) ────────────
+THE REFRAME (user, 2026-06-03): rich text is NOT a bespoke html5ever document with
+invented "traits" + a new wire schema + a new sanitizer. It IS a Spacetime AST subtree
+constrained by an allowlist/denylist of node kinds. Proof: Spacetime already parses HTML
+into HtmlExpr (src/html/treesink.rs:1, src/ir/code.rs:299); the "traits" (a @scroll on a
+quote, a $binding on an img) ARE just AST nodes; EditAst already round-trips the AST (3C).
+∴ ONE allow/denylist replaces THREE would-be subsystems (document schema, sanitizer,
+object-union types). This is simpler AND more Spacetime-native (AGENTS.md: don't write a
+Rust HTML parser/fallback; the metasystem is self-describing; the list IS the policy).
+The policy (full detail in FUP-029):
+  ALLOW structure: h1/h2/h3, p, ul/ol/li, blockquote, img, a, figure/figcaption
+  ALLOW inline:    strong, em, code, br  (the hard 20% — native AST, free)
+  ALLOW Spacetime: AttrPart::Hole ($.field); curated motion on blocks (@scroll/@reveal)
+  DENY:            %primitive, %emit js, %macro, <script>/<style>/<iframe>, on* attrs,
+                   javascript: URLs, form controls
+Enforcement: editor OFFERS allowlisted kinds; SERVER VALIDATES incoming EditAst body
+(security-bearing); TreeSink already rejects %-directives. A field typed =richtext=
+drives the admin to render the block editor (mockup stage2-richtext-blocks.jpg).
+Dividends preserved: native inline marks; ANIMATABLE PROSE (a Quote can @reveal — no CMS
+has animated structured content); $data bindings in prose; provenance addresses every
+node; the block-type menu IS the allowlist (extensible by declaring a type/template, not
+by editing the editor).
+Open: inline vs sidecar storage; distinct =richtext= TypeExpr vs Reference.
+FUP: FUP-029 (supersedes the earlier richtext-schema + sanitizer ideas).
+
+* ──────────── VEIN 1 — page-builder-as-typed-composition (Framer core) ────────────
+THE UNLOCK: a Spacetime page is ALREADY an ordered list of template invocations (unkn's
+index.st composes the homepage as =.site-header { &unkn-nav() } …=), and the template
+registry ALREADY stores each template's typed interface (params: param_list). ∴ the
+compiler already knows, for every section, what DATA it consumes (binding params) and
+what SLOTS it offers (element params). The builder VISUALIZES the component model that
+already exists — it does not invent one.
+TYPED COMPOSITION = structurally-valid pages BY CONSTRUCTION: a section is placeable iff
+its bindings are satisfiable; a slot accepts a child iff the child is valid. Framer has
+no type system under the canvas; this is a category it cannot reach.
+The palette WRITES ITSELF: it is registry.templates() rendered with signatures. Add a
+@template → it appears in the palette (mockup stage3-page-builder.png left rail).
+"Whole Spacetime surface" (3A) mapping (every action emits/edits via EditAst, 3C):
+  add/reorder section → insert/reorder &template() in page .st
+  bind to data        → set @each(source) or a $binding
+  fill a slot         → drop child into &slot
+  edit text in section→ in-context content edit (dev-editable + EditAst)
+  edit motion         → tune @scroll/@reveal params (slider) — UNIQUE; motion is a
+                        DECLARATION the tool reads & writes (the single most
+                        differentiated feature; Framer's motion is opaque runtime config)
+  restyle via tokens  → pick a @theme token (FUP-031)
+  new component       → "extract component": promote a selection to a @template (FUP-032)
+World-class UX principles: direct manipulation on the REAL rendered page (requires
+compile-time hydration, FUP-030); selection reveals the TYPED inspector
+(DATA/PARAMS/SLOTS/MOTION/STYLE); guided insertion (drop-zones only where valid);
+two-way with code (a "View .st" toggle — designer & developer see ONE artifact; output
+is hand-quality, git-diffable .st, never Framer's opaque React).
+Brand/theme (3B): a first-class =@theme= typed-token construct, "as nice as @type",
+editable as just another generated form; brand integrity is STRUCTURAL (you edit tokens,
+can't smear rust where scarlet belongs — unkn AGENTS.md). FUP-031.
+Challenges: extract-component is generalization (anti-unification), hard + high-leverage
+(FUP-032); static-vs-dynamic section (bind-to-data step); canvas fidelity NEEDS
+compile-time hydration (FUP-030).
+FUP: FUP-030 (hydration), FUP-031 (@theme), FUP-032 (extract-component).
+
+* Building the admin IN Spacetime (dogfood; the Framer killer built with what it beats)
+The admin is itself a Spacetime site in stdlib/__admin__/ (NO custom JS; primitives wrap
+unavoidable browser APIs via %emit js, as __dev__ already does). Sketch:
+  stdlib/__admin__/index.st                 entry; --debug gate; mounts /__spacetime/admin/
+  stdlib/__admin__/primitives/admin-ws.st   reuse/extend dev WS (EditJson/Array/Ast/upload)
+  stdlib/__admin__/primitives/admin-schema.st  fetch types.json/site.json → view-models
+  stdlib/__admin__/primitives/admin-drag.st    drag/reorder (browser API wrapper)
+  stdlib/__admin__/primitives/admin-graph.st   relation graph canvas (Vein 3)
+  stdlib/__admin__/primitives/admin-richtext.st constrained-AST block editor (Vein 2)
+  stdlib/__admin__/macros/{collection-list,entry-form,relation-picker,page-canvas,theme-editor}.st
+Compile-time hydration (FUP-030) becomes necessary at Stage 3 so the builder canvas
+equals the shipped page. FORK: prerender-only (recommended first) vs prerender+hydrate-
+adopt (the SSR cliff — defer).
+
+* New veins surfaced (carry forward)
+1. Animatable prose (Vein 2): motion inside structured content; no CMS has it.
+2. The content graph as navigation/product identity ("Anytype for websites") (Vein 3).
+3. "The type is the teacher": showing id(Agent)/&content/richtext signatures in the UI
+   teaches the Spacetime model as you use it — onboarding and product are one surface.
+4. @theme as a design-SYSTEM editor (could subsume responsive/dark token sets) (3B).
+5. Extract-component as the GROWTH LOOP: composition consumes templates, extraction
+   produces them; together a real design tool (Vein 1 / FUP-032).
+6. Spacetime-aware policy = the denylist (Vein 2 / FUP-029).
+
+* Open questions & challenges (the planning checklist; full table in spec §6)
+- Q1 id(T): TypeExpr::Apply (general) vs special-case Ref — leaning Apply.
+- Q2 id storage: bare id (matches unkn) vs {"$ref":…} envelope — leaning bare.
+- Q3 referential integrity on delete — leaning warn-on-delete.
+- Q5 backlinks — derive, don't store.
+- Q6 richtext type signal: distinct =richtext= TypeExpr vs Reference — smallest viable.
+- Q7 richtext storage: inline AST in entry JSON vs sidecar by provenance — open.
+- Q8 allow/deny enforcement point — server-side is security-bearing.
+- Q9 object unions for blocks — NO (blocks are AST nodes).
+- Q10 @theme construct + var(--*) migration.
+- Q11 extract-component param inference — start conservative.
+- Q12 hydration: prerender-only vs hydrate-adopt — prerender-only first.
+- Q13 page/route model for new-page scaffolding.
+
+* Stage DoDs
+STAGE 2 (Squarespace killer): a writer manages RELATIONAL (id(T) + graph + computed
+views), RICHLY STRUCTURED (constrained-AST blocks with animatable prose + native inline
+marks), optionally LOCALIZED content, with a MEDIA LIBRARY and LIVE side-by-side
+preview — entirely local, entirely generated from the project's types.
+STAGE 3 (Framer killer): a designer composes whole PAGES via TYPED COMPOSITION over the
+project's own @templates (valid by construction), edits @theme tokens (brand-safe by
+construction) and REAL DECLARATIVE MOTION (sliders over @scroll/@reveal), on a
+COMPILE-TIME-HYDRATED canvas that is the real page, and the admin emits CLEAN .st
+indistinguishable from hand-authored source (via EditAst). The admin is itself a
+Spacetime site — the Framer killer built with the thing it beats.
+
+* Out of scope (later "servers" layer)
+auth/roles, multi-editor/CRDT, draft/publish lifecycle, hosting/deploy/CI-CD, remote
+upload. Keep local writes flowing through the same verbs a future server exposes
+(GET types · GET/PUT data/* · POST build) so local→remote is a transport swap.
+
+* Dependencies
+- BLOCKED BY: PLAN-028 (V1 local admin) — Stage 2/3 build on the V1 admin + __admin__.
+- FUPs: FUP-028 (id(T)), FUP-029 (richtext AST allowlist), FUP-030 (hydration),
+  FUP-031 (@theme), FUP-032 (extract-component), FUP-033 (id rename cascade).
+- Also informs: FUP-026/FUP-027 (macro body-scope + namespaces, from V1).
+
+NOTE [2026-06-03]: PROGRESS 2026-06-03: Stage-2 W1+W2 DONE. W1 (id(T) relations): TypeExpr::Apply, schema x-st-ref, widgets relation/relation-multi; reviewer-passed; commit 74d2dbb3; FUP-034 filed (ref-validation not wired into form-match path). W2 (relation pickers + graph): single select + multi chips/add-picker, both persisted to disk live (maria→sofia; campaigns add); SVG graph view (List|Graph toggle) with source/target/edges/legend; browser-verified (wave2-relations-live.png, wave2-graph-live.png) + 14 node assertions; reviewer-passed, P2 (+New inert in graph) fixed; commits 1483e36b, eee42948. unkn 57/57 green throughout. NEXT: W3 richtext = constrained Spacetime AST (FUP-029) — the conceptually heaviest wave.
+
+NOTE [2026-06-04]: PROGRESS 2026-06-03 (cont): W3+W4 DONE. W3 richtext sanitizer (FUP-029): lol_html allowlist enforced on all 3 persist paths; adversarial security review found 4 bypasses (2 P0 XSS mXSS/unclosed-tag, 2 P1 array-insert/EditAst gaps) ALL fixed+tested (14 tests); commits f234c92e, 0f74d2f0. W4 block editor: contenteditable+toolbar, live-verified XSS-strip-on-persist (<script>+onclick\u2192clean on disk), reviewer-passed (no breakout/caret-loss); commit 428e7716; screenshot wave4-blockeditor-live.png. NEXT: W5 media library + live preview = Stage-2 DoD.
+
+NOTE [2026-06-04]: STAGE 2 COMPLETE 2026-06-03 (Squarespace killer DoD met). W5 media library + live preview: /dev/assets.json (symlink-safe recursive walk), Library modal grid (browse/search/pick 172 unkn assets, persisted), url() encodeURI fix; live-preview iframe + reload-on-save (verified). Reviewer-passed, P2 symlink-leak fixed. Commits d6c9bb1e, fe0def06. STAGE 2 TOTAL: W1 id(T) relations, W2 pickers+graph, W3 richtext sanitizer (4 XSS bypasses fixed), W4 block editor, W5 media+preview. All reviewer-gated, browser+disk verified, unkn 57/57 throughout. Crossing into STAGE 3 (Framer killer): W6 compile-time hydration is the keystone (the missing prerender stage; also fixes W5's finer live-update).
+
+NOTE [2026-06-04]: CAMPAIGN COMPLETE 2026-06-03. Stage 3 (Framer killer) W6-W9 done: W6 compile-time hydration reads file @data at build (FUP-035 = template-bodied unroll remainder); W7 @theme typed token editor (live-edited _theme.st, 2 injection vectors fixed); W8 typed component palette (43 unkn @templates w/ signatures; FUP-036 = drag-canvas builder); W9 visual motion editor (declarative @reveal/@scroll sliders \u2192 .st, P1 block-targeting + P2 finite-guard fixed). Stage-3 differentiators delivered: brand-safe token editing, components-from-code, and visually-tuned declarative motion (a category Framer can't reach). FULL ARC: PLAN-028 V1 (4 waves) + PLAN-029 Stage2 (5 waves) + Stage3 (4 waves) = 13 waves, 9 reviewer swarms (3 security-critical, ~12 defects found+fixed incl 4 XSS), ~18 commits, unkn 57/57 throughout. FUPs filed: 026-036. Remaining productization: FUP-035 (template unroll), FUP-036 (page-builder canvas), FUP-032 (extract-component), FUP-034 (ref validation), then the servers/auth/hosting layer (explicitly out of original scope).

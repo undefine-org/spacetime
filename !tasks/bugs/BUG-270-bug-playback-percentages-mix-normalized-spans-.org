@@ -1,0 +1,55 @@
+#+TITLE: .playback percentages mix normalized spans with millisecond totals (0.5ms windows)
+#+STATE: DONE
+#+PRIORITY: #A
+
+* The bug (reviewer-swarm confirmed, orchestrator-reproduced)
+`@score &.playback { &title for 50%; }` compiles green and emits
+`_swSpan = 0.5` against `_swTotal = "__score_1__dur"` — a runtime signal
+holding the media duration in MILLISECONDS. The window map computes
+local = (p*10000 - 0)/0.5, so a 10s media's "half" clip completes at
+parentProgress 0.00005 — a 0.5ms window. The BUG-267 class, reintroduced
+by the runtime-total mechanism (ba751429) interacting with the bare-splice
+scaling (8a94240d): every compile-time pass denominates against total=1.0
+(Inherited domain), but the emitted total is ms.
+
+Root: a RELATIVE measure under a runtime-total domain cannot be compiled to
+a constant span. four_clock_thesis uses `for 50%` under .playback and only
+asserts it COMPILES — green for the broken runtime (the banned gate shape).
+
+* Fix shape (substrate-strengthening)
+Carry the relative flag INTO the emitted map: under a runtime-total driver,
+a percentage stays a fraction at emit time and the window map scales it by
+the resolved total AT SAMPLE TIME (score-window.st already resolves signal
+totals per sample). The alternative (E0951 refusal) would kill the
+four-clock thesis's own fragment — percentages are the whole point of a
+reusable fragment (R2).
+
+* Gates
+- The thesis gate must SAMPLE the map under .playback (not just check_ok) —
+  evaluate _swMap at several parentProgress values with a stubbed duration.
+- playback-driver.test.st gains a percentage case (CDP): a `for 50%` clip is
+  mid-animation at currentTime = duration/4, not completed.
+- Discrimination: constant-span emission (today) must fail both.
+
+* Resolution (2026-08-04)
+DONE. A RELATIVE measure under a runtime-total driver cannot become a
+constant span at compile time. The relative flag now rides into the emitted
+window (`offset_rel`/`span_rel` args from src/pipeline/score.rs) and
+`score-window.st` scales the fraction by the RESOLVED total at sample time.
+Compile-time totals (`.time` etc.) keep today's constant folding — same map,
+two total kinds, one evaluation path.
+
+Gates:
+- four_clock_thesis_test's playback arm now SAMPLES the emitted map against a
+  stubbed 10000ms duration: `for 50%` → [0, 0.5, 1, 1, 1] (midpoint at 5000ms,
+  not 0.5ms).
+- playback-driver.test.st gains `&bar2 at 0s for 50%`: mid-animation at
+  currentTime = duration/4, read as the raw `__clip_bar2` signal.
+- Discrimination proven: constant-span emission (reverting the primitive's
+  rel-scaling) fails BOTH gates.
+- Regression: clip_driver_test 4/4, four_clock_thesis_test 4/4,
+  tests/score --cdp 21/21. score_window_map_test 17/18 — the sole red
+  (sign_crossing_rate_ramp_is_refused, E0956 "unknown primitive: score") is
+  the concurrent 65-UnknownPrimitiveLoud regression in expand.rs/codes.rs,
+  NOT this fix (baseline score.rs fails identically); expand.rs/codes.rs are
+  out of scope (another worker's track).

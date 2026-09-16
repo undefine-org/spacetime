@@ -1,0 +1,74 @@
+#+TITLE: @media emits JS matchMedia instead of CSS when styles present (media_dedup regression)
+#+STATE: ITEM
+#+SESSION_ID: 14f94e45c6c3f247
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-02T11-06-49-499Z_14f94e45c6c3f247.jsonl]]
+#+CUSTOM_ID: BUG-057-media-emits-js-matchmedia-instead-of-css
+#+LAYER: compiler
+
+* Initial Message
+
+actually, Land the PLAN-026 core now (done/committed); file the testing-macro cluster (@assert swap, @then/@eval nested-match) as a new BUG/PLAN with the diagnosis captured, and STOP — .test.st gating remains blocked
+ on that follow-up. Don't register text tests yet.
+
+Put text tests as FEAT within the plan. Be comprehensive
+
+* Symptom
+=@media("max-width: X") { font-size: 14px }= now emits JS (window.matchMedia)
+instead of pure CSS =@media= rules. 12 tests/v8_runtime/media_dedup_tests fail
+(expect CSS, get JS / 0 CSS bytes). Regression of commit 4de6a0f1
+"feat(media): emit pure CSS @media rules instead of JS matchMedia".
+
+* What is CONFIRMED working
+- The =media-query= macro CAPTURES correctly: =styles=Properties([{font-size:
+  14px}])=, =query=, =children= (verified via parse_matches probe).
+- The =media= primitive RESOLVES and expands (trace: "Pushing primitive: media",
+  "Expanding primitive 'media'").
+- BUT: =--layer css= is 0 bytes; only =%emit js= (matchMedia) fires.
+
+* Suspected cause (bisect needed)
+The media primitive has BOTH =%emit css { @media (%query) { %self { %styles } } }=
+and =%emit js=. The "CSS-only when styles present" selection is via the macro's
+=%when $matches { %applies { $styles } }= / =%binds media($query) -> {$matches}=.
+Two candidate causes (uncommitted in worktree during W0-W5 session):
+1. MINE: the W1 resolve_single change (=primitive_name = macro_def.name= instead
+   of directive name, commit 4c6024c3) may alter how =%binds=/=%applies= resolve
+   the conditional CSS emit. HIGHEST SUSPICION \u2014 it changed primitive naming.
+2. FOREIGN (concurrent CMS work, uncommitted): src/parser/ast.rs (TypeExpr::Apply),
+   src/type_system.rs, src/server.rs \u2014 less likely (media doesn't use @type) but
+   present in the worktree.
+
+* Repro
+#+BEGIN_SRC sh
+printf '.r {
+  @media("max-width: 1023px") {
+    font-size: 14px;
+  }
+}
+' > /tmp/m.st
+cargo run -- inspect --layer css /tmp/m.st     # 0 bytes (BUG; should have @media rule)
+cargo run -- inspect --layer emit /tmp/m.st | grep matchMedia   # present (BUG)
+cargo test --test v8_runtime_test media_dedup   # 12 fail
+#+END_SRC
+
+* Fix direction
+Bisect: temporarily check media CSS emit with the W1 resolve_single change reverted
+(primitive_name = form_match.macro_name) to confirm/deny cause #1. If MINE, the
+fix must make the conditional CSS-emit (%when/%applies) resolve correctly under the
+specific-macro-name primitive naming. The W1 multi-form fix is needed for test/
+test-needs + reveal-simple/* + property/fuzz, so the media path must be reconciled
+with it, not reverted.
+
+* Parent
+[[id:PLAN-027-spacetime-testautomation-infra-fidelity]]
+
+* UPDATE: NOT from PLAN-027 testing work \u2014 likely the interleaved CMS commits
+Bisect result: reverting the W1 resolve_single change (primitive_name=macro_def.name)
+did NOT restore media CSS \u2014 so cause #1 is RULED OUT. The git history shows FOREIGN
+CMS commits landed on top of the W3 work:
+  b3d4bc85 test(cms): Wave D ...
+  c07b1e9c feat(cms): admin Wave B+C ...
+(after c4ced07b, before W5). These touched src/parser/ast.rs (TypeExpr::Apply),
+src/type_system.rs, src/server.rs \u2014 the type/CSS pipeline media's `string` param +
+%emit css selection depend on. The media regression is almost certainly from the
+CMS work, not the testing-infra work. Owner of the CMS waves should bisect
+c07b1e9c/b3d4bc85. Filed here so it is not lost.

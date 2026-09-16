@@ -1,0 +1,289 @@
+#+TITLE: Fat-arrow (=>) syntax cutover — canonical match arm + generic directive values
+#+STATE: DONE
+#+CUSTOM_ID: PLAN-111-fat-arrow-syntax-cutover
+#+PRIORITY: A
+#+LAYER: metasystem
+
+NOTE [2026-07-22]: Implemented. `FAT_ARROW` is a first-class lexer/CST token;
+ExprExtractor/ColorExtractor terminate at depth-0 `=>`; canonical render `arm`
+replaces `match_arm` inside `@match`/`@view`; cond guards may now be bare; the
+named `try_route_match_value` hack is replaced by generic opaque
+`directive_value_atom`. Compatibility: parenthesized JavaScript arrows consume
+FAT_ARROW through the existing structured-JS path; single-parameter arrow
+snapshots retain their documented unsupported behavior as one `=>` error token.
+Gates: 2731/2731 library tests; 658 headless passed, 0 failed, 38 skipped.
+
+* Motivation
+
+`=>` is a *fake* token today. The lexer emits `EQUALS`+`GT`; the arm grammars
+are held together by three layers of Rust workaround. This plan makes `=>` a
+real token, then **deletes** the workarounds — expressing every `pat => cons`
+arm purely as `%macro` + `%capture_type` data. Direction = REMOVE from the
+meta-compiler, not add CST structure (the metasystem owns arm grammar; AGENTS.md:
+"do not write Rust parsers for constructs defined in stdlib"; "closed Rust enum
+whose arms the runtime doesn't enforce is rot").
+
+Verified facts (read from source this session — do NOT re-derive):
+
+- *No `FAT_ARROW` token.* `enum RawToken` (src/syntax/cst/lexer.rs:42) is
+  logos-based; `#[token("->")] Arrow` at :78, `#[token("<-")] LeftArrow` at :80.
+  `=>` falls through to `RawToken::Equals` (:583) + `RawToken::Gt`. No
+  `#[token("=>")]` exists.
+- *The `"=>"` literal is faked by string concat.* `LiteralExtractor`
+  (src/syntax/events/extractors/custom.rs:739) has a multi-token path whose
+  stated purpose is `=>` (comment :760; test
+  `literal_extractor_multitoken_fat_arrow` at :981).
+- *ExprExtractor boundary already has `ARROW` (`->`) but not `=>`.*
+  src/syntax/events/extractors/simple.rs:391:
+  `SyntaxKind::SEMICOLON | SyntaxKind::ARROW | SyntaxKind::COMMA if depth == 0`.
+  `=>` can't appear here because it isn't a kind. This is the ROOT CAUSE of the
+  bounded-leaf hacks: a bare expr swallows `=` (EQUALS isn't a boundary).
+- *The CST parser leaks `@match` knowledge.* `grammar/directives.rs` header
+  claims "no per-family knowledge", then `try_route_match_value` (:62–96)
+  hardcodes `@`+`match`+`{`+preceded-by-colon routing.
+- *Four capture-type files re-derive `pat => cons` with divergent workarounds*
+  for the SAME root cause:
+  - stdlib/enum/capture-types/match-arms.st  (`match_arm`, `match_value_arm`)
+  - stdlib/enum/capture-types/cond-arms.st  (`cond_arm` — FORCES parens; comment
+    documents the missing-token root cause)
+  - stdlib/capture-types/handle-block.st     (`handle_arm`)
+  - stdlib/capture-types/signal-receive.st   (`recv_arm`)
+  Their own comments repeat "the SAME pattern-matcher shape" — one construct in
+  four costumes.
+- *Corpus: `=>` is unambiguous.* 1219 `=>`, 151 `>=` (reverse order — zero prefix
+  collision), no legitimate spaced `= >`. logos longest-match: at `=` picks `=>`
+  (2 char) over `=` (1); at `>` picks `>=`. Safe.
+
+* Non-goals (explicitly OUT of scope)
+
+- **NO new `MATCH_ARM` `SyntaxKind`.** Arms stay as `%capture_type` data (max
+  introspection — registry-visible, redefinable, `inspect`-able). Adding a Rust
+  node would reduce introspection and grow the closed enum (the rot AGENTS.md
+  warns against). This is the deliberate inversion of an earlier draft.
+- **NO `is_matchable()` widening.** It stays the closed 4-kind set
+  (DIRECTIVE | VARIABLE_REF | ELEMENT_REF | META_DEF). Widening it to admit
+  *non-sigil* forms (bare-ident heads like `match`/`if`) is a separate, larger
+  architectural move — see FUP-130.
+- `@match`/`@handle`/`@view`/derive-match **stay `%macro`s.** Their `%binds`
+  (→ primitives: dispatch-mount, signal-handler, derive-match) are real runtime
+  behavior. Only the *grammar* moves; the binding layer is untouched.
+
+* Wave DAG
+
+#+begin_src
+  W1 (token) ──▶ W2 (boundary) ──▶ W3 (collapse capture_types)
+                                          (the data unification)
+  W4 (generalize + delete try_route_match_value)   ← independent, parallel
+#+end_src
+
+W4 does NOT depend on the `=>` token (it's about the `@`-head in value
+position). W1→W2→W3 MUST be sequential (each needs the prior). Ship W4 in the
+same wave-set; it is the other half of "remove meta-compiler special-cases".
+
+** Global acceptance (run after every wave, MUST be green)
+
+- `cargo test --lib`                                   (unit: extractors, form_compiler)
+- `cargo run --features headless -- test tests/ --headless`  (match/handle/render behavior)
+- `cargo run -- check <path>`                          (compile check; this CLI requires paths)
+
+* Wave 1 — Lexer: add FAT_ARROW
+
+** Target
+- src/syntax/cst/lexer.rs        — `enum RawToken` (:42) + the mapping arm (near :471, beside `RawToken::Arrow`)
+- src/syntax/cst/mod.rs          — `pub enum SyntaxKind` (:43), add `FAT_ARROW,` beside `ARROW` (:108)
+
+** Change
+1. In `RawToken`, add `#[token("=>")] FatArrow,` (mirrors `#[token("->")] Arrow`).
+2. In `SyntaxKind`, add `FAT_ARROW,`.
+3. In the lexer mapping switch, add `RawToken::FatArrow => Token { kind: SyntaxKind::FAT_ARROW, .. }`.
+
+logos does longest-match across all variants regardless of declaration order, so
+`=>` (2 char) automatically wins over `=` (1 char) at an `=` position. `>=`
+(`GtEq`, GT-led) is a different start position — no conflict.
+
+** Edge
+- Confirm `=>` text is exactly `"=>"` so the LiteralExtractor fast path
+  (`text == self.0`, custom.rs ~:752) fires. It will — single token now.
+- The multi-token concat path (custom.rs:760) is NOT deleted here: it still
+  serves `@match`/`@handle` 2-token literals inside capture-type block heads.
+  Only its `=>` burden lifts.
+
+** Accept (observable)
+- `literal_extractor_multitoken_fat_arrow` (custom.rs:981): repurpose to assert
+  `"=>"` now matches as a SINGLE `FAT_ARROW` token via the fast path (consumed ==
+  1 token). Rename to `literal_extractor_fat_arrow_single_token`.
+- New lexer test: `=>` lexes as one `FAT_ARROW`; `>=` still lexes as `GT_EQ`;
+  `=` alone still lexes as `EQUALS`.
+- Grammar unchanged → all existing capture-type tests stay green (they still
+  *write* `"=>"` literals; only token granularity shifts).
+
+* Wave 2 — ExprExtractor boundary += FAT_ARROW
+
+** Target
+- src/syntax/events/extractors/simple.rs:391 (ExprExtractor)
+- src/syntax/events/extractors/simple.rs:447 (ColorExtractor — parity)
+
+** Change
+Add `| SyntaxKind::FAT_ARROW` to the depth-0 boundary match arm:
+#+begin_src rust
+SyntaxKind::SEMICOLON | SyntaxKind::ARROW | SyntaxKind::FAT_ARROW | SyntaxKind::COMMA if depth == 0 => break;
+#+end_src
+Mirror in ColorExtractor (:447) for parity (a color value rarely precedes `=>`,
+but the boundary sets SHOULD agree).
+
+** Edge
+- `ExprExtractor` is greedy and depth-aware; adding `FAT_ARROW` at depth 0 means
+  `$a && $b => Blue` now self-limits the guard at `=>` — the whole point.
+- Inside balanced `(...)`, depth > 0, so a `=>` nested in a guard expr (if any)
+  does NOT terminate early. Correct.
+
+** Accept (observable)
+- New unit test (simple.rs): tokens `$a && $b => Blue ;` — ExprExtractor from the
+  start consumes `$a && $b` and stops at `FAT_ARROW` (consumed excludes the
+  arrow). RED before the arm change, GREEN after.
+- No existing test regresses (no current expr legitimately contains a bare `=>`
+  mid-stream — corpus-verified).
+
+* Wave 3 — Define canonical `arm`, used within @match/@view
+
+** Goal — a canonical render `arm` capture type
+Create one `arm` capture type used INSIDE `@match` and `@view`. It preserves the
+existing typed `{pat, inv}` record that `dispatch-mount` consumes, replacing the
+narrowly-named `match_arm` without a runtime-shape change.
+
+`cond_arm`, `handle_arm`, and `recv_arm` deliberately remain typed wrappers:
+their contracts carry respectively guards + variant payloads, statement blocks,
+and decode metadata (`final`). Collapsing them into raw `{pat, rhs}` would lose
+structure or force unrelated primitives to reinterpret strings — not a net
+simplification.
+
+** Target files
+- stdlib/enum/capture-types/match-arms.st   (define `arm`; `match_block` consumes it)
+- stdlib/enum/dispatch.st                    (`@match` / `@view` forms consume it)
+- stdlib/enum/capture-types/cond-arms.st     (make guard parentheses optional via FAT_ARROW boundary)
+- stdlib/capture-types/handle-block.st       (no shape change; confirm one-token arrow continues matching)
+- stdlib/capture-types/signal-receive.st     (no shape change; confirm one-token arrow continues matching)
+
+** Change — rename the render arm, preserve its record contract
+The canonical render arm retains its existing typed captures exactly:
+
+#+begin_src
+/// A render arm: `pattern => &template(args);`.
+/// `{ pat: match_pat, inv: template_invocation }` is the stable dispatch-mount contract.
+%capture_type arm {
+    $pat:match_pat "=>" $inv:template_invocation ";"?
+}
+
+%capture_type match_block {
+    "@match" $subject:binding "{" ( $arms:arm )* "}"
+}
+#+end_src
+
+Delete `match_arm`; change both `%form`s in `stdlib/enum/dispatch.st` to
+`$arms:arm+`. `@match`, `@view`, and the `match_block` helper now use ONE named
+arm grammar and `dispatch-mount` remains unchanged (`arm.pat` / `arm.inv[0]`).
+
+Then use W2's new boundary to make cond guards bare OR parenthesized:
+#+begin_src
+%capture_type cond_guard {
+    ( "_" ) | ( "(" $expr:balanced(')') ")" ) | ( $expr:expr )
+}
+#+end_src
+The `_` and parenthesized alternatives MUST precede bare expr (choice is
+first-match-wins). `cond_arm`, `handle_arm`, and `recv_arm` retain their typed
+contracts; their `"=>"` literal now takes the single-token fast path.
+
+Delete the workarounds the token makes unnecessary:
+- remove cond-arms.st's "WHY guards are parenthesized" explanation;
+- admit bare `$expr:expr` AFTER the `_` and parenthesized branches (choice order
+  remains load-bearing);
+- retain `handle_arm` and `recv_arm` as typed wrappers: their statement/decode
+  contracts are meaningful structure, not duplicate parser workaround.
+
+** Edge
+- `arm` preserves `{pat, inv}` exactly, so `dispatch-mount` keeps its existing
+  `arm.pat` / `arm.inv[0]` accesses. No primitive runtime rewrite belongs in
+  this wave. This is a grammar cutover, not a stringly-typed reinterpretation.
+- `match_pat` branch ORDER stays load-bearing (variant → lit → wild; the
+  match-arms.st header explains why). Do not reorder.
+- The REQUIRED trailing `;` on value-producing arms stays load-bearing (an
+  unterminated arm would swallow the next arm's pattern). Do not relax it.
+- `cond_block`/`match_block` block-HEAD literals (`"@match"`) are NOT redundant —
+  they skip the head inside a value-position arg. Leave them.
+- A top-level `$lhs => rhs;` STATEMENT form is OUT of scope — it needs CST
+  routing/grouping work (empirically rejected today). Tracked in FUP-131.
+
+** Accept (observable)
+- Per-family headless tests green: @match render, @view reactive remount,
+  @data-derive @match cond-mode, @handle receive arms, @data signal decode arms.
+- The derive-match integration fixture uses an unparenthesized
+  `$errorText != "" => Failed($errorText);` guard; the ExprExtractor unit test
+  separately proves `$a && $b` stops before FAT_ARROW. Both are RED before W2/W3
+  and GREEN after.
+
+* Wave 4 — Generalize then DELETE try_route_match_value
+
+** Target
+- src/syntax/events/grammar/directives.rs (`directive_value_atom`, replacing
+  `try_route_match_value` and its two call sites)
+
+** Why the `=>` token does NOT auto-kill this
+`try_route_match_value` is NOT an arm problem — it's a *value-position* problem.
+`: @match {…}`: the value-consumer (`inline_args`) stops at `@`, so `@match`
+splits off as a sibling directive BEFORE any form matching. `%capture_type`
+runs after grouping, so it structurally cannot replace this. This is the one
+Rust special-case below the `%capture_type` layer.
+
+** Change — generalize the hack into a rule, then delete the hack
+Replace the `@match`-specific routing with a GENERAL *directive-as-value-atom*
+rule in the value-consumer path: when the value-consumer (the `value_colon`
+path, after a COLON) sees `@` IDENT followed by a balanced `{…}` body OR a
+`;`-terminated form, consume the whole directive as ONE value `ARG`. This makes
+ANY directive in value position a single value atom — not just `@match`.
+
+Keep the existing scoping guard (`prev_non_trivia() == COLON`) so a *sibling*
+directive after a complete value is NOT swallowed — only a directive directly
+preceded by a value-introducing colon routes as a value.
+
+Then delete `try_route_match_value` and both call sites. Its test obligation
+moves to a general directive-as-value test.
+
+** Edge
+- MUST NOT swallow a sibling directive after a complete value. The COLON guard
+  is the discriminator — a complete value followed by a newline + `@sibling`
+  must still split. Reuse the exact `prev_non_trivia()` check.
+- The object-literal disambiguation (`starts_object_literal`, `{`+STRING) is
+  unaffected — a directive head is `@` IDENT, not `{` STRING.
+- A value-position directive with NO body and NO `;` (e.g. a bare `@foo`) is
+  malformed. Keep its consumed tokens isolated as an ARG, emit a terminator
+  diagnostic, and leave a following sibling directive unconsumed; do NOT attempt
+  a lossy rollback after tokens have entered the event stream.
+
+** Accept (observable)
+- Existing: `@data derive $x T : @match { (g) => V ; _ => W ; }` still captures
+  the match as one value arg (the cond-mode derive round-trips).
+- NEW: `: @<other-directive> { … }` in value position routes as one value atom
+  too (proves the generalization, not a rename of the special-case).
+- `grep -n "try_route_match_value" src/` returns NOTHING (the hack is gone).
+
+* Follow-up notes (optional polish, NOT gating)
+
+- The multi-token concat path in `LiteralExtractor` (custom.rs:760) loses its
+  primary `=>` use but retains `@match`/`@handle` 2-token-literal service. If a
+  later pass makes block-head literals redundant, the path may shrink further —
+  but do NOT delete it in this plan (it has live users).
+- FUP-130 is match-only research: bare `match` is empirically rejected before
+  `%capture_type` matching, and hardcoded Rust keyword routing is explicitly
+  rejected. Retain `@match`/`@view` unless a pure metasystem route is proven.
+- The top-level `$lhs => rhs;` statement form (operator-led arm) is FUP-131 —
+  empirically HARD (CST rejects it today: `is_variable_declaration` routing +
+  `inline_args` paren-break grouping). This plan creates the unified `arm`
+  capture type that FUP-131 will reuse when the CST grouping lands.
+
+* Sequencing rationale
+
+W1→W2→W3 is the token→boundary→data cascade; each ships independently green and
+deletes a workaround. W4 is orthogonal (the `@`-head, not the arms) and pairs
+with W3 as "the two meta-compiler special-cases this plan removes". Never run
+W3 without W2 (the expr boundary is what makes the collapse sound); never run
+W2 without W1 (no token, no boundary).

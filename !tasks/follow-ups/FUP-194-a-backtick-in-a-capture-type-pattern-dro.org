@@ -1,0 +1,90 @@
+#+TITLE: A backtick in a capture-type pattern drops or destabilises its production
+#+STATE: ITEM
+#+SESSION_ID: 153f5ed0617636c7
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-26T21-12-46-213Z_153f5ed0617636c7.jsonl]]
+#+CUSTOM_ID: FUP-194-a-backtick-in-a-capture-type-pattern-dro
+
+* Initial Message
+
+also make sure you file all the 'maximalist reading' you wrote as FUPs to be taken on later (with CodePaths and seeds for designing hte implementation and verifying its reach and ensuring e don't leave redundant/deprecated code in the end
+
+* Symptom — measured, and SILENT
+
+Two related defects in the capture-type PATTERN parser, both involving a
+backtick, both found while writing the `compound_value` production.
+
+** 1. `balanced('`')` drops its own production
+
+A `%capture_type` whose pattern contains `balanced('`')` is absent from the
+registry after load. Its NEIGHBOURS load fine, so nothing looks wrong — no
+diagnostic, no warning, just a production that is not there. Measured with a
+three-production probe file:
+
+: %capture_type m1 { $b:balanced('`') }   -> MISSING
+: %capture_type m2 { $b:balanced('$') }   -> PRESENT
+: %capture_type m3 { $b:balanced(';') }   -> PRESENT
+
+The delimiter itself parses correctly — a debug print shows
+`Balanced('`')` in the AST — so the loss happens after pattern parse, or the
+production's span is mis-scanned in the enclosing file.
+
+** 2. A backtick literal AFTER a capture destabilises the pattern
+
+A LEADING literal is fine: `%capture_type hole { "`" ( $binding:binding |
+$name:ident ) "`" }` ships and works (11/11 in `tests/value_node_arm_test.rs`).
+But a backtick literal placed after a capture does not:
+
+: %capture_type p1 { $b:balanced(';') "`" ( $g:binding | $n:ident ) "`" }
+
+matches nothing at all, including inputs it obviously should match.
+
+* Why it matters
+
+It blocks the COMPOUND HOLE arm of `value_node` — `border: 1px solid `$c.tint``,
+a CSS shorthand whose colour slot is a hole. The sibling compound arms for
+bindings and token references both work (`balanced('$') $binding:binding` and
+`balanced('-') $token:token_ref`), so the shape is right and only the backtick
+delimiter fails.
+
+Nothing is refused TODAY: all 19 corpus values with a non-leading backtick are
+diagnostic prose inside quoted strings, not declaration values. But the moment
+one appears it is a FALSE REFUSAL — a build the author cannot fix — which is the
+failure mode this whole arc treats as worse than a missed diagnostic.
+
+Defect 1 is the more serious of the two on its own terms: a silently-dropped
+production is exactly the class of failure `every_capture_type_file_on_disk_is_embedded`
+was written to catch, one layer down.
+
+* CodePath
+
+  src/parser/mod.rs:5645                      `balanced` arg parse — reads the
+      quoted delimiter char and consumes `)`. Verified to produce the right
+      AST, so start here but the fault is likely downstream.
+  src/parser/mod.rs::parse_balanced_delim_arg
+  src/parser/mod.rs:8204                      `strip_prefix("balanced")` — the
+      OTHER delimiter parse path (type-string form). Two paths for one fact;
+      check both agree on a backtick.
+  src/syntax/cst/lexer.rs::RawToken::Backtick NEW as of 71de8e55 — a pattern
+      file now contains a real BACKTICK token where it previously had an
+      unknown byte, so this may be a NEW interaction rather than an old bug.
+  stdlib/capture-types/value-node.st::%capture_type compound_value
+      the three working arms + the missing hole arm, documented in place
+
+* Verification seeds
+
+- RED, and it must assert PRESENCE, not behaviour: load a probe file with
+  `balanced('`')` and assert the production is in `STDLIB_REGISTRY.capture_types()`.
+  A behaviour test cannot distinguish "wrong" from "absent", and absence is the
+  defect.
+- Then un-`#[ignore]` `a_hole_inside_a_shorthand_is_admitted` in
+  `tests/value_consistency_test.rs` — the gate is already written and states the
+  intended semantics.
+- Add the hole arm to `compound_value` and confirm it does not over-admit:
+  `a_shorthand_with_no_spacetime_node_is_still_judged` must stay green.
+- Corpus flat (35/36/6) and `cargo test --lib` (3209/0).
+
+* Deprecation sweep
+
+If defect 1 is the two-delimiter-parse-paths problem, DELETE one path rather
+than fixing both — two sources for one fact is the defect, and this arc has
+cancelled a table twice for exactly that reason.

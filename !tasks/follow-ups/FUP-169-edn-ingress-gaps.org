@@ -1,0 +1,45 @@
+#+TITLE: EDN file-ingress follow-ups — imports, project macros, spans
+#+STATE: TODO
+#+CUSTOM_ID: FUP-169-edn-ingress-gaps
+
+Surfaced by the FEAT-169 review swarm. None are regressions — they are
+PLAN-148 gaps that existed on the MCP path and are now visible on the file
+path too.
+
+* 1. EDN-importing-EDN fails in resolve_imports
+
+An EDN document declaring `:st/imports ["./dep.edn"]` fails: the import
+resolver parses imported files with the `.st`-only parser. Fix at the parser
+seam: route imported-file reads through the same extension-gated lift
+(`Compiler::edn_ingress` or a parser-layer twin). Watch the module dependency
+direction (edn depends on parser::ast; parser reaching into edn is the
+inverse) — the lift may need to live in parser, with edn delegating.
+
+* 2. EDN forms decode against STDLIB_REGISTRY before imports augment it
+
+`to_st_file` rejects unknown macros at READ time, so an EDN page that imports
+a project macro from a `.st` file and invokes it fails as `unknown macro`.
+The `.st` path preserves such directives and rematches after import
+resolution. EDN needs the same: retain unresolved forms until the rematch
+stage, or decode against the assembled project registry.
+
+* 3. EDN FormMatches carry no source spans
+
+`to_st_file` leaves every span at (0,0): diagnostics point at byte zero, and
+`inspector_node_stamps` can assign duplicate `data-st-id` values to same-tag
+EDN templates (source_file, span.start, tag, occurrence all collide).
+`read_forms` should record each form's byte range in the EDN source.
+
+* 4. Directory build/export does not discover .edn entries
+
+`spacetime build <dir>` / export walk `.st` files; an `.edn`-only project
+builds nothing. Single-file `spacetime build page.edn` compiles (FEAT-169)
+but the output pairing (page.html next to bundle) was written with `.st`
+naming assumptions.
+
+* 5. .st.md files are not watched
+
+`should_watch` matches on extension; `index.st.md`'s extension is `md`, so
+literate edits never trigger reload. Pre-existing; documented as watched in
+no place (FEAT-169's doc briefly claimed otherwise — corrected). Either add
+the `*.st.md` predicate or document the gap.

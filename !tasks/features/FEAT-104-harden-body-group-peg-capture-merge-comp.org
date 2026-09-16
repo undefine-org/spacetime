@@ -1,0 +1,50 @@
+#+TITLE: Harden body-group PEG: capture-merge completeness + author-surface guards
+#+STATE: DONE
+#+SESSION_ID: 1503ca05d05c0c62
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-10T14-32-18-497Z_1503ca05d05c0c62.jsonl]]
+#+CUSTOM_ID: FEAT-104-harden-body-group-peg-capture-merge-comp
+#+COMPLETION_HASH: 712fdee3af463abf
+
+* Initial Message
+
+FEAT-103 + FUP-040/041/042: Please give me your synthetical overview; what are the tradeoffs, the things to think about, the syntax overall? Show me all the challenges and whatnot, I want a deep and wide view to really get this design right
+
+Parent: [[id:PLAN-031-editable-structured-rich-text-input-mult]] (FEAT-103 W-A0 review).
+Surfaced by the W-A0 reviewer swarm (agents 5/6/7). All LATENT (shipped editable
+groups are multi-element literal-led sequences \u2192 no live regression), but each is a
+footgun for grammar authors using the new body-group primitive. Fix before W-A0
+closes (methodology: fix ALL surfaced issues mid-flight).
+
+* Findings
+1. [P2] merge_group_captures drops non-Named group values (form_compiler.rs ~3965).
+   A repeat group `( ... )*` yields CapturedValue::Array; a single-capture group
+   `( $s:string )?` yields a scalar String (name\u2192Named threading lives only in
+   Sequence/Choice extractors). Both have tokens CONSUMED + body boundary advanced,
+   but captures silently dropped. Fix: bind non-Named values under capture_name_of.
+2. [P2] Boundary scan is string-literal-blind (mod.rs find_matching_delimiter).
+   A group with a paren literal `( "(" ")" )?` or unbalanced paren mis-bounds \u2192
+   parse_capture_pattern None \u2192 group text silently leaks into body_capture with NO
+   diagnostic. Fix: quote/char-class-aware extent scan; diagnostic on unresolved
+   leading `(`.
+3. [P2] Whitespace before modifier flips optional\u2192required (mod.rs ~4009).
+   `( ... ) ?` (space before `?`) \u2192 modifier read as None (Required), stray `?`
+   leaks into body_capture. Asymmetric with the inner PEG (which skip_whitespace
+   before modifier). Fix: trim_start after_close, advance consumed past ws.
+4. [P2] Non-literal-led optional body group steals body tokens (mod.rs ~4016).
+   `( $x:ident )? $body:component_body` \u2014 no anchor sentinel \u2192 the optional group
+   greedily binds the first body token. Fix: parse-time validation \u2014 an optional/
+   zero-or-more body group ahead of a greedy body capture MUST be literal-led.
+
+* Gate
+cargo test --lib (incl. new tests for each: repeat-group captures bound,
+single-capture-group bound, paren-literal group bounded correctly, ws-before-modifier
+honored, non-literal-led optional rejected).
+
+NOTE [2026-06-11]: DONE 2026-06-10 (f70d8d05). All 5 reviewer findings fixed + tested:
+1. merge_group_captures binds non-Named (scalar/Array) via pattern_capture_name.
+2. find_group_close: quote/char-class-aware paren scan; unresolved `(` not swallowed.
+3. Whitespace before modifier honored (trim before `?`/`*`/`+`).
+4. Literal-led discipline enforced for optional/star body groups (non-anchored
+   rejected, left in body_capture; required exempt).
+9 new tests (6 parser + 3 matcher). Lib 2218 green. No live regression (shipped
+editable groups were already multi-element literal-led).

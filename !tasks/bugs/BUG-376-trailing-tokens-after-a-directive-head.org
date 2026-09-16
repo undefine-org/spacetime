@@ -1,0 +1,60 @@
+#+TITLE: Trailing tokens after a directive head are discarded without a diagnostic
+#+STATE: TODO
+#+CUSTOM_ID: BUG-376-trailing-tokens-after-a-directive-head
+
+* Symptom
+
+Arbitrary text between a directive's head and its body is dropped in silence:
+
+#+begin_src spacetime
+.x { @on &.keydown:Enter        { $a <- "1"; } }   // ✓ compiles
+.x { @on &.keydown:NOTAKEY!!xyz { $a <- "1"; } }   // ✓ compiles
+#+end_src
+
+Both build clean under `check --deny-warnings`. The handler binds; everything
+after `&.keydown` is gone.
+
+* Why it matters
+
+This is the failure shape the `@on` arc has been deleting one instance at a
+time — BUG-261 (`as` clause with a wrong spelling vanished), BUG-334 (a
+delegation selector absorbed as a nested scope), BUG-346 (a CSS property in a
+mutation body), BUG-352 (an unmapped param name dropped). Each was fixed at its
+own site. This is the SHARED mechanism underneath them: a directive head that
+matches a prefix of the text, with the remainder discarded rather than refused.
+
+Concretely it cost the fix in BUG-375 its most intuitive spelling. An author who
+writes `@on &.keydown:Enter` — the spelling `stdlib/__mcp__/env.st` itself used,
+and documented as working — gets a handler that fires on every key, with no
+diagnostic to correct them.
+
+* Where
+
+`src/syntax/events/mod.rs::match_capture_type` already enforces a WHOLE match
+(`Some((value, n)) if n >= last_significant`), so by the time a capture type is
+consulted the text is already only `&.keydown`. The split happens UPSTREAM, when
+the directive's head is separated from its body during parsing/tokenization.
+
+That is why this is filed rather than folded into BUG-375: the fix is not in the
+driver rail, and it would change refusal behaviour for EVERY capture type and
+every directive at once. Per AGENTS.md's elegance bar — "if any test fails, file
+a follow-up, don't fold it in" — this needs its own design pass and its own
+migration of whatever it starts refusing.
+
+* Shape of a fix
+
+Where a directive head is split from its body, the remainder between them must
+be either consumed by a capture or REFUSED. E0946 already exists for "directive
+does not match its declared grammar" and reads correctly here.
+
+Risk to weigh first: this will start refusing source that compiles today, in an
+unknown number of places across stdlib, demos and projects. Worth a survey pass
+(build everything, count new refusals) BEFORE the change, so the migration is
+sized rather than discovered.
+
+* Gate
+
+A test asserting that `@on &.keydown:Enter { … }` produces a diagnostic, plus
+whatever migration the survey turns up. Note the positive case must keep
+compiling: `@on &.keydown("Enter") { … }` is the working spelling (BUG-375) and
+must not be caught by the new refusal.

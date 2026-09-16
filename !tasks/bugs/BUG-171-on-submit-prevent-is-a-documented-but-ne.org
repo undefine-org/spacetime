@@ -1,0 +1,119 @@
+#+TITLE: @on submit.prevent is a documented but never-implemented feature — `.prevent` silently mis-parses as an event-delegation selector, handler never fires
+#+STATE: ITEM
+#+SESSION_ID: 152939d2e5b25e66
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-09T16-24-34-454Z_152939d2e5b25e66.jsonl]]
+#+CUSTOM_ID: BUG-171-on-submit-prevent-is-a-documented-but-ne
+
+* Initial Message
+
+can dom-refs (`&my-template(..., ...) { ... }`) contain all of ST? As in, html, CSS, ST syntax through macros, etc. and then it gets its scope solved to be within the template? Or does it have some special case?
+
+The goal is to empower the 'element-ref as function' way of creating Spacetime affordances the most blessed way to build encapsulation and whatnot. I would like to do that for Ora Ventures, whose website we want to rewrite completely to be attractive to Chief AI Officers at big groups in emerging markets, as well as capital-rich SMBs that want to be more dynamic and competitve. That website should be sober, have crisp but minimal copy, and showcase Spacetime features in a way that is unique and helps us convert more (so think of advanced interactions and motions in terms of high-convertion)
+
+Come back with your plan, sources, inspirations, for the copy
+Come back with your analysis for the &... thing
+
+* Found via
+PLAN-071 (ora-ventures.com rewrite) \u2014 the Get Started form's submit handler
+(=@on submit.prevent { $formState <- "success"; }=, copied verbatim from
+=stdlib/macros/on-event.st='s OWN documented example) never fires: submitting
+the form does a normal browser form-submit (page reload / scroll-to-top),
+the success state never activates.
+
+* Repro (RED, confirmed 2026-07-09 on main, dev server + puppeteer)
+#+begin_src spacetime
+$state string: "idle";
+<main class="page">
+  <form class="f"><button type="submit">Go</button></form>
+</main>
+.f {
+  .success: $state === "done";
+  @on submit.prevent {
+    $state <- "done";
+  }
+}
+#+end_src
+Compiles clean (=cargo run -- check= exits 0 \u2014 no warning, no error). Built +
+served, clicking submit reloads the page; =$state= never becomes =\"done\"=.
+
+* Root cause (traced)
+=stdlib/macros/on-event.st= documents (in its OWN doc-comment, "@example form
+submit"): =form { @on submit.prevent { $formData <- new FormData($); } }= as
+valid syntax. But NO macro form actually parses a =.prevent= MODIFIER at all.
+What exists is =%macro on-mutation-dispatcher='s =%form {
+@on $event:ident $target:selector { $body:mutation_actions } }= \u2014 a form
+with an EVENT NAME followed by an EVENT-DELEGATION TARGET selector (the
+documented shape is =@on click [data-option-id] { ... }=). Author-written
+=submit.prevent= is NOT special-cased anywhere; the =$target:selector=
+capture greedily matches =.prevent= as a CSS class selector (syntactically
+valid \u2014 =.prevent= parses fine as "elements with class prevent"). The
+compiled JS confirms this exactly:
+: const eventType = "submit";
+: const delegateSelector = ".prevent";
+: ...
+: $ = e.target.closest(delegateSelector);
+: if (!$) return;  // always true \u2014 no element has class="prevent"
+The handler is wired to EVENT DELEGATION against a selector that matches
+NOTHING, so it silently no-ops on every submit. Neither branch calls
+=e.preventDefault()= anywhere in =on-mutation-handler= (grep confirms zero
+=preventDefault= references in the entire compiler + stdlib) \u2014 so even if
+the parse issue were fixed, the browser's default form-submit navigation
+would STILL happen unless =preventDefault= is added to the handler when a
+=.prevent= modifier is present.
+
+* Structural fix (chosen)
+Two-part, both required for the feature to actually work as documented:
+
+1. Grammar: add explicit modifier-aware forms to
+   =stdlib/macros/on-event.st= that recognize a literal =.prevent= (and
+   ideally =.stop= for stopPropagation, matching the DOM event-modifier
+   convention many frameworks use) as a DISTINCT token from a delegation
+   selector \u2014 NOT a =$target:selector= capture. Likely shape: a new
+   %capture_type or explicit literal =".prevent"= alternative BEFORE the
+   generic =$target:selector= form in the ordered Choice, so
+   =@on $event:ident "." "prevent" { $body }= wins over the delegation-target
+   form for this exact literal. (Structural/grammar-first per the AGENTS
+   elegance bar \u2014 add capture-type data, don't special-case in Rust.)
+2. Runtime: =on-mutation-handler= (=stdlib/primitives/animation/drivers.st=)
+   needs a =prevent: bool = false= param; when true, call
+   =e.preventDefault()= inside the handler BEFORE running mutations (so a
+   form's default submit-navigation never fires regardless of whether the
+   mutation body succeeds).
+
+* Acceptance
+1. RED fixture above: submitting the form does NOT navigate/reload; =$state=
+   becomes =\"done\"= (assert via a CDP =--cdp= test \u2014 =@when .f submit= /
+   equivalent, checking =window.location= unchanged AND the state signal).
+2. Event delegation (=@on click [data-option-id] { ... }=) keeps working
+   unchanged \u2014 regression guard (the two forms must coexist unambiguously).
+3. =stdlib/macros/on-event.st='s "@example form submit" doc block added as a
+   compile + CDP fixture (closes the doc-lies-about-working-code gap this
+   bug exposes).
+4. =.stop= (stopPropagation) considered/scoped in the same pass if cheap;
+   otherwise file as its own follow-up \u2014 don't silently half-ship it.
+
+* Workaround applied in this session (PLAN-071)
+=projects/ora-ventures.com/index.st= / =for-ai-officers/index.st= keep the
+=@on submit.prevent { ... }= source as-authored (it is, after all, the
+DOCUMENTED correct syntax) but the ACTUAL behavior today is a plain page
+reload on submit, which is broken for the Get Started form. This blocks
+PLAN-071's form-submission acceptance criterion until fixed. See
+PLAN-071's verification notes for how this was worked around/flagged for
+the live demo (if a workaround was used, it is documented in that plan's
+acceptance section).
+
+
+* Cross-session confirmation (2026-07-17)
+Reproduced again independently in a SEPARATE session (Spacetime Host
+commercial/host Wave 4, =stdlib/__host__/index.st=) — confirms this is
+not a one-off. Same symptom (a real page navigation/reload on click,
+all in-flight JS state discarded), confirmed via a live headless-
+Chromium browser test this second time too. Workaround applied there:
+avoided =<form>=/submit entirely — a plain =<div>= container with a
+=type="button"= element and a bare =@on click= handler (no default
+navigation exists to prevent, so the whole =.prevent= gap is
+sidestepped). This is a NARROWER workaround than PLAN-071's (which kept
+the =<form>=+=submit.prevent= as-authored per the doc); worth comparing
+both workarounds once this bug is fixed, to confirm a real =<form>=
+becomes safe to use again project-wide.
+

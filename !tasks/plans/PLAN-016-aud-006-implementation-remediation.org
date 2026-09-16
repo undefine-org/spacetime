@@ -1,0 +1,158 @@
+#+TITLE: AUD_006_IMPLEMENTATION_REMEDIATION
+#+STATE: DONE
+#+SESSION_ID: 14cb4663c8d20fb9
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-04-27T17-02-15-332Z_14cb4663c8d20fb9.jsonl]]
+#+CUSTOM_ID: PLAN-016-aud-006-implementation-remediation
+#+LAYER: tooling
+
+* Initial Message
+
+Implement these audit recommendations from org://AUD-006-audit-implementation:
+
+## Audit findings
+
+Sorted by effort-to-impact ratio.
+
+---
+
+- **What**: Stale `cargo run -- serve site/` / `check site/` / `build site/` and "Site Directory (`site/` and subdirectories)" ownership in agent context prompts.
+- **Where**:
+  - `.claude/agents/site-designer.md` — multiple, including `## Tools & Technologies` "`cargo run -- serve site/` for live development server", `## Owns / Site Directory (`site/` and subdirectories)`, `## Notes / Development Workflow` step 1 "Start dev server: `cargo run -- serve site/`", debugging tips `RUST_LOG=trace cargo run -- serve site/`, plus `site/examples/todo-app` example.
+  - `.claude/agents/pipeline-engineer.md` — the shell block under `## Notes / Key Debugging Commands` contains `RUST_LOG=spacetime::pipeline=trace cargo run -- serve site/`, `cargo run -- check site/`, `cargo run -- build site/`.
+  - `.claude/agents/code-quality-guardian.md` — 1 example mention `site/examples/todo-app`.
+- **Why**: `site/` no longer exists in the repo. Subagents loaded under these identities will paste broken commands and propose changes to a non-existent directory. This is precisely the work item FEAT-014::update-skills was meant to cover (the plan explicitly listed "Update only verbatim copy-paste-ready commands"); execution missed `.claude/agents/`.
+- **Effort**: trivial (3 files, literal find/replace `site/` → `projects/<name>/`, plus rename "Site Directory" ownership stanza to point at `projects/`).
+
+---
+
+- **What**: `# Or from the Spacetime repo root: cargo run -- serve <cd_target>` hint in `run_init` success output assumes the caller's cwd is the Spacetime repo root.
+- **Where**: `src/main.rs::run_init` ~line 1782–1783.
+- **Why**: When `cd_target = projects/<name>` the hint is correct only if cwd was already the repo root (so `projects/` was the in-repo gitignored dir). When `cd_target = <name>` (no `projects/` parent), the hint prints `cargo run -- serve <name>`, which only resolves to the right place if the user's cwd happened to be the Spacetime repo root. Misleading for users who installed `spacetime` and ran `init` from a personal scratch dir without `projects/`.
+- **Effort**: trivial (gate the "Or from the Spacetime repo root" hint behind the `cd_target.starts_with("projects/")` branch, or drop the hint entirely).
+
+---
+
+- **What**: `resolve_init_target_returns_pathbuf` test is a tautological type assertion duplicating `resolve_init_target_no_projects_dir`.
+- **Where**: `src/main.rs` ~lines 3736–3741.
+- **Why**: Adds noise without coverage. The function signature already declares `-> PathBuf`; the cargo build proves the type. Dead test.
+- **Effort**: trivial (delete).
+
+---
+
+- **What**: No test for `projects/` being a broken symlink (target missing).
+- **Where**: `src/main.rs::init_target_tests`.
+- **Why**: `std::fs::metadata` follows symlinks; on a broken symlink it returns `Err`, so `unwrap_or(false)` falls back to cwd/name. Behavior is correct but unverified. Adjacent to the existing `with_projects_symlink_to_dir` test, easy to add.
+- **Effort**: trivial.
+
+---
+
+- **What**: Tracked compiler bug documentation (`bugs/BUG-000-each-template-rendering-overview.md` … `BUG-003-template-invocation-js-serialization.md`) moved to gitignored `scratch/bugs/`.
+- **Where**: `scratch/bugs/` (was root `bugs/`, listed in plan as "non-Spacetime debris").
+- **Why**: Reading file contents, these are Spacetime-compiler-specific BUG notes (template-invocation extractor stub, body capture quantifier loop, etc.). They look like the older equivalent of the `!tasks/bugs/` org-mode bug tracker. Demoting them to gitignored `scratch/` removes them from the main repo's history going forward and from anyone cloning the repo. The plan scoping called this a "decision" but the deletion is irreversible after the next prune; consider whether they should instead be archived under `!tasks/` or `docs/legacy-bugs/` before falling out of git visibility.
+- **Effort**: small (move tracked-but-still-needed entries into `!tasks/bugs/` legacy area; or `git mv scratch/bugs docs/legacy-bugs` and adjust .gitignore exception).
+
+---
+
+- **What**: `tests/PHASE8_SUMMARY.md` and other historical task summaries still contain absolute `/home/user/code/ora/spacetime/...` paths.
+- **Where**: `tests/PHASE8_SUMMARY.md` lines 19, 62, 163, 378; `.serena/memories/STDLIB_JS_EMISSION_TRACE.md:273` references `cargo run -- serve site/`.
+- **Why**: Plan deliberately scoped historical notes out ("only forward-facing instructional docs change"), but `tests/PHASE8_SUMMARY.md` is in `tests/`, not under `!tasks/` or `@tasks/`, and might get crawled by future readers as if it were current docs. Borderline — flagged for awareness, not necessarily action.
+- **Effort**: trivial (one sed-style substitution) if you choose to action.
+
+[[id:AUD-006-audit-implementation]]
+[[id:BUG-018-clean-stale-site-path-commands-from-agen]]
+[[id:BUG-019-fix-init-next-steps-hint-and-symlink-tes]]
+[[id:BUG-020-preserve-legacy-compiler-bug-docs-outsid]]
+[[id:BUG-021-delete-stale-historical-summaries-with-o]]
+
+* Context
+** Source audit
+This plan implements the accepted recommendations from [[id:AUD-006-audit-implementation]]. AUD-006 audited the PLAN-015 projects/ reorganization commit and found small correctness/documentation gaps that should be cleaned before agents or users copy stale =site/= commands, before legacy compiler bug notes disappear into gitignored scratch, and before =spacetime init= gives misleading fallback instructions.
+
+** User clarification
+Two choices were clarified before planning:
+1. Legacy compiler bug markdown currently in =scratch/bugs/= should be preserved as markdown under tracked =docs/legacy-bugs/=, not converted into org items.
+2. The borderline stale historical summaries should be deleted, not patched. The files are =tests/PHASE8_SUMMARY.md= and =.serena/memories/STDLIB_JS_EMISSION_TRACE.md=.
+
+** Settled decisions
+1. Agent prompt cleanup targets only =.claude/agents/site-designer.md=, =.claude/agents/pipeline-engineer.md=, and =.claude/agents/code-quality-guardian.md= for the stale command/ownership examples called out by AUD-006. Generic English uses of "site" may remain when they mean websites, not the removed =site/= directory.
+2. =run_init= keeps the primary output =cd <target>= and =spacetime serve .= for all workflows. The repo-root =cargo run -- serve <target>= hint is gated to targets under =projects/= only, because only those are guaranteed to be relative to the Spacetime repo root convention.
+3. =resolve_init_target_returns_pathbuf= is removed as dead coverage. A broken =projects= symlink test is added beside the existing symlink-to-dir test.
+4. Legacy compiler bug markdown is preserved in =docs/legacy-bugs/= with a README. If ignored local files in =scratch/bugs/= are absent during execution, recover exact contents from =HEAD~1:bugs/<filename>=.
+5. =tests/PHASE8_SUMMARY.md= and =.serena/memories/STDLIB_JS_EMISSION_TRACE.md= are deleted per user clarification. No wider historical-doc cleanup is included.
+6. Execution should close [[id:AUD-006-audit-implementation]] to DONE after all four child items pass verification.
+
+** Non-goals
+- Do not repeat PLAN-015 layout work.
+- Do not move websites, projects, scratch content beyond the four legacy bug markdown files.
+- Do not update every historical =site= word in the repo.
+- Do not introduce CLI flags for init path selection.
+- Do not convert legacy markdown bugs into org items in this pass.
+
+* Verification
+** Required commands/checks
+- =grep -rn 'serve site/\|check site/\|build site/' .claude/agents/site-designer.md .claude/agents/pipeline-engineer.md .claude/agents/code-quality-guardian.md= → zero hits.
+- =grep -rn 'Site Directory (`site/`\|site/examples/todo-app' .claude/agents/site-designer.md .claude/agents/code-quality-guardian.md= → zero hits.
+- =cargo test --bin spacetime init_target_tests= → pass; expected tests cover no projects dir, projects dir, projects file, projects symlink to dir, projects broken symlink.
+- Manual smoke with =projects/= present: =spacetime init demo-with= prints =cd projects/demo-with= and =cargo run -- serve projects/demo-with=.
+- Manual smoke without =projects/=: =spacetime init demo-without= prints =cd demo-without= and does *not* print =cargo run -- serve demo-without=.
+- =cargo check --tests= → pass, ignoring pre-existing warnings only.
+- =test -f docs/legacy-bugs/BUG-000-each-template-rendering-overview.md= and equivalent for BUG-001..BUG-003 → pass.
+- =test -f docs/legacy-bugs/README.md= → pass.
+- =git status --short -- scratch/= after staging → no staged scratch files.
+- =test ! -e tests/PHASE8_SUMMARY.md= → pass.
+- =test ! -e .serena/memories/STDLIB_JS_EMISSION_TRACE.md= → pass.
+
+** Completion evidence
+The implementation completion report should record:
+- Baseline grep output for stale agent prompt hits before cleanup.
+- Before/after stdout snippets for init with and without =projects/=.
+- Checksum or git-history recovery evidence for the four legacy bug markdown files.
+- Exact verification commands and outcomes.
+- Commit hash and org lifecycle updates: BUG-018..BUG-021, AUD-006, and this PLAN item to DONE if all checks pass.
+
+* Execution Manifest
+** wave-1 :wave:
+- [[id:BUG-018-clean-stale-site-path-commands-from-agen::capture-agent-prompt-grep]] Capture failing grep evidence (TDD: before implementation)
+- [[id:BUG-019-fix-init-next-steps-hint-and-symlink-tes::capture-init-baseline]] Capture init output and unit-test baseline (TDD: before implementation)
+- [[id:BUG-020-preserve-legacy-compiler-bug-docs-outsid::inventory-legacy-bug-docs]] Inventory and checksum legacy bug docs (TDD: before implementation)
+- [[id:BUG-021-delete-stale-historical-summaries-with-o::capture-stale-summary-baseline]] Capture stale-summary baseline (TDD: before deletion)
+** wave-2 :wave:
+- [[id:BUG-018-clean-stale-site-path-commands-from-agen::update-agent-prompt-paths]] Update agent prompt path examples
+- [[id:BUG-019-fix-init-next-steps-hint-and-symlink-tes::update-init-helper-tests]] Add broken symlink test and remove tautological test
+- [[id:BUG-020-preserve-legacy-compiler-bug-docs-outsid::move-legacy-bug-docs]] Move docs to tracked legacy archive
+- [[id:BUG-021-delete-stale-historical-summaries-with-o::delete-stale-historical-files]] Delete the two stale historical files
+** wave-3 :wave:
+- [[id:BUG-018-clean-stale-site-path-commands-from-agen::verify-agent-prompt-cleanup]] Verify agent prompt cleanup
+- [[id:BUG-019-fix-init-next-steps-hint-and-symlink-tes::gate-init-root-hint]] Gate repo-root serve hint in run_init
+- [[id:BUG-020-preserve-legacy-compiler-bug-docs-outsid::verify-legacy-bug-docs]] Verify legacy archive integrity
+- [[id:BUG-021-delete-stale-historical-summaries-with-o::verify-historical-delete]] Verify stale historical files are gone
+** wave-4 :wave:
+- [[id:BUG-019-fix-init-next-steps-hint-and-symlink-tes::verify-init-output]] Verify init output and tests
+
+** Completion [2026-04-27]
+*** Verification
+- =grep -on 'serve site/|check site/|build site/' .claude/agents/site-designer.md .claude/agents/pipeline-engineer.md .claude/agents/code-quality-guardian.md= → 0 hits.
+- =grep -on 'Site Directory.*site/|site/examples/todo-app' .claude/agents/site-designer.md .claude/agents/code-quality-guardian.md= → 0 hits.
+- =cargo test --bin spacetime init_target_tests -- --list= → 5 tests, including new =resolve_init_target_with_projects_broken_symlink=, with =resolve_init_target_returns_pathbuf= removed.
+- =cargo test --bin spacetime init_target_tests= → 5/5 ok.
+- =cargo check --tests= → ok with only pre-existing warnings.
+- Smoke =spacetime init demo-with= in tempdir with =projects/= → prints =cd projects/demo-with= and =cargo run -- serve projects/demo-with= (hint preserved).
+- Smoke =spacetime init demo-without= in tempdir without =projects/= → prints =cd demo-without= and =spacetime serve .= and does not print =cargo run -- serve demo-without= (misleading hint suppressed).
+- =test -f docs/legacy-bugs/BUG-{000,001,002,003}-*.md= and =test -f docs/legacy-bugs/README.md= all pass.
+- =sha256sum= of legacy bug docs unchanged across the move; pre/post checksums match.
+- =test ! -e tests/PHASE8_SUMMARY.md= and =test ! -e .serena/memories/STDLIB_JS_EMISSION_TRACE.md= pass.
+- =git status --short -- scratch/= shows no scratch staged paths.
+*** Artifacts
+- [[file:!tasks/plans/plan-artifacts/PLAN-016-aud-006-implementation-remediation/init_tests_before.txt]]
+- [[file:!tasks/plans/plan-artifacts/PLAN-016-aud-006-implementation-remediation/init_with_projects_before.txt]]
+- [[file:!tasks/plans/plan-artifacts/PLAN-016-aud-006-implementation-remediation/init_without_projects_before.txt]]
+- [[file:!tasks/plans/plan-artifacts/PLAN-016-aud-006-implementation-remediation/init_with_projects_after.txt]]
+- [[file:!tasks/plans/plan-artifacts/PLAN-016-aud-006-implementation-remediation/init_without_projects_after.txt]]
+- [[file:!tasks/plans/plan-artifacts/PLAN-016-aud-006-implementation-remediation/legacy_bug_checksums.txt]]
+- [[file:!tasks/plans/plan-artifacts/PLAN-016-aud-006-implementation-remediation/stale_summaries.txt]]
+- [[file:docs/legacy-bugs/README.md]]
+- Code: =src/main.rs::run_init= (gated repo-root hint), =src/main.rs::init_target_tests= (broken-symlink test).
+- Org sources: =@tasks/agents/{site-designer,pipeline-engineer,code-quality-guardian}.org= and regenerated =.claude/agents/*.md= (incidental =testing-engineer.md= regeneration produced no diff in path examples but is included in the staged changes from =scripts/sync-agents.fish=).
+- Children: [[id:BUG-018-clean-stale-site-path-commands-from-agen]] DONE; [[id:BUG-019-fix-init-next-steps-hint-and-symlink-tes]] DONE; [[id:BUG-020-preserve-legacy-compiler-bug-docs-outsid]] DONE; [[id:BUG-021-delete-stale-historical-summaries-with-o]] DONE; [[id:AUD-006-audit-implementation]] DONE.
+*** Deviations
+None.

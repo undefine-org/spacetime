@@ -1,0 +1,123 @@
+#+TITLE: Reactive HtmlExpr→DOM renderer (the unified template/HTML keystone)
+#+STATE: REVIEW
+#+SESSION_ID: 14fc108ed3772fa8
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-04T14-32-37-965Z_14fc108ed3772fa8.jsonl]]
+#+CUSTOM_ID: FEAT-077-reactive-htmlexprdom-renderer-the-unifie
+
+* Initial Message
+
+hey what would it look like if the admin app were done multi-file? what reactive primitives and modular programming principles (and other missing constructs that you find) do you need to make this an amazing DX for developing this kind of app?
+
+* Parent
+[[id:PLAN-030-spacetime-app-platform-declarative-schem]] Phase B O2 (full convergence). Also
+COMPLETES the stranded PLAN-023 W3/W4 (reactive HtmlExpr emit). Design:
+[[file:../../@research/phase-b-o2-full-convergence.org]].
+
+* Why (the keystone)
+O2 unifies @template + file-scope HTML onto ONE model. The model's HTML IR (HtmlExpr) exists
+(html5ever treesink) but its REACTIVE renderer does NOT — emit_hole is SSG-only
+(<!--st-hole:src-->), and the only working reactive template renderer is the factory regex
+path in template.st (96 templates). Converging onto HtmlExpr therefore REQUIRES building the
+reactive HtmlExpr→DOM renderer. Once built it replaces BOTH the factory regex AND the SSG
+emit_hole — one path, no deprecation — and unblocks reactive file-scope HTML + HTML @each.
+
+* Verified ground truth (explorers, 2026-06-07)
+** Reactive substrate to REUSE (public/runtime/st.js, src/syntax/form_match.rs)
+- ST.get(el,name)/ST.set(el,name,v)/ST.watch(el,name,fn): per-element WeakMap signal store,
+  microtask-batched; ST.watch fires immediately if value defined. (st.js:256-340)
+- SpacetimeLocal[name] global signals + `local:<name>:updated` CustomEvent.
+- transpile_signal_expr_with(expr, SignalScope::{Element,Global}) → $x rewritten to
+  ST.get(__el,'x') / SpacetimeLocal['x']; collect_signal_deps(expr) → ordered dep names.
+  COMPILE-TIME, no runtime eval. (form_match.rs:1100-1250)
+- emit_reactive_binding_js (compiler.rs:740-770): the PROVEN reactive arc pattern —
+  apply()=transpiled expr, deps→listeners, render() on change. The renderer mirrors this.
+** HTML IR + skeleton (src/ir/code.rs:264-310, src/html/treesink.rs)
+- HtmlExpr::{Element{tag,attrs:Vec<(name,Vec<AttrPart>)>,children}, Text, Hole(JsExpr), Raw};
+  AttrPart::{Lit, Hole(JsExpr)}. parse_html_skeleton(skeleton, holes)→Vec<HtmlExpr> (html5ever).
+** Factory contract to PRESERVE (stdlib/primitives/template.st, 7 phases)
+  interpolate → ST.set state init → directive wiring (OnEvent/ClassToggle/ContentBinding via
+  ST.watch+resolveScoped) → injection wiring (Text/Slot/Attr) → template refs (+depth guard,
+  dynamic dispatch) → @match dispatch → selector refs (MutationObserver). Reactivity via
+  ST.get/set/watch. The renderer replaces ONLY phase-1 (regex interpolate) with HtmlExpr DOM
+  build + reactive holes; phases 2-7 stay.
+
+* Design — the renderer
+A compile-time lowering HtmlExpr → a JS DOM-builder function that, given a scope element
+(__el = the instance root, or document for file-scope), constructs the live subtree and wires
+each Hole reactively:
+- Element{tag,attrs,children} → document.createElement(tag); for each attr: if all Lit →
+  setAttribute once; if any Hole → an apply()+deps+ST.watch arc (mirror emit_reactive_binding_js
+  but element-scoped) that recomputes the attr value string; recurse children.
+- Text(s) → document.createTextNode(s).
+- Hole(JsExpr::Raw(src)) → a text node whose content is render()=transpiled(src); deps =
+  collect_signal_deps(src); ST.watch(__el, dep, render) for each dep (Element scope inside a
+  template; Global scope for file-scope HTML). Escaping: textContent (auto-safe) for text holes;
+  for attr holes, string-built value via setAttribute (escapeAttr semantics preserved).
+- Raw(s) → trusted innerHTML fragment (for &param element substitution).
+- Scope: SignalScope::Element when rendering a @template body (deps read ST.get(__el,...));
+  SignalScope::Global for file-scope HTML (SpacetimeLocal + local:<dep>:updated listeners).
+- bare $x desugaring: the skeletonizer (B-Wave 2) normalizes bare $x/$x.path/&param in
+  component HTML into holes so authoring is unchanged.
+
+* Plan (sub-waves, each reviewer-hardened)
+1. SPIKE: hand-write the target JS for a 2-hole template + a file-scope binding; assert in V8
+   it renders + reacts. Pin the exact emit shape before generalizing.
+2. Build the Rust lowering HtmlExpr → JS DOM-builder (new src/emit/ module or extend html.rs),
+   parameterized by SignalScope. Unit + snapshot the emitted JS.
+3. Wire it into register-template (replace factory phase-1) — templates render via builder.
+   V8: bug059_*/feat071_* corpus green on the builder.
+4. Wire it into file-scope HTML (replace emit_hole SSG with the reactive builder) — file-scope
+   $x becomes reactive. V8 + a served site.
+5. @each + HtmlExpr (dissolve PLAN-023 W4 remaining): per-item builder, SSG-unroll for static.
+
+* Acceptance
+- [ ] one reactive HtmlExpr→DOM renderer; emit_hole SSG + factory regex both DELETED.
+- [ ] templates render + react via the builder (corpus green, emitted-JS asserted).
+- [ ] file-scope HTML $x reactive (PLAN-023 W3/W4 closed).
+- [ ] HTML @each works (BUG-028/030 dissolved).
+- [ ] bare $x authoring unchanged; 96 templates compile+render+react.
+- [ ] reviewer swarm per sub-wave; all findings resolved.
+
+NOTE [2026-06-08]: Sub-waves 1-2 DONE + reviewer-hardened. Renderer keystone built (src/emit/html_reactive.rs::emit_builder), spike-proven then generated, V8-verified (render+react). R-wave swarm found+fixed 3 P2s (empty-hole invalid JS, multi-node Raw drop, dotted-path try/catch parity). Commits 48d7708e, 04241ede. Architecture reviewer noted sub-wave-3 integration gaps to handle: (a) seed template PARAMS as signals on __el (holes read ST.get(__el,name) but factory interpolates from data[param]); (b) single-root vs fragment for phases 2-7 (querySelector/ST.set need an element); (c) PROJ-102 scope resolution for parent/global holes in nested templates; (d) bare-$x->hole normalization (B-Wave 2) + &param->Raw routing must feed this. lib 2142/0, v8 302/12 pre-existing +12 ignored.
+
+NOTE [2026-06-08]: Sub-wave 3 DONE: templates render via the reactive builder end-to-end. component_body_to_js emits a root-scoped builder (bare $x normalized to holes); factory evals it, seeds params as signals on root, runs phases 2-7 unchanged. PARAMS now reactive (ST.set re-renders) — strict upgrade. Single-line emit so builder survives %body payload. Real project (unkn, 17 pages, 21 builders) builds clean. Commits cd9baefc/aa202c11/299a4c6f. Corpus green: lib 2146/0, integration 162/0, v8 303/12 pre-existing +12 ignored. REMAINING: (a) &param element substitution via Raw/HtmlExpr (builder doesn't yet handle &param \u2014 currently falls back works since &param templates still use regex? verify); (b) file-scope HTML convergence (replace SSG emit_hole with reactive builder, Global scope); (c) @each + HtmlExpr (PLAN-023 W4); (d) cutover: remove regex factory + SSG emit_hole; (e) @match pure .st (Phase C). Reviewer swarm pending on sub-wave 3.
+
+* PROGRESS (2026-06-08) — keystone + template convergence DONE & hardened
+
+** Built + reviewer-hardened (2 swarms)
+- emit_builder / emit_builder_root_scoped (src/emit/html_reactive.rs): HtmlExpr -> JS DOM
+  builder; reactive text/attr/element(&param) holes; scope-parameterized (Element=ST.get(__el)
+  /ST.watch, Global=SpacetimeLocal/local:<dep>:updated). Single-line emit (survives %body
+  payload). try/catch null-safe dotted paths. Multi-node Raw -> fragment. Empty-hole guard.
+- component_html_to_exprs(html, element_params): normalizes bare $x/$x.path + DECLARED &param
+  into holes via html5ever skeleton; prose (AT&T) + entities untouched.
+- Factory (template.st): uses rawBody.builder, seeds ALL params as signals on root, runs
+  phases 2-7 unchanged. PARAMS now reactive (strict upgrade). display:contents wrapper for
+  multi-root bodies. Element params threaded from :param_list via
+  component_body_to_js_with_params in resolved_to_primitive_args (pipeline/expand.rs).
+- Reviewer swarms: R1 (3 P2: empty-hole/multi-node-Raw/dotted-try-catch) fixed; R2 (P1
+  element-param-seed, P1 prose-corruption, P2 multi-root) fixed.
+
+** Gates (regression-free across ALL)
+lib 2149/0, integration 162/0, v8 306/12 (pre-existing media) +12 ignored,
+headless 355/254 (IDENTICAL to pre-FEAT-077 baseline -> zero regressions).
+Fleet: unkn (17pg), ora-ventures.com (&links/&body element params) build clean.
+Commits 48d7708e, 04241ede, cd9baefc, aa202c11, 299a4c6f, f3557d7f, bf048afb.
+
+** REMAINING (each substantial; not started)
+1. File-scope HTML -> reactive builder (Global scope). NB: needs a HYDRATION mode (wire holes
+   onto existing SSG DOM) not fresh-build, OR build-fresh-and-replace. emit_html_blocks ->
+   CompiledSpacetime.html is SSG-static today. Distinct from the template (fresh-build) case.
+2. @each + HtmlExpr per-item builder (PLAN-023 W4 remaining 5-point list).
+3. CUTOVER: delete factory regex interpolation (template.st 175-215) + SSG emit_hole, once
+   file-scope + @each are on the builder. (Currently regex is a FALLBACK only; templates with
+   a builder never use it — so the path is single-in-practice, but the regex code remains.)
+4. Phase C: @match as pure .st (%capture_type match_block + %primitive match-render). Unblocked
+   by multi-token literals (B-Wave 1) + the renderer. The @match runtime is dormant in
+   template.st; the feat073_match V8 tests are #[ignore] (the spec). Proper home is Phase B
+   (component_body self-describing) so @match parses via stdlib grammar not Rust.
+
+** State: the keystone (reactive renderer) + template convergence are DONE. Remaining is
+breadth (file-scope, @each, cutover, @match) \u2014 each its own focused wave with a reviewer swarm.
+
+NOTE [2026-06-08]: @each composition: DONE-transitively (no new wiring). @each items are template instances; the factory uses the reactive builder, $item.field holes read the seeded $item signal. Verified by emitted structure (feat077_each_item_template_uses_reactive_builder) + headless suite. Also fixed BUG-061 mid-flight (InjectionTarget::Selector for [attr=v]<- descendant targeting). Remaining O2: (1) file-scope HTML reactive (Global scope; needs SSG hydration mode \u2014 the one genuinely-distinct piece left); (2) Phase B component_body self-describing (retires parse_component_body per-construct Rust + @match special-case BUG-060 \u2014 the true full cutover); (3) cutover delete regex factory + emit_hole. lib 2152/0, v8 311/12 pre-existing.

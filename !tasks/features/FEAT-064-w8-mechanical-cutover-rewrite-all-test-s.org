@@ -1,0 +1,99 @@
+#+TITLE: W8 mechanical cutover: rewrite all .test.st to new grammar (parallel subagents)
+#+STATE: ITEM
+#+SESSION_ID: 14f94e45c6c3f247
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-02T11-06-49-499Z_14f94e45c6c3f247.jsonl]]
+#+CUSTOM_ID: FEAT-064-w8-mechanical-cutover-rewrite-all-test-s
+#+LAYER: testing
+
+* Initial Message
+
+actually, Land the PLAN-026 core now (done/committed); file the testing-macro cluster (@assert swap, @then/@eval nested-match) as a new BUG/PLAN with the diagnosis captured, and STOP — .test.st gating remains blocked
+ on that follow-up. Don't register text tests yet.
+
+Put text tests as FEAT within the plan. Be comprehensive
+
+Wave 8 of [[id:PLAN-027-spacetime-testautomation-infra-fidelity]]. Mechanically
+rewrite the entire =.test.st= corpus to the new grammar (@then{claims}, @mount,
+@setup, needs<rung>), deleting the last uses of @fixture / then-* / eval(eval()).
+Parallelized across ~10 subagents (one per directory). HARD CUTOVER — nothing left.
+
+* Corpus (≈80 files)
+stdlib/testing/meta (10), stdlib/text/tests (2), tests (10), tests/bugs (5),
+tests/component-model (5), tests/e2e (1), tests/integration (6),
+tests/unit/animations (3), tests/unit/assertions (3), tests/unit/data (2),
+tests/unit/i18n (1), tests/unit/macros (10), tests/unit/primitives (10),
+tests/unit/runtime (9), tests/unit/templates (2).
+
+* Mechanical transform spec (per subagent, ≤1 dir)
+- =@fixture { html }= → =@mount { html-or-real-st }= (prefer real primitives where
+  the test simulated them via eval).
+- =@then .x should <assert> <val>= → =@then .x { <claim> }= (per the W3 op table).
+- =@eval (eval("…"))= → =@setup { … }= or block =@eval { … }= (kill double-eval).
+- =@let (x = …)= → keep (now emits) or fold into @setup.
+- Add =needs <rung>= where assertions require layout/timing (inference should
+  auto-handle most; declare only when it must rise).
+- Replace hand-simulated primitive state (=el.__stStateHistory = […]=) with
+  =@mount= of the REAL primitive + =@when= driving it, wherever feasible.
+
+* Gating (per file)
+- Each rewritten file must (a) compile, (b) GATE: a mutation in one assertion makes
+  it FAIL; revert. The audit (newly-real assertions) WILL expose product bugs —
+  file each as its own BUG (do NOT fix inline; do NOT weaken the test to pass).
+- If a test cannot be expressed in the new grammar: file a BUG (blocking on W3) —
+  worst case FUP — and leave the file FAILING/quarantined with a tracked reference,
+  never reverted to old macros (K3).
+
+* Registration
+- Register the rewritten stdlib/text/tests/* and all unit suites into the CDP
+  harness (the old playwright_st_test.rs → CDP runner from W2). This finally
+  closes the original FEAT-055 (text tests gated) — now meaningful because
+  assertions gate (W0) and layout is real (W2).
+
+* Orchestration
+- Dispatch AFTER W0–W3 land (grammar stable). One task per directory, blockers = the
+  shared grammar waves. Each task: rewrite + per-file gate-proof + list of BUGs filed.
+- Final pass: =cargo run -- test tests/ --audit= shows eval-density ≈ 0
+  (target: 782 → <50, double-eval → 0); full suite re-baselined; every failure triaged.
+
+* Acceptance
+- Zero @fixture, zero then-* macros, zero eval(eval()) remain in the corpus.
+- Every .test.st gates (mutation-proven sample per directory).
+- Newly-exposed real failures all triaged (BUG filed or test corrected, never weakened).
+- Suite re-baselined under the CDP runner; coverage (W6) reported.
+
+* Depends on
+- [[id:FEAT-056-w0-grammar-bedrock-fix-capture-type-for]]
+- [[id:FEAT-059-w3-assertion-grammar-mount-block-claims]]
+- [[id:FEAT-061-w5-animation-testing-virtual-clock-timel]] (for animation suites)
+
+* Parent
+[[id:PLAN-027-spacetime-testautomation-infra-fidelity]]
+
+* W8 STATUS: transform PROVEN; mass-cutover DEFERRED (build stability)
+SEED PROOF (done): the mechanical transform is proven end-to-end:
+  @fixture { <html> }                -> @mount { <html> }
+  @then .x should have_state "a"     -> @then .x { state == "a"; }
+  @then .x should have_text "t"      -> @then .x { text ~= "t"; }   (or == for exact)
+  @then .x should exist              -> @then .x { exist; }
+  @then .x should have_length N      -> @then .x { count == N; }
+  @then $sig on .x should equal v    -> @then .x { $sig == v; }
+A rewritten state-assertions file passes valid cases + GATES wrong ones.
+
+DEFERRED (mass rewrite of 79 files + DELETE 43 then-* + @fixture):
+1. The interleaved FOREIGN CMS commits (74d2dbb3, 1483e36b, ...) currently BREAK
+   the lib build (8 failures: html_* emit "", full-runtime snapshot churn). A K3
+   hard-cutover (irreversible mass-deletion) CANNOT be safely verified against an
+   unstable shared build. Run W8 when the build is green.
+2. Many meta-tests (stdlib/testing/meta/then-assertions.test.st, assert-custom,
+   when-actions) are SELF-TESTS OF THE OLD MACROS \u2014 they must be REPLACED with
+   meta-tests of @then{claims}/@mount, not mechanically transformed.
+3. The new grammar (@mount/@then{claims}/@when-live/@drive/@clock) COEXISTS with the
+   old today \u2014 both are real, working, tested surfaces (NOT a broken fallback). The
+   deletion is the only step that needs the stable build.
+
+DISPATCH PLAN (when build green): ~8 parallel subagents, one per dir
+(tests/unit/{primitives,macros,runtime,assertions,animations,data,...}, tests/
+{integration,bugs,component-model}, stdlib/testing/meta). Each: apply the transform
+table above, gate a sample (mutation), list any then-* capability the claim grammar
+can't express (file BUG). THEN delete @fixture + then-* + assertions/*.st; verify
+zero references remain; re-baseline.

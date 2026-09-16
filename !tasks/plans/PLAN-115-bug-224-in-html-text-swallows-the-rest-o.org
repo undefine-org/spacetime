@@ -1,0 +1,65 @@
+#+TITLE: BUG-224: `/*` in HTML text swallows the rest of the file (silent rule loss)
+#+STATE: DONE
+#+SESSION_ID: 153cbb7aff30bc80
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-24T20-02-11-580Z_153cbb7aff30bc80.jsonl]]
+#+CUSTOM_ID: PLAN-115-bug-224-in-html-text-swallows-the-rest-o
+
+* Initial Message
+
+only the first document is showing.... http://localhost:3333/process the rest is empty.
+
+Also, the brand column is too tight
+
+* Symptom
+
+A page renders its text correctly but *silently loses every CSS rule and
+directive that follows it*. Found on `projects/backdesk-new/process.st.md`:
+three of four chapters were invisible because the `@on visible pr-doc(...)`
+reveal animation never registered, leaving `.pr__doc { opacity: var(--st-pr-doc, 0) }`
+stuck at 0. The page compiled clean (`check` passed all 16 files), the DOM
+contained every element, and the markdown content was fully injected — only
+the animation was missing from the runtime bundle.
+
+* Root cause
+
+`block_comment_callback` in =src/syntax/cst/lexer.rs= treated `/*` as a block
+comment opener ANYWHERE, including inside HTML element text. The sidebar in
+`modules/reader-chrome.st` contained the innocuous prose:
+
+: <p class="pr__foot">Chapters rendered from<br>process/*.md by the md module.</p>
+
+The `/*` in `process/*.md` opened a "comment" that ran to the next `*/` or EOF,
+consuming all 120 lines of CSS that followed — including the animation rule.
+
+This is the SAME failure mode as BUG-072 (a lone quote in HTML text starting a
+string that swallowed the rest of the file), and it takes the same remedy.
+
+* Fix
+
+A block comment never crosses a BLANK LINE. A real comment is either
+single-line or a contiguous banner; neither contains a blank line. On hitting
+one before the closing `*/`, the `/*` is treated as lone punctuation
+(`lex.bump(0)`) and the rest of the source re-lexes normally.
+
+Terminated comments (`/* c */`), multi-line contiguous banners, and
+unterminated-at-EOF recovery all keep their previous behaviour.
+
+* Why it was invisible
+
+The failure deletes source SILENTLY: no error, no diagnostic, and the text that
+triggered it still renders. `cargo run -- check` passes. Only a missing visual
+effect reveals it — which is why this needed a screenshot, not an assertion,
+to notice. Any glob in prose is a landmine: `process/*.md`, `src/**/*.rs`,
+`node_modules/*`.
+
+* Tests
+
+Three in =src/syntax/cst/lexer.rs= `comment_tests`:
+- `glob_in_html_text_does_not_swallow_following_source` (RED before fix)
+- `multiline_banner_comment_still_lexes_as_one_comment`
+- `terminated_comment_before_blank_line_is_a_comment`
+
+* Related
+
+- BUG-072 — lone quote in HTML text, same class, same remedy.
+- Discovered while fixing the literate `.st.md` chrome regression (PROJ-007).

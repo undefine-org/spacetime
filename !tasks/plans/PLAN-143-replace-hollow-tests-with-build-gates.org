@@ -1,0 +1,77 @@
+#+TITLE: PLAN-143 — Replace the 15 proven-hollow tests with build-a-page gates
+#+STATE: ITEM
+#+PRIORITY: A
+#+CUSTOM_ID: PLAN-143-replace-hollow-tests-with-build-gates
+
+Follow-up to !tasks/research/RESEARCH-zero-assertion-audit.org (commit 03baaa53), which
+classified all 42 files carrying emitted-output `.contains` assertions (187+ assertions) and
+PROVED 15 hollow by stubbing the mechanism and watching the test stay green.
+
+* Why priority A
+
+BUG-328 (a bundle that did not parse), BUG-335 (an ignored duration) and BUG-339 (unregistered
+macros — 29 lib + 6 integration failures) were all invisible to the entire unit/integration/LSP
+suite. Each was caught by a gate that shells out to `spacetime build`/`check`. A dead bundle and
+a dead feature are indistinguishable at the assertion layer.
+
+* The three hollow clusters
+
+** H1 — pipeline probe tautology (src/pipeline/integration_tests.rs:32+)
+
+`test_full_pipeline_data_fetch` / `_element_ref` / `_mixed_phases` call
+`probe_context(&["data-fetch"])` — feeding the string IN — then assert
+`output.js.contains("data-fetch")`. The test asserts its own input echoes back; its comment
+admits the target is a "fallback comment stub". Proven: stubbing `probe_context`'s body to a
+dead comment left all 5 green.
+
+ORCHESTRATOR-VERIFIED: `@data fetch` is HEALTHY — `@data fetch $users: "/api/users"` builds and
+the URL reaches the bundle. This is a PROOF gap, not a live defect. Replace the gate; do not
+"fix" the feature. NB the binding sigil is mandatory (`$users`; bare IDENT is a grammar error).
+
+** H2 — reactive state-name (7 tests)
+
+Asserts `js.contains("menuOpen")` etc. Proven by counterexample: the state-only variant, with the
+reactive directive REMOVED, still emits the name — state init emits it regardless. The assertion
+cannot distinguish a working class-toggle from a deleted one. That counterexample IS the RED
+demonstration the replacement gate must reproduce.
+
+** H3 — GH-30 LSP (context_variable, context_template) -> closes BUG-341
+
+`src/lsp/definition.rs:77,81` are still literally `// TODO: wire up variable/template definition
+lookup` returning `None`. The tests assert the CONTEXT CLASSIFIER, so they pass while the feature
+they are named for resolves nothing. Re-confirmed verbatim by the orchestrator.
+
+* Method
+
+Do NOT delete string assertions where the string IS the contract. Replace the HOLLOW ones and add
+the missing behavioral half:
+- logic-rung contract        -> `.test.st`
+- layout/paint/timing        -> `.cdp.test.st` (real Chromium; a `needs layout` claim is SKIPPED,
+  not failed, under --headless, and a skipped gate reads exactly like a passing one)
+- compiler stdout / bundle   -> `tests/repro/<slug>/check-contract.sh`
+
+Every replacement MUST be demonstrated RED against the broken mechanism before acceptance.
+
+* Ranked order
+
+1. H1 pipeline probe (core reactivity; dead-bundle class)
+2. H2 reactive state-name (core reactivity)
+3. H3 GH-30 LSP (closes BUG-341)
+4. 3D cluster in compiler.rs (BUG-328 class)
+5. duration/timing cluster (BUG-335 class)
+6. WebSocket / signal-decode / markdown / data-stream, plus the 2 WEAK typed-union watcher
+   assertions in src/metasystem/codegen.rs that the audit's group-A pass missed
+7. sync/handlers patch asserts
+
+* Loose end — TRIAGED, answer below
+
+The audit flagged `tests/value_functions_test.rs` as RED and untriaged. Triaged 2026-08-07:
+`test_wave_with_all_parameters_compiles` and `test_runtime_function_evaluation_logic` fail
+because their fixture uses `@loop wobble(2s) { ... }` — RETIRED syntax; `%macro loop` survives
+only in stdlib/migrations/entries/2026-07-26-on-cutover.st.
+
+The underlying feature is FINE: a live page using `` `wave(amp: 10)` `` compiles and emits all
+five markers the tests look for (stWave, resolveValue, __st_fn_, evaluateRuntimeFunction, wave).
+So these are STALE tests for removed syntax — the same class as the two known-stale parser tests
+— not a regression. Migrate the fixtures to current `@on`/value-function syntax, or retire them;
+do not treat as a defect.

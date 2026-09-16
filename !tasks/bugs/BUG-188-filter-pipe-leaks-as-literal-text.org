@@ -1,0 +1,49 @@
+#+TITLE: Filter pipe (`expr` | filter(args)) leaks as literal text node in @template/@each interpolation
+#+STATE: DONE
+#+SESSION_ID: 153497c78a510229
+#+CUSTOM_ID: BUG-188-filter-pipe-leaks-as-literal-text
+#+COMPLETION_HASH: de798c90ccdf9deb
+
+* Source
+GitHub issue #1 (undefine-org/spacetime). Surfaced while building
+projects/sakazuki. Canonical examples (examples/data-binding/styles.st) ship
+the broken shape, so users copy a silently-corrupting pattern.
+
+* Symptom
+In `@template` / `@each` body interpolation, a filter pipe like
+`` `price` | currency("$") `` is NOT applied. The value interpolates raw, and
+the pipe source itself (`` | currency("$") ``) is appended as a LITERAL text
+node sibling. Visitor sees e.g. =49.99 | currency("$")= on the page. No
+warning, no error.
+
+* Root cause (verified 2026-07-18)
+Two divergent codegen emitters for the same interpolation grammar:
+- The `text <-` binding path correctly emits
+  `ST.filter("currency(\"$\")", __v)`.
+- The template/`@each` body interpolation path emits
+  `document.createTextNode(" | currency(\"$\")")` as a literal sibling after
+  the (correct) value node.
+Verified via `cargo run -- inspect --layer emit examples/data-binding/styles.st`.
+
+* Impact
+Silent visitor-facing output corruption with zero diagnostics; contradicts
+the shipped canonical demo; affects all filters (`| currency`, `| uppercase`,
+`| truncate(100)`, `| if(...)`). Forced workarounds in sakazuki.
+
+* Test pin (RED)
+tests/bugs/BUG-188-filter-pipe-leaks-as-literal-text-in-template-each.test.st
+- 1 green control (`text <-` path applies filters), 3 RED (template/@each
+  paths leak the literal pipe text).
+Run: `cargo run --features headless -- test <file> --headless --format json`
+Authoring note: `@assert`'s `$message` is literal-only -- string
+concatenation in the message silently empties the test body. Backticks in
+@test names also break parsing; both avoided in the pin.
+
+* Fix direction
+Unify the two interpolation emitters so template/@each body pipes route
+through ST.filters exactly like the `text <-` path; then fix the shipped
+examples/data-binding/styles.st demo. Pending user decision (asked
+2026-07-18): prioritize fixing the filter paths vs documenting the
+workaround first.
+
+NOTE [2026-07-19]: FIXED (PLAN-078), three layers: (1) normalize_bare_holes consumes a ` | filter(...)` run following a TEXT-position hole into the hole source (new scan_filter_pipe, quote/balance-aware) — src/emit/html_reactive.rs; (2) emit_text_hole splits the pipe and applies ST.filter at render (same split as emit_reactive_binding_js / reify injection); (3) each-inline.st fillHolesOnly applies ST.filter after hole resolution (bare @each rows). Also added the documented-but-missing currency/truncate/if filters to ST.filters in public/runtime/st.js (Intl currency, mirrors stdlib %primitive + data-binding engine). Pin 4/4 green; canonical examples/data-binding/styles.st emits 0 literal pipes. FUP-119 (second invokeTemplate instance @each no-rerender) + FUP-120 (SSG unroll filter parity) filed for adjacent gaps.

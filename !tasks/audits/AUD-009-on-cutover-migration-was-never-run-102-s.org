@@ -1,0 +1,244 @@
+#+TITLE: on-cutover migration was never run: 102 sites pending across the repo
+#+STATE: ITEM
+#+SESSION_ID: 153497be379ff5cc
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-18T12-18-12-318Z_153497be379ff5cc.jsonl]]
+#+CUSTOM_ID: AUD-009-on-cutover-migration-was-never-run-102-s
+
+* Initial Message
+
+ok what's next in terms of making the whole test suite pass?
+
+* Finding
+
+`spacetime migrate --explain on-cutover .` reports **102 site(s) pending**.
+The `on-cutover` capsule (=stdlib/migrations/entries/2026-07-26-on-cutover.st=,
+SIP-001) retired eight animation directives \u2014 =@scroll=, =@load=, =@hover=,
+=@click=, =@mouse=, =@pointer=, =@time=, =@loop= \u2014 plus =@value-change=, in
+favor of the single head =@on &.<driver>=. The capsule is complete and its
+machinery works. It has simply **never been run on this repository**.
+
+=reactive-surface= (2026-06-09) reports a further **2 sites pending**.
+
+Distribution:
+| area | pending |
+|------------+---------|
+| =tests/=     |      92 |
+| =examples/=  |       6 |
+| =stdlib/=    |       0 |
+| =demos/=     |       0 |
+| =docs/=      |       0 |
+
+stdlib/demos/docs are clean \u2014 the debt is almost entirely in the TEST corpus,
+which is why it stayed invisible: the migration window auto-rewrites these
+shapes in memory (W0715), so every one of those files still COMPILES today.
+
+* Why this matters now
+
+Two reasons, one of them load-bearing.
+
+1. **The window is not permanent.** Once a project's =@version= reaches
+   2026-07-26, a lingering retired use is E0911, not a rewrite. Three examples
+   ALREADY declare =@version 2026-07-26=
+   (=examples/{mobile-tasks,mobile-v2,more-tasks}/index.st=). So part of the
+   corpus is at the wave while part of it still writes pre-wave syntax.
+
+2. **Test fixtures pinned to retired syntax silently rot.** This was found by
+   making exactly that mistake: =bare_ident_string_arg::stdlib_loop_mode_accepts_bare_ident=
+   was "fixed" (commit 97003d61) by correcting =@loop spin (2s, \u2026)= \u2192
+   =@loop spin(2s, \u2026)= \u2014 repairing a test by pinning it harder to a surface the
+   migration exists to delete. It is now written against
+   =@on &.loop(name:, duration:, mode:)=, the capsule's own =%into= target.
+
+   The general trap: a fixture on retired syntax passes today via the window,
+   and goes red at the wave for a reason unrelated to what it asserts.
+
+* The whitespace question, resolved
+
+Previously flagged as a possible design defect: =@loop spin(2s)= compiles,
+=@loop spin (2s)= does not. Re-examined \u2014 this is NOT a live grammar wart. Both
+spellings are on a RETIRED directive; the =%rewrite loop-positional= /
+=loop-named= rules match the no-space form because that is what the retired
+=%macro loop-positional= declared. Nothing to fix on the current surface.
+
+* Verification performed
+
+- =migrate --dry-run= on a copy of =tests/unit/macros/loop.test.st= \u2192 correct
+  per-hunk rewrites, =@version= bump proposed.
+- =migrate= applied \u2192 file compiles clean (=\u2713 All 1 file(s) passed=).
+- Behaviour check, and this is the interesting part: the ORIGINAL file runs
+  =0 passed, 0 failed, 0 skipped= \u2014 it asserts NOTHING. The MIGRATED file runs
+  =0 passed, 0 failed, 5 skipped= \u2014 the rewrite produced claims the original
+  lacked, now correctly reported as needing =--cdp=. The migration improved the
+  file's honesty.
+
+* What must NOT be done
+
+Do not bulk-run =spacetime migrate .= and call it done. Two hazards:
+
+1. **Skipped reads like passing.** The migrated loop file reports
+   =0 passed, 5 skipped= and exits 0. A repo-wide migration could convert a
+   corpus of silent no-op tests into a corpus of silently SKIPPED tests and
+   look green throughout. Any migration of test files must be paired with a
+   =--cdp= run of the affected files, per AGENTS.md.
+2. **Concurrent agents are active in this tree.** A 92-file sweep of =tests/=
+   will collide. Sequence it, or scope it per-directory.
+
+* Proposed sequence
+
+1. =examples/= first (6 sites, 3 of them already at =@version 2026-07-26= and
+   therefore closest to breaking). Small, self-contained, verifiable by
+   =cargo run -- check=.
+2. =tests/= in per-directory batches, each batch: =migrate= \u2192 =check= \u2192 run the
+   affected tests =--cdp= \u2192 compare against a pre-migration =--cdp= baseline.
+   The baseline matters: several of these files assert nothing today, so
+   "still passes" is not evidence.
+3. Bump =@version= only where a root entry exists (the tool warns and skips
+   otherwise, as observed).
+
+* Open question for the owner
+
+=@loop= is described as deprecated in favour of =@score= and the =.loop=
+surface. The capsule rewrites =@loop= \u2192 =@on &.loop(\u2026)=, which may itself be an
+intermediate destination rather than the final one. Confirm whether
+=@on &.loop= is the intended landing point before migrating 92 test sites onto
+it \u2014 otherwise this is one migration performed twice.
+
+NOTE [2026-08-07]: OPEN QUESTION RESOLVED \u2014 `@on &.loop` IS the correct landing point. No
+double-migration risk; the 92-site sweep can proceed on the capsule's own
+`%into` target.
+
+`loop` is not a directive being replaced by unrelated surfaces. It is a
+registered DRIVER: `%registers driver(loop) { primitive: loop-driver,
+value_type: transport, seekable: true, domain: declared, reduced_motion: hold }`
+(=stdlib/macros/drivers.st:356=). Two heads consume drivers, and both are
+current:
+
+- =@on &.loop(\u2026) { <keyframes> }=  \u2014 one element, one keyframe body. The
+  capsule's =%into= target.
+- =@score &.loop { <clip entries> }= \u2014 =%form { @score $driver:driver_expr
+  $as:score_as_name? { $entries:score_entry+ } }= (=stdlib/macros/score.st:162=).
+  An ARRANGEMENT over the same driver: many clips with windows, not one
+  keyframe body.
+
+So `@score` did not deprecate `@loop`; the =@on <driver>= cutover did, and
+=@score= is the richer head built on the identical driver registry. Migrating
+=@loop \u2192 @on &.loop= lands on live vocabulary. A file that wants an arrangement
+rather than a single body is then a further, EDITORIAL change (=@on= \u2192 =@score=),
+never a mechanical one \u2014 correctly outside a =%rewrite='s remit.
+
+Corroborating evidence that both heads are live and gated in a real browser:
+=demos/score-launch/= (=index.st.md=, a literate page) with =--cdp= gates in
+=tests/score/{score-launch-film,score-launch,two-pole}.test.st=. Its README
+records a bug where "=@score &.loop= inherited =loop-driver='s =pingpong=
+default" \u2014 i.e. =@score= reads the same driver defaults the =%rewrite= writes
+explicitly (=mode: pingpong=, =phase: 0=), which is exactly why the rewrite
+emits them rather than relying on inheritance.
+
+NOTE [2026-08-07]: SWEEP COMPLETE. Tracked-file migration debt is now ZERO. Summary of the arc:
+
+** The root cause was not "the migration was never run"
+
+That was the symptom. The cause: a %rewrite rule registers a MATCH-ONLY def keyed <capsule>#<rule> with no %emit/%binds (by design — the shim consumes it). Resolve runs at pipeline/mod.rs:1311, the retired-syntax check at :1448. So a surviving rule-def looked to Resolve like an unknown primitive and the build died on E0956 — 137 lines before E0910 was ever computed.
+
+E0956 is a HARD error → the file's whole compile died → a test file that fails to compile discovers ZERO tests → the runner exits 0.
+
+MEASURED: all 21 pending test files reported `0 passed, 0 failed, 0 skipped`. Not skipped — zero DISCOVERED, from files containing 5, 11, 21 @test blocks. Inert and green for the capsule's whole life.
+
+Fixed in 47f87f69 by marking rewrite-rule matches `binds_consumed` after Evaluate — the same guard score binds already use, whose comment at resolve.rs:50 documents this exact failure mode ("E0956 masks the diagnostic that actually explains the page").
+
+** Sweep results
+
+72 sites across 12 files. 55 tests revived (0 → passing). Skip counts IDENTICAL before/after in every file — the acceptance criterion, since a migration converting failures into skips would look like success.
+
+  @scroll batch (57 sites, 6 files) → 40 tests, landed in 0bffd37f
+  @mouse/@pointer/@loop/@load (15 sites, 6 files) → 15 tests, be976de3
+
+Suites: lib 29→10 failed, integration 6→2, migrations_test 8→10 passed. tests/unit/primitives/ now 98 passed / 0 failed headless; 99/7 under --cdp.
+
+** The skip-hazard warning was justified and was exercised
+
+loop.test.st reports `0 passed, 0 failed, 5 skipped` + exit 0 headless. Under --cdp: 5 passed, 0 failed. The migrated @on &.loop genuinely animates in Chromium — a claim no headless run could have supported.
+
+** The warning against bulk `spacetime migrate .` was ALSO justified — see BUG-344
+
+13 of the 20 still-"pending" sites are NOT debt. They are correct current syntax (`@on &.visible(600ms) as $reveal`) that the capsule wrongly claims: `$name:ident` before the paren group matches the trailing `as` keyword, producing `name: as` and silently DROPPING the binding. Affects on-visible AND on-hover (and likely every rule with that prefix shape). 31 such sites across 10 files, including a dedicated tests/on_as_sigil_test.rs.
+
+Had I run `spacetime migrate .` as the STUCK/ASK suggested, it would have corrupted all of them in one pass. Caught by --dry-run before applying.
+
+∴ the pending COUNT is not a usable progress metric until BUG-344 is fixed: it cannot reach 0, and forcing it to would destroy working code.
+
+** Bugs surfaced by doing this work
+
+- BUG-342 object-literal decl `$u object: {…}` fails E0946 (pre-existing; `array` parses, `object` doesn't). Accounts for the 2 residual migrations_test failures, which are NOT migration bugs.
+- BUG-343 scroll-driven element doesn't hold its first keyframe at progress 0 (pre-existing, verified by running the PRE-migration files under --cdp: same 7 failures, identical text). User-visible: scroll reveals flash partially-faded on load.
+- BUG-344 capsule corrupts `(...) as $binding` (above).
+- AUD-010 five .st files don't parse → invisible to migrate → will hit E0911 with no warning. Includes retired `~name` presets that have NO capsule at all.
+
+NOTE [2026-08-08]: HARD CUTOVER COMPLETE. Retired syntax no longer compiles.
+
+** What shipped
+
+| commit   | what |
+|----------+------|
+| 90f449df | BUG-344 — `as` is structure, never a name (IdentExtractor); migrate stopped corrupting 31 working sites |
+| bfc6e7da | HARD CUTOVER — an absent `@version` means CURRENT, not ancient |
+| 432299ca | refusal gate enumerating all 11 retired surfaces |
+| 6c9dd8f0 | BUG-345 — `as $name` defines a signal (E0408 refused the recommended surface) |
+
+** The mechanism, and why it is NOT "delete the retired macros"
+
+My plan said delete the embedded `%macro` defs. That would have worked and been
+worse: the `%rewrite` rules and `%hint` entries live in the same capsules, and
+they are what makes `spacetime migrate` able to FIX the code and what makes the
+error message teach. Deleting the macros would have turned a good diagnostic
+into "unknown directive".
+
+The actual hole was the DEFAULT. An absent `@version` compared as "older than
+every wave", so the migration window (W0715) stood open forever for any file
+that never declared one — a file written today in syntax retired months ago
+compiled silently. A permanent amnesty, not a transition. That is the whole
+reason ~100 sites accumulated with nobody noticing.
+
+Inverting the default closes it with everything else intact: capsules keep
+their rewrite rules, `migrate` still works, the hint still teaches, and a
+project genuinely mid-migration opts INTO the window by declaring the older
+`@version` it is migrating FROM — which is exactly what `spacetime migrate`
+writes before bumping it forward. The default is derived from the registry
+(`newest_migration_wave()`), so a new wave moves it automatically; no date to
+keep in sync in Rust.
+
+** Where the policy lives (two attempts)
+
+First attempt defaulted inside `apply_migration_shim_for_wave` and broke all 7
+`migrate::tests` — correctly, since they drive SYNTHETIC registries and each
+one closed its own window. `None` must keep meaning "no version constraint" for
+a caller that means it. So the default is POLICY about real source files and
+lives in `migrate::effective_syntax_version`, applied at the two entry points
+that compile a real file: `Compiler::from_file` and the `check` command.
+
+That second call site was itself a latent bug: before this, `check`
+auto-migrated (W0715) source that `build`/`serve` would refuse. They now agree.
+
+** State
+
+Pending sites: 96 → 0 in tracked files (the 2 remaining are gitignored scratch/).
+Suites: lib 3165 ✓/10 ✗ · integration 215 ✓/2 ✗ · migrations_test 16 ✓/2 ✗ ·
+v8 458 ✓/1 ✗ · headless corpus 710 ✓/20 ✗ · --cdp 104 ✓/7 ✗.
+
+Every residual failure attributed and NOT from this work:
+- lib 10 = concurrent agent's snapshot churn
+- integration 2 = concurrent agent's data_kind_dispatch
+- migrations 2 = BUG-342 (object-literal parse gap)
+- cdp 7 = BUG-343 (verified pre-existing by running PRE-migration files)
+- headless 20 = E0905/E0952/E0940, ZERO E0910/E0911 — i.e. no retired syntax
+  anywhere in the corpus
+
+** Open, filed, not blocking
+
+- BUG-342 object-literal decl `$u object: {…}` — CST-level (brace claimed as a
+  scope block before form matching); tested and REJECTED the `balanced(';')`
+  fix.
+- BUG-343 scroll element doesn't hold first keyframe at progress 0 (user-visible).
+- AUD-010 five .st files don't parse → invisible to migrate. Includes retired
+  `~name` presets that have NO capsule at all — the error tells users to migrate
+  by hand and gives them no tool. Best remaining candidate for a new capsule.

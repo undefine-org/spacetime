@@ -1,0 +1,38 @@
+#+TITLE: FOUC initial-state CSS flattens nested-scope keyframes onto the root element
+#+STATE: DONE
+#+SESSION_ID: 157047c1462c1c38
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-undefine-spacetime/2026-09-02T20-57-35-768Z_157047c1462c1c38.jsonl]]
+#+CUSTOM_ID: BUG-382-fouc-initial-state-css-flattens-nested-s
+
+* Initial Message
+
+Using whatever tools and techniques you want, make the absolute most impressive, most mind blowing, most visually stunning 30s promo video for Spacetime (this repo). I want something that looks like we paid a studio $5m to produce.
+
+After that, I want you to do the same thing, but with Spacetime, and to compare/critique the two
+
+* Symptom
+A body such as
+
+#+begin_src st
+.s1 { @on &.clip { opacity: 0 -> 1; .orb { scale: 0.15 -> 1; } .t1 { blur: 30px -> 0px; } } }
+#+end_src
+
+emitted (=dist/spacetime.css=, the =@media (prefers-reduced-motion: no-preference)= FOUC block):
+
+#+begin_src css
+.s1 { opacity: 0; transform: scale(0.15); filter: blur(30px); }
+#+end_src
+
+i.e. every CHILD's initial value landed on the PARENT. The whole scene rendered at 15% scale and blurred. The runtime later drives =.orb=/=.t1= correctly, but the parent's inline-emitted CSS is never overwritten (the runtime never touches the root's =transform=), so the wrong state persists for the entire page life. Under =spacetime render= frame 0 is captured at exactly that instant, so the whole film was wrong. Visible in =demos/score-launch= too (=.sc1 { transform: translateY(18px) translateY(10px); filter: blur(14px) }= — those belong to =.fh=/=.fk=), masked there because the values were small.
+
+* Cause
+=src/pipeline/expand.rs::get_raw_keyframe_body=, the =CapturedValue::Keyframes= arm (BUG-086's reconstitution), rebuilt the raw body as a flat =prop: a -> b;= list and DROPPED =KeyframeDef.selector= (added by BUG-201 for nested scopes). =generate_initial_state_css= then parsed everything as root-level properties.
+
+* Fix
+=keyframes_to_raw_body= regroups entries by selector into =sel { … }= blocks (first-appearance order), root entries stay at top level. Same shape the raw-body path already parses — no new mechanism.
+
+* Gate
+=src/pipeline/expand.rs::tests::test_initial_state_css_keyframes_capture_keeps_nested_scope= — seen RED against the flattening code (=child scale must NOT land on the root=), GREEN after.
+
+* Found by
+FEAT-175 (the promo film): the first preview render of =demos/promo/= showed every scene at quarter scale.

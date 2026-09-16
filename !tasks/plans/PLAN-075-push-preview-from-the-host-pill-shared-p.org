@@ -1,0 +1,244 @@
+#+TITLE: Push preview from the host pill (shared packaging crate, verse-side push route)
+#+STATE: DONE
+#+SESSION_ID: 153483dcc7307f91
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-18T10-51-20-732Z_153483dcc7307f91.jsonl]]
+#+CUSTOM_ID: PLAN-075-push-preview-from-the-host-pill-shared-p
+
+* Initial Message
+
+ok my friendest,
+
+can you please show me how you would make the spacetime host button actually really good looking and leveraging Spacetime? And also, able to show me the actual dev links and be the right Spacetime Host button? Ask me questions if needed. It looks horrible right now and is almost unusable.
+
+* Problem
+FEAT-155 gave the host pill live preview/production LINKS, but no way
+to actually PUSH from the pill -- "Add domain"/"Promote" are pure
+fetch-only signals the browser can issue on its own, but a real push
+needs to tar+gzip the project's SOURCE DIRECTORY, which only verse's
+own dev server has open on disk (a widget instance rendered in the
+browser has no filesystem access). User: "I should be able to do it
+from the pill."
+
+* Repo boundary (confirmed this session)
+`commercial/host` is a FULLY SEPARATE git repo, gitignored inside
+`verse` (`/.gitignore:26`, same pattern as `projects/`) -- NOT a
+submodule. `verse`'s own Cargo.toml has zero dependency on any
+`spacetime-host-*` crate today. Any shared code MUST flow
+commercial/host -> verse (path dep on verse's own `spacetime` lib
+crate, exactly the relative-path mechanism spacetime-host-server
+already uses between ITS OWN sibling crates), never the reverse --
+verse must stay buildable/testable standalone with no knowledge
+commercial/host even exists on disk.
+
+* Design (user-confirmed direction: shared crate, not CLI shell-out
+  or a duplicate reimplementation)
+
+** 1. Extract shared packaging into verse
+New `pub fn package_site_archive(dir: &Path, widget_js: &str,
+widget_css: &str, widget_html_tail: &str) -> Result<Vec<u8>, String>`
+in verse (candidate module: `src/host_package.rs`). Pure tar+gzip +
+"splice widget_html_tail before every HTML file's `</body>`" logic --
+lifted VERBATIM from
+`commercial/host/crates/spacetime-host-cli/src/main.rs::package_directory`'s
+walk+splice loop (lines ~413-472), parameterized so BOTH callers
+supply their own ALREADY-SUBSTITUTED widget assets. Sentinel
+substitution itself does NOT move -- it stays exactly where it's
+already correct:
+  - verse's own `compile_host_widget_raw` (src/server.rs) for local
+    dev pushes
+  - `spacetime-host-cli::widget_bundle::render` for real CLI pushes
+This is the ONLY thing shared; neither caller's substitution/trust
+logic changes.
+
+** 2. commercial/host gains the path dependency
+`spacetime-host-cli/Cargo.toml`: `spacetime = { path =
+"../../../../.." }` (repo-relative, resolves to verse's own root from
+inside commercial/host's nested location). `package_directory` in
+main.rs becomes a thin wrapper: build widget_js/css/tail (unchanged,
+still via widget_bundle's own sentinel substitution) then call
+`spacetime::package_site_archive`. Its own tar-building code is
+DELETED (no parallel implementation left over) -- existing test
+`package_directory_injects_widget_into_html_and_bundles_its_assets`
+(main.rs:533) must keep passing unmodified (same observable output).
+
+** 3. New verse dev-server route: POST /__spacetime/host/push
+Dev-mode only (`AppMode::Dev { site_dir, .. }` -- 404/501 in
+`AppMode::Compiled`, matching this route's own inherent "needs a
+source directory on disk" constraint). Handler:
+  1. `compile_host_widget_raw(Some(site_dir), ...)` -- ALREADY exists,
+     already does per-request sentinel substitution -- reuse as-is.
+  2. Build the widget's `<link>`/`<script>`/markup tail (same shape
+     `host_widget_inject` already produces server-side for the LOCAL
+     dev page -- reuse that exact construction, don't re-derive it).
+  3. `spacetime::package_site_archive(site_dir, js, css, tail)` (the
+     new shared fn from step 1) -> archive bytes.
+  4. `read_host_api_token()` (ALREADY exists,
+     `$XDG_DATA_DIR/spacetime-host/credentials`) for the bearer token;
+     401 with a clear "not logged in -- run `spacetime host login`"
+     message if absent (this route needs a REAL account token, unlike
+     the widget's read-only status calls which can no-op on absence).
+  5. `read_deploy_project_id(site_dir)` (ALREADY exists) for the
+     project id; 400 "no @deploy{} fact" if absent -- but note
+     $isNoProject already hides this whole action client-side, so this
+     is a defense-in-depth check, not the primary UX gate.
+  6. Plain `reqwest::Client` POST to `{api_base}/api/v1/projects/{project_id}/push`
+     with the archive bytes as the body + bearer auth -- inline HTTP
+     call (do NOT add a dependency on spacetime-host-client just for
+     this one POST; that would pull verse toward depending on
+     commercial/host, the wrong direction). `api_base` = the SAME
+     `SPACETIME_HOST_ENDPOINT`-or-`https://spacetime.undefine.org`
+     resolution `compile_host_widget_raw` already performs.
+  7. Return the upstream JSON body verbatim on success; surface
+     upstream error status/text honestly on failure (no swallowing).
+
+** 4. Widget change (stdlib/__host__/index.st)
+  - New `@data signal $pushPreview() to <local, same-origin>` --
+    IMPORTANT: this one signal targets the same-origin
+    `/__spacetime/host/push` path directly, NOT `$hostApiBase` (every
+    other signal in this file targets the real orchestrator via CORS;
+    this is the ONE deliberate exception, needs a clear doc comment
+    explaining why -- only this action needs bytes off local disk that
+    only VERSE's own dev server has).
+  - New `$showPushPreview` derive: `!$isDeployedContext && !$isNoProject`
+    (mirrors `$showLocalLogin`'s existing gate shape -- impossible on a
+    real deployed static site, there IS no source directory there by
+    construction).
+  - New button "Push preview" in `.st-host-widget__actions`, gated by
+    `$showPushPreview`.
+  - On success: bump the SAME kind of counter `$domainsBump` already
+    uses to force a `status.json` re-fetch, so `preview_hash` updates
+    and the state machine (+ the preview link) reflects the new push
+    without a manual page reload.
+  - `$isOrange` (the "in flight" badge) should ALSO include
+    `$pushPreview_pending` alongside the existing
+    `$status_pending || $promote_pending || $addDomain_pending` --
+    pushing is visibly slower than the other actions and deserves the
+    same in-flight affordance.
+
+* Tests (colocate with implementation commits per AGENTS)
+  - verse: unit test for `package_site_archive` (tar contains injected
+    widget tail spliced before `</body>`, non-HTML files pass through
+    byte-for-byte, widget JS/CSS present as separate archive entries)
+    -- port the EXISTING assertions from
+    `package_directory_injects_widget_into_html_and_bundles_its_assets`
+    onto the new shared fn directly.
+  - verse: integration test for `POST /__spacetime/host/push` against
+    a `MockR2`-equivalent -- since verse has no host-server, mock the
+    UPSTREAM HTTP call (e.g. via `wiremock` or a local test server) and
+    assert the archive body reaches it correctly, auth header set, and
+    a missing local credentials file 401s with the documented message.
+  - commercial/host: `package_directory_injects_widget_into_html_and_bundles_its_assets`
+    must still pass unmodified after the CLI-side refactor to a thin
+    wrapper (proves zero behavior change from the extraction).
+  - Widget: extend live-browser verification (this session's own
+    precedent) -- click Push preview against the real dev server,
+    confirm `status.json`'s `preview_hash` changes and the panel
+    transitions to Turquoise/Green without a manual reload.
+
+* Explicitly NOT in scope this pass
+  - No change to how a DEPLOYED (static, pushed) site's widget behaves
+    -- push-from-pill is celebrated as local-dev-only, matching
+    `$isDeployedContext`'s existing semantics everywhere else in this
+    file.
+  - No change to `spacetime-host-cli`'s own `spacetime host push`
+    terminal command UX -- it keeps working exactly as today, just
+    delegates its packaging step to the shared fn.
+
+* Implementation complete (this session)
+
+** 1. Shared packaging (verse: src/host_package.rs)
+`pub fn package_site_archive(dir, widget_js, widget_css, widget_html_tail)
+-> Result<Vec<u8>, String>` -- tar+gzip+splice logic lifted verbatim from
+the CLI's old `package_directory`. 3 unit tests (widget injection +
+asset bundling, non-HTML byte-for-byte passthrough, symlink skipping).
+
+** 2. commercial/host: path dependency (confirmed working)
+`spacetime-host-cli/Cargo.toml` gained `spacetime = { path =
+"../../../../" }` (default features ON -- verse's own `watcher` module
+unconditionally uses `notify`, gated behind the "lsp" feature, so verse
+itself is NOT buildable with `--no-default-features` today; a
+pre-existing gap, out of this plan's scope, documented inline in the
+Cargo.toml comment as a follow-up candidate).
+
+commercial/host/Cargo.toml ALSO needed its own `[patch.crates-io]`
+copy of verse's serde/serde_core patch (Cargo workspaces don't inherit
+a path-dependency's own `[patch]` section) -- confirmed empirically:
+without it, swc_common (pulled in transitively via verse's default
+"headless" feature) fails with `unresolved import serde::__private`.
+
+`package_directory` in main.rs is now a thin wrapper: builds
+sentinel-substituted widget assets via `widget_bundle::render`/
+`page_tail` (UNCHANGED, sentinel substitution stayed put), then calls
+`spacetime::host_package::package_site_archive`. The existing
+regression test `package_directory_injects_widget_into_html_and_bundles_its_assets`
+passes UNMODIFIED -- zero observable behavior change from the
+extraction. Whole `commercial/host` workspace (`cargo check --workspace`)
+compiles clean.
+
+** 3. verse: POST /__spacetime/host/push (src/server.rs::host_push_handler)
+Dev-mode only (501 in AppMode::Compiled). Reuses
+`compile_host_widget_raw` (sentinel substitution), builds the widget
+tail (same shape as `host_widget_inject`), calls the new shared
+packager, reads local credentials (`read_host_api_token`) + project id
+(`read_deploy_project_id`), forwards the archive via a plain
+`reqwest::Client` POST to the real orchestrator's `/push` (NOT via
+spacetime-host-client -- that would pull verse toward depending on
+commercial/host, the wrong direction). `host_api_base()` extracted as
+a shared helper (was inline in `compile_host_widget_raw` only).
+
+Error paths: 501 compiled-mode, 401 missing credentials ("Not logged
+in -- run `spacetime host login` first"), 400 missing `@deploy{}`
+fact, 502 upstream unreachable, upstream status/body passed through
+verbatim on success/failure otherwise.
+
+** 4. Widget (stdlib/__host__/index.st)
+New `@data signal $pushPreview() to $selfApi` (same-origin, mirrors
+`$initDeploy`'s existing local-only precedent) -> POST
+`/__spacetime/host/push`. `@handle` re-fires `$status()` on success
+(same shape as `$promote`'s own handler). New `$showPushPreview`
+derive (`!$isDeployedContext && !$isNoProject`, mirrors
+`$showLocalLogin`'s gate). New \"Push preview\" button next to
+\"Promote to production\", styled with the shared button voice.
+`$isOrange` now also includes `$pushPreview_pending`.
+
+** 5. Live verification (real dev server + REAL spacetime.undefine.org)
+- `curl -X POST http://127.0.0.1:4473/__spacetime/host/push` against a
+  REAL logged-in local credentials file -> 200, real `deploy_hash` +
+  `preview_url` in the response.
+- Confirmed via `status.json` (real bearer token, real orchestrator)
+  that `preview_hash` actually updated server-side.
+- Headless-browser click on the ACTUAL \"Push preview\" button (not
+  just curl) -> same real push succeeds, state stays \"Preview ahead
+  of production\", no error surfaced. Turquoise dot correct (live
+  server predates FEAT-155's `preview_url` field -- expected, not a
+  bug, confirmed via direct diff against the response shape).
+- Simulated `$isDeployedContext = true` -> Push preview button
+  correctly hides.
+- No-@deploy{} project (sakazuki) -> 400 with the documented message.
+- No-credentials (temp-moved the real credentials file) -> 401 with
+  the documented message.
+- Screenshots: scratch/host-widget-push-clicked.png.
+
+** Test results
+- verse `cargo test --lib`: 2617 passed (2611 + 6 new: 3 host_package
+  unit tests + 3 host_push_handler unit tests covering the
+  network-independent branches; the network-dependent success path was
+  verified live against the real orchestrator instead of mocked, per
+  this session's actual verification above).
+- commercial/host `cargo test --workspace`: all suites green (CLI 8,
+  server 81 + others, zero regressions) -- the extraction changed
+  nothing observable.
+
+** Explicitly deferred (documented, not silently dropped)
+- verse's own `--no-default-features` buildability (the `notify`/
+  `watcher` gap) -- real, but pre-existing and out of this plan's
+  scope; noted inline in commercial/host's Cargo.toml comment as a
+  candidate follow-up.
+- No wiremock-based integration test for the SUCCESS path's outbound
+  HTTP call (verse has no existing HTTP-mocking dev-dependency) --
+  substituted with real live verification against the actual
+  deployed orchestrator instead, which is a STRONGER proof for this
+  session but doesn't leave a repeatable CI-safe regression test for
+  that one branch. Follow-up: add `wiremock` as a dev-dependency and a
+  proper integration test for `host_push_handler`'s success/502
+  branches, mocking the upstream POST.

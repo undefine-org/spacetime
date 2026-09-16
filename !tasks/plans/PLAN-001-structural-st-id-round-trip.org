@@ -1,0 +1,367 @@
+#+TITLE: STRUCTURAL_ST_ID_ROUND_TRIP
+#+STATE: DOING
+#+CUSTOM_ID: PLAN-001-structural-st-id-round-trip
+
+* Problem
+
+When the debugger's select tool edits a text element inside a =@template= body,
+the server uses the element's *tag name* (e.g., ="a"=) as a CSS selector in lol_html.
+Because tag selectors are non-unique, =set_inner_content= fires on *every* matching
+element, silently corrupting all siblings. Filed as =BUG-content-edit-ambiguous-template-selector=.
+
+The two-pass count guard (committed in =b796d8a2=) catches this at runtime and rejects,
+but the root cause is that there is no unique element identity flowing through the edit path.
+
+* Current flow (broken)
+
+1. =inject_template_provenance= (=form_match.rs:1219=) annotates the served DOM:
+   - =data-st-id="st-HASH"= (unique, derived from =file:ast_offset:tag:occurrence_idx=)
+   - =data-st-origin="file.st::scope §directive tag"= (NOT unique — tag name only)
+2. Browser =readProvenance= (=dev-editable.st:47=) extracts the locator from origin.
+   For =.st= files, locator IS the selector: =" §template a"=.
+3. Browser sends =EditAst { selector: " §template a", patch: {__content: "..."} }=.
+4. Server parses selector → =AstContent { element_path: "a" }= → uses ="a"= as lol_html selector.
+5. ALL =<a>= elements in the template body get replaced.
+
+* Design: st-id round-trip
+
+The =data-st-id= hash is already unique by construction. We round-trip it through the edit:
+
+1. Browser sends =__st_id= alongside =__content= in the patch object.
+2. Server re-derives provenance on the template body HTML (in memory) using
+   =inject_template_provenance= with the same inputs it had at serve-time.
+3. Server uses =[data-st-id="st-HASH"]= as the lol_html selector on the annotated HTML.
+4. Server strips injected =data-st-id= / =data-st-origin= attributes from the result.
+5. Splices clean HTML back into source.
+
+This makes element identity structurally unique — ambiguity is impossible, not merely caught.
+
+* Key invariant
+
+=inject_template_provenance= is *deterministic*: given the same =(file, ast_offset, tag, idx)=,
+it produces the same =st-id= hash. The server can always re-derive the exact provenance the
+browser saw, because all inputs are available from the parsed AST:
+- =source_file=: from =file_path= arg
+- =scope_selector=: from =form_match.selector= (or =""= for root scope)
+- =macro_name=: from =form_match.macro_name=
+- =ast_offset=: from =form_match.span.start=
+
+* Files to change
+
+| File | Change |
+|------+--------|
+| =stdlib/__dev__/primitives/dev-save.st= | Include =__st_id= in the =EditAst= patch for content edits |
+| =stdlib/__dev__/primitives/dev-editable.st= | Already reads =stId= — no change needed (verify) |
+| =src/sync/handlers.rs= | Extract =__st_id=, pass to =handle_content_edit_st=; re-derive provenance; target by st-id |
+
+* Implementation
+
+** ITEM 1: Browser — include __st_id in EditAst patch
+:PROPERTIES:
+:EFFORT: 15m
+:END:
+
+In =dev-save.st:181-188=, the =EditAst= message is constructed:
+
+#+BEGIN_SRC javascript
+ws.send({
+  type: 'EditAst',
+  file: filePath,
+  selector: editEvent.selector,
+  patch: { "__content": sanitizedContent },
+  op_id: opId
+});
+#+END_SRC
+
+Change to:
+
+#+BEGIN_SRC javascript
+var patch = { "__content": sanitizedContent };
+if (editEvent.stId) patch.__st_id = editEvent.stId;
+ws.send({
+  type: 'EditAst',
+  file: filePath,
+  selector: editEvent.selector,
+  patch: patch,
+  op_id: opId
+});
+#+END_SRC
+
+=editEvent.stId= is already populated by =readProvenance= (=dev-editable.st:86=).
+
+** ITEM 2: Server — accept __st_id and use it for targeting
+:PROPERTIES:
+:EFFORT: 1h
+:END:
+
+In =src/sync/handlers.rs=:
+
+*** =handle_edit_ast_inner= (~line 779)
+Extract =__st_id= from patch alongside =__content=:
+
+#+BEGIN_SRC rust
+let st_id = patch.get("__st_id").and_then(|v| v.as_str()).map(String::from);
+#+END_SRC
+
+Pass it through =handle_content_edit= → =handle_content_edit_st=.
+
+*** =handle_content_edit_st= (~line 618)
+Add =st_id: Option<&str>= parameter. When =st_id= is =Some=:
+
+1. Re-derive provenance: call =inject_template_provenance(&body_html, source_file, scope_selector, &form_match.macro_name, form_match.span.start)=
+2. Use =[data-st-id="{st_id}"]= as the lol_html selector on the annotated body
+3. After replacement, strip =data-st-id= and =data-st-origin= attributes via a second lol_html pass (or combine into one pass)
+4. Splice the clean result back into source
+
+When =st_id= is =None= (backwards compat), fall through to existing =element_path= logic
+(which now has the count guard).
+
+*** =replace_html_element_content= (~line 737)
+Keep the two-pass uniqueness guard as defense-in-depth. The =[data-st-id="..."]= selector
+will always match exactly 1, so it passes the guard. If the browser sends a stale/invalid
+st-id, the guard rejects with "matched 0 elements" — clear error.
+
+** ITEM 3: Write provenance-strip utility
+:PROPERTIES:
+:EFFORT: 20m
+:END:
+
+Extract a =strip_provenance_attributes(html: &str) -> String= function (lol_html pass that
+removes =data-st-id= and =data-st-origin= on all elements). This is needed in:
+- =handle_content_edit_st= (strip after replacing in annotated HTML)
+- =handle_content_edit_html= (already does this inline — extract to share)
+
+** ITEM 4: TDD — write failing tests before implementing
+:PROPERTIES:
+:EFFORT: 45m
+:END:
+
+*** Unit tests in =src/sync/handlers.rs=
+
+1. =test_content_edit_st_with_st_id_targets_unique_element=: Template body with 5 =<a>= tags.
+   Provide =st_id= corresponding to the 3rd element. Assert only the 3rd element's content changes.
+
+2. =test_content_edit_st_with_invalid_st_id_rejected=: Provide a non-existent =st_id=.
+   Assert =Err= with clear message about no match.
+
+3. =test_content_edit_st_without_st_id_falls_back_to_element_path=: No =st_id= provided,
+   unique =element_path= like ="h3"= (single match). Assert it still works (backwards compat).
+
+4. =test_content_edit_st_without_st_id_ambiguous_rejected=: No =st_id=, non-unique element_path ="a"=.
+   Assert =Err= (the existing count guard catches it).
+
+5. =test_strip_provenance_attributes=: HTML with =data-st-id= and =data-st-origin= → both stripped,
+   content and other attributes preserved.
+
+*** Integration test
+6. =test_edit_ast_content_st_id_round_trip=: Full =handle_edit_ast= with patch containing both
+   =__content= and =__st_id=. Verify correct element updated, source file clean (no provenance attrs).
+
+** ITEM 5: Verify dev-editable already passes stId
+:PROPERTIES:
+:EFFORT: 10m
+:END:
+
+Confirm =readProvenance= at =dev-editable.st:84-90= already includes =stId= in the return object
+for content edit types. Trace the edit event flow to ensure =editEvent.stId= is available in
+=dev-save.st= at send time.
+
+* Verification
+
+- =cargo test --lib -- sync::handlers::tests::test_content_edit_st_with_st_id= → new tests pass
+- =cargo test --lib -- sync::handlers::tests::test_replace_html_element_content= → existing 5 tests still pass
+- =cargo test --lib= → no regressions (ignore pre-existing stdlib parse error)
+- Manual: =cargo run -- serve site/undefine.org/ --debug=, edit CTA text, confirm only CTA changes
+- Manual: verify other nav links are untouched after edit
+
+* Migration / backwards compat
+
+- =__st_id= is optional. Older browser code that doesn't send it falls through to the existing
+  =element_path= path, which is now protected by the count guard.
+- No wire format changes — =__st_id= is a new key in the existing =patch= JSON object.
+- =inject_template_provenance= is unchanged — it already produces what we need.
+* ITEM Structural st-id round-trip for template content edits
+:PROPERTIES:
+:CUSTOM_ID: DRAFT-001-structural-st-id-round-trip-for-template
+:EFFORT: 3h
+:PRIORITY: #A
+:LAYER: backend
+:END:
+
+* Problem
+
+When the debugger's select tool edits a text element inside a =@template= body,
+the server uses the element's *tag name* (e.g., ="a"=) as a CSS selector in lol_html.
+Tag selectors are non-unique — all siblings sharing the tag get clobbered.
+Filed as =BUG-content-edit-ambiguous-template-selector= (fix: =b796d8a2=, count guard).
+
+The count guard is a band-aid. The real fix: make element identity structurally unique
+by construction, so ambiguity is impossible.
+
+* Root cause chain
+
+1. =inject_template_provenance= (=src/syntax/form_match.rs:1219=) annotates served DOM:
+   - =data-st-id=\"st-HASH\"= — *unique*, derived from =file:ast_offset:tag:occurrence_idx=
+   - =data-st-origin=\"file.st::scope §directive tag\"= — *NOT unique* (just tag name)
+2. Browser =readProvenance= (=stdlib/__dev__/primitives/dev-editable.st:47=) extracts the locator
+   from origin. For =.st= files, locator IS the selector: =\"§template a\"=.
+3. Browser sends =EditAst { selector: \"§template a\", patch: {__content: \"...\"} }=.
+4. Server =parse_content_selector= → =AstContent { element_path: \"a\" }=.
+5. =replace_html_element_content(body, \"a\", new_text)= → ALL =<a>= elements replaced.
+
+* Design: st-id round-trip
+
+The =data-st-id= hash is already unique by construction. Round-trip it:
+
+1. Browser sends =__st_id= alongside =__content= in the patch object.
+2. Server re-derives provenance on the template body HTML (in memory) using
+   =inject_template_provenance= with the same deterministic inputs from the parsed AST:
+   =source_file=, =scope_selector= (from =form_match.selector=), =macro_name=, =ast_offset= (=form_match.span.start=).
+3. Server targets =[data-st-id=\"st-HASH\"]= on the annotated HTML — guaranteed unique.
+4. Server strips injected =data-st-id= / =data-st-origin= before splicing back to source.
+
+=element_path= (tag name) in =AstContent= becomes dead weight — remove it. The =ContentSelector::AstContent=
+variant carries =st_id= instead. No fallback, no backwards compat shim.
+
+* Files to change
+
+| File | Change |
+|------+--------|
+| =stdlib/__dev__/primitives/dev-save.st= | Include =__st_id= in =EditAst= patch for content edits (=editEvent.stId= already available) |
+| =src/sync/handlers.rs= | =ContentSelector::AstContent= carries =st_id: String= instead of =element_path: String=; =handle_content_edit_st= takes =st_id=, re-derives provenance, targets by =[data-st-id]=; extract =strip_provenance_attributes= utility; remove =element_path= dead code |
+| =src/sync/handlers.rs= | =parse_content_selector=: for =.st= content edits, parse =st_id= from patch, not tag from locator |
+
+=stdlib/__dev__/primitives/dev-editable.st= already reads =stId= (line 67-86) — no change.
+=src/syntax/form_match.rs= (=inject_template_provenance=) — no change, already produces what we need.
+
+* Implementation
+
+** ITEM 1: Browser — include __st_id in EditAst patch
+:PROPERTIES:
+:EFFORT: 15m
+:END:
+
+In =stdlib/__dev__/primitives/dev-save.st:181-188=:
+
+#+BEGIN_SRC javascript
+// BEFORE
+ws.send({
+  type: 'EditAst',
+  file: filePath,
+  selector: editEvent.selector,
+  patch: { \"__content\": sanitizedContent },
+  op_id: opId
+});
+
+// AFTER
+var patch = { \"__content\": sanitizedContent };
+if (editEvent.stId) patch.__st_id = editEvent.stId;
+ws.send({
+  type: 'EditAst',
+  file: filePath,
+  selector: editEvent.selector,
+  patch: patch,
+  op_id: opId
+});
+#+END_SRC
+
+** ITEM 2: Server — rewrite content edit path around st-id
+:PROPERTIES:
+:EFFORT: 1h30m
+:END:
+
+*** =handle_edit_ast_inner= (~line 779 in =src/sync/handlers.rs=)
+Extract =__st_id= from patch alongside =__content=:
+#+BEGIN_SRC rust
+let st_id = patch.get(\"__st_id\").and_then(|v| v.as_str());
+#+END_SRC
+Pass to =handle_content_edit= → =handle_content_edit_st=.
+
+*** =ContentSelector::AstContent= — replace =element_path: String= with =st_id: String=
+Remove =element_path= field entirely. The tag name from the origin locator is no longer
+used for targeting. =parse_content_selector= still parses scope + directive from the locator,
+but the element_path portion is ignored (kept in origin for human readability only).
+
+If =__st_id= is missing from the patch, reject immediately — no silent fallback.
+
+*** =handle_content_edit_st= — new signature and logic
+#+BEGIN_SRC rust
+fn handle_content_edit_st(
+    file_path: &Path,
+    css_selector: &str,
+    directive: &str,
+    st_id: &str,         // was: element_path
+    new_content: &str,
+) -> Result<(), String>
+#+END_SRC
+
+Steps 1-4 same as today (read, parse, find scope, extract body_html). Then:
+
+- Step 5: Re-derive provenance:
+  #+BEGIN_SRC rust
+  let source_file = file_path.file_name()...to_str();
+  let scope_selector = form_match.selector.as_deref().unwrap_or(\"\");
+  let annotated = inject_template_provenance(
+      &body_html, source_file, scope_selector,
+      &form_match.macro_name, form_match.span.start,
+  );
+  #+END_SRC
+
+- Step 6: Replace using unique selector:
+  #+BEGIN_SRC rust
+  let selector = format!(\"[data-st-id=\\\"{}\\\"]\", st_id);
+  let modified_annotated = replace_html_element_content(&annotated, &selector, new_content)?;
+  #+END_SRC
+  The existing count guard in =replace_html_element_content= guarantees exactly 1 match.
+
+- Step 7: Strip provenance attributes:
+  #+BEGIN_SRC rust
+  let modified_html = strip_provenance_attributes(&modified_annotated);
+  #+END_SRC
+
+- Step 8: Splice =modified_html= into source (same as today).
+
+*** =strip_provenance_attributes= — new utility
+lol_html pass that removes =data-st-id= and =data-st-origin= from all elements.
+Also refactor =handle_content_edit_html= (line 574-579) to use this instead of inline stripping.
+
+** ITEM 3: TDD — write failing tests first
+:PROPERTIES:
+:EFFORT: 45m
+:END:
+
+All in =src/sync/handlers.rs= tests module:
+
+1. =test_content_edit_st_with_st_id_targets_unique_element=: Template body with 5 =<a>= tags.
+   Compute the =st-id= for the 3rd =<a>= using =inject_template_provenance=.
+   Call =handle_content_edit_st= with that =st_id=. Assert only the 3rd changes.
+
+2. =test_content_edit_st_with_invalid_st_id_rejected=: Non-existent =st_id=.
+   Assert =Err= with \"matched 0 elements\".
+
+3. =test_content_edit_st_no_st_id_rejected=: Missing =__st_id= in patch → reject.
+   No silent fallback to element_path.
+
+4. =test_strip_provenance_attributes=: HTML with =data-st-id= and =data-st-origin= → both stripped,
+   content and other attributes preserved.
+
+5. =test_edit_ast_content_st_id_round_trip=: Full =handle_edit_ast= with patch containing both
+   =__content= and =__st_id=. Verify correct element updated, source file clean.
+
+** ITEM 4: Clean up dead code
+:PROPERTIES:
+:EFFORT: 15m
+:END:
+
+- Remove =element_path= from =ContentSelector::AstContent= variant
+- Remove =element_path= parsing from =parse_content_selector= (the part after directive name)
+- Update/remove tests that asserted =element_path= in =ContentSelector= results
+- Remove the old =test_replace_html_element_content_no_match= etc. that tested the old path
+  (replaced by st-id tests)
+
+* Verification
+
+- =cargo test --lib -- sync::handlers= → all new + existing tests pass
+- =cargo test --lib= → no regressions (ignore pre-existing stdlib parse error in =ripple.st=)
+- Manual: =cargo run -- serve site/undefine.org/ --debug=, edit CTA text → only CTA changes
+- Manual: edit a nav link (=.ud-nav__link=) → only that specific link changes, siblings untouched

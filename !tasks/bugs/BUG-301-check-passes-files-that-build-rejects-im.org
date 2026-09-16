@@ -1,0 +1,173 @@
+#+TITLE: check passes files that build rejects — import validation never runs under check
+#+STATE: ITEM
+#+SESSION_ID: 153497be379ff5cc
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-18T12-18-12-318Z_153497be379ff5cc.jsonl]]
+#+CUSTOM_ID: BUG-301-check-passes-files-that-build-rejects-im
+
+* Initial Message
+
+can you explain to me what's left w.r.t modular imports and stuff here
+
+* Symptom
+
+The same file, the same binary, two verdicts \u2014 and the GATE is the permissive one:
+
+#+begin_src sh
+$ spacetime check exact926.st
+✓ exact926.st            # ✗ silently green
+
+$ spacetime build exact926.st -o out
+error[E0926]: unbound import qualifier `typo` in `@typo/badge`
+#+end_src
+
+Reproduced for both import-validation codes:
+
+| file | =check= | =build= | CSS emitted |
+|------+---------+---------+-------------|
+| =@typo/badge= (unbound alias) | *✓ passes* | E0926 | 0 |
+| =@b/badge= under =hiding (badge)= | *✓ passes* | E0927 | 0 |
+| valid =@b/badge= | ✓ passes | ✓ passes | 1 |
+
+Note the third column: in both failing cases the module's CSS is silently
+absent. So =check= reports success on a page that builds to nothing \u2014 the
+banned silent-drop class, reached through the tool whose entire job is to
+report problems before a build.
+
+* Root cause
+
+=check_file= (=src/main.rs:1703=) never calls =CompileContext::with_imports=.
+=import_scope= stays =default()=, and the validation pass is gated:
+
+#+begin_src rust
+// src/pipeline/mod.rs:1487
+if !context.import_scope.is_empty() {
+    let import_diagnostics =
+        check_import_visibility(raw_matches, &context.import_scope, &context.meta_registry);
+    output.diagnostics.extend(import_diagnostics);
+}
+#+end_src
+
+An empty scope is indistinguishable from "no namespaced imports", so the whole
+pass is skipped rather than failing loudly. =build= goes through
+=compiler.rs:1313=, which DOES call =.with_imports(&ast.imports)= \u2014 hence the
+divergence.
+
+* Why no test caught it
+
+=module_system_unbound_qualifier_errors_e0926= and
+=module_system_hiding_list_hides_name_e0927= (=src/compiler.rs:3556=, =:3583=)
+both pass \u2014 they drive =Compiler::from_file(...).fresh_registry().compile()=,
+i.e. the BUILD path. The inputs I used above are byte-identical to those
+fixtures. The feature is genuinely implemented and genuinely tested; only the
+=check= entry point is unwired, and nothing tests =check= as a path.
+
+This is FUP-058's thesis ("unify =check= and =build= compile paths \u2014 they
+diverge") with a concrete, user-visible consequence.
+
+* Fix
+
+1. Thread =.with_imports(&ast.imports)= into =check_file=. Minimal, unblocks
+   the immediate divergence.
+2. Better (FUP-058): give =check= and =build= ONE context-construction path so
+   a pass wired into one is wired into both by construction. Every
+   =with_*= builder call that only one entry point makes is a latent instance
+   of this bug \u2014 audit the rest of them.
+3. Consider making the =is_empty()= gate explicit: a file WITH namespaced
+   imports and an empty scope is a wiring bug, not a no-op.
+
+* Acceptance
+
+- A test that runs the =check= ENTRY POINT (not the compiler API) over the
+  E0926 and E0927 fixtures and asserts the codes fire.
+- An audit note listing every =with_*= call present on one path and absent on
+  the other.
+
+Discovered while probing the module system for BUG-299 (=@use= clauses) \u2014 the
+probe compiled the same fixture two ways and the answers disagreed.
+
+NOTE [2026-08-06]: ROOT CAUSE REFINED [2026-08-06] — the first hypothesis was wrong and the
+evidence corrected it.
+
+*Wrong guess:* "=check= never runs pipeline validation." Disproved directly —
+=check= DOES emit pipeline diagnostics on the same file class:
+
+#+begin_src sh
+$ spacetime check pipetest.st
+error[E0940]: `nope` is not a known module qualifier in `nope/$host`
+#+end_src
+
+E0940 comes out of the very pipeline the E0926 pass lives in. So the pipeline
+runs, diagnostics surface, and the collector reports them. The gap is NARROWER
+and therefore more interesting: =check_import_visibility= SPECIFICALLY does not
+fire, while its neighbours in the same pipeline do.
+
+*Also disproved:* that =resolve_imports= drains the imports. =parser/mod.rs:8447=
+explicitly RETAINS namespaced entries (=merged.imports.retain(|i| i.namespace.is_some())=)
+precisely so the =ImportScope= can be built downstream, and the comment there
+names FUP-057.
+
+*Also disproved:* that =with_imports= is build-only. It sits on the SHARED
+compile path (=compiler.rs:1313=), reached by =from_ast= and =from_file= alike.
+
+∴ every obvious structural explanation is eliminated by inspection. The
+remaining candidates, in order of likelihood:
+1. =check= passes a DIFFERENT ast to =from_ast= than the one carrying the
+   retained imports (the shim/no-import branching at =main.rs:1816-1845=
+   rebinds =ast= several times).
+2. =raw_matches= — the pass reads PRE-canonical qualifiers; if =check='s path
+   canonicalises earlier, the qualifier is already rewritten and nothing looks
+   unbound.
+3. The =!context.import_scope.is_empty()= gate is satisfied, but the matches
+   handed to the pass have empty =namespace_qualifier= on this path.
+
+Candidate 2 is the most likely, and it would ALSO explain why E0940 (which
+reads a different structure) survives while E0926 does not.
+
+*Measured behaviour table (unchanged, re-verified):*
+
+| file | check | build | module CSS |
+|------+-------+-------+------------|
+| =@typo/badge= | ✓ silent | E0926 | 0 |
+| =@b/badge= under =hiding (badge)= | ✓ silent | E0927 | 0 |
+| valid =@b/badge= | ✓ | ✓ | 1 |
+
+The silent-drop severity stands: =check= greenlights a page that builds to an
+empty stylesheet.
+
+NEXT: instrument =check_import_visibility='s entry (log =import_scope= size and
+each =fm.namespace_qualifier=) under both entry points and diff. Do NOT fix by
+adding a second call site — that would deepen the =check=/=build= divergence
+this item exists to close (see FUP-058).
+
+NOTE [2026-08-08]: RE-VERIFIED at HEAD (2026-08-07) — STILL OPEN, but the symptom above is now
+STALE and would mislead the next reader.
+
+The ticket says `check` prints a clean ✓. It no longer does. It prints:
+
+: warning[W0714]: `@typo/badge` is not a known directive and was ignored
+
+That is an improvement and NOT a fix, for two reasons:
+
+1. `check` still EXITS SUCCESSFULLY on a page that `build` refuses with a hard
+   error. The two tools still disagree about the same bytes, which is the actual
+   defect — a gate that is more permissive than the thing it gates is not a gate.
+2. The wording announces the silent drop rather than preventing it: "was
+   ignored" is the compiler telling you it threw your code away. Same class as
+   BUG-352.
+
+Both variants re-tested: the unbound qualifier (`@typo/badge`, E0926 under
+build) and the hidden-name case (`@b/badge` under `hiding (badge)`, E0927). Both
+produce W0714 under check.
+
+Root cause in the ticket still stands and was not re-derived: `check_file`
+(src/main.rs:1703) never calls `CompileContext::with_imports`, so
+`import_scope` stays empty and the validation pass gated at
+src/pipeline/mod.rs:1487 never runs.
+
+Worth checking whether OTHER validation passes are gated on the same empty
+`import_scope`, since one unwired code path can hide more than imports.
+
+Method caveat for whoever picks this up: my first repro used a missing FILE
+(`@import "stdlib/nonexistent-xyz"`), which check DOES catch — that led me to
+briefly conclude the bug was fixed. The bug is about import QUALIFIER validation
+(`@typo/badge`), a different pass. Use the ticket's original repro shape.

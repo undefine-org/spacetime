@@ -1,0 +1,34 @@
+#+TITLE: Reactive text/class expression drops || (and likely other multi-term operators) after the first $signal
+#+STATE: ITEM
+#+SESSION_ID: 1522aa9778a04732
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-04T14-07-53-826Z_1522aa9778a04732.jsonl]]
+#+CUSTOM_ID: FUP-111-reactive-text-class-expression-drops-and
+
+* Initial Message
+
+i have restarted the session, can you do the visual confirmation now?
+
+Found during PLAN-065 W_feedback (2026-07-05). A reactive binding like `text: $a || $b` compiles to `__v = (ST.resolve(__node,'a'))` — the `|| $b` fallback is DROPPED. Only the first $signal sub-expression survives.
+
+** Repro
+  @data inline $a : "";
+  @data inline $b : "";
+  <div class="out"></div>
+  .out { text: $a || $b; }
+Build -> grep spacetime.js: `__v = (ST.resolve(__node, 'a'))` (no `|| ST.resolve(...,'b')`).
+
+Also affects the multi-clause form `text: $x?.p?.e || $x?.p?.s || $x?.q` (only the first clause emitted) — surfaced when the workbench action toast tried to show error-or-summary-or-name.
+
+** Impact
+Any binding that wants a fallback/coalesce across signals (`$a || $b`), or a computed combination of multiple signals via an operator, silently loses all but the first term. The try/catch wrapper in emit_reactive_binding_js means it degrades to the first term's value with NO error — a silent correctness bug. collect_signal_deps also likely only registers the first dep, so even if the expr were kept, the binding wouldn't re-fire on the others changing.
+
+** Likely cause
+The reactive text/class expression compiler (src/emit/html_reactive.rs emit_reactive_binding_js / the text-hole path) appears to extract a single $signal + its trailing member access, not the full JS expression. transpile_signal_expr_with (form_match.rs) is a passthrough that DOES preserve `||` and all terms, so the truncation is UPSTREAM — in how the binding VALUE expression is captured/segmented from the .st source (the `text:`/`.class:` property value parse), not in the transpile. Needs a trace of how a `text:`/`.is-x:` property value is captured and whether it stops at the first signal token.
+
+** Workaround used in PLAN-065
+The workbench action toast avoided `||` by having the host bridge compute ONE display string (error-or-summary-or-name) and yield it as a single signal ($mcpActionText), bound with no operator. Robust, but the underlying `||`-drop is a real language gap other pages will hit.
+
+** Fix (future)
+Preserve the FULL expression for a reactive text/class binding value (route it through transpile_signal_expr_with which already handles the whole expr + all $refs), and make collect_signal_deps register EVERY $signal in the expression so the binding re-fires on any of them. Add a RED test: `text: $a || $b` compiles to an expr containing both resolves + watches both deps.
+
+Parent: PLAN-065 (surfaced by). Not blocking (workaround in place).

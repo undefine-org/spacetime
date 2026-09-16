@@ -1,0 +1,159 @@
+#+TITLE: MCP workbench critical review — builder-parity gaps + param-default defects
+#+STATE: DONE
+#+SESSION_ID: 1522aa9778a04732
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-04T14-07-53-826Z_1522aa9778a04732.jsonl]]
+#+CUSTOM_ID: FEAT-148-mcp-workbench-critical-review-builder-pa
+#+COMPLETION_HASH: 107dfa68aa79d824
+
+* Initial Message
+
+do a critical review of the workbench and bring in any usability issues. i want it to be a live environment that would make the Webflow and Squarespace and Framer execs scared SHITLESS. Deep deep investigation into its architecture and way of work
+
+Deep architecture + usability audit of the MCP workbench (stdlib/__mcp__/) benchmarked against Webflow / Squarespace / Framer / paper.design. Driven live: registered guests, composed onto the stage, exercised every drawer, breakpoint, selection spine, and the param-edit / source-edit write rails via real browser automation + curl signal probes.
+
+Verdict: the *chrome* is genuinely best-in-class (warm-dark organic stage, drawer-summon model, single-signal drawer state, zero page JS — all pure Spacetime). But three tiers of defects stop it from scaring the incumbents. Tier 1 is a credibility-killer that breaks the very first thing a user does.
+
+═══════════════════════════════════════════
+TIER 1 — CORRECTNESS (breaks the first-run demo)
+═══════════════════════════════════════════
+
+** B1. Template value-default params render `[object Object]` / silently drop.  [BLOCKER]
+Registering a component with default params is the FIRST thing anyone does. It is broken three ways:
+
+  (a) `:` default form does not parse past the first param.
+      `@template &main($a: "one", $b: "two")` → contract captures ONLY `a`; `b` is swallowed.
+      Grammar (stdlib/capture-types/param_list.st) defines default as `("=" $default:expr)?` —
+      there is NO `:`-default production. Yet docs/language/data-and-rendering.md tells authors
+      `:` introduces a value and reserves `=` for the meta layer. Docs and grammar contradict.
+
+  (b) `=` default form parses but the default VALUE is dropped in codegen.
+      `CapturedValue::ParamList` serialization (src/pipeline/expand.rs ~1765) emits
+      `{ name, kind, optional, type }` and OMITS `default`. The runtime factory
+      (buildTemplateFactory, snapshot template_def_invocation_js.snap ~4450) explicitly reads
+      `spec.default` and applies it — but it always arrives `undefined`. Fix is one field: add
+      `default` to the ParamList object emit (TemplateParamDef.default already carries it).
+
+  (c) Autostage passes the whole region-input object as positional arg-0.
+      registerBundle autostage does `factory(regionInput || {})`; the factory binds positional
+      args as `data[paramSpecs[0].name] = args[0]`, so with regionInput `{}` the first param
+      becomes the object → renders `[object Object]`. Params with no arg must fall to their
+      default; autostage should pass NAMED args (`{__stNamedArgs: input}`), not a bare positional.
+
+Repro (live): `hero-card` with `$title:"Launch faster",$subtitle,$cta` → contract showed only
+`title`; stage rendered blank title/subtitle/cta. Isolated 2-line template: single `:` default →
+`[object Object]`; `=` default → `[object Object] — "two"` (arg-0 objectified, arg-1 quotes kept).
+
+Acceptance: `@template &main($a:"one",$b:"two")` with no args renders `one`+`two`; contract lists
+BOTH; docs and grammar agree on ONE default sigil.
+
+═══════════════════════════════════════════
+TIER 2 — BUILDER PARITY (the Webflow/Framer moat)
+═══════════════════════════════════════════
+
+** B2. Structure navigator shows templates only, not the element tree.  [HIGH]
+`stage_structure_from_bundle` (src/mcp/live.rs:636) walks `&child()` template-ref edges ONLY. A
+hero of `<section><h1><p><button>` projects as ONE node (`main`). The layer tree is the core of
+Webflow/Framer. Today the navigator is empty theatre for any single-template component. (Known:
+FUP-061.) Must walk the HTML element graph (the parsed body / `builder` closure exists), giving
+each element a stable node id + text/invoke span for selection.
+
+** B3. No in-stage direct manipulation — selection is coarse + indirect.
+Clicking the stage selects the WHOLE frame, never an element. No hover outline, no
+click-to-select-element, no on-canvas resize/drag/text edit. The incumbents' whole value prop is
+DIRECT manipulation. The selection spine ($selected/$selectedNode) is well-built but frame/
+template-granular; needs element granularity (dep B2) + an on-stage selection overlay.
+
+** B4. Per-node param editing is dead for the common case.
+`stage_node_params` projects `[]` for a root single-template guest (invoke_span null on &main), so
+the inspector "edit params" renders nothing. Frame-level `mcp_param` override DOES work (verified:
+POST mcp_param → guest re-rendered "HELLO FROM CURL"), but node-level editing is unreachable
+without B2's element/invoke spans.
+
+** B5. Dark guests are invisible on the stage — no artboard.
+Guest bg (26,20,16) vs stage (36,30,25) = 1.1:1 contrast. A dark component vanishes; no artboard
+frame, no neutral backing, no elevation, no device chrome at tablet/mobile. Add an explicit
+artboard surface (neutral + border + shadow) behind the mounted region, independent of the stage.
+
+** B6. Breakpoint widths are not real device widths.
+Mobile preview measured 181px; real mobile ≈ 375–390px, tablet ≈ 768px. Pin to true device widths
+and show the px value.
+
+═══════════════════════════════════════════
+TIER 3 — USABILITY / POLISH / A11Y
+═══════════════════════════════════════════
+
+** U1. z-index: "clear stage" + right rail paint OVER the open inspector.
+clear-stage (z6) + mcp-rail-right (z6) sit above the inspector (z5) and overlap horizontally
+(clear x1233 w110, rail x1297, inspector x969 w380). Controls occlude the drawer. Raise the open
+drawer above edge chrome, or shift/hide same-side chrome when a drawer opens.
+
+** U2. Two selection models visible at once ("selected node" + "selected frame").
+Inspector stacks both sections, populated together after node→stage clicks. Unify into one
+selection model (element-or-frame) with one detail panel.
+
+** U3. No keyboard affordances.
+Escape does not close drawers (verified). No focus trap, no tree arrow-nav, no shortcuts.
+Constraint: AGENTS.md forbids custom page JS — needs a Spacetime `@on key` primitive; scope first.
+
+** U4. Icon buttons lack accessible names; drawers lack dialog semantics.
+Summon buttons have `title` but no `aria-label`; drawers have no role=dialog/aria-modal/aria-hidden;
+stage not focusable. Screen readers get almost nothing.
+
+** U5. Low-contrast secondary text.
+Drawer labels rgb(122,107,84) ≈ 3.4:1 — below WCAG AA 4.5:1. Lift muted tokens or enlarge.
+
+** U6. Server-audience actions give zero user feedback.
+Param/compose/clear are server-audience → comms feed (agent-only) stays empty; user sees no
+confirmation until the 1s poll re-renders. Add an optimistic echo / server-action toast.
+
+** U7. Discoverability: edge glyphs unlabeled at rest.
+Four warm glyphs, no resting label; a first-timer can't tell nav/structure/inspector/origin apart
+without hovering. Add hover-peek labels or a one-time coach.
+
+───────────────────────────────────────────
+ALREADY EXCELLENT (keep / build on)
+───────────────────────────────────────────
+- Pure-Spacetime chrome: drawer state, breakpoint, selection all fall out of single signals +
+  reactive classes. Zero page JS — the moat incumbents can't match (a design tool authored in the
+  language it edits).
+- Region-isolated host bridge (one __stHost per region); generic /__mcp/signal sink; origin chips.
+- Warm-dark language, "Begin here" empty state, frame-strip, gallery, create-frame surface.
+- Write rails EXIST and work (frame param override + source hot-swap verified live) — the gap is
+  granularity (element/node), not plumbing.
+
+───────────────────────────────────────────
+RECOMMENDED SEQUENCE
+───────────────────────────────────────────
+1. B1 (param defaults) — 1-field codegen fix + autostage named-args + doc/grammar reconcile.
+   Ships correctness; unblocks every demo. Do first.
+2. B2 (element-tree structure projection) — keystone; unblocks B3/B4.
+3. B3 (in-stage selection overlay) + B5 (artboard) — the visible "holy shit" moment.
+4. U1/U2 (z-index + unified selection) — cheap polish.
+5. U3/U4/U5 (keyboard + a11y + contrast) — needs `@on key` primitive scoped first.
+6. B6/U6/U7 — refinements.
+
+Evidence: live session inst-1 (http://127.0.0.1:38283), guests fn-2..fn-7, browser automation +
+curl signal probes + contrast math. Source read: env.st, workbench/*.st, primitives/host.st,
+src/mcp/live.rs, src/pipeline/expand.rs, stdlib/capture-types/param_list.st,
+docs/language/data-and-rendering.md.
+
+───────────────────────────────────────────
+SUPERSEDED BY PLAN-064 (2026-07-04)
+───────────────────────────────────────────
+This review's findings are now organized into an executable architecture: PLAN-064 "Structure IR
+— shared live-coding introspection substrate." Key evolutions from the raw review:
+  - B1 default-param defect: resolved to Decision K (keep `=` as literal-default; pure codegen+
+    autostage bugfix, no grammar change). See DEC-spacetime-param-default-sigil.
+  - B2 structure navigator: reframed from a workbench feature into a SHARED introspection substrate
+    (structure_ir()) consumed by BOTH the MCP workbench AND the dev-ws host — the review found two
+    parallel, divergent introspection stacks (MCP refs-walk + a DEAD dev-ws InspectElement dispatch).
+    See DEC-spacetime-structure-ir.
+  - B2b: the beat-Webflow claim sharpened — @each/@match render as generative NODE KINDS (source+
+    loopvar+body rule / all-arms), richer than Webflow's opaque "Collection List".
+  - B3/B4: node-addressed selection + EditAst re-keyed to IR ids (one address space for inspect+
+    select+edit).
+  - U1-U7: carried forward verbatim into PLAN-064's U-wave; U3 (keyboard) confirmed authorable via
+    first-class @on keydown:Escape — no new primitive.
+Execute via PLAN-064.
+
+NOTE [2026-07-05]: RESOLVED via PLAN-064 (DONE 2026-07-04). Every finding from this review addressed: B1 (param defaults) shipped + verified live; B2 (structure navigator) became the shared Structure IR substrate consumed by both hosts; B3 (in-stage selection) shipped as the unified node-selection spine; B4 (per-node edit) shipped as provenance-dispatch binding editing; B5 (artboard) + B6 (device widths) shipped; U1-U7 shipped (U2 dissolved by B3). 15 commits, full test matrix green, 8 swarm passes, 2 oracle consults. Follow-ups filed as FUP-107.

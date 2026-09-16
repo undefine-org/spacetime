@@ -1,0 +1,40 @@
+#+TITLE: Interpolation dispatched by TYPE, not by primitive name — %scalar_type interpolate: column (kills BUG-202 class)
+#+STATE: ITEM
+#+SESSION_ID: 153f5ed0617636c7
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-26T21-12-46-213Z_153f5ed0617636c7.jsonl]]
+#+CUSTOM_ID: FUP-160-interpolation-dispatched-by-type-not-by
+
+* Initial Message
+
+Please review the full arc and the cross-refs in light of recent changes to the codebase and tell me what is still relevant, what is even more relevant, and what capabilities on the rest of Spacetime this could unlock (be bold and creative)
+
+* Context
+
+PLAN-122 §Unlocks item 2. Today the animation layer learns "this value is a colour" from the PRIMITIVE'S NAME (animate-color), not from the value's type. BUG-202 is the live consequence: animate-color calls `ST.lerpColor`, which does not exist in the runtime → TypeError on every tick. BUG-192 (oklch never parsed → keyframes snap instead of blending) was the same shape and is now DONE, but by fixing one parser rather than the dispatch rule.
+
+* Change
+
+Give the PLAN-122 scalar table an `interpolate:` column; the runtime selects the lerp from the registry rather than from a primitive name:
+
+  color   → interpolate in oklch (perceptual), alpha componentwise
+  length  → numeric + unit-compatibility check (px↔px; px↔% is NOT interpolable)
+  angle   → shortest-arc
+  integer → stepped
+  keyword → discrete snap at 50%
+  dynamic (calc/var) → refuse at compile with a spanned reason, do not silently snap
+
+Adding a new animatable type stops meaning "write a new Rust/JS primitive".
+
+* The compile-time half (the real win)
+
+With keyframe endpoints TYPED, two endpoints of different types — or a pair with no interpolate entry — is an error AT THE KEYFRAME, not a snap or a TypeError at tick. That converts the whole BUG-192/BUG-202 class from runtime discovery to compile-time refusal. Note the fidelity rule (docs/testing/FIDELITY_LADDER.md): a timing/paint assertion refuses on the logic backend; this check is static, so it holds on every backend.
+
+* Acceptance
+
+- BUG-202 repro green: animate-color ticks without TypeError, dispatch read from the registry.
+- `@on ... { color: 8px -> #fff }` (mismatched endpoints) is a compile error naming both types and spans.
+- A new scalar with an interpolate entry animates with ZERO Rust/runtime changes (the extension test).
+
+* Relation
+
+Parent: PLAN-122 (§Unlocks 2). Blocked by FEAT-165 (typed leaves) and wants FEAT-168 (%scalar_type table to carry the column). Closes BUG-202; makes BUG-192's class structurally impossible. Consumers: PLAN-124 (@on), PLAN-128 (@score).

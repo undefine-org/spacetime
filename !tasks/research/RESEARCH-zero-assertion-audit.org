@@ -1,0 +1,260 @@
+#+TITLE: Zero-Assertion Audit — tests that assert on emitted output without building a page
+#+STATE: DOING
+#+CUSTOM_ID: RESEARCH-zero-assertion-audit
+#+EFFORT: 6h
+#+PRIORITY: #A
+#+LAYER: coding-agent
+
+* Purpose
+Triage every test in the repo that asserts on emitted compiler output via
+`assert!((js|out|html|compiled.js).contains(...))`, and classify each into:
+
+- *FINE* — the asserted string IS the contract (an emitted attribute name,
+  error code, selector, or serialized shape). No action.
+- *WEAK* — asserts a string, but the feature's real contract is behavioral
+  (it moves / animates / fetches / resolves / renders something). A `.contains`
+  passes even when that behavior silently breaks.
+- *HOLLOW* — cannot fail for the reason it is named: the asserted string is
+  emitted by a code path that runs even when the feature under test is dead
+  (resolver returns None / probe substitutes a fake / state-decl emits the name).
+
+Motivation (this batch's recurring lesson): three defects this session
+(BUG-328 a bundle that did not parse, BUG-335 an ignored duration, BUG-339
+unregistered macros) were invisible to the entire unit/integration/LSP suite
+because no test *builds and runs a page*. A dead bundle and a dead feature are
+indistinguishable at the assertion layer. Gates that shell out to
+`spacetime build`/`test` caught all three.
+
+* Scope
+- File finder (the 42-file universe this audit covers):
+  `grep -rlE "assert!\((js|out|html|compiled\.js)\.contains" src/ tests/`
+- Within those files the audit also covers the fuller `.contains`-on-emitted-
+  output inventory (`output.js`, `compiled.html`, multiline `assert!(\n js…`)
+  because those are the same defect class.
+- READ-ONLY. No source or test was changed. The tree is left exactly as found
+  (verified `git status --short`).
+- Known-broken baseline (BUG-339, and the three stale parser/form failures) is
+  NOT classified hollow — a test failing for those reasons is not certifying a
+  dead feature.
+
+* HOLLOW — proven cases (priority)
+Each entry names the test, what it asserts, WHY it cannot fail for its name,
+and the evidence. Proof method: temporarily stub the feature (or demonstrate
+the string is emitted without the feature), run the test, observe green,
+REVERT the stub.
+
+** H1. Pipeline probe tests (src/pipeline/integration_tests.rs)
+- test_full_pipeline_data_fetch (L56): `output.js.contains("data-fetch")`
+- test_full_pipeline_element_ref (L76): `output.js.contains("element-ref")`
+- test_full_pipeline_mixed_phases (L130-132): `js.contains("data-fetch")`,
+  `js.contains("local-state")`, `js.contains("on-click")`
+
+These tests compile forms through `probe_context(&[...])`, which *substitutes
+a probe primitive* for the real feature primitive (src/pipeline/mod.rs L204):
+`%primitive {name} { %emit js { console.log("probe: {name}"); } }`. The real
+stdlib data-fetch / element-ref / local-state / on-click primitives are NEVER
+loaded. The assertions pass off the probe marker alone — the features under
+test could be entirely dead and these stay green.
+
+*Proof (run-based)*: temporarily changed the probe body from
+`console.log("probe: {name}")` to a dead comment `/* PROBE-STUBBED {name} */`
+(feature reduced to a comment), rebuilt, ran:
+`cargo test --lib full_pipeline` → all 5 tests still PASS. Reverted the stub;
+`diff` against pre-stub backup = identical. The assertion only proves a name
+was written, never that the feature ran.
+- *Miss*: broken fetch/state/event wiring, an unparsable bundle (BUG-328
+  class), unregistered macros (BUG-339 class).
+- *Gate*: a `.test.st` logic test that mounts a page using each feature and
+  asserts the observable effect (data rendered, state mutated, click handled).
+
+** H2. Reactive state-name assertions (tests/integration/reactive_properties.rs)
+The asserted string is the *state-variable name*, which the state declaration
+serializes unconditionally. Breaking the reactive feature (class-toggle /
+text / attr injection / computed / data source) leaves the name in the bundle.
+- test_class_toggle_emits_st_watch_in_template (L58): `js.contains("menuOpen")`
+- test_class_toggle_with_state_compiles_clean (L79): `js.contains("active")`
+- test_text_injection_emits_content_binding (L117): `js.contains("count")`
+- test_attr_injection_compiles (L142): `js.contains("url")`
+- test_full_reactive_template_compiles (L262, L268): `js.contains("todo")`,
+  `js.contains("done")`
+- test_inline_data_source_compiles_with_value (L412): `js.contains("sizes")`
+- test_computed_publishes_global_signal_and_dispatches (L472): `js.contains("cartTotal")`
+
+*Proof (run-based counterexample, non-destructive)*: temp probe
+`tests/_probe_hollow_test.rs` compiled the *state-only* variants (reactive
+directive removed): `@template &nav-shell(){ <nav/> $menuOpen bool:false; }`
+→ JS contains "menuOpen"; and `@template &image-card($alt){ <img/> $url
+string:"/default.jpg"; }` → JS contains "url". Both passed → the state name is
+emitted with the feature ABSENT. Probe file deleted; tree clean. All 8 source
+tests confirmed green via
+`cargo test --test integration_tests -- integration::reactive_properties::…`.
+- *Miss*: a dropped/miswired class-toggle, content, or attr binding.
+- *Gate*: `.test.st` logic that mounts the template and asserts the class/
+  text/attr actually changes after a signal write; these assertions (the
+  non-hollow half of each test) should be replaced or paired with a live gate.
+
+** H3. GH-30 LSP context classifier (tests/lsp/definition_test.rs) — the named exemplar
+- context_variable (L32), context_template (L18): assert
+  `extract_definition_context` classifies a token as
+  `DefinitionContext::Variable/Template { name }`.
+
+The feature they are named for — go-to-definition for variables/templates —
+*always returns None*: src/lsp/definition.rs L76 `Variable { name: _ } => None`
+and L80 `Template { name: _ } => None` (both `// TODO: wire up … lookup`). The
+classifier tests pass while the resolver is a hardcoded None. Proven
+structurally (the code IS the stub): `cargo test --test integration_tests -- lsp::definition_test` → 4 passed (context_directive, context_none, context_template, context_variable).
+- *Miss*: definition resolution itself (jump-to-definition) for $vars and &templates.
+- *Gate*: an LSP integration test that requests `textDocument/definition` at a
+  variable/template site and asserts a non-empty Location, then a resolver
+  returning Some.
+
+*WEAK — the bulk of the suite (behavioral contracts asserted by string only)*
+The recurring shape: a token/marker name appears in emitted JS, but nothing
+executes the page. Two defect classes escape today: *dead/unparsable bundle*
+(BUG-328) and *ignored parameter/timing* (BUG-335). Gates are per-class:
+- `.test.st` — logic/state/event/reactivity (headless V8).
+- `.cdp.test.st` — layout/paint/timing/animation/DOM.
+- `check-contract.sh` — compiler stdout / emitted-bundle parse validity.
+
+Highest-blast-radius WEAK clusters (all currently green, all would pass with a
+dead bundle):
+
+1. *3D (src/compiler.rs)* — three_stage/object/light/gltf/particles/post/orbit
+   tests assert `THREE.*`, `WebGLRenderer`, `Mesh*Material`, `GLTFLoader`,
+   `EffectComposer`, `OrbitControls`, `UnrealBloomPass` etc. No scene is built
+   or painted. *Gate*: `.cdp.test.st` WebGL render; `check-contract.sh` for bundle parse.
+2. *WebSocket / signal decode (src/compiler.rs)* — ws_signal, signal_emits_*,
+   handle_emits_* assert `doWsRequest`, `new WebSocket`, `decodeReply`,
+   `armMatches`, `evalPayload`, `policyMode`, `timeoutMs`, `retryMax`. No
+   socket opens, no reply decoded. *Gate*: `.test.st` logic + `check-contract.sh`.
+3. *Markdown (@doc, src/compiler.rs)* — assert `snarkdown` / inlined heading /
+   `Document not found`. No render. *Gate*: `.cdp.test.st`; `check-contract.sh`.
+4. *Data stream (src/compiler.rs)* — `new SpacetimeEventSource(…)`; no SSE
+   connection. *Gate*: `.test.st` logic; `check-contract.sh`.
+5. *Animation / driver timing (src/compiler.rs, src/pipeline/mod.rs,
+   tests/sip_001_w36_facets_test.rs, tests/sip_001_w3_article_gate_test.rs,
+   tests/sip_001_w3_signal_arms_test.rs)* — assert serialized durations /
+   `ST.bindTransform` / `ST.watch` / `IntersectionObserver` / keyframe
+   literals. Ignored durations (BUG-335 class) pass. *Gate*: `.cdp.test.st` timing.
+6. *Sync handlers (src/sync/handlers.rs)* — content-edit and AST-edit assert
+   patched source substrings; do not prove the output parses or targets the
+   right node. *Gate*: `.test.st` parse/compile of the patched fixture.
+7. *Debugger runtime (src/debugger/runtime.rs, src/debugger/panel.rs)* —
+   assert method-name / API-object tokens (`registerTimeline:`, `setSignal:`,
+   `__ST_DEBUG__`); no runtime interaction. *Gate*: `.cdp.test.st`.
+
+*FINE — string IS the contract (no action)*
+- Error-code diagnostics (`out.contains("E0xxx")`) — bug_241/297/298/327,
+  sip_001_*, registry_addressing_diagnostics, on_head/signal_arms diagnostics.
+- Exact emitted markup/escaping/namespace/ID — compiler.rs HTML lowering,
+  emit/html_reactive.rs, export/html.rs, page_shell.rs, mcp/css_scope.rs,
+  mcp/state.rs, mcp/tools.rs, migrate.rs, syntax/form_match.rs,
+  sync/richtext.rs, treesitter_gen/emit.rs, debugger/panel.rs (structure),
+  v8_runtime_test.rs (serialized JSON/DOM contracts).
+- Lean-bundle negative contracts (`!contains("globalThis.pretext")`,
+  `!contains("WebGLRenderer")`, dead-cell elimination) — text_module_test.rs,
+  compiler.rs, registry_addressing_diagnostics.rs.
+- Import/AST merge contracts (selectors, scopes) — import_resolution_test.rs.
+
+* Per-file classification (all 42)
+| file | FINE | WEAK | HOLLOW | notes |
+|------|------|------|--------|-------|
+| src/compiler.rs | html/css shape, negative lean contracts | runtime JS tokens (signal/ws/drag/3D/markdown/stream/host) | 0 | largest WEAK cluster |
+| src/debugger/panel.rs | panel HTML structure | overlay JS | 0 | |
+| src/debugger/runtime.rs | config serialization | runtime API method tokens | 0 | |
+| src/emit/html_reactive.rs | DOM builder, namespace, ids, escaping | reactive ST.watch/get/set tokens | 0 | |
+| src/emit/metasystem_codegen.rs | 0 | typed-union watcher tokens (L2850,2861) | 0 | |
+| src/emit/st_expr.rs | serialized expr shape | 0 | 0 | FINE |
+| src/export/emit.rs | route/synth/literate page markup, JS href | @doc bundle content | 0 | |
+| src/export/html.rs | prod HTML cleanup/strip/inject | 0 | 0 | FINE |
+| src/html/page_shell.rs | shell structure, head hoist | 0 | 0 | FINE |
+| src/html/ssg_filters.rs | refusal diagnostics | generated filter JS | 0 | |
+| src/html/ssg_unroll.rs | escaping/shape | nested-unroll content | 0 | |
+| src/mcp/css_scope.rs | @scope serialization | 0 | 0 | FINE |
+| src/mcp/state.rs | JSON serialization | 0 | 0 | FINE |
+| src/mcp/tools.rs | formatter text | 0 | 0 | FINE |
+| src/migrate.rs | version decl migration text | 0 | 0 | FINE |
+| src/pipeline/integration_tests.rs | runtime-inclusion markers | 0 | 5 asserts / 3 tests (H1) | probe substitution |
+| src/pipeline/mod.rs | runtime-inclusion markers | animation fragment tokens | 0 | |
+| src/sync/handlers.rs | 0 | source/HTML patch substrings | 0 | |
+| src/sync/richtext.rs | sanitizer output/security | 0 | 0 | FINE |
+| src/syntax/form_match.rs | provenance attributes | 0 | 0 | FINE |
+| src/treesitter_gen/emit.rs | grammar codegen fragments | 0 | 0 | FINE |
+| tests/bug_212_bodyless_if_guard_test.rs | 0 | emitted guard/shape tokens | 0 | |
+| tests/bug_241_form_splice_test.rs | error codes E094x | 0 | 0 | FINE |
+| tests/bug_297_easing_form_body_test.rs | error codes | registerEasing/springCurve tokens | 0 | BUG-335 class |
+| tests/bug_298_style_form_splice_expansion_test.rs | emitted CSS / error codes | 0 | 0 | FINE |
+| tests/bug_327_form_composition_test.rs | emitted CSS / error codes | 0 | 0 | FINE |
+| tests/demo_brand_catalog_test.rs | static hero/CSS | catalog card / runtime wiring tokens | 0 | |
+| tests/feat_data_forms_source_test.rs | 0 | catalog row payload strings | 0 | row presence ≠ consumer render |
+| tests/import_resolution_test.rs | import/AST merge, html merge, coverage, lean | emitted selector/click tokens, entity registry, measure | 0 | |
+| tests/integration/reactive_properties.rs | class/attr/background lowering shape (classList.toggle, setProperty) | reactive binding tokens | 8 state-name asserts (H2) | |
+| tests/integration/wave1_primitives.rs | comma-selector preservation | cursor/scroll/velocity/magnetic tokens | 0 | BUG-335 class for duration |
+| tests/lang/registry_addressing_diagnostics.rs | diagnostics, dead-cell absence, module CSS | cross-file state/read/render tokens | 0 | |
+| tests/migrations_test.rs | migration hint diagnostics, pill HTML/CSS | display/status fetch tokens | 0 | |
+| tests/sip_001_w1_grammar_spikes_test.rs | expansion/diagnostic/CSS | 0 | 0 | FINE |
+| tests/sip_001_w2_form_surface_test.rs | expansion/CSS/diagnostic | 0 | 0 | FINE |
+| tests/sip_001_w36_facets_test.rs | diagnostics | driver/observer/duration/keyframe tokens | 0 | BUG-335 class |
+| tests/sip_001_w3_article_gate_test.rs | compile-time lowering absences | observer/duration/keyframe/ST.* tokens | 0 | real article built but not run |
+| tests/sip_001_w3_on_head_test.rs | diagnostics | driver/observer/keyframe tokens | 0 | |
+| tests/sip_001_w3_signal_arms_test.rs | diagnostics, token-bounded subst | match/watcher/duration/keyframe tokens | 0 | |
+| tests/text_module_test.rs | lean-vendor absence | pretext/measure/ResizeObserver tokens | 0 | |
+| tests/v8_runtime_test.rs | serialized DOM/JSON/namespace contracts | wiring tokens (adjacent live V8 often covers) | 0 | |
+| tests/value_functions_test.rs | 0 | @loop scaffolding markers (stWave/resolveValue/…) | 0 | *currently RED* — see below |
+| tests/lsp/definition_test.rs (GH-30, outside 42) | — | — | 2 (H3) | classifier-only, resolver returns None |
+
+* value_functions_test.rs — currently RED (not hollow)
+`test_wave_with_all_parameters_compiles` and `test_runtime_function_evaluation_logic`
+fail: `compiled.js.contains("resolveValue")` is false — the @loop runtime
+scaffolding is not emitted in the current build. This is a live red test
+(consistent across runs), NOT part of the known-broken baseline and NOT a
+hollow green. The file header already documents INIT-038 (value-function
+primitives not wired into the %emit pipeline); the failing scaffolding asserts
+need triage, and the `#[ignore]`d codegen tests are the honest behavior gate.
+*Not* a hollow case (red ≠ certifying).
+
+* Ranked recommendations (executable top-down)
+Rank = (defect class already seen to escape) × (feature blast radius).
+
+1. *H1 pipeline probe tests* — replace probe_context certification with a real
+   `data-fetch` / `local-state` / `on-click` / `element-ref` `.test.st` gate
+   that mounts a page and asserts the observable effect. The probe tests can
+   stay as *plumbing* tests, but they must not be named/read as feature tests.
+   Class: dead/unparsable bundle + unregistered macro (BUG-328/339). Radius: core reactivity.
+2. *H2 reactive state-name asserts* — add `.test.st` logic gates for class-
+   toggle, text, and attr injection that assert a DOM mutation after a signal
+   write; drop or reframe the state-name `contains`. Class: dead feature.
+   Radius: core reactivity.
+3. *H3 GH-30* — wire variable/template resolution (or mark the classifier tests
+   as classifier-only, not feature tests) and add an LSP `textDocument/definition`
+   gate. Class: resolver-returns-None. Radius: LSP DX.
+4. *3D cluster (compiler.rs)* — a single `.cdp.test.st` WebGL smoke (or
+   `check-contract.sh` node --check on a 3D bundle) that actually parses+runs
+   one THREE page; keep the token asserts only as lowering smoke. Class:
+   BUG-328. Radius: entire 3D feature.
+5. *Duration/timing cluster (bug_297, wave1, sip_001_w36/article/signal_arms,
+   compiler.rs animations)* — `.cdp.test.st` timing asserts that a serialized
+   duration/threshold actually changes observed motion. Class: BUG-335.
+   Radius: all animation drivers.
+6. *WebSocket/signal decode + markdown + data-stream (compiler.rs)* — 
+   `check-contract.sh` bundle-parse on a page using each; `.test.st` logic for
+   a decode/dispatch round-trip. Class: BUG-328. Radius: async/signals.
+7. *sync/handlers.rs patch asserts* — parse+compile the patched fixture in a
+   `.test.st` gate (proves the edit yields a valid bundle), not just substrings.
+8. *value_functions_test.rs* — triage the currently-red scaffolding asserts;
+   land the `#[ignore]`d codegen tests once the %emit pipeline is wired.
+
+* Evidence / commands
+- `cargo test --lib full_pipeline` → 5 passed (baseline green, H1).
+- H1 stub: `%emit js {{ /* PROBE-STUBBED {name} */ }}` → 5 still passed →
+  reverted; `diff` = identical.
+- `cargo test --test integration_tests -- integration::reactive_properties::…`
+  → 7 passed (baseline green, H2).
+- H2 probe `tests/_probe_hollow_test.rs` (state-only variants) → 2 passed →
+  file deleted; tree clean.
+- `cargo test --test integration_tests -- lsp::definition_test` → 4 passed
+  (H3); resolver arms return None (src/lsp/definition.rs L76, L80).
+- `cargo test --test value_functions_test` → 2 FAILED (resolveValue absent).
+- Final `git status --short`: only the new org file among my changes; the
+  pre-existing concurrent-session edits (src/analysis, src/lsp, demos/…,
+  stdlib submodules, scroll-*.test.st) are not mine and were left untouched.

@@ -1,0 +1,55 @@
+#+TITLE: events grammar truncates paren-led derive value with trailing method call
+#+STATE: DONE
+#+SESSION_ID: 14fc108ed3772fa8
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-04T14-32-37-965Z_14fc108ed3772fa8.jsonl]]
+#+CUSTOM_ID: BUG-083-events-grammar-truncates-paren-led-deriv
+
+* Initial Message
+
+ok dude I want you to focus on FEAT-092. Give me your boldest vision for it, and explain what's separating us from it. Do a deep review of what's available and how to do it
+
+* Symptom
+A `@data derive` value that STARTS with `(` AND has a TRAILING method call —
+`@data derive $shown : ($x || []).filter(...).slice(0, 5)` — captured only
+`($x || []).filter`, dropping everything from the first trailing call-args
+onward. The emitted derived-signal exprText truncated at the method name, so
+the derive evaluated wrong / threw at runtime. Surfaced building the FEAT-092
+media library's `$assets` derive (the search-filter pipeline).
+
+* Root cause — the OTHER parser
+BUG-077 fixed the CST parser (src/syntax/cst/parser.rs `last_was_value_colon`
+guard). But the **events grammar** (src/syntax/events/grammar/directives.rs)
+is a SEPARATE parser, and it drives the actual FormMatch capture/emission. It
+lacked the twin guard: a value-colon followed by `(` opened an ARG_LIST
+structural node for the leading `(...)`, then `.slice` parsed as trailing
+inline_args, and the final `(0, 5)` was orphaned. The balanced(';') extractor
+byte-scans only the directive's flat inline-token slice (ARG_LIST tokens are
+structural, excluded), so the scan ended at the last inline token (`.slice`).
+
+The `.length` case BUG-077 originally tested has NO trailing call, so it never
+exposed this — the truncation only bites when a method call FOLLOWS the
+paren-led head.
+
+* Fix (structural, mirrors the CST guard)
+- inline_args() now RETURNS whether the last arg was a standalone
+  value-introducing COLON (parsed as its own ARG so a following token resets
+  the flag — preserves preset `~x: cubic-bezier(…)` routing).
+- directive_with_source(): when value_colon && at `(`, consume the whole
+  paren-led value via new inline_value_expr() (balanced run to depth-0
+  `;`/`{`/`}`) as ONE value ARG, instead of arg_list().
+- The trailing call-args now stay in the directive's inline tokens, so the
+  balanced(';') scan captures the WHOLE expression.
+
+* Tests (RED→GREEN)
+- tests/integration/data_kind_dispatch.rs::data_derive_paren_led_value_keeps_trailing_call
+  asserts the emit contains `.filter(x => x > 0).slice(0, 5)`.
+- Regression guard: the 8 preset/type-annotation lib tests that the BROAD
+  BUG-077 fix had regressed (test_parse_easing_preset_*, test_animation_preset_*,
+  test_data_directive_inline_type_annotation_*) all still pass — the narrow
+  value-colon scoping holds.
+
+* Verification
+End-to-end: the admin's `$assets` derive now emits the whole
+`.filter(...).slice(0, 400).map(...)` (was truncated at `.filter`); the media
+library renders 4 cards, live-search filters, pick persists to disk.
+Gates: lib 2180/0, integration 170/0, v8 343/12 (BUG-039 baseline), stdlib clean.

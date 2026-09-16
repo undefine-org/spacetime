@@ -1,0 +1,96 @@
+#+TITLE: Every `@type` declaration in the repo fails its own grammar (E0946)
+#+STATE: ITEM
+#+SESSION_ID: 153f5ed0617636c7
+#+CUSTOM_ID: BUG-296-type-directive-fails-its-own-grammar
+
+* What
+
+Every `@type` in the repository raises E0946 "directive does not match its
+declared grammar: Expected body block `{ ... }`".
+
+#+begin_example
+$ printf '@type T {\n  f: string\n}\n' > /tmp/t.st
+$ cargo run -- check /tmp/t.st
+error[E0946]: directive does not match its declared grammar: Expected body block `{ ... }`
+#+end_example
+
+Not a formatting question — every variant fails identically:
+- with and without trailing `;` on the fields
+- every field type (`string`, `number`, `color`, `length`)
+- single-line and multi-line bodies
+- with and without following page content
+
+Live files affected (E0946 count):
+| file                          | count |
+|-------------------------------+-------|
+| demos/reactive-list/index.st   |     1 |
+| demos/liveview-kanban/index.st |     2 |
+| demos/cms-testbed/index.st     |     1 |
+
+* Not caused by PLAN-122
+
+Bisected across this session's commits by swapping only `src/syntax/cst/parser.rs`:
+
+| commit                    | E0946 |
+|---------------------------+-------|
+| b84ff8c7 (session start)  |     1 |
+| 2d82722c (scalar table)   |     1 |
+| 5f27f9ac (FUP-176)        |     1 |
+
+Present at `b84ff8c7`, which is 95 commits BEFORE this session's work began. The
+scalar-name cutover is ruled out separately: `string` and `number` fail exactly
+like `color` and `length`, so this is not about which grammar a field type
+resolves to.
+
+`stdlib/macros/type-data.st` is also unchanged since 03d7fcf7, and its form still
+reads:
+
+#+begin_src spacetime
+%form {
+  @type $name:ident {
+    $fields:properties
+  }
+}
+#+end_src
+
+So the regression is in how a directive BODY is matched against a `properties`
+capture, not in the declaration itself.
+
+* Why it matters more than the count suggests
+
+`@type` is the entry point for every typed surface: `@data inline $x T : …`,
+`@cms(T)`, typed reads, JSON-schema generation, the admin widget mapping. When
+the type fails to register, everything downstream degrades — `demos/cms-testbed`
+additionally reports `E0102 Unknown type reference 'Brand'` and
+`E0804 Missing required parameter 'initial'`, both of which are consequences of
+this, not separate defects.
+
+It also blocks FEAT-166 (CSS-native typed seeds) from being verified end to end:
+the seed mechanism itself works (see below), but the acceptance runs through a
+`@type`.
+
+* What still works (measured, so the fix has a target)
+
+The FEAT-166 seed surface is FINE — the CSS-native record parses, reaches
+codegen, and is byte-identical to the quoted form:
+
+#+begin_example
+@data inline $q : { "ink": "#e8eef7", "radius": "8px" };   // quoted
+@data inline $q : { ink: #e8eef7, radius: 8px };            // CSS-native
+#+end_example
+
+both emit `window._localState["q"] = { ink: "#e8eef7", radius: "8px" }`, and a
+full-output comparison returns IDENTICAL=true. Only the TYPED path is blocked.
+
+* Gate when fixed
+
+- `@type T { f: string }` compiles with zero diagnostics.
+- The three demo files above return to zero E0946.
+- `tests/typed_seed_test.rs` — its typed cases are written and currently blocked
+  on this; they should go green without modification.
+
+* Related
+
+- FEAT-166 — blocked on this for its typed acceptance.
+- PLAN-122 — ruled out as the cause; recorded here so the next person does not
+  re-bisect it.

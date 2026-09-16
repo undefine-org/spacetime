@@ -1,0 +1,124 @@
+#+TITLE: MCP workbench round-3 seam repair: seed input, stop leaks/self-edit, cache bundles
+#+STATE: DONE
+#+SESSION_ID: 150f785b33edb744
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-19T16-17-16-496Z_150f785b33edb744.jsonl]]
+#+CUSTOM_ID: PLAN-048-mcp-workbench-round-3-seam-repair-seed-i
+#+COMPLETION_HASH: 29fc96d357613e7e
+
+* Initial Message
+
+Test drive the Spacetime MCP workbench and list all the actions and their expected vs. actual output. The workbench should end up feeling like a mix of Spacetime+Squarespace+Figma/Framer in the end, and it doesn't. This is a REVIEW+DESIGN+BRAINSTORM session. Compare against the previous round of this kind of comparison also (AFTER you've done your own comparison though)
+
+* Origin
+Round-3 review (test-drive of every MCP workbench action) found the studio CHROME
+shipped (PLAN-046) but five seam defects make it behave like an inspector, not a
+studio. ALL root causes source-verified (guess-gate); see
+@research/mcp-workbench-review-2026-06-19-round3-corrections.org — three review
+claims (param-contract bugs) were DISPROVEN and dropped. The five real bugs:
+BUG-113 (mount input dropped on compose), BUG-114 (source editor self-mutates),
+BUG-115 (contract list leaks host internals), BUG-116 (standalone mount blank),
+BUG-118 (compile-per-poll CPU wedge).
+
+North star unchanged: Spacetime × Squarespace × Figma/Framer. These fixes are the
+DATA-layer repair beneath the already-shipped chrome — make values FLOW (113),
+make it SAFE (114, 115), make it FELT (116), make it FAST (118).
+
+* Gates (every step)
+- Pure-Spacetime / no custom JS in the workbench tree (AGENTS); stdlib edits go
+  through %primitive / @mcp-action, not page JS.
+- cargo build + cargo test --lib mcp (the live/bundle/dispatch tests).
+- Live-verify each fix in a real browser via the workbench (st_workbench → mount →
+  drive with puppeteer). Use VALID param grammar this time (space-type + = default),
+  NOT colon.
+- Baseline to hold: lib mcp tests green; no new clippy errors in src/mcp/.
+
+* Steps (each = a bug, smallest shipped-primitive + glue; mostly independent)
+
+** S1 — BUG-113: seed mount input into the composed region.  [src/mcp/tools.rs, src/mcp/live.rs]
+Thread `input` through the compose path so a guest mounts WITH its values.
+- live.rs::mount_into_host: add an `input: &Value` (or HashMap<String,String>)
+  param; before inserting region_mounts, write
+  host.region_mount_input.entry(region).or_default() with the input's string
+  fields (mirror the mcp_param write at L1232). Coerce JSON values to strings the
+  same way the bundle seed expects (region_mount_input is HashMap<String,HashMap<String,String>>).
+- tools.rs::st_mount: in the `if let Some(host_id)` branch, pass the already-parsed
+  `input` into mount_into_host.
+- Test: live.rs unit — mount_into_host with input seeds region_mount_input; the
+  bundle endpoint then returns it. Acceptance (live): st_mount name=greeter2
+  host=inst-1 region=stage input={"name":"World"} → stage shows "Hello, World".
+  (greeter2 MUST declare the param in the template signature: `&main($name string = "")`.)
+
+** S2 — BUG-118: cache the compiled region bundle per (function_id, revision).  [src/mcp/live.rs, src/mcp/bundle.rs]
+Stop recompiling guest source on every 1s /bundles poll.
+- Add a cache: either a field on FunctionRecord (Option<CachedBundle> invalidated
+  on revision bump in update_source/put) OR a Store-level HashMap<(fn_id,rev), Bundle-json>.
+  Prefer caching on FunctionRecord (revision is the natural key; update_source
+  already rebuilds html/js/css there — extend it to stash the region bundle too).
+- instance_bundles: look up cache by (target_fid, function.revision); compile only
+  on miss, then store. region_input merge stays per-request (cheap).
+- Verify compile is NOT held under the Store mutex longer than needed.
+- Test: instance_bundles for an unchanged function compiles AT MOST once across N
+  polls. Acceptance (live): sustained 1Hz workbench polling holds CPU near idle,
+  HTTP responsive over a multi-minute session.
+
+** S3 — BUG-114: source editor only edits on INTENT.  [stdlib/__mcp__/workbench/*, env.st]
+Stop the hydration-set textarea value from dispatching mcp_source_edit.
+- Cleanest: replace `on:"change"` auto-dispatch with an explicit SAVE affordance —
+  a "save source" button (@mcp-action click) reading the textarea value — so merely
+  selecting/inspecting never writes. Keep the textarea `text: $mcpStageSource`
+  binding for display.
+- If keeping change-dispatch: add a dirty-guard in the source-edit path (skip when
+  the new value equals the loaded $mcpStageSource). The explicit button is preferred
+  (removes ambiguity; one obvious gesture).
+- Test/Acceptance (live): select a stage guest, open inspector, wait 3 polls → the
+  guest source + revision are UNCHANGED (no spurious mcp_source_edit in the event
+  log). Editing + clicking save DOES recompile + bump.
+
+** S4 — BUG-115: scope the inspector contract list (no host internals).  [src/mcp/live.rs]
+- Minimal: in workbench_snapshot, exclude mcp-workbench from the `functions` slice
+  feeding contract_params (same filter the gallery uses at L327-330).
+- Preferred (more Figma-true): the inspector's primary contract view binds the
+  SELECTED frame (stage_mount.contract_params already exists); keep "all contracts"
+  but exclude the host. Do the minimal exclusion first; the selected-frame emphasis
+  is already wired (M3'), so this is a one-line filter + maybe a label tweak.
+- Test: workbench_snapshot.contract_params contains no template whose function is
+  mcp-workbench. Acceptance (live): inspector ALL CONTRACTS shows only user fns.
+
+** S5 — BUG-116: standalone template-only mount renders its main template.  [src/mcp/live.rs]
+- instance_page: when the function's page html is empty but its bundle has a `main`
+  template, emit a region root the runtime can mount into — i.e. give the standalone
+  page the SAME region-root + bundle-poll/@view wiring the host stage has, OR
+  server-render an invocation of `&main()`. Decide by reading how the host stage
+  mounts (env.st @mcp-region @view $stageTpl) and reusing that minimal shell for a
+  standalone instance.
+- Edge: a function WITH file-scope html keeps current behaviour (render html). Only
+  the template-only case needs the shell.
+- Test/Acceptance (live): st_mount source="@template &main(){ <button ...>Approve</button> }"
+  agent_control=true → the page renders the button; clicking it emits an event that
+  st_await drains.
+
+* Sequencing
+S1, S2, S4 are independent (touch disjoint live.rs regions + tools.rs). S3 is
+stdlib-only (independent). S5 touches instance_page (independent of S1/S2/S4).
+→ Can run mostly in parallel; S2 and S4 and S5 all edit live.rs so coordinate
+(disjoint functions: instance_bundles / workbench_snapshot / instance_page).
+Land S1 first (the headline), then S2 (stability), then S3/S4/S5.
+
+* Out of scope (tracked separately / north star)
+- Multi-frame drag canvas (deferred PLAN).
+- One meta-renderer convergence (__mcp__/__admin__/__dev__) — north star.
+- Type-aware property-panel CONTROLS (number/enum widgets) — follow-up once S1
+  proves the seed loop; the contract already carries type/default (verified).
+
+* Artifacts
+Review: @research/mcp-workbench-review-2026-06-19-round3.org.
+Corrections/verification: @research/mcp-workbench-review-2026-06-19-round3-corrections.org.
+Bugs: BUG-113, BUG-114, BUG-115, BUG-116, BUG-118. Memory EP-ba2b208b8a2ac87a.
+
+NOTE [2026-06-19]: DONE 2026-06-19 (commit 484f1c97). All five seam fixes shipped + unit-tested + live-verified in a real browser via a stdio-drive harness against the freshly-built binary:
+- S1 BUG-113 mount input seed (live: stage renders "Hello, World").
+- S2 BUG-118 bundle cache (live: 40 polls 0.028s; was a CPU wedge).
+- S3 BUG-114 isTrusted guard (live: hydration 0 edits, real keystroke commits).
+- S4 BUG-115 contract self-exclusion (live: ALL CONTRACTS shows only guest params).
+- S5 BUG-116 standalone autostage (live: agent-control button renders).
+Gates: lib 2374/0 (+3 tests), integration 172/0, v8 430/9 (+1 autostage; 9 pre-existing BUG-039). Runtime snapshots updated. NB: the guess-gate disproved 3 of the original review's root causes (invalid colon param-grammar in my probes) before any code was written — corrections logged in @research/mcp-workbench-review-2026-06-19-round3-corrections.org.

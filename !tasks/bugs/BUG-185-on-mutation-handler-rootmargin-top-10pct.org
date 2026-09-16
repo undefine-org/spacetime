@@ -1,0 +1,97 @@
+#+TITLE: on-mutation-handler's hardcoded rootMargin restricted @on visible to only the top 10% of viewport, breaking bottom-anchored elements
+#+STATE: DONE
+#+SESSION_ID: 153115a0b151f3c0
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse-commercial-host/2026-07-15T18-54-16-774Z_153115a0b151f3c0.jsonl]]
+#+CUSTOM_ID: BUG-185-on-mutation-handler-rootmargin-top-10pct
+
+* Initial Message
+
+it got reloaded and i saw the code but it still says log in or sign up after reload
+
+* Found by
+Live user report this session ("host pin doesn't update to the host
+being saved"). Traced through two other real, independent bugs
+(BUG-186 login-state-ignoring-auth, and this widget's own initial
+`$status()` call) down to a shared-primitive root cause affecting
+every `@on visible { <mutations> }` caller in the language, not just
+this one widget.
+
+* Root cause (confirmed via a controlled, isolated A/B live browser test)
+`stdlib/primitives/animation/drivers.st::on-mutation-handler` -- the
+shared primitive backing the plain-body `@on visible { ... }` form
+(NOT the animation/keyframe form, which uses a different, unaffected
+primitive: `load-driver`) -- hardcoded:
+
+#+begin_src js
+{ threshold: 0, rootMargin: '0px 0px -90% 0px' }
+#+end_src
+
+restricting the IntersectionObserver's OBSERVED region to only the TOP
+10% of the viewport, per the removed comment ("where fixed headers
+sit"). This was a narrow, undocumented assumption baked in for one
+specific header-reveal use case, silently applied to EVERY caller of
+the general-purpose mutation-trigger form.
+
+`stdlib/__host__/index.st`'s own status widget is `position: fixed;
+bottom: 16px; ...` -- a BOTTOM-anchored element that NEVER enters the
+top-10% region, so its `@on visible { $status(); }` (used to fire the
+widget's initial status check on mount) never fired, ever, on any
+render.
+
+Verified via an isolated, from-scratch probe (independent of the
+widget itself): an otherwise-identical `<div style="position:fixed;
+top:10px;...">` with `@on visible { $fired <- true; }` fired
+correctly; the SAME markup with `bottom:10px` instead of `top:10px`
+never fired. This isolates the bug to the shared primitive's
+`rootMargin`, not anything specific to the widget.
+
+* Why existing tests didn't catch it
+`tests/unit/animations/on-visible-mutation.test.st` (the ONLY existing
+test file for this exact code path) exercises 4 cases, ALL using
+`top:0` fixtures (still trivially visible under any reasonable
+rootMargin) or a genuinely off-screen element (`top:200vh`, off-screen
+regardless of rootMargin width) -- so the narrow-region restriction
+never surfaced as a test failure despite the file's own doc comment
+claiming to verify "IntersectionObserver is used instead of
+addEventListener('visible')".
+
+Additionally: the headless V8 test tier's own `IntersectionObserver`
+shim (`src/headless_shims.js`) is a pure inline-style heuristic that
+NEVER consults `rootMargin` at all (confirmed by reading its source
+this session) -- a regression test for this exact bug is IMPOSSIBLE to
+write meaningfully at the default `logic` rung; it requires `needs
+layout` (real CDP-backed Chromium) to be meaningful at all. Confirmed
+empirically: a naive headless-tier version of the regression test
+below kept passing even with the real bug artificially re-introduced.
+
+* Fix applied
+`rootMargin` widened from `'0px 0px -90% 0px'` to `'0px'` (the real,
+full viewport) -- the unsurprising, standard meaning of "visible" for
+a general-purpose mutation trigger, matching every other event type
+this same primitive handles.
+
+* Verification
+- New regression test, `needs layout` (real CDP/Chromium, NOT
+  headless V8 -- see rationale above):
+  =tests/unit/animations/on-visible-mutation.test.st= --
+  "@on visible mutation fires for a BOTTOM-anchored fixed element
+  (BUG-185)".
+- Confirmed the test FAILS against the pre-fix code (manually
+  reverted `rootMargin` back to the narrow value, re-ran under
+  =--cdp=: 0 passed, 1 failed) and PASSES against the fix (1 passed).
+- Full existing suite for this file re-run under BOTH tiers after the
+  fix: 6/6 pass headless (5 pre-existing + this new one, which
+  correctly SKIPS under headless since it's layout-gated), 6/6 pass
+  under real =--cdp= (including this new test, for real this time).
+- Live end-to-end: the widget's own `.st-host-widget { @on visible {
+  $status(); } }` now fires correctly and immediately on a fresh page
+  load, confirmed via `$statusChecked` flipping to `true` without any
+  manual intervention.
+
+* Blast radius
+Repo-wide search confirmed `stdlib/__host__/index.st` was the ONLY
+real (non-test) caller of the plain-body `@on visible { ... }` form
+anywhere in stdlib/demos at the time this bug was found -- so the fix
+carries zero known regression risk to any other real caller, though it
+DOES change behavior for any FUTURE caller that might have (silently,
+accidentally) relied on the old narrow region.

@@ -1,0 +1,39 @@
+#+TITLE: __stRefs never populated: named element refs dead → playback score cannot choreograph a video overlay
+#+STATE: ITEM
+#+SESSION_ID: 1534a2eae1903af0
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-18T13-07-01-638Z_1534a2eae1903af0.jsonl]]
+#+CUSTOM_ID: BUG-310-strefs-never-populated-named-element-ref
+
+* Initial Message
+
+continue
+
+* Diagnosis (PLAN-135 W6, browser-verified)
+
+Two independent dead ends make video-playhead choreography of overlay content impossible today:
+
+**1. `__stRefs` has readers but no writer.** `ST.ref(name)` (`public/runtime/st.js:1327`) reads `window.__stRefs[name]`, and callers exist: `CapturedValue::Element` lowering (`src/pipeline/evaluate.rs:838`, PLAN-057's `@drag bounds: &track`), and the media-driver's named-media path (`stdlib/primitives/animation/drivers.st:706` — `&voice.playback`). **Nothing anywhere assigns `__stRefs[name]`** — grep finds zero writers in public/, src/, stdlib/. The element-ref primitive (`stdlib/primitives/dom.st:42`) queries a selector and yields `$ref` but never registers into the registry. ∴ every named element ref resolves null; the media-driver's retry loop polls at 16ms forever, silently.
+
+**2. A playback score on the media element itself can't drive overlay subjects.** Clip subjects resolve the score signal by walking UP from themselves (`watchScoped`, see clip_driver_test.rs). A `<video>` is a void element — it can never have descendants — so `@score &.playback` on a `<video>` publishes a correct playhead signal (browser-verified: sig tracks currentTime/duration exactly) that no sibling overlay element can ever read.
+
+**Consequence:** the natural hero pattern (video + overlay title/subtitle/CTA choreographed by the playhead) has NO working authoring shape. Playback scores only ever passed node-sampled `_swMap` tests — never a DOM behavior gate (BUG-252 class).
+
+* Browser evidence (PLAN-135 W6 probes, 2026-08-05)
+
+- `.stage { @score &mv.playback { &t for 100%; } }` compiles, emits `ST.ref("mv")` — resolves null forever (no writer).
+- `@score &.playback` on `<video>`: sig = currentTime/duration exact (0.038→0.968 over a 6s clip); all three sibling subjects frozen at opacity 0 through the whole playthrough.
+
+* Design sketch (fix wave)
+
+1. Authoring: an element names itself in markup — bare `&name` attribute position (`<video &reel>`), consistent with `&` = element identity. Emits `data-st-ref="reel"` + an init that registers `__stRefs["reel"] = el` with cleanup on teardown.
+2. `@score &reel.playback { … }` on the overlay container (ancestor of subjects) then works: media-driver resolves the named ref (its retry rail already exists), publishes on the container, subjects walk up and find it.
+3. Acceptance: `stdlib/showcases/hero/media.st` (added in W6, kept OUT of the index import until this lands — it is the acceptance fixture) plays a reel and sequences its overlay exactly: title 0–55%, subtitle 55–80%, cta 80–100% of the media duration, browser-verified.
+4. ALSO fixes `@drag bounds: &track` (PLAN-057) — same registry.
+
+* Related
+
+- BUG-309 (dev server sends no Accept-Ranges → media non-seekable in Chromium; blocks seek-testing playback scores)
+- clip_driver_test.rs (the watchScoped ancestor rule)
+- demos/score-launch/index.st.md (noted playback `planned:` at the time)
+
+NOTE [2026-08-06]: NB the dev-server range issue referenced as "BUG-309" in the body is BUG-311-dev-server-sends-no-accept-ranges-media (id assigned after drafting).

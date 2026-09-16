@@ -1,0 +1,49 @@
+#+TITLE: Headless test harness: @let bindings don't cross test steps + missing test helpers (the "X is not defined" cluster)
+#+STATE: DONE
+#+SESSION_ID: 150ccb99745d347e
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-17T14-25-31-601Z_150ccb99745d347e.jsonl]]
+#+CUSTOM_ID: BUG-108-headless-test-harness-let-bindings-dont
+
+* Initial Message
+
+Dig into the FUPs and explain to me
+1. what got done
+2. what you can do with it
+3. what we should do next
+
+treat this as an overall report to explain things to me from scratch
+
+#+RELATED: BUG-107-headless-test-harness-no-per-file-per-te
+#+RELATED: BUG-101-dev-editable-test-st-files-fail-identifi
+
+* Summary
+After BUG-107 (per-file V8 isolation) made the headless suite signal HONEST, the largest remaining real failure cluster was ~76 tests failing with "X is not defined" (counter/form/modal/easing/binding: `counter`, `form`, `page`, `modal`, `app`, `easingNames`, …) plus "X is not defined" for `__obj`/state-machine helpers. Two distinct root causes, both fixed here.
+
+* Root cause 1 — @let bindings do not persist across test steps
+Every @test body step (@let / @eval / @then / @when / @assert) compiles to a SEPARATE file-scope directive that the pipeline wraps in its OWN IIFE — `(function(){ const el = document.body; <step> })()` — deliberately, so two `@media` `const mql` can't clash (the IIFE isolation BUG-107-era guard relies on).
+
+The `@let` macro (stdlib/testing/test.st) emitted `const %$assignment` where `$assignment:expr` captured the PARENTHESIZED expr `(counter = document.querySelector(...))`. `const (counter = …)` is invalid JS, so the whole @let step was silently DROPPED — the following `@eval`/`@then` referenced an undeclared `counter` → "counter is not defined". (Some tests "passed" only because they used the name `el`, which every step IIFE injects as `const el = document.body` — a coincidence, not a binding.)
+
+* Root cause 2 — headless harness missing test helpers
+`main::new_headless_runtime` (the --headless V8 path) defined only `__spacetime_register_test`. The helpers `__obj`, `__st_register_machine`, `__st_dispatch`, and the `SpacetimeStateMachine` class lived ONLY in the HTML/CDP path (`test_runner::generate_test_runtime`). So every state-machine test (modal) and every `__obj(...)` test failed `X is not defined` under --headless.
+
+* Fix
+1. @let now emits a BARE assignment `%$assignment;` (the parenthesized `(name = value)` is a valid assignment EXPRESSION). In the non-strict test runtime this creates a property on the global object that every later step's IIFE closes over by the same bare name — one binding, visible step-to-step. (commit before this one had it as `const`, which silently emitted invalid JS.)
+2. The `el` collision: a bare `el = …` would REASSIGN the per-step preamble `const el = document.body` → "Assignment to constant variable". Fix in src/pipeline/emit.rs: when a body-scope fragment's statements REASSIGN `el` (detected: a top-level `el = ` / `(el = ` line), the preamble is emitted as `let el = document.body` instead of `const`, so the reassignment is legal. A plain fragment keeps `const` (immutable, the common case; snapshots unchanged).
+3. Injected the SAME test helpers (`SpacetimeStateMachine`, `__obj`, `__st_register_machine`, `__st_dispatch`) into `main::new_headless_runtime` so both backends agree.
+4. Converted test-authoring antipatterns that trap scope the same way: raw `const arr = …` test-body statements (assert-custom meta) and `var X` inside a nested eval() (easing) → @let.
+
+* Results
+Per-file (isolated): counter 0→11, modal 0→6, form 1→8, toggle 8→9, assert-custom 13→14, easing 17/17, binding held 6/6.
+FULL headless suite: 376/238 → 452/162 (+76 pass / −76 fail), 0 regressions. lib 2340/0, snapshots 13/0.
+
+* Verification
+`cargo run --features headless -- test tests/ --headless` → 452 passed, 162 failed, 2 skipped. `cargo test --lib` → 2340/0. `cargo test --lib snapshot_tests` → 13/0 (the `let el` preamble fires only on `el`-reassigning fragments, none in the snapshot fixtures).
+
+* Residual 162 (NOT this bug — separate root causes, tracked elsewhere or by-design)
+- ~27 "Identifier 'el' already declared": BUG-101 family (dev-editable tests inline-eval() copies of helpers each declaring `var el`; fix = drive the real primitive, not eval copies).
+- ~20 backend-ceiling refusals (DOMParser / IntersectionObserver / FocusEvent / getSelection / `needs 'layout'`): CORRECT --headless refusals, run on --cdp by design (FIDELITY_LADDER).
+- "Expected state X", state-machine duration, signal-resolution on `el`-cross-step binding tests, "Invalid left-hand side": deeper test-semantics / the `el`-cannot-truly-persist-cross-step limit. Folded into FUP below.
+
+* Follow-up
+FUP filed: test-body steps share ONE scope (drop per-step IIFE + the `const el` preamble for test directives) so `el` (and any name) persists cross-step uniformly — the principled successor that would clear the residual `el`-cross-step binding failures without the per-name workaround.

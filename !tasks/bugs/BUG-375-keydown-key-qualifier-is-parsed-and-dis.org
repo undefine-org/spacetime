@@ -1,0 +1,247 @@
+#+TITLE: `@on &.keydown:Enter` — the key qualifier is parsed and discarded
+#+STATE: DONE
+#+CUSTOM_ID: BUG-375-keydown-key-qualifier-is-parsed-and-dis
+
+* Symptom
+
+A key-qualified keydown binding compiles clean and binds to EVERY key:
+
+#+begin_src spacetime
+.composer__input { @on &.keydown:Enter { $send($draft,); } }
+#+end_src
+
+emits an unfiltered listener —
+
+#+begin_src js
+const eventType = "keydown";
+__stTargetEl.addEventListener(eventType, handler);   // no e.key check
+#+end_src
+
+— so the handler fires on `h`, then `hi`, then `hii`… A chat composer bound
+this way sends a message on every keystroke.
+
+No diagnostic at any stage: `check --deny-warnings` passes, `build` succeeds.
+
+* Why this is worse than a missing feature
+
+The qualifier is SILENTLY DISCARDED, and the surface reads as supported:
+
+- `stdlib/__mcp__/env.st:360` documents `@on keydown:Escape` as "first-class
+  Spacetime (emits an `e.key === 'Escape'` filtered keydown listener)" and
+  line 367 SHIPS a binding written that way. That claim is false — see below.
+- An author who reaches for it gets a handler that fires on every key, with a
+  compiler that said yes.
+
+This is the BUG-261 failure shape named in `stdlib/macros/on.st`'s own
+comments: *"an optional capture that does not match is not an error"*, so a
+spelling the grammar does not know vanishes rather than failing.
+
+* Evidence
+
+** The `:Escape` filter in bundles is the PORTAL runtime, not the binding
+
+The one `e.key !== 'Escape'` in a built bundle comes from `ST.pushPortal`
+(FEAT-074's document-level modal-close handler). It is present in a bundle
+built from a page with NO key-qualified binding at all, so it is not evidence
+that `keydown:Escape` works. Escape is broken exactly like Enter.
+
+Probe — four qualified binds in one file:
+
+#+begin_src spacetime
+.x { @on &.keydown:Escape  { $a <- "esc";   } }
+.x { @on &.keydown:Enter   { $a <- "ent";   } }
+.x { @on &.keydown:ArrowUp { $a <- "up";    } }
+.x { @on &.keydown:Bogus   { $a <- "bogus"; } }
+#+end_src
+
+→ builds clean; emitted JS contains FOUR `eventType = "keydown"` listeners and
+ZERO `e.key` comparisons. A nonsense key (`:Bogus`) is accepted too.
+
+** Where it is dropped
+
+`stdlib/macros/on.st:22`:
+
+#+begin_src spacetime
+%capture_type driver_expr { ( "&" $subject:ident? | "$" $ssubject:ident ) "." $member:ident ( "(" $driver_params:call_arg* ")" )? }
+#+end_src
+
+`$member:ident` has no qualifier slot. `ident` stops at `:`, so `keydown` is
+captured as the member and `:Enter` is absorbed by the optional
+`$as:on_as?` / consequence machinery without matching anything.
+
+Proof that the member is the bare head: an unknown driver reports the head
+WITHOUT the qualifier —
+
+#+begin_example
+error[E0948]: unknown driver projection `.nosuchdriver` — no `%registers driver(nosuchdriver)` entry exists
+  --> t.st:5:6
+5 | .x { @on &.nosuchdriver:Enter { $a <- "x"; } }
+#+end_example
+
+** The registry has no key-aware driver
+
+`stdlib/macros/drivers.st` registers `driver(keydown)` and `driver(key)`, both
+`primitive_args: "trigger:keydown"`, neither carrying a key filter. The
+primitive (`on-mutation-handler`, `stdlib/primitives/animation/drivers.st:1972`)
+takes `event: ident` and attaches it directly — there is no parameter through
+which a key could reach it.
+
+* Found by
+
+Building a chat page in beam-lisp's `spell` (contract-generated LiveView). The
+composer was a `<form>`, so Enter triggered the browser's implicit submission —
+a native GET that reloaded the page and remounted the LiveView with seeded
+assigns. The user saw their message vanish into an empty page. Removing the
+form is correct and fixes the reload; binding Enter explicitly is what the
+page then needs, and that is where this was found.
+
+* Fix
+
+Two candidate shapes; the second is preferred and matches the
+kinds-as-data rule in AGENTS.md.
+
+** A. Qualifier in the grammar
+
+Extend `driver_expr` with an optional qualifier and thread it to the primitive
+as an argument:
+
+#+begin_src spacetime
+%capture_type driver_expr { … "." $member:ident ( ":" $qualifier:ident )? ( "(" $driver_params:call_arg* ")" )? }
+#+end_src
+
+`drive` lowering passes it to `on-mutation-handler` as a new optional
+`key: string?` param; the primitive emits `if (e.key !== %key) return;`.
+
+Cost: one capture slot, one primitive param, one emit line. But `:` already
+means "introduces a VALUE" (AGENTS.md, one-sigil-one-meaning), and a key IS a
+value, so the spelling is consistent.
+
+** B. Reuse the existing params surface (PREFERRED)
+
+`driver_expr` ALREADY has a call-arg list. `@on &.keydown(key: "Enter")` needs
+NO grammar change at all — only a `key` param on the driver registry entry and
+the filter in the primitive:
+
+#+begin_src spacetime
+%registers driver(keydown) {
+  primitive: event-driver
+  positional_params: "key"
+  primitive_args: "trigger:keydown"
+  …
+}
+#+end_src
+
+This satisfies the elegance bar: extends existing grammar (no new syntax), the
+variants are DATA (a registry field), and it is testable by the same machinery.
+
+Whichever is chosen, the OTHER spelling must become an ERROR rather than
+silently compiling — an unmatched qualifier that vanishes is what made this a
+bug instead of a gap.
+
+* Also to fix
+
+- `stdlib/__mcp__/env.st:367` binds `@on &.keydown:Escape` and relies on it for
+  the drawer/selection reset. That binding does not filter today: ANY keydown
+  inside `[data-st-instance]` clears the inspector's selection. Migrate it to
+  whichever spelling lands.
+- `stdlib/macros/drivers.st:175` comments that `@on enter` was cut over in
+  BUG-329, but no `%registers driver(enter)` exists. Either register it or
+  correct the comment.
+
+* Gate
+
+Per AGENTS.md ("a source assertion is not a behavior assertion", BUG-252): the
+fix needs a `--cdp` test that presses two different keys at a bound element and
+asserts the handler ran for ONE of them. Asserting the emitted JS contains a
+key check proves a string was written, not that the browser filtered.
+
+* AS BUILT
+
+Option B, as proposed — no grammar change. `@on &.keydown("Enter")` and
+`@on &.keydown(key: "Enter")` both work; the key is a driver PARAM.
+
+** The change
+
+- =stdlib/macros/drivers.st= — `positional_params: "key"` on `driver(keydown)`
+  and `driver(key)`. `key`'s old positional slot was `duration`, which a
+  keyboard event has no use for; a duration can still be passed by name.
+- =stdlib/primitives/animation/drivers.st= — both primitives that back a
+  keyboard binding gained `key`:
+  - `event-driver` (the MOTION rail, `@on &.keydown("Enter"): --form;`) wraps
+    its handlers in `keyed()` rather than guarding at each `addEventListener`.
+    It attaches in three places (toggle / plain / untrigger) and a filter
+    pasted three times is a filter that gets added to two of them next time.
+  - `on-mutation-handler` (the MUTATION rail, `@on &.keydown("Enter") { … }`)
+    checks the key FIRST, before delegation and before `ST.runMutations`.
+- =src/pipeline/drivers.rs= — `mutation_driver_param_args`, the forwarding half
+  of BUG-352's `check_mutation_driver_params`. Both mutation sites hand-build
+  their `on-mutation-handler` args and forwarded NOTHING the author wrote, so a
+  param could validate and then vanish — the precise shape BUG-352 documents.
+  Both sites now forward, and both read the SAME registry row as the check, so
+  they cannot drift into accept-but-drop.
+- `check_mutation_driver_params` also reads `positional_params` now: a row that
+  accepts `("Enter")` must accept `(key: "Enter")`, or one of two documented
+  spellings silently does nothing.
+
+** Collateral fixed
+
+- =stdlib/__mcp__/env.st:367= carried `@on &.keydown:Escape` and a comment
+  asserting that spelling filtered. It did not: the workbench inspector cleared
+  its node selection and closed its drawer on EVERY keydown. Migrated to
+  `@on &.keydown("Escape")`.
+- =stdlib/macros/drivers.st:175= named `@on enter` as a BUG-329 cutover
+  survivor; no such driver was ever registered. Comment corrected — a key is a
+  param of a keyboard driver, not a driver of its own, which keeps one row per
+  DOM event instead of one row per key.
+
+** Gate (as required)
+
+=tests/keydown-key-filter.test.st= — 5 tests, passing under BOTH `--headless`
+and `--cdp` (real Chromium, real KeyboardEvents).
+
+The NEGATIVE is the load-bearing assertion, and it was verified to be real: with
+the filter line removed from `on-mutation-handler`, exactly the two negative
+tests fail with `Signal "fired" expected "", got "yes"` — the bug's signature.
+Restored, 5/5 again. A gate that cannot fail against the defect it names is not
+a gate.
+
+The file also pins the regression risk of the fix itself: an UNKEYED driver must
+still answer every key, because `keyed()` wraps every listener in a primitive
+four non-keyboard rows share (hover/click/focus/submit).
+
+** Suites
+
+| suite | before | after |
+|-------+--------+-------|
+| `cargo test --lib` | 3214 | 3214 pass (1 snapshot updated: the primitive's emitted JS) |
+| `cargo test --test integration_tests` | 217 | 217 pass |
+| `cargo test --test v8_runtime_test` | 458/1 fail | same 1 fail |
+| headless `test tests/` | 13 fail | 11 fail |
+
+The v8 failure (`editable_bind_is_per_instance_across_two_compiled_instances`)
+was confirmed PRE-EXISTING by re-running it against pristine copies of all three
+changed files. The headless failure set was diffed the same way: the only
+difference is two of this bug's own tests flipping fail→pass, which is the
+RED→GREEN proof. Nothing regressed.
+
+* STILL OPEN — the silent-drop, filed separately below
+
+The qualifier now has a working spelling, but the OLD spelling is still
+accepted and still does nothing:
+
+#+begin_src spacetime
+.x { @on &.keydown:Enter { … } }        // compiles clean, fires on every key
+.x { @on &.keydown:NOTAKEY!!bogus { … } } // also compiles clean
+#+end_src
+
+Arbitrary trailing garbage after a driver member is discarded before
+`driver_expr` is matched — `match_capture_type` enforces a whole match, so the
+text handed to it is already only `&.keydown`. The split happens upstream at
+directive tokenization, which is a wider fix than this bug (it would affect
+every capture type, not just drivers) and deserves its own investigation rather
+than being folded in here — the elegance bar's "file a follow-up, don't fold it
+in" test.
+
+Until then an author who writes the intuitive `:Enter` gets silence. That is the
+same class of defect this bug is about, one layer up.
+

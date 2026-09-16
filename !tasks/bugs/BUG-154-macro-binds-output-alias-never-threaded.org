@@ -1,0 +1,42 @@
+#+TITLE: %macro %binds output alias never threaded to %yield write-time remap
+#+STATE: DONE
+#+SESSION_ID: 1522aa9778a04732
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-04T14-07-53-826Z_1522aa9778a04732.jsonl]]
+#+CUSTOM_ID: BUG-154-macro-binds-output-alias-never-threaded
+#+COMPLETION_HASH: 2684937dc5a6e88e
+
+* Initial Message
+
+i have restarted the session, can you do the visual confirmation now?
+
+Compiler dataflow bug (librarian-traced, source-cited agent://20-AliasThreading). Surfaced as the deeper half of BUG-153 (workbench action feedback dead).
+
+** Symptom
+A `%macro`'s `%binds { prim(...) -> { $export as $alias } }` output alias is NOT applied when the `%primitive`'s `%emit js { %yield expr -> $export }` compiles. The yield writes the RAW export name, not the alias.
+Proven: mcp-host yields `%yield lastMessage -> $lastMessage` with `%binds { ... $lastMessage as $mcpLastMessage }`; compiled JS = `ST.set(el,"lastMessage",lastMessage)`, ZERO `ST.set(...,"mcpLastMessage",...)`. A page reading `$mcpLastMessage` (→ `ST.resolve(__node,'mcpLastMessage')`) gets undefined. Same for $mcpConnected/$mcpError.
+
+** Root cause (dataflow gap, 4 sites)
+The write-time remap EXISTS and is correct: js.rs:589 resolve_signal_name consults ctx.outputs; js.rs:913 the yield calls it; metasystem_codegen.rs:352 fills ctx via args.outputs. The alias is PARSED correctly into BindDecl.outputs and stored for CHAINING (resolve.rs:429 extended_captures). But it is NEVER passed into the ResolvedPrimitive → PrimitiveArgs.outputs, so ctx.outputs is empty at yield time.
+Missing:
+1. src/pipeline/types.rs:61 ResolvedPrimitive has no `outputs` field.
+2. src/pipeline/resolve.rs:446 build output_mappings from bind_decl.outputs + .with_outputs(...) on the ResolvedPrimitive.
+3. src/pipeline/expand.rs:~440 (resolved_to_primitive_args) transfer primitive.outputs -> prim_args.output(...).
+4. src/emit/metasystem_codegen.rs:352 already correct (applies args.outputs -> ctx.with_output).
+
+** Why it matters beyond the workbench
+mcp-input's `$data as $mcpInput` has the SAME bug; it only "works" because publishWorkbenchSources() MANUALLY republishes `data` under derived names (a data-registry side-channel). That republish is a WORKAROUND for this bug. Fixing (A) lets the native alias work + removes the need for that special-case (AGENTS elegance bar: deletes a special-case, no parallel impl).
+
+** Fix (A) — write-time remap via ctx.outputs (librarian-recommended)
+Thread the existing field through the 4 sites above. All mechanical, no new logic. Rejected (B) yield-under-canonical-name (couples primitive to caller) and (C) more republish (duplicates alias logic).
+
+** Verify
+- cargo run -- build stdlib/__mcp__/env.st
+- grep 'ST.set.*mcpLastMessage' spacetime.js -> MATCHES (was 0)
+- grep 'ST.set(el, "lastMessage"' spacetime.js -> 0 (raw name gone)
+- Add a lib test: a %macro %binds `$x as $y` over a %primitive yielding `%yield v -> $x` compiles to ST.set(...,"y",...). RED before, GREEN after.
+- Full suite: cargo test --lib green.
+- Live: real click on Open environment -> $mcpLastMessage set -> toast fires (unblocks BUG-153 W_feedback).
+
+Parent: PLAN-065 (blocks W_feedback). Blocks BUG-153 feedback layer.
+
+NOTE [2026-07-05]: FIXED + verified (commit ac0f115b). Threaded %binds output alias through ResolvedPrimitive.outputs -> PrimitiveArgs.outputs -> ctx.with_output so %yield remaps at write time. Compiled JS now writes ST.set(el,"mcpLastMessage"/"mcpConnected"/"mcpError",...) (was 0). RED->GREEN test bug154_macro_binds_output_alias_remaps_yield_signal. lib 2556 green. Live: $mcpLastMessage now populated on a real click (was undefined). Retiring the mcp-input republish workaround is a clean follow-up (native alias now works).

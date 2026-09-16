@@ -1,0 +1,468 @@
+#+TITLE: full-Spacetime: first-class HTML, source<T>, and the alphabet/grammar boundary
+#+STATE: ITEM
+#+SESSION_ID: 14f48ced503111a7
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-05-29T18-28-09-664Z_14f48ced503111a7.jsonl]]
+#+CUSTOM_ID: PLAN-023-full-spacetime-list-rendering-and-inline
+#+EFFORT: 5d
+#+LAYER: coding-agent
+
+* Supersedes
+This body REPLACES the original PLAN-023 (the "<template> synthesis" plan). The design
+session of 2026-05-30 reframed the whole effort: instead of *hacking the compiler* to
+synthesize discoverable <template> nodes, we make **valid HTML a first-class Spacetime
+construct** (html5ever-powered), **pre-compile static lists to real HTML for SEO** (SSG),
+and **push as much syntax as possible out of Rust and into the stdlib** (capture-type
+alphabet/grammar split + %balanced). The original "Ground truth" facts remain accurate and
+are preserved at the bottom under "Appendix: original ground truth".
+
+* Folds (child items)
+This plan subsumes and resolves the following filed items:
+- [[id:BUG-028-each-empty-non-template-body-raises-e080]] — @each empty/non-template body → E0804 (DISSOLVES: body becomes HTML, no quantifier).
+- [[id:BUG-035-inline-template-body-renders-nothing-onl]] — inline @template renders nothing (DISSOLVES: SSG-unroll + one discovery path).
+- [[id:FEAT-043-full-spacetime-st-only-page-generation-i]] — full-Spacetime .st-only page generation (Wave 2 reframed: < is a first-class sigil).
+
+* Goal
+A *full-Spacetime* `.st` file (no hand-written index.html, no external web-component .js)
+renders a list end-to-end, AND the rendered list is present in the served HTML source
+(SEO-visible) when its data is known at compile time.
+
+Reframed from the original three filed items, all of which dissolve under the new model:
+- BUG-028 (@each inline body → E0804): dissolves — @each body is just HTML; no quantifier.
+- BUG-035 (inline @template renders nothing): dissolves — templates are HtmlExpr over the
+  one discovery path; static lists need no <template> at all.
+- FEAT-043 Wave 2 (file-scope inline HTML dropped): becomes "< is a first-class sigil".
+
+* North star (design-session decisions — the heart of this plan)
+
+** valid HTML is valid Spacetime
+`<` becomes a top-level sigil in the meta-syntax. The CST recognises an HTML element
+literal exactly as it recognises a scope block, directive, or decl. HTML correctness
+(nesting, void elems, raw-text script/style, implied tags, error recovery) is delegated to
+**html5ever** via a custom `TreeSink` that builds `ir::HtmlExpr` DIRECTLY (no RcDom round
+trip → fast, fully type-aware, introspectable). lol_html was evaluated and REJECTED: it is
+a streaming rewriter with no tree, so it cannot SSG-unroll or re-inject holes. (lol_html
+may earn a seat later for runtime hole-hydration into a served stream — not now.)
+
+** SSG by default; <template> only for dynamic data
+A data source declares its own staticity. The @each emitter branches on it:
+- static source  → UNROLL the loop into real HTML in the page (crawler sees content).
+- dynamic source → emit a skeleton + Spacetime.templates factory + hydrate at runtime.
+This makes the SEO win load-bearing and reserves the (single) <template> discovery path for
+genuinely dynamic lists. The original plan's "synthesize <template> for everything" is
+retired.
+
+** holes are the ONE bridge from HTML into Spacetime
+Inside HTML, embed Spacetime with a backtick hole: `<li>`$x`</li>`, `<a href="`$url`">`,
+`<div>`&content`</div>`. The hole's inner tokens are parsed as a FULL Spacetime expression
+(Option C — one expression grammar, one correctness layer; no string re-scanning, no split
+AST/CST correctness across layers). Holes appear ONLY inside HTML. Everywhere else,
+Spacetime syntax is already the host language and is written bare (e.g. `@data derive
+$total: sum($items)` — no backticks).
+
+This also resolves the `&` / HTML-entity collision: html5ever parses a pure HTML skeleton
+with holes pre-extracted as placeholders, so it never sees bare `&content` as a
+(broken) entity. `&` only means "element binding" INSIDE a hole; `&amp;` stays a real
+entity in text.
+
+** sigils encode the TYPE of a binding (not a tag)
+- `$x`   value-typed binding   — any reactive value (may be a function).
+- `&x`   element-typed binding — points to a DOM node, or a factory "curried to become" a
+         node. `&card($p)` = APPLY the element-binding `card` to `$p` → an element. The text
+         after `&` is a VARIABLE NAME, never a tag name. (Runtime today:
+         `&name → document.querySelector('[data-st-ref="name"]')` or
+         `Spacetime.templates.get(name)(...args)` — see form_match.rs:1408, template.st:155.)
+- `<…>`  element literal — html5ever-parsed structure.
+- `` `expr` `` hole — embed a Spacetime expr (which may use $ or &) into HTML.
+
+** operators are an algebra split across the use/definition boundary
+END-USER surface:
+- `:`   type / static bind / CSS decl     `$name: string[]`, `color: red`
+- `<-`  reactive assignment               `$x <- $x + 1`
+- `->`  transition / yield / reducer step `0 -> 1`, `(…) -> step`
+META-LAYER ONLY (defining the language — %primitive / %macro / %form / %capture_type):
+- `=`   default-assignment at DEFINITION time   `params: array = []`, `easing: $e:ident = ease-out`
+∴ `=` is the sigil of the meta-layer. A page author writing a .st site NEVER types `=`;
+only someone authoring stdlib primitives writes it, to give a parameter a default. Seeing
+`=` tells the reader "this is a definition, not a use." The operator set itself encodes the
+use/definition split — reinforcing design goal #1 (compiler = meta-syntax, stdlib =
+end-user language) at the syntax level.
+
+** types: postfix [], never <> generics
+Collection types are postfix: `string[]`, `Product[]`, `CartItem[]` (already the
+convention — local-state.st:80). There are NO angle-bracket generics in end-user Spacetime.
+∴ `<` is UNAMBIGUOUSLY the start of HTML. This is why `@data inline $products string[]:
+["a","b"]` parses with zero ambiguity against `<ul>`.
+
+** @data is one construct: a named reactive source<T>
+Surface (kind-word discriminator like @on's event word; typed decl like
+parse_variable_decl `$name <type> : value`):
+
+    @data <kind> $name <type>? : <value>
+
+    @data inline   $products string[] : ["a","b"]
+    @data fetch    $api      Product[]: "/api/products" refresh 30s
+    @data derive   $total    number   : sum($items)
+    @data fold     $running  number   : ($cart, acc, x) -> acc + x.price
+    @data inline   $seats             : 3                 // type omitted, still valid
+
+Note: NO `=` (type before `:`, value after `:`). `@computed` keyword is DELETED → folds
+into `@data derive` / `@data fold`. The kinds are stdlib %macros, one per kind — the KIND
+IS THE MACRO (no `%if $src == "inline"` string-switch). Each binds a `source-<kind>`
+%primitive that DECLARES its own `{ static, trigger }` contract:
+
+    inline  → static: true,  trigger: none
+    fetch   → static: false, trigger: poll(refresh)
+    derive  → static: AND(deps.static), trigger: deps      (transitive const-fold)
+    fold    → static: false (stateful), trigger: deps
+
+Staticity is therefore a PROPERTY OF THE SOURCE PRIMITIVE — not a Rust enum, not a `%`
+predicate. The @each SSG branch just reads `source.static`. This is the user's "scope-local
+boolean of staticity at the @data macro", realised via the existing %registers/scope-lookup
+affordance.
+
+computed FAMILY (sub-words, NOT operator overload). SHIP NOW: derive, fold.
+ROADMAP (grammar reserves space; not built this plan):
+  debounce ($q ~> 300ms) · throttle ($s <~ 16ms) · delay (lag N) · await (flatten
+  source<source>) · sample (gate by control source) · merge (latest-any of N sources).
+Pressure-tested orthogonality: derive=stateless, fold=stateful, debounce/throttle=timed,
+delay=historical, await=async, sample/merge=combinatorial — six real categories. derive+fold
+cover every current demo (list count, cart total, configurator).
+
+** capture types: Rust owns the ALPHABET, stdlib owns the GRAMMAR
+The %capture_type engine (custom.rs `compile_pattern`) is already a real PEG/combinator
+compiler: Literal · CharClass · reference-to-another-type · Sequence · Choice(|) · Group ·
+`*` `+` `?` · recursion via registry lookup. The Rust `CaptureType` enum (meta_ast.rs:386,
+37 variants) conflates THREE categories:
+
+  (A) IRREDUCIBLE LEAVES (the alphabet — terminals recognised by char/token scanning):
+      Ident String Number Bool Time Length Duration Color Easing Expr Binding Selector
+      Typeref Event Preset  + operators Union, PatternMatch  + the Custom hook.
+      → KEEP in Rust (efficient, genuinely terminal). This is the pragmatic core.
+
+  (B) COMPOSITIONS IN DISGUISE (Rust hand-rolls loops the PEG already expresses):
+      Params Fields Properties Keyframes ParamList States Transitions MutationActions.
+      complex.rs = ~900 lines of brace/paren-depth while-loops. param_list PROVES the
+      redundancy: it exists BOTH as Rust ParamList AND stdlib param_list.st.
+      → MOVE to stdlib %capture_type; DELETE the Rust loops; resolve the param_list double-path.
+
+  (C) THE HTML/TEMPLATE ZOO (semantic — not capture types at all):
+      HtmlBlock ComponentBody Template TemplateInvocation.
+      → DELETE. HTML → html5ever HtmlExpr; template semantics → stdlib %macro over HtmlExpr.
+      (JsBlock: KEEP as a Rust leaf — JS is genuinely opaque to Spacetime; "balanced JS
+       until matching brace" is a terminal. Used only inside %primitive %emit js. — user call.)
+
+Test for the boundary:
+  terminal (scan chars, no sub-structure)?            → Rust leaf
+  structure over other capture types (Seq/Choice/*)?  → stdlib %capture_type
+  semantic ("an HTML element", "a template")?         → not a capture type (html5ever / macro)
+
+** %balanced — the ONE new PEG leaf that unlocks category B
+complex.rs's loops do depth-aware "collect tokens until a delimiter AT depth 0, respecting
+() [] {} nesting" (see complex.rs:129-151). PEG has Choice/CharClass but lacks depth
+tracking. Add ONE primitive:
+
+    %balanced(until: ';')        // collect until ';' at nesting depth 0
+
+This single, general primitive lets EVERY category-B type be re-expressed in stdlib and
+retires ~900 lines of bespoke Rust. It is the user's "improve %capture_type" — one
+well-chosen leaf rather than N hand-rolled extractors. on-actions.st already composes the
+non-nesting cousin (`raw_until_semicolon = [^;]+`); %balanced is the nesting-aware version.
+
+%balanced MUST be property/fuzz tested (user mandate): generators for arbitrary nested
+bracket strings assert (1) returns at the correct depth-0 delimiter, (2) never splits inside
+nesting, (3) handles unbalanced input without panic (graceful error), (4) round-trips with
+the existing complex.rs behaviour on the current stdlib corpus (differential test:
+old-extractor output == new-%capture_type output for params/keyframes/properties across all
+stdlib + fixtures before deleting the Rust paths).
+
+* Architecture (big picture)
+
+  .st source
+      │
+  ┌───┴───────────────────────────────────────────┐
+  │ CST (meta-syntax, Rust) — src/syntax/cst/       │
+  │  parse_root: + L_ANGLE arm → HTML element span  │
+  │  + backtick hole spans inside HTML              │
+  │  for each <…> region:                            │
+  │   1. lex out `…` holes → placeholders □0,□1…    │
+  │      parse each hole as ONE Spacetime Expr      │
+  │   2. hand HTML skeleton (holes=placeholders) to │
+  └───┬─────────────────────────────────────────────┘
+      ▼
+  ┌─────────────────────────────────────────────┐
+  │ html5ever + custom TreeSink (NEW dep)         │
+  │  spec-correct HTML5 → builds ir::HtmlExpr      │
+  │  directly (no RcDom). re-injects Expr at □.    │
+  └───┬───────────────────────────────────────────┘
+      ▼
+  ir::HtmlExpr { Element{tag, attrs:Vec<(name, Vec<AttrPart>)>, children},
+                 Text(String), Hole(Expr), Raw(String) }
+      │
+  ┌───┴───────────────────────────────────────────┐
+  │ emit (src/emit/html.rs, extended)              │
+  │  static source  → fold holes per item → real   │
+  │                    <li>×N into index.html (SSG) │
+  │  dynamic source → skeleton + factory + hydrate  │
+  └────────────────────────────────────────────────┘
+
+Parallel: capture-type engine gains %balanced; category-B types move to stdlib; the data
+layer becomes source-<kind> %primitives each declaring {static, trigger}.
+
+Final Rust footprint = ALPHABET (≈15 terminal extractors) + PEG ENGINE + %balanced +
+html5ever subsystem + Union/PatternMatch/Custom. Everything else (all productions, @data /
+@each / @template / @on, template semantics) is stdlib.
+
+* Execution waves (TDD per wave; RED before GREEN; build + LIVE verify before commit)
+
+** Wave 0 — meta-syntax: `<` top-level sigil + backtick holes
+RECON-CORRECTED (2026-05-30): the `<` token is SyntaxKind::LT (logos RawToken::Lt,
+lexer.rs:140) — there is NO `L_ANGLE`. `>`=GT, `<-`=LEFT_ARROW, `<=`=LT_EQ. Backtick is
+NOT a lexer token today. STRATEGY B (source-span, user-ratified): backtick does NOT become
+a global lexer token; the parser captures the raw HTML byte-span and a byte-level scanner
+extracts holes. html5ever (W1) receives the exact source slice.
+- thread the source &str into Parser (today Parser holds only tokens:Vec<Token>; pub fn
+  parse(input:&str) already has it — add a `source:String` field via Parser::new(tokens, src)).
+- src/syntax/cst/parser.rs parse_root (L257): add a SyntaxKind::LT arm. At top level `<` is
+  unambiguously HTML (a comparison can't begin a top-level construct). Capture the byte span
+  [tok.offset .. matching-close], advance `pos` past every token inside the span, emit an
+  HTML_ELEMENT CST node carrying the raw span text + extracted hole Exprs.
+- byte-level scanner (mirror string_callback_impl): find the HTML region end (depth-aware over
+  tags) and extract `` `expr` `` holes → placeholders □0□1…; `` \` `` escapes a literal backtick.
+  Each hole inner is parsed as ONE Spacetime Expr by re-entering the expr parser.
+- holes recognised in TEXT and ATTR-VALUE position only; NOT inside <script>/<style>
+  raw-text (html5ever CDATA rule — enforced fully in W1; W0 scanner is raw-text aware).
+- TDD: CST snapshot for `<main><h1>Hello</h1></main>` and `<li>`$x`</li>` (hole placeholder).
+- Acceptance: `cargo run -- check` accepts top-level HTML (no "expected scope block…").
+
+** Wave 1 — html5ever TreeSink → HtmlExpr; file-scope HTML reaches <body>
+- add html5ever dep; implement custom TreeSink building ir::HtmlExpr directly.
+- extend ir::HtmlExpr with Hole(Expr) and attr values as Vec<AttrPart> (literal+hole parts).
+- re-inject parsed Expr holes at placeholders.
+- server.rs synthesize_st_only_shell + build index.html: inject emitted body HTML into <body>
+  (Wave 1 of original FEAT-043 already serves 200; this fills the body).
+- TDD: codegen — file-scope `<main><h1>Hello</h1></main>` ⇒ index.html body contains
+  <main>/Hello. Live: serve, puppeteer DOM has <main>.
+- Acceptance: pure-.st page with static inline HTML renders it; view-source shows it.
+
+** Wave 2 — capture-type alphabet/grammar split + %balanced
+- add %balanced(until:…) PEG leaf to compile_pattern + a BalancedExtractor.
+- PROPERTY/FUZZ test %balanced (see North-star mandate) BEFORE migrating.
+- re-express category B in stdlib %capture_type: params, fields, properties, keyframes,
+  param_list, states, transitions, mutation_actions.
+- DIFFERENTIAL test: new stdlib types == old Rust extractors over full stdlib+fixtures corpus.
+- DELETE Rust category-B extractors (complex.rs loops, pattern.rs ParamListExtractor) + enum
+  variants ONCE differential is green. Resolve param_list double-definition (stdlib wins).
+- Acceptance: all existing macros (@on, @template params, @each keys, cursor, etc.) still
+  compile; complex.rs shrinks ~900 lines; param_list single-sourced.
+
+** Wave 3 — source<T>: unify @data; @computed folds in; staticity drives SSG
+- rewrite stdlib: data-inline / data-fetch / data-derive / data-fold %macros (kind-word form
+  `@data <kind> $name <type>? : value`). DELETE the body-block @data + the `%if $src==…` switch.
+- source-<kind> %primitives each declare { static, trigger }. derive folds staticity
+  transitively from deps' source.static (read via %registers facts).
+- DELETE @computed macro/keyword; migrate type-data.st convention-A (`@data $n : type {…}`)
+  to the unified form.
+- fold reducer surface: `@data fold $r number: ($src, acc, item) -> step`.
+- TDD: @data inline/derive/fold codegen; staticity fact present in registered data_source.
+
+** Wave 4 — @each + @template re-expressed over HtmlExpr; SSG vs hydrate
+- @each body = HTML (over HtmlExpr) — NOT template_invocation+. `<li>`$i`</li>` and empty
+  body both compile (empty ⇒ render nothing, never E0804).
+- @each emit branches on source.static: static ⇒ UNROLL real HTML; dynamic ⇒ skeleton +
+  Spacetime.templates factory + hydrate (the ONE remaining discovery path).
+- @template = name an HtmlExpr-with-holes; invocation `&card($p)` = element-binding
+  application (an Expr in a hole), not a special capture type.
+- regression GATE every commit: cart-demo still renders (prior +→* relax broke @each
+  globally — 2f492135 reverted c1974fb7; we do NOT relax a quantifier, the shape changed).
+- TDD: (1) static @each inline list ⇒ real <li>×N in source (SEO); (2) dynamic @each ⇒
+  hydrates; (3) empty body safe; (4) cart-demo regression.
+
+** Wave 5 — BIG-BANG kill + whole-stdlib cutover + primitive collapse
+- DELETE category-C zoo: HtmlBlock, ComponentBody, Template, TemplateInvocation.
+- DELETE runtime registry sprawl: window.__templates, window.__pendingTemplates,
+  IK.templates fallback; collapse findTemplate() 4-way lookup → ONE.
+- elem-ref/element/selector → ONE HtmlExpr primitive: element=HtmlExpr (noun), &ref=named
+  element-binding (naming), selector=query over elements. No third type.
+- migrate WHOLE stdlib (each, template, data, bindings, websocket, type-data, local-state)
+  + all demos + cart-demo to: backtick holes, `&`-in-holes, unified @data, postfix [] types,
+  NO `=` in end-user surface, NO `{…}` interpolation, NO bare-& in HTML. No compat shim.
+- rm -f stdlib/.cache/registry.bin after each .st edit; node --check every emitted dist.
+
+** Wave 6 — docs + SSG showcase
+- NEW docs: sigil reference ($/&/<…>/`); operator algebra (: <- -> and =-is-meta-only);
+  meta-compiler basics (alphabet vs grammar; %capture_type; %balanced; source<T> {static,
+  trigger}); the `=` / `:` / `<-` / `->` subtlety (user-requested).
+- SSG showcase demo under demos/ (no index.html, no .js): inline @each list + derive count;
+  view-source MUST show real <li>s. Screenshot. Mark BUG-028/035/043 DONE w/ live evidence.
+
+* Kill list (authoritative)
+DELETE — Rust capture vocab:
+  HtmlBlock · block(alias) · Template · ComponentBody · TemplateInvocation (zoo, →html5ever/macro)
+  ParamList(Rust) · Params · Fields · Properties · Keyframes · States · Transitions ·
+  MutationActions (category B → stdlib %capture_type)
+  complex.rs hand-rolled loops · pattern.rs ParamListExtractor (after differential-green)
+KEEP — Rust alphabet: Ident String Number Bool Time Length Duration Color Easing Expr
+  Binding Selector Typeref Event Preset · Union · PatternMatch · Custom · JsBlock(leaf)
+ADD — Rust: %balanced PEG leaf · html5ever TreeSink subsystem · HtmlExpr::Hole + AttrPart
+DELETE — runtime: window.__templates · __pendingTemplates · IK.templates · findTemplate 4-way
+REPLACE — syntax: {…} interp → `expr` holes · bare &name in HTML → `&name` hole ·
+  @data dual syntax → @data <kind> $n type?: val · @computed keyword → @data derive/fold ·
+  <> generics → never existed (postfix [])
+KEEP — `=` but META-LAYER ONLY (%primitive/%macro/%form/%capture_type defaults); absent
+  from end-user surface.
+PRIMITIVE COLLAPSE — elem-ref/element/selector → one HtmlExpr notion.
+
+* Test gates (per wave; ALL before each commit)
+- cargo test --lib (1574+) · --test integration_tests (442+) · --test v8_runtime_test (139)
+- cargo run --features headless -- test tests/ --headless (341+)
+- %balanced: property/fuzz (depth correctness, no-split-inside-nesting, no-panic on
+  unbalanced, differential vs complex.rs over stdlib+fixtures corpus)
+- live (serve + puppeteer DOM + SpacetimeLocal): SSG demo (view-source has <li>s),
+  cart-demo (regression), reactive-list, reactive-configurator, namespaced-signals
+- node --check every emitted dist .js after stdlib edits
+- emacsclient PRD validate after !tasks edits is NOT used (Spell-native org tool only)
+
+* Risks
+- html5ever TreeSink learning curve + Hole re-injection correctness. Mitigate: W0 extracts
+  holes to placeholders BEFORE html5ever sees the markup; TreeSink only rebuilds structure.
+- %balanced correctness is load-bearing for the category-B migration. Mitigate: property/
+  fuzz + differential test gate BEFORE any Rust deletion. Never delete on green-compile alone.
+- @each regression (2f492135 +→* broke @each globally). Mitigate: we change body SHAPE
+  (HTML, not invocation+), do NOT relax quantifiers; cart-demo gates every commit.
+- Whole-stdlib big-bang blast radius. Mitigate: wave order is dependency-correct (grammar
+  before consumers); each wave independently build+live-verified; forward-only (NEVER git
+  revert/stash/reset — if regression appears, STOP and ASK).
+- stdlib cache staleness: rm -f stdlib/.cache/registry.bin after every .st edit.
+
+* Dependencies / order
+W0 → W1 (HTML literal needs the parse span) ; W2 independent of W0/W1 (capture engine) but
+land before W3/W4 (they author new stdlib grammar) ; W3 → W4 (each needs source.static) ;
+W5 after W1-W4 (kills what they replaced) ; W6 last. W2 MAY parallelize with W0/W1.
+
+* Out of scope
+- computed roadmap kinds (debounce/throttle/delay/await/sample/merge) — grammar reserved,
+  not built.
+- lol_html runtime streaming hydration — future.
+- sigil harmonisation beyond recognition (e.g. unifying $f(...) and &x(...) application) —
+  footguns DOCUMENTED here, harmonisation deferred.
+
+* Recognised footguns (document now, harmonise later)
+- `&` historically overloaded (define-template / element-param / splice / —). Under this
+  plan: define = @template; param = &name in a param list; splice = `&name` hole;
+  invocation = element-binding application in a hole. The "tag-like" reading is WRONG — &x
+  is always a variable.
+- `$` doubles as value-binding and field-root (`$item.title`). Left as-is.
+- element SELECTOR is bare ident (`div {}`) while element REF is `&name` — two surfaces for
+  "an element". Collapsed conceptually (selector=query, ref=naming) but surface unchanged.
+- whether `&x(...)` application should be spelled like `$f(...)` application — open
+  harmonisation question, flagged not solved.
+
+* Appendix: original ground truth (still accurate, HEAD 9aa147ef → current)
+1. Parser: no L_ANGLE/HtmlExpr handling; file-scope <main> tokenizes but is dropped.
+2. emit/html.rs (137L): real HtmlExpr→string emitter EXISTS; only reached via
+   FragmentKind::Html, which nothing populates for file-scope HTML.
+3. Capture types: form_compiler.rs parse_capture_type_name hardcodes html_block, template,
+   template_invocation, component_body, param_list (param_list ALSO in stdlib — duplicate).
+4. @template (template.st): emits window.__templates + comment "actual <template> emitted
+   during HTML generation" (that gen never existed).
+5. each runtime findTemplate() (each.st L32-48): checks IK.templates / getElementById /
+   querySelector / template[data-component]; NOT window.__templates. interpolate() handles
+   {$item}/{$.field} — runtime clone+interpolate works IF a discoverable template exists.
+6. server.rs: generate_fallback_html emitted empty body; FEAT-043 W1 (61d2f58d) added
+   synthesize_st_only_shell so .st-only serves 200 (body still empty until W1 here).
+7. capture engine (custom.rs compile_pattern) is a full PEG: Literal/CharClass/Sequence/
+   Choice/Group/*/+/?/recursion — category-B types are already expressible there.
+8. & runtime: form_match.rs:1408 &name → querySelector('[data-st-ref="name"]');
+   template.st:155 factory = Spacetime.templates.get(name) → factory(...args). ∴ & is an
+   element-typed VARIABLE (DOM node or curried factory), never a tag.
+
+NOTE [2026-05-30]: This plan is the product of a dedicated DESIGN session. All North-star
+decisions are user-ratified. Implementation is a separate session; forward-only discipline,
+live-verify every reactive/runtime claim, NEVER git revert/stash.
+
+** ITEM W2 structured-output %capture_type — the reifier boundary
+:PROPERTIES:
+:CUSTOM_ID: PLAN-023-full-spacetime-list-rendering-and-inline::reifier-boundary
+:END:
+DISCOVERY (recon contradicted the plan): category-B extractors are NOT delimiters — they
+produce TYPED structured CapturedValue (Properties(Vec<PropertyDef>), Params(Vec<ParamDef>),
+Keyframes(Vec<KeyframeDef>), ParamList(Vec<TemplateParamDef>)) consumed by ~43 sites
+(resolve/expand/form_scoring/visitor/sync/lsp/timeline_lint). A PEG %capture_type produces
+only generic Array/Expr/String. The param_list "redundancy" the plan cited is actually a
+SHAPE-MISMATCH: Rust ParamList wins (parse_capture_type hardcodes the enum), stdlib
+param_list.st produces Array and is SHADOWED/dead. So the obstacle to "grammar in stdlib"
+was never verbosity — it was the typed-output contract.
+
+THE REIFIER BOUNDARY (three legitimate categories, extending the alphabet/grammar split):
+  TERMINALS (alphabet)   — Rust   — scan chars -> CapturedValue (Ident, Number, %balanced)
+  PRODUCTIONS (grammar)  — stdlib — compose terminals (%capture_type bodies)
+  REIFIERS (type adapters) — Rust — generic record (Named) -> domain struct (PropertyDef)
+A reifier is the seam where a generic parse-result becomes a Rust-owned domain TYPE. It
+belongs in Rust because the TYPE is Rust (consumed by Rust pipeline). The GRAMMAR (shape of
+a property line) belongs in stdlib. Reifier honesty rule: rename/restructure fields + split
+scalars ONLY; the moment a reifier must parse (track depth/nesting), the grammar leaked ->
+push back to stdlib. ~10 lines each.
+
+THREE-LAYER ARCH:
+  L1 PEG named-capture retention — RecordSequence/RecordRepeat collect ($var -> value) into
+     Named; (..)* over a record -> Array(Vec<Named>). DECISION: named-retention is DEFAULT
+     (user ratified wider blast radius; on-actions types keyframe_prop/mutation migrate too).
+  L2 reifiers — reify_properties/params/keyframes/param_list: Array(Vec<Named>) -> typed.
+  L3 ~43 consumers — UNCHANGED; still match Properties/Params/Keyframes/ParamList.
+
+split per type: CaptureType::Properties = stdlib grammar (capture-types/properties.st) +
+Rust reifier. complex.rs per-type loops DELETED (~600-900L). Types stay the bird's-eye view.
+
+EXECUTION (forward-only, gate each step, NEVER delete on green-compile alone):
+  S1 L1 named retention (RecordSequence/RecordRepeat) + opt make default; full suite per step
+  S2 param_list KEYSTONE: stdlib grammar + reify_param_list; DIFFERENTIAL vs Rust over
+     {stdlib,examples,tests/fixtures,demos}; delete ParamListExtractor; resolve dual-def
+  S3 properties + reify; differential; delete loop
+  S4 params + reify; differential; delete loop
+  S5 keyframes + reify (values = split on '->'); differential; delete loop
+  S5b on-actions types (keyframe_prop/mutation/on_body) under the default-Named path
+  S6 GATE: lib+integration+v8+headless green · fuzz green · differential green · complex.rs
+     shrunk · param_list single-sourced · @type/@template/@keyframes/@on compile
+
+DIFFERENTIAL GATE: ∀ capture invocation in corpus, old_rust_extractor(tokens) ==
+new_stdlib+reifier(tokens), 100% green BEFORE deleting Rust.
+
+TARGET STRUCTS: PropertyDef{name,type_ref,optional} · ParamDef{name,type_ref,default} ·
+KeyframeDef{property,values:Vec<String>} · TemplateParamDef{name,kind:Binding|Element,optional}.
+RISK: L1 default change touches EVERY %capture_type incl on_body composition — opt-in safety
+traded for the deeper win per user; differential + full suite are the guardrails. param_list
+first proves the mechanism before properties/params/keyframes.
+
+NOTE [2026-06-01]: SESSION PROGRESS (2026-06-01, autonomous):
+DONE + gated + reviewer-hardened:
+- W0 (commit e576eef8): `<` first-class sigil; backtick holes; CST HTML_ELEMENT/HTML_HOLE/HTML_RAW.
+- W1 (d2ba5fd1/0667a224/abffc914): html5ever TreeSink -> ir::HtmlExpr (Hole+AttrPart); file-scope HTML -> CompiledSpacetime.html -> served <body> (SSG-visible). FEAT-043 DONE.
+- W2 (f3437d58..f13ec5fd, 8 commits): %balanced + %skip_block PEG terminals (fuzz @4000); WIRED the (previously inert) stdlib %capture_type -> matcher pipeline; migrated all 5 category-B types (param_list/properties/fields/params/keyframes) to stdlib grammar + Rust reifiers; complex.rs 902L->32L; E0402 latent bug fixed; reviewer wave + 3 hardening fixes. Reifier-boundary concept enshrined (CON-reifier-boundary).
+Mid-flight bugs fixed+TDD'd: BUG-037 (macro dispatch, commit 4545f86b+cfda83c7), BUG-038 (stale snapshots). Filed: BUG-039 (pre-existing @media-emits-JS, 12 v8 fails), FEAT-044 (single-file test runner), FEAT-045 (post-hydration DOM snapshot).
+
+PARKED:
+- W3 (source<T> @data unify) -> FEAT-046. Reviewer wave found additive macros non-functional (dispatch hijack: re-dispatch scores captures not leading literals; + derive/fold need dep-extraction). Forward-removed (commit 935df2fb), NO regression. Needs shared-scorer surgery + dep-extraction on the LIVE reactive arc — requires supervised session.
+- W4 (@each SSG vs hydrate) BLOCKED on W3 (source_static fact) + new @each+HtmlExpr runtime. BUG-028's E0804 error is already gone (leniency) but the HTML-@each FEATURE needs W3+runtime. NOT an independent slice.
+- W5 (big-bang kill) depends on W3/W4. W6 (docs+showcase) depends on W3-W5.
+
+Gates green at session end: lib 2070, integration 139, headless 441; v8 12 pre-existing (BUG-039). Baseline locked for regression detection. NEVER regressed the reactive arc.
+
+NOTE [2026-06-01]: SESSION 2 PROGRESS (2026-06-01, autonomous, user at date):
+W3 COMPLETE + reviewer-hardened (FEAT-046 DONE). Unified @data <kind> (inline/fetch/derive/fold) all live-browser-verified incl reactive recompute. Commits f8bfae4b, 9cba7d06, 500b3d35. Key: FormMatch.matched_macro (parse decides form, resolve honors — Blocker 1 was misdiagnosed, NO scorer surgery); BalancedExtractor source byte-scan (recovers call-parens grammar splits into ARG_LIST); derived-signal runtime dep-discovery (no Rust expr parser). 3-reviewer wave: dispatch correct, 2 P2/P3 fixed+live-verified. Filed BUG-041 (backtick-in-regex-charclass lexer). 10 tests.
+
+W4 STARTED — CST foundation landed (commit 5059a5fd): parse_body_item now has an LT arm (lt_starts_html_element guard) so `<li>` inside scope/directive bodies parses as a first-class HTML_ELEMENT node (reuses W0 parse_html_element). Snapshot snapshot_fixture_with_html updated (BODY now structured HTML_ELEMENT vs opaque brace string). Gate green: lib 2070, integration 149, headless 441.
+
+W4 REMAINING (next session): (1) WIRE the BODY's HTML_ELEMENT through NodeContext -> html_block body-capture so an @each(... ){ <li> } form can capture it (currently the html_block extractor delegates to ExprExtractor over tokens and doesn't see the HTML_ELEMENT child; an each-html-probe form did NOT emit). (2) reify body html -> ir::HtmlExpr (W1 HtmlExpr + skeleton() exist). (3) per-item render runtime (each-with-templates/register-template factory machinery exists in stdlib/primitives/template.st as the hydrate path). (4) SSG-unroll branch on source_static fact (registered in W3): static source -> compile-time unroll real <li>xN; dynamic -> skeleton+hydrate. (5) dissolve BUG-028/030 (empty/HTML each body no longer E0804). BUG-028 still LIVE: @each HTML body currently errors E0804 'invocations' (the template_invocation+ form is the only matching each form).
+
+W5 (big-bang migrate+kill legacy @data/@computed) + W6 (docs+SSG showcase) still pending, depend on W4.
+
+NOTE [2026-06-02]: PLAN-023 COMPLETE (W0-W6, autonomous arc 2). Final state:
+W0 (e576eef8) first-class < HTML + backtick holes. W1 (d2ba5fd1+) html5ever TreeSink -> HtmlExpr -> served body. FEAT-043 DONE.
+W2 (f3437d58..f13ec5fd) %balanced/%skip_block leaves + stdlib capture-type pipeline wired + 5 category-B types migrated. Reifier-boundary enshrined.
+W3 (f8bfae4b, 9cba7d06, 500b3d35) unified @data <kind>: inline/fetch/derive/fold + query (W5). FormMatch.matched_macro (parse decides, resolve honors). BalancedExtractor source byte-scan. derived-signal runtime dep-discovery. FEAT-046 DONE. 3-reviewer wave.
+W4 (5059a5fd, 6647226e, 0cdb107a, 8a64edbf, c5261ead) HTML-body @each (each-inline) + SSG-unroll (src/html/ssg_unroll.rs) with unroll==hydrate. BUG-028/030 DONE. 3-reviewer wave (2 P1 fixed: LT-arm comparison misfire, SSG ambiguous container).
+W5 (13dd6d42, 20d35ac5, a244961d) @data query + fetch-options parity; migrated data-binding-demo + cart-demo (browser-verified reactive arc: cartTotal 687/cartCount 3); legacy DEPRECATED not deleted (w5-kill -> FEAT-047, blocked on BUG-042). Grammar: arithmetic in directive values.
+W6 (1249544a, c906b0ef) docs/language/data-and-rendering.md + demos/ssg-list showcase (live unroll==hydrate). Fixed BUG-043 (hole drops each) + P1 void/self-close over-skip. 2-reviewer wave.
+FILED: BUG-039 (pre-existing @media-emits-JS, 12 v8), BUG-040/041 (lexer), BUG-042 (inline object-literal data), BUG-043 (fixed), FEAT-044/045/046(done)/047.
+FINAL GATE: lib 2077, integration 158, headless 441; v8 12 pre-existing (BUG-039) no new regressions. Every wave reviewer-gated + live-browser-verified. Reactive arc (FEAT-042/BUG-036) never regressed.
+REMAINING (deferred, tracked): FEAT-047 (delete legacy after BUG-042), BUG-042 (inline object arrays), BUG-039/040/041, W1 text-hole binding gap (count display).

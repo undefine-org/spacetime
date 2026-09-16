@@ -1,0 +1,48 @@
+#+TITLE: Compound expressions on subscribed signals compile to string concatenation
+#+STATE: ITEM
+#+CUSTOM_ID: BUG-286-compound-expressions-on-subscribed-signa
+
+* Symptom
+
+A reactive style binding whose expression is a ternary over a SUBSCRIBED
+(`@data subscribe`) signal compiles to string concatenation instead of a
+real expression. In the compiled bundle:
+
+#+begin_example
+display: $pages_empty == true ? "block" : "none";
+  → (ST.resolve(__node, 'pages_empty') + " == true ? \"block\" : \"none\"")
+#+end_example
+
+The binding sets `display` to a garbage string (an object/string
+concatenation), never to a real value. The SAME ternary over an INLINE
+signal (`$tab == "records" ? …`) compiles correctly:
+
+#+begin_example
+(ST.resolve(__node, 'tab') == "records" ? "block" : "none")
+#+end_example
+
+Bare subscribed signals also resolve correctly (`(ST.resolve(__node,
+'pages_empty_display'))`). Probes in /tmp/stprobe (p17.st/p18.st, knowledger
+session 2026-08-05): ternaries AND `&&` on subscribed signals both break.
+
+* Impact
+
+Any visibility/conditional styling driven by server data is silently dead.
+Found in the knowledger desk (admin/frontend/desk.st): empty-states and the
+sign-off pane showed wrong defaults until every conditional was moved to
+server-computed display STRINGS bound bare.
+
+* Repro
+
+#+begin_example
+@data subscribe $items_empty bool ;
+.pane-empty { display: $items_empty == true ? "block" : "none"; }
+#+end_example
+
+Compile and inspect the emitted `__stBind_*` function: the ternary is
+inside a string concatenation with the ST.resolve call.
+
+* Workaround (in use)
+
+Compute the display string on the server (`display_for(true) → "block"`)
+and bind a bare subscribed signal.

@@ -1,0 +1,51 @@
+#+TITLE: jallete: full JS-controller → Spacetime migration (configurator @each + reactive rendering)
+#+STATE: ITEM
+#+SESSION_ID: 150f475256d7192f
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-19T12-43-02-363Z_150f475256d7192f.jsonl]]
+#+CUSTOM_ID: FEAT-134-jallete-full-js-controller-spacetime-mig
+
+* Initial Message
+
+Verification: lib 2363 passed/0 failed · integration 172 · FUP-069 acceptance green · headless 456→513
+ passed.
+
+ Filed BUG-112 for the residual @try $error lowering bug ($error signal-lowers to ST.get(el,"error") =
+ __e) — out of FUP-072 scope, accounts for the remaining state/binding @try failures.
+
+ Notes (honesty):
+ - 9 v8_runtime failures (@media→JS, getSelection/DOMParser/IntersectionObserver, async initElement) are
+ pre-existing — st.js is byte-identical to HEAD, and @media("print") (no colon, real selector) fails
+ identically, ruling out all my changes.
+ - 4 non-test snapshots + part of test_and_fixture drift from the other session's concurrent
+ public/runtime/templates.js edit (FEAT-124/126 bundle code), embedded in compiled-JS snapshots — not my
+ logic. Left the test_and_fixture snapshot unstaged since it's entangled with their unstaged bundle.
+
+
+
+please review this owrk and what it was trying to achieve, and tell me what it did right and what the next steps are
+
+* Goal
+Migrate jallete's 463-line inline <script> (projects/jallete/index.html, lines ~709-1172) entirely to Spacetime constructs, per AGENTS.md ("Spacetime websites should NOT have custom javascript"). The state-machine portion is ALREADY done (PLAN-047 W2 — cart/cfg open-close are now $cartOpen/$cfgOpen signals + reactive .is-open class). This FEAT covers the REMAINING JS:
+
+** What the inline script still does (all needs Spacetime equivalents)
+- loadPacks(): fetch /data/packs.json → already have `@data fetch $packs Pack[]` in index.st; wire the configurator off it.
+- openConfigurator(packId): set currentPack, populate title/badge/items/pricing, render variant selectors, set hero image. → @each over the selected pack + reactive content injection.
+- renderVariantSelectors() / renderTwoItemSelector() / createVariantCard(): build variant cards + color dots from nested pack option data (conditional on pack type: mom-only | cocoon | winter-family). → @each (nested) + @match/@view on pack type.
+- getProductIds(): compute WooCommerce parentId/variationId from selections+sizes (per pack type). → @compute / @data derive.
+- updateHeroImage(): pick model photo by variant+color, fallback to pack image. → reactive @data derive + reactive `src <- $heroImg`.
+- updateSpacetimeState(): bridges JS state → SpacetimeLocal. → eliminated once selections are native signals.
+- Click delegation for variant/color/size selection (is-active toggling). → @on click [data-...] mutations (some already exist in index.st) + reactive .is-active bindings.
+- ESC / click-outside: ESC already migrated (PLAN-047). Click-outside-to-close: add @on click on overlay (already have close-cart/close-configurator overlay triggers).
+
+** Blocking feature gaps (each may be its own sub-FEAT — verify support first)
+1. `@compute name($a, $b) : type { ... }` with $-params FAILS TO PARSE ("expected R_PAREN, found DOLLAR"). checkout-helper.st uses `@compute checkoutUrl($cart, $checkoutConfig)`. Either @compute-with-params is unimplemented or the syntax differs. RESOLVE: find the correct @compute/@data derive author surface for a multi-input computed signal, or implement param support. (This ALSO blocks checkout-helper.st from compiling at all.)
+2. Reactive attribute write from an @on handler (`&.href <- expr` / `&.attr <- expr`): the RUNTIME supports it (st.js ST.runMutations has currentAttrMatch/namedAttrMatch) but the PARSER rejects `&.href` inside @on (lexes as a CSS nesting selector). Either add author grammar for attr-mutation in @on bodies, or document that the only reactive-attr form is the scope-level `attr <- $sig` (which is what PLAN-047 used for checkout: `.jal-cart__checkout { href <- $checkoutUrl; }`). DECISION NEEDED: is `&.attr <- ` a real intended surface or should it be removed from docs? (checkout.st doc-comment shows it as the example.)
+3. Nested @each over conditional pack-type option structures (mom-only vs cocoon vs winter-family have different shapes) — needs @match/@view on $pack.type + @each over the right options array. Verify nested @each + @match interplay works (cf BUG-085 @each-in-template gap).
+
+** Acceptance
+- projects/jallete/index.html has NO <script> block (except the spacetime.js include).
+- index.st + checkout-helper.st all compile clean (cargo run --features headless -- check projects/jallete/).
+- Configurator opens from a pack card, renders correct variants/colors/sizes per pack type, hero image updates on selection, add-to-cart builds the cart item, checkout href is correct — all via Spacetime, verified by headless probes.
+
+* Provenance
+Split out of PLAN-047 (state-machine retirement) on 2026-06-19 by user decision. The state-machine part of jallete is DONE; this is the orthogonal JS-controller + missing-feature work. The inline script + the @state_machine never actually worked together cleanly (FEATURE_PARITY.md notes "cart drawer opening handled by JS controller"); index.st never compiled standalone pre-migration. NOT started.

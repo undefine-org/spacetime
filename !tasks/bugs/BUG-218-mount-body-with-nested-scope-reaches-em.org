@@ -1,0 +1,88 @@
+#+TITLE: A @mount body containing a nested scope reaches emit as a structured dump, not source — the body silently compiles to nothing
+#+STATE: TODO
+#+CUSTOM_ID: BUG-218-mount-body-with-nested-scope-reaches-em
+#+PRIORITY: #A
+
+* Summary
+
+When a `@mount` body mixes HTML with a NESTED SCOPE, the body handed to the
+opaque-block recompile is not source text — it is a serialized capture structure:
+
+: { scopes: [{ selector: '<button class="t">+</button>     .t',
+:             properties: [{ property: '@behavior .t machine(initial',
+:                            keyframes: [{ at: 0, value: '"a") { a' },
+:                                         { at: 1, value: 'b on click; }' }] }] }] }
+
+That string is not Spacetime source, so `crate::parser::parse` rejects it and the
+whole body compiles to NOTHING.
+
+Note what the dump shows: the capture machinery has split `machine(initial: "a")`
+across a `property` and two `keyframes` entries, cutting the source mid-token
+(`'"a") { a'`). The body was matched against a keyframe-ish grammar and
+re-serialized, losing the original text.
+
+* How it was found
+
+BUG-216's fix. An unparseable body used to return `String::new()` — silence — so
+this test passed while asserting nothing:
+
+: tests/fixtures/w8-seed/state-claims.test.st:18
+: @test "transition_count via claim" {
+:   @mount { <button class="t">+</button>
+:     .t { @behavior .t machine(initial: "a") { a -> b on click; } } }
+:   @then .t { exist; }
+: }
+
+Once a dropped body emitted a throw instead, this test began failing — correctly.
+Verified by restoring the old silent bail: the test goes back to `✓ 3 passed`
+with an EMPTY mount body. It has never actually mounted anything.
+
+* Why #A
+
+Same class as BUG-216, one layer up: a body that LOOKS right produces nothing,
+and a test built on it reports success. BUG-216 made the failure loud; this is a
+live instance of the underlying defect, and it is in a shipped fixture.
+
+Blast radius MEASURED (not estimated), by counting bodies that now emit the
+BUG-216 throw across the whole repo:
+
+: stdlib/   0
+: tests/    1   <- tests/fixtures/w8-seed/state-claims.test.st:18
+: examples/ 0
+
+Exactly ONE live instance. So this is a narrow, currently-contained defect rather
+than a widespread one — which is why the fixture is left failing rather than the
+whole suite being triaged around it.
+
+* Reproduction
+
+The body parses fine ON ITS OWN:
+
+#+begin_src rust
+  parse("<button class=\"t\">+</button>\n  .t { @behavior .t machine(initial: \"a\") { a -> b on click; } }")
+  // => Ok
+#+end_src
+
+So the corruption happens BEFORE emit — in how the `:block` capture is taken and
+stored, not in the parser.
+
+* Investigation plan
+
+1. (DONE — see Blast radius above.) One instance repo-wide.
+2. Find where the `:block` capture is serialized. The dump's shape (`scopes`,
+   `properties`, `keyframes`) names the structure — locate the code that produces
+   it and determine why a `:block` capture took that path instead of retaining the
+   raw source span.
+3. The fix should keep the body as RAW SOURCE. A `:block` is opaque by definition
+   (FUP-069) — it is re-parsed later as a sub-program, so any structural
+   interpretation at capture time is both wasted and lossy.
+4. Regression test: the fixture above must MOUNT its button and the `@then .t {
+   exist; }` claim must genuinely pass — verified by sabotage (empty the body; the
+   test must fail).
+
+* Interim state (this commit)
+
+The fixture is marked with an explanatory comment pointing here. It is NOT
+deleted and its assertion is NOT weakened — per PLAN-113's rule, green is not
+restored by lowering the bar. It fails loudly until this bug is fixed, which is
+the correct state for a test that was previously passing on an empty body.

@@ -1,0 +1,104 @@
+#+TITLE: Auto-detect projects/ in spacetime init
+#+STATE: DONE
+#+SESSION_ID: 14cb41bb54d20fb7
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-04-27T16-41-54-259Z_14cb41bb54d20fb7.jsonl]]
+#+CUSTOM_ID: FEAT-013-auto-detect-projects-in-spacetime-init
+#+DEPENDS: PROJ-001-reorganize-websites-into-projects-privat
+#+EFFORT: 30m
+#+LAYER: tooling
+#+PRIORITY: #B
+
+* Initial Message
+
+I want you to make it very easy to make websites with spacetime.
+
+this means you reorganise the various websites into a projects/ folder that is gitignored, and you move all the websites inside it. i'll move the demo ones back at some point. initialise a new git repository there to keep track of our private websites.
+
+on top of that, the projects/ folder has a .gitignore of **/dist which is where the built website is put.
+
+make sure the experience of the product and the instructions on how to use it match this
+
+* Scope
+** In-scope
+- Modify =run_init= in =src/main.rs= so that when the caller's current working directory contains a =projects/= subdirectory (or =./projects= relative to the cwd), the new project is created at =projects/<name>/= instead of =./<name>=.
+- Update the success "Next steps" output to reflect the actual creation path (=cd projects/<name>= when applicable).
+- Preserve the existing fallback: if =projects/= does not exist in cwd, behavior is unchanged (creates at =./<name>=).
+- Add a unit test for the path-resolution helper, and a smoke test verifying the init output references the correct path.
+
+** Out of scope
+- Auto-creating =projects/= when it doesn't exist (we only detect; if user wants it, they create it via the layout reorg or manually).
+- Changing any other CLI command (=serve=, =build=, etc.).
+- Modifying =run_init='s mobile / Tauri scaffolding logic — those continue to apply to the resolved project dir.
+- Any flag-based override (=--projects=, =--no-projects=); kept implicit per scoping decision.
+
+* Existing Patterns
+- =run_init(name: String, mobile: bool)= at =src/main.rs::run_init= (lines 1576–1765) currently does =let project_dir = PathBuf::from(&name);= and writes everything relative to that.
+- =std::env::current_dir()= already available; project uses =std::path::PathBuf= idioms throughout =run_init=.
+- Unit tests for =main.rs= are sparse; place the resolution logic in a small helper =fn resolve_init_target(name: &str, cwd: &Path) -> PathBuf= so it is pure-functionally testable, then call it from =run_init=.
+- Inline =#[cfg(test)] mod tests= alongside the helper (matches the pattern in =src/build_runtime.rs=).
+
+* Tests
+** Unit tests (=src/main.rs= or a small new module)
+- =resolve_init_target_no_projects_dir=: cwd is a tempdir with no =projects/= subdir → returns =cwd.join("foo")= for name "foo".
+- =resolve_init_target_with_projects_dir=: cwd is a tempdir containing =projects/= → returns =cwd.join("projects/foo")=.
+- =resolve_init_target_projects_is_file=: cwd contains a regular file named =projects= → returns =cwd.join("foo")= (only directories trigger the redirect).
+- =resolve_init_target_with_projects_symlink_to_dir=: =projects= is a symlink to an existing directory → returns =cwd.join("projects/foo")= (treat symlink-to-dir same as dir).
+
+** Integration smoke
+- In a tempdir with =projects/= present, run =spacetime init demo= via =assert_cmd= (or a direct fn-call test), confirm =projects/demo/index.html= and =projects/demo/index.st= exist; stdout contains "cd projects/demo".
+- In a tempdir without =projects/=, run same → =./demo/index.html= exists; stdout contains "cd demo".
+
+* Implementation
+** ITEM Extract resolve_init_target helper
+:PROPERTIES:
+:CUSTOM_ID: FEAT-013-auto-detect-projects-in-spacetime-init::extract-helper
+:END:
+- Add =fn resolve_init_target(name: &str, cwd: &Path) -> PathBuf= near =run_init=.
+- Logic: if =cwd.join("projects").is_dir()= then =cwd.join("projects").join(name)= else =cwd.join(name)=.
+- Use =std::fs::metadata(cwd.join("projects")).map(|m| m.is_dir()).unwrap_or(false)= so symlinks to dirs resolve true.
+
+** ITEM Write unit tests for the helper (TDD: before wiring)
+:PROPERTIES:
+:CUSTOM_ID: FEAT-013-auto-detect-projects-in-spacetime-init::helper-tests
+:DEPENDS: FEAT-013-auto-detect-projects-in-spacetime-init::extract-helper
+:END:
+- File: =src/main.rs= bottom inline =#[cfg(test)] mod init_target_tests=.
+- Use =tempfile::tempdir= (already a dev-dep) for cwd setup.
+- Implement the four scenarios from the Tests section.
+
+** ITEM Wire helper into run_init
+:PROPERTIES:
+:CUSTOM_ID: FEAT-013-auto-detect-projects-in-spacetime-init::wire-init
+:DEPENDS: FEAT-013-auto-detect-projects-in-spacetime-init::helper-tests
+:END:
+- Replace =let project_dir = PathBuf::from(&name);= with =let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));= and =let project_dir = resolve_init_target(&name, &cwd);=.
+- Update the existing-directory check: keep the same error path, but message includes the resolved path (=Directory '{}' already exists=, where ={}= renders =project_dir.display()=).
+
+** ITEM Update success output
+:PROPERTIES:
+:CUSTOM_ID: FEAT-013-auto-detect-projects-in-spacetime-init::update-output
+:DEPENDS: FEAT-013-auto-detect-projects-in-spacetime-init::wire-init
+:END:
+- Compute the user-friendly =cd= argument: if =project_dir= starts with =cwd.join("projects")=, print =cd projects/<name>=; else =cd <name>=.
+- The =spacetime serve .= line stays. Add a follow-up bullet: =# Or from repo root: cargo run -- serve <relative-path>=.
+- Mobile branch: same =cd= update applies; =spacetime serve . --android= remains unchanged.
+
+** ITEM Smoke test the integrated path
+:PROPERTIES:
+:CUSTOM_ID: FEAT-013-auto-detect-projects-in-spacetime-init::smoke-test
+:DEPENDS: FEAT-013-auto-detect-projects-in-spacetime-init::update-output
+:END:
+- Add a single =#[test]= that runs =run_init= against a tempdir cwd (refactor =run_init= minimally to accept an optional =cwd= override, or use =std::env::set_current_dir= guarded by a serial test using the existing =serial_test= dev-dep), verifies file existence under =projects/demo/= when =projects/= exists, and under =./demo/= otherwise.
+
+* Edge Cases
+- =run_init= currently calls =std::process::exit(1)= on failures. Tests must avoid exercising those paths or refactor minimally to return =Result= for testability — keep refactor scope minimal: extract the helper only, leave =run_init= imperative.
+- Calling =spacetime init= from =inside= =projects/= (e.g., =cd projects && spacetime init foo=): cwd has no nested =projects/=, so it correctly resolves to =./foo= → =projects/foo=. ✓
+- Calling =spacetime init= from a deeply nested cwd that happens to have a =projects/= subdir (random user dir): the redirect would surprise. Acceptable: =projects/= as a subdir is the explicit signal; document in init success output ("Detected projects/, creating at projects/<name>").
+- =cwd= unreadable (=current_dir()= fails): fall back to =PathBuf::from(".")= which means =./<name>= — preserves prior behavior.
+- =name= containing path separators (=foo/bar=): unchanged from current behavior; the helper still concatenates and the caller is responsible. Note this is unusual for =init= and does not need special handling.
+
+* Acceptance Criteria
+- =cargo test --lib init_target_tests= passes the four unit cases.
+- The smoke test (or a manual run): in =/home/user/code/ora/verse/= with =projects/= present, =cargo run -- init demo-site= creates =projects/demo-site/= (not =./demo-site/=); success output prints =cd projects/demo-site=.
+- In a directory without =projects/=, =cargo run -- init demo-site= still creates =./demo-site/= (regression check).
+- =cargo run -- init <existing-name>= when =<existing-name>= already exists at the resolved location prints the existing-directory error with the resolved path in the message.

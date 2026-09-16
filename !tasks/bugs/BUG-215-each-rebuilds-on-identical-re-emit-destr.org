@@ -1,0 +1,71 @@
+#+TITLE: @each rebuilds on an identical re-emit, destroying live DOM state
+#+STATE: DONE
+#+CUSTOM_ID: BUG-215-each-rebuilds-on-identical-re-emit-destr
+#+PRIORITY: #A
+
+* Summary
+
+`@each` re-rendered by unconditionally clearing `containerEl.innerHTML` and
+rebuilding every row, on EVERY emit from its source — whether or not the data
+had changed.
+
+A polled source (`@data fetch { refresh: 2s }`) re-emits on every tick, almost
+always with identical data. So any `@each` over a polled source silently threw
+away, twice a minute, all the live DOM state the markup cannot re-express:
+
+- a focused `<input>` — focus AND caret position (this is BUG-151's class)
+- a `<select>`'s chosen option
+- an open `<details>`
+- scroll position within a row
+- any transient CSS state keyed to `:focus`/`:hover`
+
+* How it surfaced
+
+The inspector pill's root switcher (a `<select>` whose `<option>`s come from an
+`@each` over polled data) snapped back to the default root every 2 seconds while
+the tree still displayed the previously-chosen root — the panel visibly
+disagreed with itself about what the user was looking at.
+
+* Fix (landed, commit 4655ee0e)
+
+`stdlib/primitives/data/each.st` and `stdlib/primitives/data/each-inline.st`
+both keep a `renderedSig` (a `JSON.stringify` of the last rendered data) and
+skip the teardown entirely when the incoming data serializes identically and the
+container still has children.
+
+Non-serializable/cyclic data yields a `null` signature, which always re-renders —
+i.e. it degrades to exactly the old behaviour (correct, just costlier) rather
+than risking a missed update.
+
+The empty-state handler resets `renderedSig` so a list that empties and refills
+with its previous contents still rebuilds.
+
+* Why at the engine and not in the pill
+
+The pill could have worked around it (and briefly did, via a
+`ST.insStableTemplates` helper returning a stable array reference). That helper
+was DELETED once the engine fix landed: one need, one implementation. Every
+`@each` over a polled source has this bug, not just the pill's.
+
+* Tests
+
+`stdlib/__inspector__/tests/pill.test.st`:
+- "an each list survives an identical re-emit without rebuilding" — asserts on
+  DOM NODE IDENTITY, because a rebuild produces equal-LOOKING options; only
+  identity distinguishes preserved from recreated.
+- "an each list does rebuild when its data actually changes" — the complement.
+  A change-detection guard that suppressed real updates would be worse than the
+  bug it fixes, so both directions are locked.
+
+Sabotage-verified: with the guard removed from `each-inline.st`, the first test
+FAILS. (Worth noting: the first version of this test sabotage-PASSED because it
+was checked against `each.st` while the pill's inline-markup `@each` actually
+compiles to `each-inline.st` — the test only became real once the correct
+variant was disabled.)
+
+* Follow-up worth considering (not done)
+
+The fix is a full-list signature compare: cheap relative to a DOM rebuild, but it
+still rebuilds the WHOLE list when one row changes. A keyed reconcile (patch the
+changed row, leave its siblings' DOM alone) would preserve live state even across
+real updates. That is a larger design change — filed as FUP-133.

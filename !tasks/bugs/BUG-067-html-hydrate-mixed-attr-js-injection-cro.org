@@ -1,0 +1,39 @@
+#+TITLE: html_hydrate: mixed-attr JS injection, cross-block id collision, content-attr misroute, span wrapper
+#+STATE: DONE
+#+SESSION_ID: 14fc108ed3772fa8
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-04T14-32-37-965Z_14fc108ed3772fa8.jsonl]]
+#+CUSTOM_ID: BUG-067-html-hydrate-mixed-attr-js-injection-cro
+#+COMPLETION_HASH: 3a1a0274014f61e2
+
+* Initial Message
+
+Ok, start with Phase B. Use a wave manifest with in-chat mid-flight check-ins exlpaining what's going on, what' you've done, and what you're doing next. use main thread for architectural work and reviewer swarms in between waves. add as many gap implementation as needed; you have unlimited time budget. file FEAT/BUG you find mid-flight using the org tool and fix/implement them mid-flight
+
+* Source
+FEAT-078 reviewer swarm (agents 20-HydrateCorrectness, 21-IntegrationParity). 4 real bugs.
+
+* Bugs
+1. [P1] attr_initial_and_expr raw-concatenates literal text + signal src into the JS expr ->
+   transpile_signal_expr_with("badge $kind") = `apply = () => (badge SpacetimeLocal['kind'])`,
+   a SyntaxError that breaks the ENTIRE concatenated bundle. Mixed literal+hole attrs
+   (class="btn `$variant`", href="/u/`$id`", style="width:`$w`px") are routine. FIX: build the
+   expr like html_reactive::attr_value_expr (js_string-quote literals, transpile+paren holes,
+   join with " + "); build the static initial separately from parts.
+2. [P1] emit_html_blocks calls emit_hydrated once per HtmlBlockAst with a fresh next_id=0, but
+   bindings address holes by document-wide querySelectorAll([data-st-hole="N"]). Two top-level
+   blocks each with a hole both get id 0 -> cross-contaminated hydration. FIX: thread one
+   monotonic id counter across all blocks (or run emit_hydrated once over all exprs).
+3. [P2] emit_binding decides is_text via matches!(property,"text"|"content"); an attribute
+   literally named `content` (<meta ... content="`$desc`">) is misrouted to textContent -> never
+   updates. FIX: pass an explicit is_text flag from the caller (text-hole path = true,
+   attr path = false), don't sniff the property string.
+4. [P2] emit_text_hole always wraps in <span>, which corrupts RCDATA (<title>), table (<tr>),
+   <select> contexts. FIX: context-aware text anchor (the reference reactive path uses a bare
+   text node). Lower-priority; common flow content is fine.
+
+* Regression
+Add: mixed-attr (class="btn `$x`"), two-block id-uniqueness, content-attr (<meta content>),
+to the html_hydrate tests. The two-block + mixed-attr cases must be V8-verified (bundle loads,
+correct hole updates).
+
+NOTE [2026-06-09]: All 4 fixed structurally: #1 mixed-attr now builds proper JS via attr_value_js (js_string-quote literals + transpile/paren holes + join with +, mirroring html_reactive::attr_value_expr); #2 hole id threaded across blocks via emit_hydrated_from(start_id)+next_id in emit_html_blocks; #3 emit_binding takes explicit is_text flag (not property-sniff); #4 allows_span_child guards RCDATA/table/list parents -> render static initial only (no span/marker). 7 lib feat078 tests + 2 V8 tests (feat078_mixed_attr_and_multiblock_no_collision proves bundle loads + class btn primary->btn danger + independent count hole). P3 (emit_binding dup) acceptable: signatures now differ (pre-transpiled value + explicit is_text). lib 2140/0, v8 313/12 (pre-existing media).

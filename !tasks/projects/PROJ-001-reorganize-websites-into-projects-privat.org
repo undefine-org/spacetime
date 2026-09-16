@@ -1,0 +1,137 @@
+#+TITLE: Reorganize websites into projects/ private repo
+#+STATE: DONE
+#+SESSION_ID: 14cb41bb54d20fb7
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-04-27T16-41-54-259Z_14cb41bb54d20fb7.jsonl]]
+#+CUSTOM_ID: PROJ-001-reorganize-websites-into-projects-privat
+#+EFFORT: 1h
+#+LAYER: tooling
+#+PRIORITY: #A
+
+* Initial Message
+
+I want you to make it very easy to make websites with spacetime.
+
+this means you reorganise the various websites into a projects/ folder that is gitignored, and you move all the websites inside it. i'll move the demo ones back at some point. initialise a new git repository there to keep track of our private websites.
+
+on top of that, the projects/ folder has a .gitignore of **/dist which is where the built website is put.
+
+make sure the experience of the product and the instructions on how to use it match this
+
+* Scope
+** In-scope
+- Create =projects/= at repo root with its own git repository (private, separate from main repo).
+- Move user websites into =projects/<name>/=. Sources:
+  - Top-level dirs: =backdesk-dashboard=, =expertcomptable-kadiri=, =ikarchitecte=, =jallete=, =ora-v2=, =ora-ventures.com=, =playground=, =sothema=, =spacetime-showcase=, =zeystudios=.
+  - =site/<subdir>=: =adovasio=, =animations=, =dataiku=, =jeton=, =pulsar=, =undefine.org=, =webgl-landing=.
+  - =demos/<subdir>=: =scene-demo=, =webgl= (=demos/FUTURE.md= stays in =demos/=).
+- After move, remove the now-empty =site/= directory.
+- Move non-Spacetime debris into =scratch/= (also gitignored): =n8n/=, =xyflow/=, =bugs/=, =bigfuxes/=, =better-ccflare/=, =data-binding/=, =claude-code-spacetime/=, =mobile-v2/=, =editor/=.
+- Delete stray root-level build artifacts left by earlier =build .= runs: =index.html=, =en/=, =fr/=, =landing/=, =data/=, =fonts/=, =locales/=, =dist/=. (=spacetime.css= and =spacetime.js= are already gitignored — delete them too if present.)
+- Add =projects/=, =scratch/=, and a top-level =dist/= entry to main repo =.gitignore=.
+- Inside =projects/=: =git init=, write =projects/.gitignore= containing =**/dist=, write a one-line =projects/README.md= explaining the convention.
+
+** Out of scope
+- Updating compiler source paths or tests — handled by sibling item (test-fixture relocation).
+- Updating documentation (README/AGENTS/CLAUDE/CLI help) — handled by sibling docs item.
+- Renaming or splitting any moved website's internal structure.
+- Cleaning up loose root-level =.png=, =.md=, =.org=, =.json= files that are not build artifacts (out-of-scope cleanup).
+
+* Existing Patterns
+- Top-level =.gitignore= already excludes =/target=, =.local/=, =**/.env=, =node_modules/=, =stdlib/.cache/=, =spacetime.css=, =spacetime.js=. Add new entries in the same style (anchor with leading =/= for repo-root-only paths).
+- =run_build= (=src/main.rs::run_build=, lines 765–792) defaults to =<site>/dist= when given a directory, so =projects/<name>/dist= is the canonical build target — =**/dist= in =projects/.gitignore= covers it.
+- Each site is self-contained (own =index.html= + =index.st= + assets), confirmed by =cargo run -- serve <site>/= usage across =!tasks/= history. A simple =git mv= preserves history within each repo.
+
+* Tests
+- =git status= in repo root after move: working tree clean except for =.gitignore= edit and any source-code edits handled by sibling items; the moved dirs no longer show as untracked (covered by gitignore).
+- =git ls-files= output before vs after move: every previously-tracked file under a moved dir appears under its new =projects/<name>/= path with history preserved.
+- =cd projects && git status= shows a clean working tree on a fresh =main= branch with the initial commit containing all moved sites and =.gitignore=.
+- =cargo run -- serve projects/ora-ventures.com/= boots without "site directory not found" errors and serves =/= and =/en/= (smoke test of one moved site).
+- =cargo run -- build projects/dataiku/= writes to =projects/dataiku/dist/= and that path is ignored by =projects/.gitignore= (=cd projects && git status --ignored | grep dataiku/dist= prints the entry).
+- =ls /home/user/code/ora/verse= no longer lists =site/=, =en/=, =fr/=, root =index.html=, root =dist/=, root =fonts/=, root =data/=, root =locales/=, root =landing/=, =spacetime.css=, =spacetime.js=, and no longer lists any of the dirs listed in scratch/ scope.
+
+* Implementation
+** ITEM Inventory and dry-run mapping
+:PROPERTIES:
+:CUSTOM_ID: PROJ-001-reorganize-websites-into-projects-privat::inventory
+:END:
+- Produce an explicit =mv= map: for each source path, target path under =projects/=, =scratch/=, or deletion list.
+- Verify each website target dir does not exist under =projects/= before move (avoid clobber).
+- Output the map to stdout for review before any filesystem mutation.
+
+** ITEM Create projects/ scaffold (git init, gitignore, README)
+:PROPERTIES:
+:CUSTOM_ID: PROJ-001-reorganize-websites-into-projects-privat::projects-scaffold
+:DEPENDS: PROJ-001-reorganize-websites-into-projects-privat::inventory
+:END:
+- =mkdir projects=
+- =cd projects && git init -b main=
+- Write =projects/.gitignore= with single line =**/dist=
+- Write =projects/README.md=: 1–2 paragraphs explaining "this is a private git repo for Spacetime websites; build with =spacetime build <name>/= which outputs to =<name>/dist/= (gitignored); runs from main repo as =cargo run -- serve projects/<name>/=".
+
+** ITEM Create scratch/ scaffold
+:PROPERTIES:
+:CUSTOM_ID: PROJ-001-reorganize-websites-into-projects-privat::scratch-scaffold
+:DEPENDS: PROJ-001-reorganize-websites-into-projects-privat::inventory
+:END:
+- =mkdir scratch=
+- Write =scratch/README.md=: one line "untracked staging area for non-Spacetime debris".
+
+** ITEM Move user websites into projects/
+:PROPERTIES:
+:CUSTOM_ID: PROJ-001-reorganize-websites-into-projects-privat::move-websites
+:DEPENDS: PROJ-001-reorganize-websites-into-projects-privat::projects-scaffold
+:END:
+- For each source path in the inventory, =git mv <src> projects/<name>/= so main-repo history preserves the move (sites are still tracked in main repo until staged removal — see next step).
+- After all mv operations, =rm -rf site/= (now empty after its sub-sites moved out, modulo =site/test-runner= and =site/landing/= which the sibling item handles; sequence so this runs AFTER sibling completes, OR ensure those dirs are also moved by sibling before this step deletes the empty parent; document the sequencing in commit message).
+
+** ITEM Move non-Spacetime debris into scratch/
+:PROPERTIES:
+:CUSTOM_ID: PROJ-001-reorganize-websites-into-projects-privat::move-scratch
+:DEPENDS: PROJ-001-reorganize-websites-into-projects-privat::scratch-scaffold
+:END:
+- =git mv= each entry in scratch list to =scratch/<name>/=.
+
+** ITEM Delete stray root-level build artifacts
+:PROPERTIES:
+:CUSTOM_ID: PROJ-001-reorganize-websites-into-projects-privat::clean-artifacts
+:DEPENDS: PROJ-001-reorganize-websites-into-projects-privat::inventory
+:END:
+- =git rm -r= for each tracked stray artifact (=index.html=, =en/=, =fr/=, =landing/=, =data/=, =fonts/=, =locales/=, =dist/=, =spacetime.css=, =spacetime.js=).
+- For untracked artifacts among that list, plain =rm -rf=.
+- Confirm via =cargo run -- check stdlib/= that font references in =stdlib/macros/css-at-rules.st= and =stdlib/primitives/font-face.st= are doc-only (URL strings inside doc comments) and not loaded at compile time — they should be unaffected.
+
+** ITEM Update top-level .gitignore
+:PROPERTIES:
+:CUSTOM_ID: PROJ-001-reorganize-websites-into-projects-privat::root-gitignore
+:DEPENDS: PROJ-001-reorganize-websites-into-projects-privat::move-websites PROJ-001-reorganize-websites-into-projects-privat::move-scratch
+:END:
+- Append three entries to =/.gitignore= (anchored to root):
+  - =/projects/=
+  - =/scratch/=
+  - =/dist/= (defensive, in case a stray =build .= runs)
+- Verify =git check-ignore -v projects/= and =git check-ignore -v scratch/= both report the new rule.
+
+** ITEM Initial commit inside projects/
+:PROPERTIES:
+:CUSTOM_ID: PROJ-001-reorganize-websites-into-projects-privat::projects-initial-commit
+:DEPENDS: PROJ-001-reorganize-websites-into-projects-privat::move-websites PROJ-001-reorganize-websites-into-projects-privat::root-gitignore
+:END:
+- =cd projects && git add -A && git commit -m "Initial import: private Spacetime websites"=
+- =cd projects && git log --oneline= shows one commit.
+- =cd projects && git status --ignored= lists =**/dist= ignores once any =dist/= dirs exist.
+
+* Edge Cases
+- Moves that span filesystems: all moves are within the same repo, so =git mv= is safe.
+- =site/= contains both user websites AND test fixtures (=test-runner=, =landing/=). Coordinate with sibling test-fixture item: move user websites first, then sibling moves fixtures, then this item =rm -rf site/= once empty.
+- =git mv= refuses to move untracked content; if any of the listed sites contain untracked-by-main-repo files (e.g., =dist/= subdirs), they need =mv= (plain) for the untracked portion after =git mv= for tracked files.
+- =better-ccflare/=, =bigfuxes/=, =bugs/=, =data-binding/=, =editor/= contain only docs/configs — moving to =scratch/= preserves them but they will no longer be tracked by main repo.
+- =playground/= moves to =projects/playground/= per scoping decision; if any docs reference =playground/= as a top-level dev target, the docs item updates them.
+- A future =cargo run -- build .= run in repo root would re-emit stray artifacts. The new =/dist/= gitignore catches the most common case; warn in docs that =build= takes a site dir argument.
+
+* Acceptance Criteria
+- =ls= in repo root shows =projects/= and =scratch/= but no longer shows: =site=, =en=, =fr=, =dist=, =index.html= (root), =fonts=, =data=, =locales=, =landing= (the artifact one), =spacetime.css=, =spacetime.js=, nor any of the moved user-website top-level dirs.
+- =git status= in repo root: clean working tree (after committing the move + gitignore update from this item).
+- =cd projects && git rev-parse --is-inside-work-tree= prints =true= and =git rev-parse --show-toplevel= ends in =/projects=, proving an independent git repo.
+- =projects/.gitignore= contains exactly =**/dist=.
+- =cd projects && git check-ignore -v dataiku/dist/foo= reports =/.gitignore:1:**/dist= (or equivalent).
+- =cargo run -- serve projects/ora-ventures.com/= boots without errors (smoke test).

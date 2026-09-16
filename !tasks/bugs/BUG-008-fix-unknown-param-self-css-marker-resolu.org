@@ -1,0 +1,43 @@
+#+TITLE: Fix Unknown param self CSS marker resolution errors
+#+STATE: DONE
+#+SESSION_ID: 14a74f44d1a10ea9
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-03-30T18-35-43-814Z_14a74f44d1a10ea9.jsonl]]
+#+CUSTOM_ID: BUG-008-fix-unknown-param-self-css-marker-resolu
+#+EFFORT: 1h
+#+PRIORITY: #B
+#+LAYER: engine
+#+BLOCKER: BUG-006-fix-dev-server-locale-routing-404-for-ro
+
+NOTE [2026-03-30]: Added early return for 'self' param in CSS marker resolution (src/emit/css.rs:82-85). self is a runtime-only reference that legitimately appears in marker IR but has no CSS meaning.
+
+* Initial Message
+
+cargo run -- serve ora-ventures.com/ --debug
+
+doesn't work the website is shit. Why?
+
+During compilation, 10 errors are logged:
+#+begin_example
+[ERROR spacetime::emit::css] Unknown param 'self' during CSS marker resolution. Available params: ["styles", "query"].
+#+end_example
+
+These occur in both =ora-ventures.com/index.st= and =landing/index.st= wherever =@when &self.scrollSpy.isActive= is used inside =@scroll-spy= blocks (lines 181-185 of main =index.st=, lines 68-75 of landing =index.st=).
+
+* Analysis
+The pattern =@scroll-spy @when &self.scrollSpy.isActive { ... }= is valid Spacetime syntax — the runtime handles it correctly (landing page works). But the CSS emitter tries to resolve =self= as a CSS marker parameter and fails because the CSS emit context only has ="styles"= and ="query"= parameters.
+
+This is a codegen-side issue: the =@when= block's JS code references =self= which is correct at runtime, but the CSS marker resolution pass encounters it and errors because it's not a CSS concept.
+
+* Fix
+The CSS marker resolution in =src/emit/css.rs= should skip or recognize =self= as a runtime-only reference that doesn't need CSS marker resolution. The error message comes from the param lookup failing; the fix is likely to either:
+1. Suppress the error when the unknown param is =self= (it's a known runtime reference)
+2. Or filter =self= references before they reach CSS marker resolution
+
+* Key Files
+- =src/emit/css.rs= — the error site for "Unknown param 'self' during CSS marker resolution"
+
+* Verification
+- =cargo run -- check ora-ventures.com/= produces 0 ERROR lines
+- =cargo run -- check ora-ventures.com/landing/= produces 0 ERROR lines
+- =cargo test --lib= passes
+- Existing =@scroll-spy= / =@when &self.scrollSpy.isActive= behavior unchanged

@@ -1,0 +1,48 @@
+#+TITLE: Revert scroll scope default from entry to cover
+#+STATE: DONE
+#+SESSION_ID: 14af0a7e71c1adaa
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-04-05T18-43-05-799Z_14af0a7e71c1adaa.jsonl]]
+#+CUSTOM_ID: BUG-016-revert-scroll-scope-default-from-entry-t
+#+EFFORT: 1
+#+PRIORITY: #A
+#+LAYER: stdlib
+
+NOTE [2026-04-05]: Reverted scope default from entry to cover in stdlib/macros/timeline.st. All 1983 unit tests pass. Sites using entry scope already specify it explicitly.
+
+* Initial Message
+
+the final states in the scrolls in http://localhost:9416/en/ (ora-ventures.com) are always shown, I don't have that scroll timeline working anymore. Find the root cause and exlpain it to me. Use the browser tool to find out as well.
+
+* Problem
+Commit =ac5bb3e8= (March 8 2026) changed the =@scroll= macro's default =scope= parameter from =cover= to =entry= in =stdlib/macros/timeline.st=.
+
+For tall scroll-locked sections (e.g., ora-ventures =.ora-scroll-section--work= at =min-height: 300vh=):
+- =cover= scope: scroll range = =vh + 300vh ≈ 3072px=. Sub-ranges like =start: 0.05, end: 0.25= map to ~60vh of gradual animation.
+- =entry= scope: scroll range = =vh ≈ 768px=. The same sub-range maps to ~150px, causing all sequential panel animations (in at 5%, hold, out at 45%, next in at 50%) to fire in under one viewport height of scroll.
+
+Result: users see "final states always shown" because animations complete before they're visible.
+
+All 34 =@scroll= blocks in =ora-ventures.com/index.st= rely on the default scope. The 2 blocks that need =entry= (=cta-reveal=, =footer-reveal=) already specify it explicitly. Sites written after the change (=ora-ventures.com/landing/=, =undefine.org=) also specify =scope: entry= explicitly.
+
+* Fix
+** Target file
+=stdlib/macros/timeline.st=, line 43
+
+** Change
+#+begin_src
+- scope: $scope:ident = entry,
++ scope: $scope:ident = cover,
+#+end_src
+
+Also update the doc comment in =stdlib/primitives/animation/drivers.st= line 21:
+#+begin_src
+/// @param scope - Reference frame: "cover" (default), "entry", "exit", "contain"
+#+end_src
+This comment already says "cover (default)" — verify it matches the new default.
+
+** Verification
+- Run =cargo test --lib= — all unit tests pass
+- Run =cargo run --features headless -- test tests/unit/primitives/scroll-driver.test.st --headless= — scroll driver tests pass
+- Run =cargo run --features headless -- test tests/unit/primitives/scroll-multi-keyframe.test.st --headless= — multi-keyframe tests pass
+- Run =cargo run --features headless -- test tests/unit/primitives/scroll-scope.test.st --headless= — scope tests pass
+- Grep for =scope: entry= in all =site/**/*.st= and =ora-ventures.com/**/*.st= files — confirm every site that needs =entry= already specifies it explicitly

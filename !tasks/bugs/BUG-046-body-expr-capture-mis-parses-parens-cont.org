@@ -1,0 +1,50 @@
+#+TITLE: Body expr capture mis-parses parens containing $ refs (if (!$x) ...)
+#+STATE: ITEM
+#+SESSION_ID: 14f48ced503111a7
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-05-29T18-28-09-664Z_14f48ced503111a7.jsonl]]
+#+CUSTOM_ID: BUG-046-body-expr-capture-mis-parses-parens-cont
+
+* Initial Message
+
+ok cool, show me what changes you'll do to cart-demo and ruthlessly delete legacy and any path that supported it and any other deprecated/legacy path you encounter along your exploration to fulfil FEAT-047 (maximalist interpretation)
+explain the bugs you filed
+
+* Symptom
+A `$body:expr` capture (used by @fn and @compute) fails to parse when the JS body contains a
+parenthesized expression whose content includes a `$`-ref, e.g. `if (!$cart || $cart.length === 0)`.
+Error: `expected R_PAREN, found DOLLAR` at the `(` inside the body.
+
+* Repro
+  @fn ct($cart) : number { if (!$cart) return 0; return 1; }      -> R_PAREN found DOLLAR
+  @compute ct($cart) : number { if (!$cart) return 0; }           -> same
+  @compute ct($cart) : number { const x = $cart.length; return x; } -> OK (no paren-wrapped $)
+Affects @fn AND @compute (independent of which macro). projects/jallete/checkout-helper.st
+(@compute cartTotal/checkoutUrl with `if (!$cart || ...)` bodies) cannot build.
+
+* Root cause (hypothesis)
+BUG-040/041 family: the block lexer / `expr` capture treats body JS as Spacetime syntax. A `(`
+in the body opens a paren context where `$cart` is lexed as a Spacetime `$`-variable / directive
+inline-arg rather than opaque JS, so the matcher expects R_PAREN and chokes on DOLLAR. Bodies
+WITHOUT a `$` directly inside `(...)` parse fine, which localizes it to paren+`$` interaction in
+the body token stream. The `$body:expr` (ExprExtractor) is depth-aware over parens but the
+underlying lexer/grammar emits a DOLLAR token that the form/grammar layer rejects inside `()`.
+
+* NOT in scope of
+PLAN-025 (post-arglist returnType capture) is DONE and unrelated — returnType now captures for
+both @fn and @compute; this body-paren-$ bug is the remaining blocker for jallete's @compute.
+
+* Fix direction
+Body JS captured by `$body:expr` (and the multi-statement @compute body) must be lexed opaquely
+— `$` inside a body expression is JS, not a Spacetime variable ref. Likely a lexer-context or
+expr-capture-boundary fix (recognize the `{ ... }` body region as raw/opaque up to the matching
+`}`, like %skip_block, rather than re-lexing `$`/`(` as Spacetime tokens). Coordinate with the
+BUG-040/041 lexer-context work.
+
+* Acceptance
+- @fn/@compute bodies containing `if (!$x || ...)` and `$cart.reduce((s,i)=>...)` parse + compile.
+- projects/jallete builds clean (checkout-helper.st @compute consumers).
+- Regression test enshrining a paren+$ body for both @fn and @compute.
+
+* Context
+Surfaced during PLAN-025 / FEAT-047 (jallete @compute migration). The @compute deps:param_list
+fix + returnType post-arglist capture (PLAN-025) are landed; this is the last blocker.

@@ -1,0 +1,195 @@
+#+TITLE: %emit js lightweight statement-boundary parser silently mangles braceless if-statement bodies into invalid JS
+#+STATE: ITEM
+#+SESSION_ID: 152939d2e5b25e66
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-09T16-24-34-454Z_152939d2e5b25e66.jsonl]]
+#+CUSTOM_ID: BUG-177-emit-js-lightweight-statement-boundary-p
+
+* Initial Message
+
+bro the chagne in sizing still does and i think it's from letter spacing, and i'm talking about vertical height overall. please observe properly
+
+* Summary
+
+`src/emit/js_parser.rs`'s statement-boundary detection/reformatting for
+`%emit js` blocks can silently produce SYNTACTICALLY INVALID compiled JS
+(compile succeeds, zero `pipeline_errors`, but the emitted output throws
+`SyntaxError` when actually parsed/executed by a browser). Discovered while
+rewriting `value-change-driver` (PLAN-072) — a braceless single-statement
+`if (cond) stmt;` inside a larger, sufficiently complex `%emit js` block gets
+its statement body scrambled into a different, unrelated location in the
+output, corrupting control flow and producing an `Unexpected token ':'`
+syntax error.
+
+* Root cause (traced, not fully isolated to the exact function)
+
+`src/emit/js_parser.rs` implements a ~2200-line hand-written JS
+statement/expression parser (`parse_emit_js_with_cleanup` ->
+`build_parseable_js` -> `validate_js` -> `convert_segments_to_ir`) used to
+convert `%emit js { ... }` block content into the compiler's IR, so
+placeholders (`%param`, `%&el`, `%yield`) can be resolved and the result
+re-serialized. This is NOT a full ECMAScript parser — it appears to use
+statement-boundary heuristics that can miscount brace/paren/semicolon
+nesting when a braceless `if (cond) stmt;` (no `{ }` around the single
+statement body) is followed by other complex nested code (loops, nested
+object literals, method chains) in the same scope.
+
+Confirmed NOT a diagnostic gap in `validate_js` alone — this function IS
+supposed to catch invalid JS (`validate_js(&js_code)?` at
+`parse_emit_js_with_cleanup` line ~120), yet the actually-invalid output
+compiled with ZERO errors and ZERO diagnostics, meaning `validate_js` either
+validates a DIFFERENT string (before the corruption happens) or the
+corruption itself happens in a later stage
+(`convert_segments_to_ir`/re-serialization) that isn't re-validated after.
+
+* Reproduction
+
+Minimal-ish repro (full source available in the working tree history —
+`stdlib/primitives/animation/drivers.st`'s value-change-driver primitive
+before this session's brace-hardening fix): a `%emit js` block containing,
+within the SAME function scope:
+
+```js
+if (prefix) wrapper.appendChild(document.createTextNode(prefix));  // braceless
+
+var wordContainers = [];
+for (var w = 0; w < maxWords; w++) {
+  if (w > 0) wrapper.appendChild(document.createTextNode(' '));    // braceless, INSIDE a for-loop
+
+  // ... several more statements, including object/property assignments ...
+
+  wordContainers.push({ enterLayer: enter.layer, exitLayer: exit.layer });  // object literal with 2 props
+}
+if (suffix) wrapper.appendChild(document.createTextNode(suffix));  // braceless
+```
+
+Compiled output (verified via `node -e "new (require('vm').Script)(code)"`,
+which gives an accurate line number unlike plain `new Function(code)`):
+
+```
+SyntaxError: Unexpected token ':'
+    at runtime.js:6718
+        enterLayer: enter.layer, exitLayer: exit.layer
+                                          ^
+```
+
+Actual mangled output around that point (reconstructed from the compiled
+artifact, NOT what was authored):
+
+```js
+if (prefix) {
+  if (w > 0) {
+    enterLayer: enter.layer, exitLayer: exit.layer
+  }
+  );
+}
+if (suffix) {
+  wci.enterLayer.animate(...);
+  ...
+}
+```
+
+The `if (w > 0) { ... }` body and the `wordContainers.push({...})` object
+literal contents got merged/misplaced entirely — completely different
+statements from different points in the source ended up interleaved inside
+the WRONG `if` block, with a stray dangling `);` — clear evidence of a
+brace/statement-boundary tracking bug, not a simple tokenizer typo.
+
+* Reproduction via Rust test (add temporarily to `src/compiler.rs` test mod)
+
+```rust
+#[test]
+fn temp_debug_mangle_repro() {
+    let src = r#"
+.x {
+    @value-change(duration: 400ms) {
+        :entering { opacity: 0 -> 1; }
+        :exiting { opacity: 1 -> 0; }
+    }
+}
+"#;
+    let ast = crate::parser::parse(src).unwrap();
+    let compiled = crate::compile(&ast, crate::compiler::CompileOptions::default());
+    // compiled.pipeline_errors is EMPTY here — no diagnostic surfaces the bug.
+    std::fs::write("/tmp/mangle-debug-output.js", &compiled.js).unwrap();
+}
+```
+
+Then externally: `node -e "new (require('vm').Script)(require('fs').readFileSync('/tmp/mangle-debug-output.js','utf8'))"`
+throws the SyntaxError with an accurate line number (plain `new Function(code)`
+gives NO line number at all — a secondary DX gap worth noting for anyone
+debugging this class of issue).
+
+NOTE: at time of filing, this specific repro requires the PRE-fix version of
+`value-change-driver` (this session's rewrite hardened all its braceless
+`if`s into braced form as a WORKAROUND, so the CURRENT `drivers.st` no
+longer triggers it). A future session reproducing this bug should either
+check out the pre-fix version of that file, or construct a fresh minimal
+`%primitive`/`%emit js` test case with the same shape (braceless `if` +
+`for` loop + object-literal `.push({...})` call in the same scope) to
+isolate the trigger precisely — this bug report captures the SYMPTOM and
+its real-world trigger shape, not a minimal, fully-isolated unit repro
+(deprioritized in favor of shipping the value-change-driver rewrite; see
+"Next steps" below).
+
+* Impact
+
+- Silent generation of syntactically INVALID JavaScript, with ZERO compiler
+  diagnostics (`pipeline_errors` empty) — a page compiles "successfully" but
+  throws at runtime the instant its script tag executes, which reads to an
+  end user/author as "my whole page is broken" with no compiler-side clue
+  why.
+- This is a `%emit js` block AUTHORING hazard specifically for stdlib
+  primitive authors (site authors don't write `%emit js` directly) — but
+  stdlib primitives are exactly the code every Spacetime site depends on,
+  so a latent bug here has broad blast radius the instant a primitive's
+  `%emit js` body happens to hit the right (wrong) shape.
+- Workaround is trivial and safe (always brace single-statement `if`
+  bodies) but SILENT failure with no diagnostic means an author has no way
+  to know they've hit this without manually inspecting/executing the
+  compiled JS output, exactly as this session had to do.
+
+* Suggested fix direction (not implemented — filed for a dedicated session)
+
+1. Root-cause exactly where in `js_parser.rs` the brace/statement
+   boundary gets miscounted for a braceless single-statement `if`
+   (`build_parseable_js` -> `convert_segments_to_ir` are the two most likely
+   candidates per the code read this session, but not confirmed with
+   certainty).
+2. Either: (a) fix the statement-boundary tracking to handle braceless `if`
+   correctly in all cases, or (b) if a full fix is expensive, have the
+   `%emit js` block PARSER/VALIDATOR normalize/require braced `if` bodies
+   BEFORE the stage that's miscounting (a structural, not special-cased,
+   fix — reject or auto-brace at parse time, not downstream).
+3. Regardless of (2), `validate_js` should validate the FINAL serialized
+   output (post `convert_segments_to_ir`/re-serialization), not just an
+   intermediate string, so this class of bug surfaces as a real compiler
+   diagnostic instead of shipping silently broken JS. This is the more
+   valuable, general fix — it would have caught THIS specific bug and any
+   future one in the same family with a clear compile-time error instead of
+   a silent miscompilation.
+4. Consider auditing existing stdlib primitives' `%emit js` bodies for other
+   braceless `if` statements that might already be silently miscompiling
+   under specific surrounding-code shapes (this bug was latent in
+   `value-change-driver` for the driver's ENTIRE history — 55+ commits —
+   because its OLD, simpler control flow never happened to trigger the
+   exact brace-miscounting condition; a newer, more complex primitive body
+   might already be affected without anyone knowing).
+
+* Workaround applied this session
+
+`stdlib/primitives/animation/drivers.st`'s `value-change-driver` (this
+session's line-aware rewrite, PLAN-072) has all its `if (cond) stmt;`
+single-statement bodies explicitly braced (`if (cond) { stmt; }`) as a
+preventive measure — not because every one of them was confirmed to trigger
+this bug individually, but because the exact trigger condition wasn't
+isolated precisely enough to know which ones were safe, and bracing is a
+zero-cost, semantically-identical, always-safe change.
+
+* Relationship to other bugs filed this session
+
+Independent of BUG-172/BUG-175/BUG-176 (all value-change-driver-specific
+measurement/layout bugs) and BUG-173/BUG-174 (CDP test-harness gaps around
+`.selector{}` CSS + keyframe-arrow syntax in `@mount`) — this is a
+compiler-level `%emit js` authoring/codegen robustness gap, discovered as a
+side effect of writing a larger, more complex primitive body than the
+codebase's existing `%emit js` blocks had previously exercised.

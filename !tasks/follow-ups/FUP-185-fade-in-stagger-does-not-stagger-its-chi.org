@@ -1,0 +1,59 @@
+#+TITLE: @fade-in-stagger does not stagger its children
+#+STATE: ITEM
+#+SESSION_ID: 153f5ed0617636c7
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-26T21-12-46-213Z_153f5ed0617636c7.jsonl]]
+#+CUSTOM_ID: FUP-185-fade-in-stagger-does-not-stagger-its-chi
+
+* Initial Message
+
+ok so is there any point in keeping the worktree now? verify
+
+* What is honest today
+
+`@fade-in-stagger(stagger: 100ms) { > .item }` fades the CONTAINER as a whole.
+It does not stagger the children, and it does not consume `$_childSelector` or
+`$_stagger` — the `$_` prefix marks that deliberately (E0964 would otherwise
+refuse the macro), so the gap is visible in the source rather than hidden behind
+the empty `%when` body it used to have.
+
+This is a REDUCTION in ambition from the pre-BUG-364 state, and deliberately so:
+before, the macro did nothing at all while looking complete. Now it does the
+part it can actually do, and the missing part is stated.
+
+* What it needs
+
+Per-child staggered fade. The shape already exists in `reveal-engine`, which
+staggers per split unit — but that engine SPLITS TEXT into character/word/line
+spans (it rewrites `el.innerHTML`), so it cannot be pointed at a container's
+element children without destroying their markup.
+
+Two candidate designs:
+
+1. Teach `reveal-engine` a `split: "children"` (or `"none"` + an explicit unit
+   selector) so "the units" can be existing DOM elements rather than generated
+   text spans. This unifies the two engines and is the smaller surface — but it
+   widens a primitive that many pages already depend on, so it needs its own
+   `--cdp` gate proving the text paths are unchanged.
+
+2. Give `fade-in-engine` an optional `childSelector` + `stagger`, applying the
+   same delay ramp across `el.querySelectorAll(childSelector)`. Smaller blast
+   radius, but it duplicates stagger logic that already exists — a parallel
+   implementation, which the AGENTS elegance bar argues against.
+
+(1) is preferred if the text paths can be held still, precisely because it
+DELETES the duplication rather than adding to it.
+
+* Acceptance
+
+- A `--cdp` gate asserting each child's animation has a DIFFERENT `delay`,
+  ordered by `staggerFrom` — seen RED before the fix.
+- `tests/repro/gh-18-reveal-keyframes/` still GREEN (the text paths unchanged).
+- `$_childSelector` / `$_stagger` lose their `_` prefix, because they are then
+  genuinely consumed.
+
+* Context
+
+Surfaced by BUG-364 (commits 2e06bca2, fa3ed1e5), which replaced three dead
+`%when $visible` bodies with a real `fade-in-engine` primitive. The other two
+variants (`@fade-in`, `@fade-in-down`) are fully implemented and GREEN under
+`--cdp`; only the stagger variant is partial.

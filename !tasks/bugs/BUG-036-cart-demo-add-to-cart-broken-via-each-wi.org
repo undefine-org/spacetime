@@ -1,0 +1,49 @@
+#+TITLE: cart-demo add-to-cart broken via each-with-templates path
+#+STATE: DONE
+#+SESSION_ID: 14f48ced503111a7
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-05-29T18-28-09-664Z_14f48ced503111a7.jsonl]]
+#+CUSTOM_ID: BUG-036-cart-demo-add-to-cart-broken-via-each-wi
+#+EFFORT: 3h
+#+LAYER: coding-agent
+#+COMPLETION_HASH: 487b053de5343a51
+
+* Initial Message
+
+try again
+
+* Source
+Found while live-verifying the reactive signal-channel fix (commit 1602ebd9). Tested cart-demo as a regression check.
+
+* Problem
+examples/cart-demo add-to-cart does NOT populate $cart. Clicking [data-add-to-cart] leaves SpacetimeLocal.cart empty (length 0), .cart-items renders 0 items, .total-amount/.cart-count stay blank.
+
+* Key finding: NOT caused by the reactive-channel fix
+Verified at the committed BASELINE (HEAD before my uncommitted changes, by temporarily restoring git-show HEAD content of the 4 stdlib files): cart-demo was ALREADY broken there too (items 0, cart 0). So this regressed earlier in the session (likely during the @computed/BUG-034 work or the false-commit churn), independent of commit 1602ebd9.
+
+* Why the 1602ebd9 fix doesn't cover it
+cart-demo's @each($cart as $item){ &cart-item($item) } compiles via the each-with-templates / invokeTemplate path (it uses external <product-card>/<cart-item> web-component templates), NOT the each.st simple-render or keyed-diff variants that were bridged to local:<name>:updated. So that path still only listens on the data-registry channel and never hears $cart mutations.
+
+* Repro
+cargo run -- serve examples/cart-demo/ ; click "Add to Cart"; observe SpacetimeLocal.cart stays []; no cart items render.
+- closest('product-card') resolves correctly (handler selector is fine).
+- No JS console errors.
+- Manually setting SpacetimeLocal.cart + dispatching local:cart:updated also renders 0 (so the each-with-templates path ignores the local channel entirely).
+
+* Hypotheses
+1. each-with-templates needs the same local:<name>:updated bridge that each.st's render/diff variants got in 1602ebd9 (find the each-with-templates emit and add the listener).
+2. OR the @on click [data-add-to-cart] delegated handler isn't writing $cart (the mutation expr uses $.closest(...).dataset; verify the delegated event path passes the right $ target so the concat runs).
+
+* Acceptance
+- cart-demo add-to-cart appends to $cart; .cart-items renders the item; .total-amount/.cart-count update live; verified in-browser.
+- Root-caused at the mechanism (each-with-templates local-channel bridge and/or delegated-handler $ target), not patched in the example.
+
+* Relation
+Sibling of 1602ebd9 (which unified the channels for each.st render/diff variants, state.st, drivers.st). This extends the same unification to the each-with-templates path used by external-template @each lists.
+
+NOTE [2026-05-30]: FIXED + live-verified (commit c30c84d2). Root cause was deeper than the each-with-templates hypothesis: the FEAT-042 signal-channel writes (`window.SpacetimeLocal = window.SpacetimeLocal || {}`) CLOBBERED the reactive Proxy. When @data $products loaded before the $cart local-state decl, it created a PLAIN SpacetimeLocal object; local-state-impl's `if (!window.SpacetimeLocal)` then saw it truthy and SKIPPED installing the Proxy -> $cart written to _localState but unreachable via SpacetimeLocal -> add-to-cart threw 'undefined.concat'.
+
+Fix (Proxy is now authoritative, never clobbered): __stProxy identity marker on the Proxy; local-state-impl migrates a pre-existing plain object's keys into _localState and replaces it with the Proxy; source.st/computed-source.st/drivers.st/state.st all write THROUGH the Proxy when present (set-trap dispatches) else write _localState backing store + dispatch manually. each-with-templates + each.st already bridged to local:<name>:updated in 1602ebd9.
+
+Also fixed a fatal emit bug en route: ';' inside // comments in %emit js blocks gets split as statements -> invalid JS. Rewrote comments without ';'. node --check passes for all demos + cart-demo.
+
+Verified LIVE: cart-demo add Rug(299)+Lantern(149) -> 2 items, total 448, count 2; reactive-list 3->4->3->0; tests reactive 14/computed 14/cart_demo 1/data 7/each 2 + headless green.

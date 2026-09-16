@@ -1,0 +1,93 @@
+#+TITLE: Unify %form body region onto the CapturePatternAst PEG (groups, alternation, optional head-lines)
+#+STATE: DONE
+#+SESSION_ID: 1503ca05d05c0c62
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-10T14-32-18-497Z_1503ca05d05c0c62.jsonl]]
+#+CUSTOM_ID: FEAT-103-bug-form-optional-metadata-head-line-bef
+#+COMPLETION_HASH: 1b07b7ee906d8d31
+
+* Initial Message
+
+due you're being very thick. HOLES ARE WRITTEN WITH BACKTICKS YOU FUCKING IDIOT
+THERE'S A WHOLE TEST INFRA BUILT ON CHROMEOXIDE
+
+
+How the f are you so thick.
+
+Parent: [[id:PLAN-031-editable-structured-rich-text-input-mult]] (FEAT-097).
+
+* Symptom
+A `%form` that places an optional literal-led capture line BEFORE a
+`$body:component_body` capture fails to match — the whole form silently
+non-matches, so the macro's `%binds` never fires (0 emit):
+#+begin_src spacetime
+%form {
+  @editable-mark &$name:ident($params:param_list) {
+    ( shortcut: $shortcut:string )?   // <-- this optional group
+    $body:component_body
+  }
+}
+#+end_src
+Build-verified (2026-06-10): identical macro WITHOUT the optional group emits the
+factory (`grep emk_c` = 1); WITH the group, 0. Confirmed it is the group, not
+%registers (tested in isolation — %registers alone is fine).
+
+* Root cause (hypothesis)
+`component_body` is a GREEDY segment scanner (stdlib/capture-types/component-body.st)
+that consumes the entire brace-inner run, including a leading `shortcut: "x";`
+line (which matches no cb_* arm → treated as HTML text). So the optional head
+capture never gets its turn; and/or the %form matcher can't anchor an optional
+literal-group immediately before a greedy whole-body capture.
+
+* Also: the alternate arg-form `@editable-mark(shortcut: $s:string?) &$name(...)`
+fails too — `@dir(args) &name(...)` two-part shape is "expected scope block,
+directive, or declaration". The combined paren-args + element-ref head is not a
+recognized directive shape.
+
+* Options (decide when prioritized)
+A. Add a `cb_shortcut` leaf + component_item arm + reifier field
+   (ComponentBodyDef.shortcut) — metasystem-honest (self-describing), but
+   cross-cuts the body corpus + snapshots. Then shortcut lives IN the body and
+   is read from ComponentBodyDef. PREFERRED long-term.
+B. Fix the %form matcher to support an optional literal-led capture line before a
+   greedy body capture (general grammar fix).
+* Interim (FEAT-097 ships without this): @editable-mark/@editable-block take NO
+  body shortcut line; schema.shortcut = None. Keymap defaults handled editor-side
+  (FEAT-098) or via a later cb_shortcut (option A). No functionality lost — marks
+  render + register + schema-emit without a shortcut.
+
+* CLUSTER A — W-A0 (user-directed 2026-06-10): Option B, the ambitious PEG unification
+
+Decision: Option B, NOT Option A. Do NOT add ComponentBodyDef.shortcut. Instead
+route the %form body region through the CapturePatternAst PEG that ALREADY EXISTS
+(meta_ast.rs:951; compile_pattern in extractors/custom.rs). The two grammar engines
+(%capture_type = full PEG, %form = weak flat FormClause) have diverged; this unifies
+them. `cb_nested_each` proves optional-literal-led-group + greedy-tail already work
+in capture-types — the capability just isn't reachable from a %form body.
+
+Empowers (the freedom the user asked for):
+- optional metadata head-lines:  ( shortcut: $s:string ; )?  $body:component_body
+- inline alternation in forms:    ( "row" | "column" )
+- repeated runs:                  ( $k:ident "=" $v:string ; )*
+- required guards before greedy:  ( layout: $l:ident ; ) $rest:component_body
+- pseudo-selector / keyword-block re-expressed as Group lowerings (net simplification)
+
+Resolution efficiency (answered): groups are INTRA-form ordered-choice, never
+expanded into sibling forms. Cross-form resolution UNCHANGED (prefix bucket O(1) ->
+static specificity -> first-match). Optional-absent = floor specificity. The
+"multiple macro versions" pattern COLLAPSES into single forms with optional groups.
+
+Determinism rule: optional groups MUST be literal-led (anchor token), enforced +
+documented (same family as component-body.st "bounded leaf before a literal").
+
+Gate: (1) `( shortcut: $s:string ; )?` head-line emits factory + schema.shortcut
+flows via the %form path (not direct call); (2) every existing macro matches
+identically (cargo test --lib); (3) `( a | b )` + `( ... )*` in a %form body work.
+
+NOTE [2026-06-11]: DONE 2026-06-10 (d03a1d92 impl + f70d8d05 hardening). Option B shipped: %form body
+region routes through the CapturePatternAst PEG. `( "shortcut" ":" $s:string ";"? )?`
+head-line works ahead of greedy $body:component_body; $shortcut flows to %registers +
+schema.shortcut. Resolution unchanged (intra-form ordered-choice, no sibling expansion;
+reviewer-confirmed correct). Body groups general: optional/required/repeat/alternation,
+all literal-led-disciplined. Reviewer swarm (3 agents) → FEAT-104 (5 fixes, done).
+Lib 2218 green. NB second org failure (@dir(args)&name two-part head) remains out of
+scope as planned.

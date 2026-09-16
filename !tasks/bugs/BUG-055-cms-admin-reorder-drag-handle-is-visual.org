@@ -1,0 +1,43 @@
+#+TITLE: CMS admin: reorder drag-handle is visual-only (not wired)
+#+STATE: DONE
+#+SESSION_ID: 14f8685429e4ccf1
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-01T18-22-11-112Z_14f8685429e4ccf1.jsonl]]
+#+CUSTOM_ID: BUG-055-cms-admin-reorder-drag-handle-is-visual
+#+COMPLETION_HASH: 7140faf712dbedce
+
+* Initial Message
+
+ok let's think deeply deeply. What would a headless CMS for Spacetime look like? like a headless CMS that has all the nice features of a headless CMS and the power of Spacetime combined. Look at the stdlib and the __dev__ to understand some of the pre-existing experiments, and do a research on the state of headless CMSes, before coming back with your THOUGHTS AND REFLECTIONS (no decisions yet)
+
+* Source
+PLAN-028 Wave A ground-truth (browser drive of /__spacetime/admin/ on projects/unkn/).
+
+* Symptom
+Each collection row renders a drag handle (=.ad-drag=, "⋮⋮") implying reorderability,
+but rows are =draggable=false= and there are NO move-up/down buttons. Reordering is
+impossible in the UI. The server-side EditJsonArray Reorder op EXISTS and works
+(window.__stDevSave.saveArrayReorder), so this is purely a missing client wiring +
+affordance.
+
+* Evidence
+- DOM: =document.querySelector('.ad-row').draggable === false=; no =.ad-row button=.
+- Handle present: =.ad-drag= exists on every row.
+- Protocol ready: EditJsonArray Reorder handled in src/sync/handlers.rs; add/delete
+  (Insert/Delete) already verified working end-to-end on disk in the same session.
+
+* Fix (Wave B)
+Wire the drag handle in stdlib/__admin__/admin-app.st to either (a) HTML5 drag-and-drop
+(draggable rows + dragover/drop computing from_index→to_index) or (b) up/down buttons —
+PLAN-006 deferred DnD to a FUP, so buttons are the conservative MVP. On drop/move call
+window.__stDevSave.saveArrayReorder(file, fromIndex, toIndex) (verify exact API name in
+dev-save.st). Optimistic reorder + ack/reject revert, matching the add/delete pattern.
+
+* Acceptance
+- Dragging (or move-button) a row reorders it; data/<source>.json order changes on disk;
+  @each re-renders in the live site in the new order; reject reverts.
+
+* Related
+- PLAN-028 (V1 closeout, Wave B), stdlib/__admin__/admin-app.st, dev-save.st,
+  src/sync/handlers.rs (EditJsonArray Reorder).
+
+NOTE [2026-06-03]: FIXED + reviewed (Wave B). Wired HTML5 drag-and-drop in stdlib/__admin__/admin-app.st: wireReorder() makes rows draggable with scarlet drop-indicators (.ad-row--dropbefore/after); reorderEntry() normalizes pre→post-removal index (if to>from: to-=1), splices col.data, calls saveArrayReorder(file,'',from,to). Verified LIVE on unkn: Carolina idx0→after Gabbi gave [Rafaella,Gabbi,Carolina,Sofi] and persisted to data/talent.json (server EditJsonArray ok). Reviewer (reviewer agent) confirmed index math correct vs server remove(from)+insert(to) semantics (handlers.rs:297-298); flagged one P2 activeIndex desync (dragging a non-active row across the open drawer's active entry) — FIXED by mirroring the splice on state.activeIndex (from<active&&to>=active → -1; from>active&&to<=active → +1). Rebuilt + served.

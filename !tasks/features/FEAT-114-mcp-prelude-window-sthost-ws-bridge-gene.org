@@ -1,0 +1,98 @@
+#+TITLE: MCP prelude — window.__stHost ws bridge + generic /__mcp/signal sink
+#+STATE: ITEM
+#+SESSION_ID: 1507711255a45786
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-13T10-37-35-958Z_1507711255a45786.jsonl]]
+#+CUSTOM_ID: FEAT-114-mcp-prelude-window-sthost-ws-bridge-gene
+
+* Initial Message
+
+look at the Spell MCP features. I would like the interfaces to be defined as functions that are loaded into the live environment, so that it is a fully live environment from scratch, instead of just a 'prompt thing'.
+
+1. look at anything that's pending in that thread of work
+2. find your own insights w.r.t what I just said
+3. come back to me with your realisations
+
+* Parent
+[[id:PLAN-038-signal-reactive-output-the-sibling-of-da]] — WAVE 2 (the transport
+substrate under FEAT-111). Design: [[file:../../research/spacetime-signal-S0.org]]
+§S1. Depends on [[id:FEAT-110-signal-core-reactive-output-post-emit-th]] (@host ws
+transport + @data signal/stream).
+
+* Why (this is the original ask, made concrete)
+The user's goal: "interfaces defined as functions loaded into the live environment …
+a fully live environment from scratch, not just a 'prompt thing'." That requires a
+HOST BRIDGE a served .st page can signal through — the runtime substrate that makes
+`@host $mcp : ws($hostSocket)` real. This FEAT is that substrate (the prelude +
+generic sink); FEAT-111 is the tool surface (st_mount/st_await + the library .st
+functions) built on top.
+
+* The bridge (mirror window.__stDevWs EXACTLY)
+- __dev__ injects window.__stDevWs (a ws bridge: connected/lastMessage/error +
+  send) into dev-served pages (stdlib/__dev__/primitives/dev-ws.st). The MCP prelude
+  injects window.__stHost the SAME way: a ws Channel exposing
+  { dispatch(envelope) -> reply, subscribe(handler) } over the MCP's ephemeral
+  ws endpoint. `@host $mcp : ws($hostSocket)` binds to it; `@data signal/stream … to
+  $mcp` send/receive route through it.
+- ONE generic sink route on the MCP's ephemeral server: /__mcp/signal/{instance}.
+  __stHost.dispatch POSTs/sends the decoded-OUT envelope here → stored keyed by
+  instance + correlation id → unblocks st_await (FEAT-111). REPLACES the bespoke
+  /__mcp/choose route + ChooseForm{option:usize} struct.
+- correlation: the prelude stamps each outbound envelope with a correlation id and
+  routes replies back to the originating signal's @handle (the runtime-invisible
+  fiber id from §S1). One-shot signal = one reply; stream = many until `final`.
+
+* Self-describing wiring (the introspection rail)
+When st_mount(fn, input) compiles a .st page, it READS the page's @data-signal
+registry (FEAT-110 binding facts; same rail as @data dispatch / FEAT-113) to learn
+the interface's input + response sum, and serves the page with __stHost injected.
+No hand-fed schema — the function's signal registry IS the schema.
+
+* Verified ground truth
+- dev-ws.st: %primitive dev-ws { %emit js { … window.__stDevWs = { … }; %yield
+  connected/lastMessage/error } } — the exact pattern to mirror for __stHost.
+- src/mcp/live.rs: already runs an ephemeral axum server + proposal store + the
+  await poll. REUSE the server + store machinery; swap the bespoke /__mcp/choose
+  route for the generic /__mcp/signal/{instance} sink + correlation map.
+- src/mcp/state.rs: the store keyed by proposal id — generalize to instance+correlation.
+
+* Scope (W2 substrate)
+IN: window.__stHost ws-bridge prelude (demand-injected into MCP-served pages, like
+__dev__); the generic /__mcp/signal/{instance} sink + correlation map on live.rs;
+the store generalization (state.rs); the registry-read hook st_mount uses. Wire
+`@host $mcp : ws(...)` + `to mcp` to the bridge.
+OUT (→FEAT-111): st_mount/st_await tool surface + the stdlib/__mcp__/ library .st
+functions + deletion of the old tools. (→W5): device hosts.
+
+* Edge cases
+- page served without the prelude (non-MCP context) → __stHost absent → `to mcp`
+  emit degrades to console.debug noop (never throws); landing/web pages unaffected.
+- ws disconnect mid-signal → __stHost surfaces error → @handle Failed arm fires.
+- multiple instances live → instance id isolates stores; correlation id isolates
+  in-flight calls within an instance.
+- stream signal → prelude keeps the correlation open, routing every message to the
+  same @handle until a `final` arm or cancel.
+- reconnect → mirror dev-ws reconnect (configurable backoff).
+
+* Tests
+- prelude injection: an MCP-served page has window.__stHost; a non-MCP page does not.
+- round-trip (cdp): a page with `@data signal $x(..) to $mcp` fires → /__mcp/signal/
+  {instance} receives the decoded envelope keyed by correlation → reply routes back →
+  @handle runs. Assert the payload shape = the signal's declared interface.
+- correlation: two in-flight signals on one instance → replies route to the right
+  @handle (no cross-talk).
+- harmony: grep src/mcp shows /__mcp/signal as the ONE sink; /__mcp/choose +
+  ChooseForm + OptionDiagnostic precompute are GONE (deletion lands here or FEAT-111).
+
+* Acceptance (W2 substrate)
+- window.__stHost injected into MCP-served pages (mirrors __stDevWs); `@host $mcp :
+  ws(...)` + `to mcp` route through it.
+- ONE generic /__mcp/signal/{instance} sink + correlation map; bespoke choose route
+  retired.
+- st_mount reads the signal registry to expose the interface (no hand-fed schema).
+- cargo build + tests green; cdp round-trip proven; harmony grep clean.
+
+* Files (expected)
+- stdlib/__mcp__/primitives/host-bridge.st  (NEW — %primitive st-host / window.__stHost)
+- src/mcp/live.rs   (generic /__mcp/signal/{instance} sink + correlation; inject prelude)
+- src/mcp/state.rs  (instance + correlation store generalization)
+- src/mcp/tools.rs  (st_mount registry-read hook — surface shared w/ FEAT-111)

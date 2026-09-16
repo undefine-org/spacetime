@@ -1,0 +1,69 @@
+#+TITLE: Fix on visible animation chain broken by evaluate lookup bug
+#+STATE: DONE
+#+SESSION_ID: 14aefc02b33c29f0
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-04-05T17-39-49-068Z_14aefc02b33c29f0.jsonl]]
+#+CUSTOM_ID: PLAN-012-fix-on-visible-animation-chain-broken-by
+
+
+* Initial Message
+
+now run a visual verification please. I want the website to be feature-complete
+
+* Context
+
+** Problem
+The hero animation on ora-ventures.com never fires — all content below the first headline stays at =opacity: 0=. The =@on visible= directive, which starts the animation chain, silently produces no JS output.
+
+** Root Cause
+=evaluate_match()= in =src/pipeline/evaluate.rs= line 117 uses =registry.get_macro(&form_match.macro_name)= to look up macro definitions. For =@on= directives, =form_match.macro_name= is ="on"= (derived from the =@on= directive prefix), but the macro is registered under its full name ="on-event-dispatcher"=. The HashMap lookup returns =None=, so =evaluate_match= returns an empty result without processing the =%if/%elif= conditional =%binds= blocks.
+
+The downstream =resolve_single= function DOES find the macro (it uses form-directive lookup with scoring), but it only handles top-level =%binds= — not conditional ones inside =%if/%elif= blocks. Result: zero primitives are emitted for =load-driver=, the =line-1= timeline is never created, and the entire =@after= chain stalls.
+
+** Why other @on directives work
+- =@after= has top-level =%binds= (no conditionals) → =resolve_single= handles it
+- =@on click { mutations }= matches =on-mutation-dispatcher-simple= which also has top-level =%binds=
+- The 5 affected macros (=on-event-dispatcher=, =responsive=, =state-machine=, =waapi-on-event=, =waapi-timeline=) all use conditional =%binds= inside =%if/%elif= blocks
+
+** Approach
+One-line fix with fallback: when =get_macro()= returns None, use form-directive lookup + scoring (the same approach =resolve_single= already uses). This ensures =evaluate_match= finds the correct macro definition and processes its conditional =%binds=.
+
+** Key Decision
+- Fix in =evaluate_match= only — do NOT change =FormMatch.macro_name= or =get_macro=. The directive-derived name is used elsewhere and changing it would be a wider refactor.
+
+** Locale /en/ 404
+Confirmed as the pre-existing V8 thread degradation (FUP-007). The =/en/= route returns 200 on a fresh server; 404s only after V8 runtime degrades from repeated requests. No new regression from PLAN-011.
+
+* Verification
+
+- =cargo run -- inspect --layer emit /tmp/test-visible.st= → must show IntersectionObserver JS code, NOT ="Primitive not found: on"=
+- =cargo test --lib= → all tests pass (including new evaluate test)
+- =cargo run -- serve ora-ventures.com/= → hero animation chain fires in browser: all hero elements (flap, subtitle, CTA) animate from =opacity: 0= to =1=
+- Screenshot of the hero section with all elements visible saved to =!tasks/plans/plan-artifacts/PLAN-012-fix-on-visible-animation-chain-broken/hero-animated.png=
+
+* Execution Manifest
+
+** Phase 1: Bug fix
+- [[id:BUG-014-fix-evaluate-match-macro-lookup-for-form]] — Fix evaluate_match macro lookup for form-directive macros (S, #A, pipeline)
+
+Total implementation effort: S (one lookup change + tests)
+
+** Completion [2026-04-05]
+
+*** Verification
+
+- =cargo run -- inspect --layer emit /tmp/test-visible.st= → produces IntersectionObserver JS code (2 occurrences). No more \"Primitive not found: on\".
+- =cargo test --lib -- pipeline::evaluate::tests::test_evaluate_match_form_directive_fallback= → passes
+- =cargo test --lib= → 1979 passed, 0 failed (was 1978, +1 new test)
+- =cargo run -- serve ora-ventures.com/= → hero animation chain fires correctly: all hero elements (headline lines, subtitle, CTA button) animate to full opacity. Full page is feature-complete.
+
+*** Artifacts
+
+- [[file:!tasks/plans/plan-artifacts/PLAN-012-fix-on-visible-animation-chain-broken-by/hero-viewport.png]] — Hero section with all elements visible after @on visible animation fires
+- [[file:!tasks/plans/plan-artifacts/PLAN-012-fix-on-visible-animation-chain-broken-by/section-2.png]] — About section visible
+- [[file:!tasks/plans/plan-artifacts/PLAN-012-fix-on-visible-animation-chain-broken-by/section-3.png]] — Process/infrastructure section visible
+- [[file:!tasks/plans/plan-artifacts/PLAN-012-fix-on-visible-animation-chain-broken-by/footer.png]] — Contact form section visible
+- [[file:!tasks/plans/plan-artifacts/PLAN-012-fix-on-visible-animation-chain-broken-by/full-page.png]] — Full page screenshot showing all sections render correctly
+
+*** Deviations
+
+The plan identified only =evaluate_match= as needing the fix, but =resolve_evaluated= at line 53 of resolve.rs had the same broken lookup: =meta_registry.get_macro(&ev.form_match.macro_name)= where macro_name is the directive-derived name. Even with evaluate_match fixed to produce correct bind_decls, resolve_evaluated could not re-find the macro definition to pass to =resolve_via_binds_with_decls=. Both locations now use the same form-directive fallback pattern."

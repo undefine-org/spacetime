@@ -1,0 +1,96 @@
+#+TITLE: One-shot @on visible reveal reverts on viewport re-entry (intersection driver re-fires at p=0)
+#+STATE: DONE
+#+SESSION_ID: 154d859cbec2d93a
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-08-06T12-08-13-733Z_154d0baaa942d918/10-W5FidelityIdempotency.jsonl]]
+#+CUSTOM_ID: BUG-315-one-shot-on-visible-reveal-reverts-on-vi
+
+* Found via
+PLAN-137 W5, gh-6 follow-up. gh-6 (hold-end-state) is FIXED at the logic rung — the end
+keyframe is retained for the stays-visible one-shot case. This is the NOT-verified re-entry
+caveat: a driver that re-fires from p=0 when the element leaves and re-enters the viewport.
+
+* Verified state (reasoned, not run — needs CDP)
+gh-6's `@on &.visible(300ms)` compiles to the `intersection` driver
+(stdlib/primitives/intersection.st, registered for driver(visible) in
+stdlib/macros/drivers.st) with `once: false` — the emitted JS's observer is
+`if (false && entry.isIntersecting) observer.disconnect()`. It publishes
+`ST.set(el, "reveal", entry.intersectionRatio)` on EVERY intersection change.
+
+apply-animations' scalar path (emitted from stdlib/primitives/animation/apply-animations.st)
+watches that "reveal" driver signal:
+```
+const owner = el._stAnimOwner[normProp];
+const isActive = progress > 0 && progress < 1;
+if (owner && owner !== driverSignal && !isActive) return;
+if (isActive || !owner) el._stAnimOwner[normProp] = driverSignal;
+const value = interpolateKeyframes(prop.keyframes, progress, ...);
+applyStyle(el, prop.property, value, driverSignal, scopeId);
+```
+On first visible (ratio=1, progress=1): owner unset → `!owner` → owner=driverSignal, apply end
+value (opacity:1). RETAINED (this is the FIXED gh-6 case).
+
+On LEAVING the viewport (ratio→0, progress=0): isActive=false, owner===driverSignal so the
+return guard is false → interpolate at progress=0 → applyStyle START value (opacity:0). The
+one-shot reveal REVERTS while off-screen, and re-entering re-reveals (ratio→1 → opacity:1).
+
+∴ Reasoning shows re-entry WOULD revert — a real browser IntersectionObserver firing
+ratio=0 on scroll-out drops the end state. This is a re-entry POLICY defect, not fill-mode.
+
+* Gate (unrun, needs CDP)
+tests/repro/gh-6-hold-end-state/re-entry.cdp.test.st — mounts a one-shot @on visible reveal,
+lets it complete, scrolls the element out of the viewport, scrolls it back, and asserts
+opacity stays '1'. RED on current code (revert to 0); GREEN when one-shot visible drivers
+either disconnect after first intersect or pin the end state regardless of a p=0 re-fire.
+
+* Repro (reasoned)
+.curtain {
+  @on &.visible(300ms) as $reveal {
+    opacity: 0 -> 1;
+  }
+}
+Element leaves viewport → ratio 0 → applyStyle opacity:0. Re-enters → opacity:1.
+
+* Fix direction (not implemented)
+A one-shot (`@on` keyframe, non-scrub) visible driver should either (a) disconnect after the
+first intersecting publish (one-shot semantics — the author asked for a one-time reveal), or
+(b) not publish a p=0 that drops a completed animation's owned end state. The intersection
+primitive already has `once: bool` support; `&.visible` currently binds once:false. Decide
+once-policy per plan; this issue records that re-entry reverts today.
+
+NOTE [2026-08-07]: 2026-08-07 FIXED by the `.visible` repoint (PLAN-139 W1). `.visible` now registers `load-driver` (threshold-gated rAF timeline) instead of `intersection` (a sensor publishing the ratio AS progress). Leaving the viewport no longer republishes a low ratio, so a completed entrance stays completed.
+
+Evidence: `tests/repro/gh-6-hold-end-state/re-entry.cdp.test.st` — this bug's own gate, written RED and never before seen to pass — now passes under `--cdp` (1 passed). Also covered by `tests/bugs/BUG-323-on-visible-is-an-entrance-that-completes.test.st` test 3, which scrolls away and back and asserts the end value survives.
+
+CAVEAT for the sibling gh-6 files (`hold-end-state.test.st`, `hold-end-state-transform.test.st`): they remain RED, but NOT for this reason. They drive the timeline with `@clock install / advance 1000 / run-to-end`, and a virtual clock cannot advance a timeline whose START is gated on a real IntersectionObserver callback — under `--cdp` the element must genuinely be on screen. Verified the behavior they assert is CORRECT with real time: the same source with `@wait 1200ms` instead of `@clock` passes (`scratch/hold.test.st`, 1 passed under --cdp). Those two files need re-authoring onto real time (or `immediate: true`) rather than a code fix; filed as the remaining work, not a defect in the driver.
+
+* RESOLVED 2026-08-07 — the premise is DISPROVED
+
+This bug reasoned that a one-shot `@on &.visible` would revert when the element leaves and
+re-enters the viewport, because the driver re-fires from p=0. It was filed as reasoning, never
+as an observation — the caveat posted on GH-6 said so explicitly ("proving it either way needs a
+real browser").
+
+Now proven, in real Chromium:
+
+    /home/user/cdp-target/debug/spacetime test \
+      tests/repro/gh-6-hold-end-state/re-entry.cdp.test.st --cdp
+    -> 1 passed
+
+The gate scrolls the element fully out of the viewport, back in, and asserts opacity is still 1.
+It holds. A one-shot reveal does NOT revert on re-entry.
+
+Why this took two corrections to reach: the gate first appeared to fail, which I attributed to a
+fixture-init gap (BUG-325). Both were wrong. The real cause was BUG-328 — every page importing
+stdlib emitted a bundle that did not parse, so nothing ran at all. Once that landed, the gate
+passed on the first run.
+
+GH-6 can be considered fully closed, including the caveat I attached to it. The reporter was told
+to reopen if they saw a curtain flicker on re-scroll; that invitation stands, but the mechanism
+described here is not the explanation.
+
+** NOTE 2026-08-07 FIXED (PLAN-139 W1, 19c50b4a)
+Repointed `.visible` from `intersection` (a SENSOR publishing the intersection
+ratio AS progress, so leaving the viewport republished a low ratio and rewound
+the animation) to `load-driver` — the same threshold gate driving a real rAF
+timeline. This bug's own gate, tests/repro/gh-6-hold-end-state/re-entry.cdp.test.st,
+written RED and never before seen to pass, now passes under --cdp.

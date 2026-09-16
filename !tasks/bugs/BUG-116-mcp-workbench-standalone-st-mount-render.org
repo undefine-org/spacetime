@@ -1,0 +1,22 @@
+#+TITLE: MCP workbench: standalone st_mount renders blank body (agent-control panel unreachable)
+#+STATE: DONE
+#+SESSION_ID: 150f785b33edb744
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-19T16-17-16-496Z_150f785b33edb744.jsonl]]
+#+CUSTOM_ID: BUG-116-mcp-workbench-standalone-st-mount-render
+#+COMPLETION_HASH: dfe7daf08e05246a
+
+VERIFIED root cause (source-traced 2026-06-19). A template-only function mounted STANDALONE (st_mount without host/region) renders an empty <body> — only the runtime <script> loads.
+
+SYMPTOM (live): st_mount source="@template &main(){ <div><button data-mcp-action=kit-choice>Approve</button></div> }" agent_control=true → inst-2. GET /__mcp/instance/inst-2/ → body is just <script src=.../js>. /bundles HAS the main template; the page never mounts it.
+
+ROOT CAUSE: src/mcp/live.rs::instance_page (the standalone renderer) emits `function.html` as the body. For a template-only source, the COMPILED PAGE html is empty — file-scope HTML outside @template is ignored in v1 (compile_to_bundle even pushes a BUNDLE-V1 warning to that effect). The page has no region root + @view to invoke `&main()`, so the template is transported in /bundles but never rendered. Only the WORKBENCH HOST page wires `@mcp-region @view $stageTpl` (env.st) to mount guest templates; a bare standalone instance does not.
+CodePath: src/mcp/live.rs::instance_page  (body = inject_region_root_attrs(&function.html, ...))
+Contrast: stdlib/__mcp__/env.st `.mcp-stage[data-st-region="stage"] { @mcp-region @view $stageTpl { _ => &$stageTpl(); } }` — the host's mount wiring.
+
+IMPACT: the agent↔human co-edit story (comms / agent affordances, PLAN-046 M5) is unreachable through the documented agent_control mount — the button never renders, st_await can never resolve.
+
+FIX (review D3): give a standalone instance the SAME region-root + @view wiring the host stage has, so a template-only function's `&main()` actually mounts; OR make agent_control imply composition into a minimal host shell; OR (weakest) document that agent-control panels MUST be host-composed. Decide in the PLAN.
+
+Evidence: @research/mcp-workbench-review-2026-06-19-round3.org Part 2 R3-C3.
+
+NOTE [2026-06-19]: FIXED (PLAN-048 S5). instance_page synthesizes a `data-st-mcp-autostage` region root when function page-html is empty (template-only). Runtime (templates.js) gained initAutoStages/startAutoStage: on load it polls the instance's /bundles (no-region → own function) and registerBundle direct-mounts `main` into the autostage root. v8 test bug116_autostage_root_direct_mounts_main_without_view. Live-verified: standalone agent_control mount now renders its Approve button (was an empty body). Commit pending.

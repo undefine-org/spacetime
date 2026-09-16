@@ -1,0 +1,102 @@
+#+TITLE: Fix collect_descendant_tokens duplicate-token bug in catch-all arm
+#+STATE: ITEM
+#+SESSION_ID: 14a77002fa8c180b
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-03-30T20-58-47-146Z_14a77002fa8c180b.jsonl]]
+#+CUSTOM_ID: BUG-011-fix-collect-descendant-tokens-duplicate
+#+EFFORT: S
+#+PRIORITY: #B
+#+LAYER: parser
+
+* Initial Message
+
+Implement these audit recommendations from org://AUD-003-audit-implementation:
+
+Here are my findings:
+
+---
+
+## Audit Findings
+
+### 1. Latent duplicate-token bug in catch-all `_ =>` arm
+- **What**: The `_ =>` catch-all in `extract_body_captures` still uses `collect_descendant_tokens` which produces duplicate tokens. Any future `$var:fields`, `$var:params`, or `$var:states` body capture would silently fail the same way `Properties` did.
+- **Where**: `src/syntax/events/form_compiler.rs:1054-1111` (the `_ =>` arm)
+- **Why**: Silent extraction failure — the capture returns `None`, the field is silently absent, and the downstream consumer gets empty data. Latent today (no stdlib captures hit this), but a trap for the next person who adds a body capture using a complex extractor type.
+- **Effort**: `medium` (would need the same re-lex approach or fix `collect_descendant_tokens` to deduplicate)
+
+### 2. No unit tests for BUG-009 fix (el_init condition)
+- **What**: The plan's BUG-009 item specified 3 unit test scenarios (exports → Body, cleanup → Body, neither → None) but none were added. The fix is only covered by the snapshot test `data_directive_js`.
+- **Where**: `src/pipeline/expand.rs` — no `#[test]` module exists
+- **Why**: The snapshot test validates one case (data-source with exports). The critical distinction — a selectorless global with neither exports nor cleanup staying `None` — has no coverage. A future refactor could regress this without test failure.
+- **Effort**: `small`
+
+### 3. No unit test for BUG-010 fix (Properties re-lex path)
+- **What**: The plan's BUG-010 item specified unit tests (parse `@type Foo { name: string; }` → TypeRegistry with fields), but none were added. Verification was done via server endpoint only.
+- **Where**: `src/syntax/events/form_compiler.rs` — no test for the `CaptureType::Properties` arm
+- **Why**: The re-lex + pointer-arithmetic offset calculation is subtle. A regression (e.g., someone refactoring `inner` derivation to use `String` instead of `&str` slice) would silently break the offset math with no test failure.
+- **Effort**: `small`
+
+### 4. Pointer arithmetic assumes `inner` is a subslice of `source`
+- **What**: `inner.as_ptr() as usize - source.as_ptr() as usize` is safe today because `inner` is derived via `&source[body_start..body_end].trim().trim_start_matches('{')...`. But there's no `debug_assert!` guarding this invariant.
+- **Where**: `src/syntax/events/form_compiler.rs:1025`
+- **Why**: If a future refactor changes `inner` to be heap-allocated (e.g., `.to_string()` or `.replace(...)` earlier in the chain), the pointer arithmetic would produce garbage offsets silently. A `debug_assert!(inner.as_ptr() >= source.as_ptr() && ...)` would catch this in debug builds.
+- **Effort**: `trivial`
+
+* Scope
+** In Scope
+- Fix ~collect_descendant_tokens~ to not produce duplicate tokens when parent and child nodes share the same tokens
+- This affects the catch-all ~_ =>~ arm in ~extract_body_captures~ (form_compiler.rs:1054)
+- Once fixed, the dedicated ~CaptureType::Properties~ re-lex arm can be removed since the catch-all will produce clean tokens
+** Out of Scope
+- Changing the ~CaptureType::Properties~ arm itself (it gets removed as part of this fix)
+- Changing extractor logic
+
+* Problem
+~collect_descendant_tokens~ (form_compiler.rs:1364) recursively collects tokens from a ~ChildNode~'s ~tokens~ field AND all its children's tokens. When a parent node and its children share the same tokens (which they do for body captures), every token appears twice. After sorting by position, the sequence becomes ~IDENT IDENT COLON COLON~ instead of ~IDENT COLON~, which breaks multi-token extractors like ~PropertiesExtractor~.
+
+PLAN-009 worked around this by adding a dedicated ~CaptureType::Properties~ arm that re-lexes the text. But the bug is latent in the catch-all for any future ~$var:fields~, ~$var:params~, or ~$var:states~ body capture.
+
+* Implementation
+
+** Option A: Deduplicate by text_range (recommended)
+After collecting all tokens, deduplicate by ~(text_range.0, text_range.1)~ since duplicate tokens share identical byte ranges:
+
+#+begin_src rust
+fn collect_descendant_tokens(node: &ChildNode, out: &mut Vec<TokenData>) {
+    out.extend(node.tokens.iter().cloned());
+    for child in &node.children {
+        collect_descendant_tokens(child, out);
+    }
+    // Deduplicate: parent and child nodes may share the same tokens.
+    // Sort by position first, then remove duplicates by range.
+    out.sort_by_key(|t| (t.text_range.0, t.text_range.1));
+    out.dedup_by_key(|t| (t.text_range.0, t.text_range.1));
+}
+#+end_src
+
+Then remove the sorting at every call site (lines 1060, elsewhere) since tokens are now pre-sorted.
+
+** Option B: Collect only leaf tokens
+Change ~collect_descendant_tokens~ to only collect from leaf nodes (nodes with no children). This avoids duplicates by construction but changes semantics — need to verify no body_node has tokens that AREN'T in its children.
+
+** Recommended: Option A
+Dedup is simpler and preserves existing semantics. Sort+dedup in one place rather than at every call site.
+
+** Cleanup after fix
+Once ~collect_descendant_tokens~ produces clean tokens, remove the dedicated ~CaptureType::Properties~ arm (form_compiler.rs:1018-1050) and let Properties fall through to the catch-all ~_ =>~ arm like other extractor-based types.
+
+* Tests
+** Unit test: collect_descendant_tokens deduplicates
+- Construct a ~ChildNode~ with tokens [A(0,2), B(2,3)] and one child with tokens [A(0,2), B(2,3)]
+- Call ~collect_descendant_tokens~ → expect [A(0,2), B(2,3)] (not duplicated)
+** Integration: Properties via catch-all
+- After removing the dedicated Properties arm, run ~cargo test --lib~ (1977+ tests)
+- Verify ~@type Foo { name: string; }~ still produces ~CapturedValue::Properties~ with 1 field
+** Regression: existing capture types
+- Run full test suite to confirm no behavior change for Keyframes, MutationActions, ComponentBody, HtmlBlock (they go through different arms), or any extractor-based capture types in the catch-all
+
+* Acceptance Criteria
+1. ~collect_descendant_tokens~ produces no duplicate tokens when parent/child share tokens
+2. Dedicated ~CaptureType::Properties~ re-lex arm is removed from form_compiler.rs
+3. Properties falls through to catch-all ~_ =>~ and works correctly
+4. ~cargo test --lib~ passes (1977+ tests)
+5. New unit test for deduplication behavior

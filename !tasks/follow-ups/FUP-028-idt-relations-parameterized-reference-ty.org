@@ -1,0 +1,78 @@
+#+TITLE: id(T) relations — parameterized reference type + content graph
+#+STATE: ITEM
+#+SESSION_ID: 14f8685429e4ccf1
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-01T18-22-11-112Z_14f8685429e4ccf1.jsonl]]
+#+CUSTOM_ID: FUP-028-idt-relations-parameterized-reference-ty
+
+* Initial Message
+
+ok let's think deeply deeply. What would a headless CMS for Spacetime look like? like a headless CMS that has all the nice features of a headless CMS and the power of Spacetime combined. Look at the stdlib and the __dev__ to understand some of the pre-existing experiments, and do a research on the state of headless CMSes, before coming back with your THOUGHTS AND REFLECTIONS (no decisions yet)
+
+* Origin
+docs/specs/spacetime-cms-stage2-3.md §"VEIN 3". STAGE 2 (Squarespace killer).
+User decision (2A): relations are =id(Agent)=, NOT bare =Agent=.
+
+* Why
+The CMS needs relations between content entries (a Talent has an Agent; a Talent has
+Campaigns). The user decided these are REFERENCES, expressed as a parameterized type
+=id(Agent)= — NOT a bare =Agent=. Rationale:
+- A bare =Agent= field would NEST a full Agent object inside the Talent JSON:
+  denormalized, duplicated, not editable as its own entry.
+- =id(Agent)= keeps =Agent= a first-class collection and =Talent.agent= a POINTER.
+  Normalized, relational, correct.
+The parens form matches where the codebase is going (PARENTHESES for type args — cf.
+capture maps, =$v:balanced(';')= at src/parser/mod.rs:3583).
+
+* Current state (verify)
+- =TypeExpr= today (src/parser/ast.rs:348) = =Primitive | Array | Object |
+  Union(Vec<String>) | Reference(String)=. NO parameterized/applied type node yet.
+- =Union(Vec<String>)= is STRING-ONLY ("S"|"M"|"L"); no object unions in =TypeExpr=
+  (the state-machine subsystem has object unions at meta_ast.rs:136 if ever needed).
+- JSON-schema generation: =src/type_system/generate_json_schema=.
+- unkn already uses bare id strings as entry keys (data/talent.json: =id=, =slug=).
+
+* Scope
+1. Add a parameterized type to =TypeExpr=. RECOMMENDED: a general
+   =Apply { ctor: String, args: Vec<TypeExpr> }= node — the more extensible primitive
+   ("a primitive is right when it answers questions you never posed"; generalizes
+   beyond =id=). ALT: a special-case =Ref(String)=. LEANING: =Apply=.
+2. Parse =id(Agent)= (Apply) and =id(WorkCard)[]= (Array of Apply).
+3. JSON-schema: =id(Agent)= → ={ "type":"string", "x-st-ref":"Agent" }=;
+   =id(Agent)[]= → array of those. =x-st-ref= is the SIGNAL the admin reads to render
+   a relation PICKER instead of a text input.
+4. Storage: bare id string (single) / array of id strings (multi). Matches unkn. NO
+   ={"$ref":…}= envelope.
+5. Validation (warn-level, local): a value for =id(Agent)= SHOULD be an id that exists
+   in the =Agent= collection. Dangling refs WARN, not error.
+
+* Admin consumption (informational — built in the admin plan, not here)
+- single =id(T)= → chip + searchable picker over the target collection.
+- multi =id(T)[]= → multi-chip (reuse EditJsonArray on the id array).
+- GRAPH VIEW falls out for free: nodes = entries, edges = id(T) fields, edge labels =
+  field names. Pure read over the type+data registry (the Anytype "Graph view" idea).
+- backlinks DERIVED (don't store) — the graph already knows inverse edges.
+
+* Hidden opportunities
+- =@computed { where: $expr }= ALREADY EXISTS (stdlib/macros/type-data.st). Surfaced
+  in the admin, relations + computed = structured SAVED VIEWS ("Talents in Fashion")
+  with no GROQ, no hand-written queries — a content-ops layer Squarespace lacks.
+
+* Open questions
+- Apply node vs special-case Ref (leaning Apply).
+- bare id vs typed envelope (leaning bare; matches unkn). Trade-off: bare ids break on
+  rename (see the id-rename-cascade FUP); envelopes survive rename but add ceremony.
+- referential integrity on DELETE: warn-on-delete (scan referrers) vs soft-block vs
+  tolerate. Leaning warn-on-delete for Stage 2.
+- bidirectional relations: store inverse or derive? Leaning derive (graph knows).
+
+* Acceptance
+- =@type Talent { agent: id(Agent); campaigns: id(WorkCard)[]; }= parses.
+- types.json emits =x-st-ref= for those fields.
+- A value referencing a missing Agent id produces a warn-level diagnostic.
+- Round-trips through EditJson unchanged (it's just a string / string[]).
+
+* Related
+- docs/specs/spacetime-cms-stage2-3.md §"VEIN 3"
+- the id-rename-cascade FUP (deferred rename propagation)
+- src/parser/ast.rs (TypeExpr), src/type_system/ (schema + validation)
+- stdlib/macros/type-data.st (@type host)

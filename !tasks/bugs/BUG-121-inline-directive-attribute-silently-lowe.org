@@ -1,0 +1,105 @@
+#+TITLE: Inline @directive attribute silently lowers to a dead setAttribute (no refusal)
+#+STATE: DONE
+#+SESSION_ID: 150f9b60559952f5
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-19T18-50-16-790Z_150f9b60559952f5.jsonl]]
+#+CUSTOM_ID: BUG-121-inline-directive-attribute-silently-lowe
+#+COMPLETION_HASH: 83263664c3abc37f
+
+* Initial Message
+
+what did PLAN-048 do? can you let me try it out and show me?
+
+* Initial Message
+
+Found while test-driving the MCP workbench (2026-06-19). I authored a standalone
+agent-control mount with `<button @mcp-action="approve">Approve</button>`. The
+button PAINTED but clicking it emitted nothing — `st_await` drained 0 events.
+
+* VERIFIED root cause (source-traced)
+
+`@mcp-action` is a SELECTOR-SCOPED directive (a %macro at
+stdlib/__mcp__/primitives/host.st::559), only valid in a rule block
+(`.foo { @mcp-action(...) }`). There is NO inline-attribute form. So
+`<button @mcp-action="approve">` parses as an ordinary HTML attribute named
+`@mcp-action` with value `"approve"`. It has no hole, so the reactive emitter's
+all-literal branch emits it verbatim:
+
+  src/emit/html_reactive.rs::emit_attr  (verified live, builder string in /inst-2/js):
+    __n0.setAttribute("@mcp-action", "approve");   // a dead DOM attribute
+
+Nothing listens for that attribute. The directive never lowered. NO diagnostic at
+ANY layer — compiler, runtime, or test — objected. The button is inert.
+
+This is the SAME failure shape as the other workbench seam bugs: a DECLARED
+capability silently degrades to a no-op. Here the author wrote something that LOOKS
+like a directive and it compiled to nothing.
+
+* The invariant being violated: totality of lowering
+
+`@` is THE directive sigil (AGENTS harmony rule: one sigil, one meaning). An
+`@`-prefixed ATTRIBUTE reaching DOM codegen is, by definition, either a misplaced
+directive or a typo — there is no legitimate `@`-named HTML attribute. (Verified:
+zero .st files in the repo use an inline `@`-attribute; the `@click=` hits in the
+tree are all Alpine.js .html/.js source, not Spacetime.)
+
+So emitting a literal setAttribute for an `@`-prefixed name must be a REFUSAL, never
+a passthrough. This is the fidelity-ladder principle (refuse, don't fake-green)
+applied to codegen.
+
+* FIX (this BUG — the safety floor)
+
+Guard in src/emit/html_reactive.rs::emit_attr (the single chokepoint — BOTH the
+html5ever treesink path AND the CST attr path flow through it): when an attribute
+name starts with `@`, refuse with a clear, actionable compiler error instead of
+emitting a dead setAttribute. The message must name the element, the directive, and
+the correct selector-rule form:
+
+  error: `@mcp-action` used as an inline attribute on <button>.
+         @-prefixed names are DIRECTIVES, not attributes. Move it to a selector rule:
+           .approve { @mcp-action(action: "approve") }
+         (author `@` sigils MUST lower; none may degrade to a dead attribute)
+
+NB: `emit_builder` currently returns a bare String (no Result/diagnostic channel),
+so the implementer must decide the refusal mechanism:
+  (a) surface through the compile pipeline diagnostics (preferred — bundle.rs already
+      collects BundleDiagnostic; a hard ERROR severity here sets has_errors), OR
+  (b) a parse-time rejection in the element/attribute parser (src/syntax/cst or
+      src/html/treesink) where line/col is available for a miette span (best UX).
+Prefer (b) if the attribute name + span is reachable at parse time — a pointed
+miette diagnostic beats a panic deep in codegen. (a) is the fallback if the `@`-name
+only survives to emit. Either way: NO silent passthrough.
+
+* RED -> GREEN test
+
+RED: compiling `@template &main(){ <button @mcp-action="approve">x</button> }`
+currently produces a builder containing setAttribute("@mcp-action", …) and NO
+dispatch wiring. Assert that today (characterization), then flip:
+GREEN: the same source is REJECTED with a diagnostic naming `@mcp-action` and the
+selector-rule remedy; the build does not emit a dead-attribute builder.
+
+Unit test lives alongside the existing emit_attr tests in
+src/emit/html_reactive.rs::tests (or the parser tests if refusal is parse-time).
+
+* Acceptance
+- Authoring any `<el @anything="...">` (or `@anything(...)`) inline yields a compile
+  ERROR that names the directive and the selector-rule remedy. No dead setAttribute
+  is emitted.
+- All existing .st sources still compile (verified: zero inline `@`-attrs exist, so
+  no regression). cargo test --lib green; the new test asserts the refusal.
+- The standalone agent-control mount that started this: authored the CORRECT way
+  (`.approve { @mcp-action(action:"approve") }` + `<button class="approve">`), the
+  click emits an event st_await drains. (That correct-form live proof belongs to the
+  workbench-stage BUG / verification, but is the north-star this refusal protects.)
+
+* Out of scope (tracked separately)
+- Making the inline `@directive(...)` form ACTUALLY WORK (lower it, don't just
+  refuse it) — that is the feature, designed in FUP-073. This BUG is only the
+  refusal floor: turn the silent no-op into a loud compile error TODAY.
+
+* Provenance
+- Emit site: src/emit/html_reactive.rs::emit_attr (literal branch, ~L470-486).
+- Directive truth: stdlib/__mcp__/primitives/host.st::559 (%macro mcp-action).
+- Feature design: FUP-073 (inline @directive shorthand).
+- Session: MCP workbench round-3 test-drive (PLAN-048 follow-on).
+
+NOTE [2026-06-19]: FIXED + verified 2026-06-19. Totality-of-lowering guard: an `@`-prefixed inline HTML attribute now raises E0930 (refuse, don't fake-green) instead of lowering to a dead setAttribute. IMPL: find_directive_attrs walker in src/emit/html_reactive.rs (3 unit tests) + a scan over scopes/html_blocks in src/compiler.rs::compile pushing directive_attr_error(E0930) into pipeline_errors — so it surfaces in `cargo check`, server, AND MCP bundle (one sink). The message names the element+directive and steers to the selector-rule remedy (with a forward-pointer to FUP-073, the real inline-shorthand feature). GATES: lib 2380/0 (+6 tests: 3 walker + 3 compiler), html_reactive 20/0, integration 172/0; real sites (projects/undefine.org, examples/*, demos/app-shell) compile with zero spurious E0930. Verified safe: zero .st sources use an inline @-attr (the @click= hits in-tree are Alpine.js .html/.js, not Spacetime).

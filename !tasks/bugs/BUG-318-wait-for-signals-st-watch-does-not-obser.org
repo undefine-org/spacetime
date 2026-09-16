@@ -1,0 +1,44 @@
+#+TITLE: @wait_for_signal's ST.watch does not observe an async (debounced) write to a file-scope signal
+#+STATE: ITEM
+#+SESSION_ID: 154d91ed9602d93c
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-08-06T12-08-13-733Z_154d0baaa942d918/12-W3Resume.jsonl]]
+#+CUSTOM_ID: BUG-318-wait-for-signals-st-watch-does-not-obser
+
+* Initial Message
+
+Found during W3 (PLAN-137) while correcting tests/unit/animations/on-sig-change-mutation.test.st to genuinely gate.
+
+* Repro
+
+```
+@data inline $src number : 0;
+@data inline $dst number : 0;
+.d5 {
+  @on $src.change(debounce: 120ms) { $dst <- $dst + 1; }
+}
+@test "debounce" {
+  @fixture { <div class="d5">x</div> }
+  @when .d5 mouseenter
+  @eval (window.SpacetimeLocal.src = 7)
+  @eval (window.SpacetimeLocal.src = 8)
+  @wait_for_signal $dst on .d5 to_equal 1 timeout 1500ms   // FAILS: Timeout ... Current: undefined
+}
+```
+
+`@wait_for_signal` calls `ST.get(el, 'dst')` (undefined before the debounce fires) then subscribes via `ST.watch(el, 'dst', …)`. When the debounced body writes `$dst` 120ms later, ST.watch does NOT fire → the wait times out with `Current: undefined`.
+
+The same write observed via `@wait 500ms` + direct `window.SpacetimeLocal.dst` read shows the value DID update (1). So the body runs and the file-scope signal updates; only ST.watch fails to observe the ASYNC (debounced/timer-deferred) write. Synchronous writes (non-debounced `@on`) ARE observed (the sibling tests in the file pass).
+
+* Impact
+
+Low severity, narrow: `@wait_for_signal` cannot gate on a debounced/microtask-deferred file-scope signal. The debounce test was converted to `@wait 500ms` + direct read (proven working). 
+
+* Suspect
+
+`ST.watch` on an element for a file-scope signal name — the subscription is likely registered against the element-scoped signal store, which the file-scope rail's deferred write does not notify. Synchronous writes ride a path that also notifies the element store; the debounced write goes through a timer callback that misses it.
+
+* Evidence
+
+Binary: CARGO_TARGET_DIR=/home/user/w3-target/debug/spacetime, `cargo build --features headless`.
+- Minimal debounce repro with `@wait_for_signal` → fails "Timeout after 1500ms waiting for signal dst to equal 1. Current: undefined".
+- Same repro with `@wait 500ms` + `@assert (window.SpacetimeLocal.dst === 1)` → passes.

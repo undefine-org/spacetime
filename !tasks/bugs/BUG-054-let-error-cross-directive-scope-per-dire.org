@@ -1,0 +1,72 @@
+#+TITLE: @let/$error cross-directive scope: per-directive IIFE isolates test-body bindings
+#+STATE: DONE
+#+SESSION_ID: 14f94e45c6c3f247
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-02T11-06-49-499Z_14f94e45c6c3f247.jsonl]]
+#+CUSTOM_ID: BUG-054-let-error-cross-directive-scope-per-dire
+#+LAYER: compiler
+
+* Initial Message
+
+actually, Land the PLAN-026 core now (done/committed); file the testing-macro cluster (@assert swap, @then/@eval nested-match) as a new BUG/PLAN with the diagnosis captured, and STOP — .test.st gating remains blocked
+ on that follow-up. Don't register text tests yet.
+
+Put text tests as FEAT within the plan. Be comprehensive
+
+* Discovered
+W0 (FEAT-056). Once assertions gate, ~6 tests fail with "$X is not defined" /
+"$error is not defined".
+
+* Mechanism
+Each directive in a @test body compiles to its OWN IIFE:
+=(function(){ const el = document.body; <directive> })();=
+So =@let (el = …)= declares =const el= INSIDE its own IIFE — invisible to the
+next directive's IIFE. Likewise =@try { … }= sets =var $error= in one IIFE and a
+following =@assert ($error !== null)= runs in a different IIFE where =$error= is
+undefined. Tests historically dodged this with =window.__X= globals; assertions
+never ran (vacuous pass) so the breakage was hidden.
+
+* Evidence
+- state.test.st negative tests: =@try { @then … } @assert ($error !== null)= →
+  "$error is not defined".
+- =@let (lv = 7)= followed by =@assert (lv === 7)= → "lv is not defined".
+
+* Fix direction (W3-aligned)
+The test body should compile its directives into ONE shared lexical scope (single
+function body), not N isolated IIFEs — so =@let= bindings and =@try/$error= persist
+across sibling directives. This is the @mount/@setup scope model (PLAN-027 W3):
+a test body is a coherent program, not a sequence of sandboxes. Until then, @let
+is effectively non-functional for cross-directive use.
+
+* Scope decision
+Belongs to W3 (FEAT-059) where @mount/@setup define real shared scope. Tracked
+here so the ~6 failing tests have a home. Do NOT paper over with more window.__X.
+
+* Parent
+[[id:PLAN-027-spacetime-testautomation-infra-fidelity]]
+* Related
+[[id:FEAT-059-w3-assertion-grammar-mount-block-claims]]
+
+* PARTIAL FIX (PLAN-027 W3, commit pending)
+Fixed the SCOPE ARCHITECTURE: compile_block_body_to_js now flattens the
+per-directive `(function(){ const el = document.body; … })();` IIFEs into ONE
+shared scope (flatten_body_scopes in src/emit/js.rs). `const el` emitted once;
+sibling directives share scope. Verified: @eval mutations compound across
+directives (window.__shared 7->10), and @try/$error can now persist (same scope).
+
+REMAINING: `@let (name = expr)` still emits nothing — its `$assignment:expr`
+capture does not resolve the parenthesised assignment in the block-body rematch
+(becomes a __PH0__ placeholder / dropped). This is a `@let`-capture bug distinct
+from the scope architecture. The `@let (name = value)` form (name+value split)
+also fails to match (the `=` inside the arg-list isn't parsed between captures).
+Tracked here; @let is rare vs @eval-globals. The scope fix means once @let
+captures correctly, the binding WILL be visible to siblings.
+
+* RESOLUTION CHANGE (W3 live-component work)
+The flatten-to-one-scope approach was REPLACED by asyncify (commit pending): test-
+body directives keep per-directive IIFE isolation (required so @mount/@on nested
+`const init` blocks don't collide), but await-containing IIFEs (@when) become
+AWAITED ASYNC IIFEs so `await` is valid + ordered. Cross-directive @let/$error
+sharing is therefore NOT provided by scope-merging; tests use window.__X globals
+for cross-directive state (the established pattern). @let single-directive still
+works. This is the correct tradeoff: isolation > sharing, since real components
+(@mount/@on) need isolation. Closing BUG-054 as resolved-by-design.

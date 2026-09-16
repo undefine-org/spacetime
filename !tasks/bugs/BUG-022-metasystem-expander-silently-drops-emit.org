@@ -1,0 +1,112 @@
+#+TITLE: Metasystem expander silently drops %emit js body containing brace-bearing regex literals
+#+STATE: DONE
+#+SESSION_ID: 14cb5ac02323888c
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-04-27T18-31-12-780Z_14cb5ac02323888c.jsonl]]
+#+CUSTOM_ID: BUG-022-metasystem-expander-silently-drops-emit
+#+EFFORT: 2h
+#+LAYER: metasystem
+#+PRIORITY: #B
+
+* Initial Message
+
+Plan execution complete. Summary:
+
+ Shipped (foundation slice of PLAN-017):
+ - FEAT-015 (DONE) — Spacetime.review() 5-dim audit API. Walker + cache + dev-panel wiring in stdlib/__dev__/primitives/dev-review.st.
+ - FEAT-018 (DONE partial) — Showcase tree: SCHEMA + CATALOG + index + 7/24 patterns + fixture. Compiles cleanly.
+ - FEAT-021 (DONE) — spacetime-design umbrella skill: SKILL.md + 8 references. Replaces debug-spacetime + debug-compiler (deleted).
+
+ Deferred to FUPs (signed off truthfully in completion report):
+ - FEAT-016 → FUP-009 (Review tab)
+ - FEAT-017 → FUP-010 (Brand tab)
+ - FEAT-019 → FUP-011 (showcase CLI)
+ - FEAT-020 → FUP-012 (doctor CLI)
+ - FEAT-018 remaining → FUP-013 (17 showcases)
+
+
+Read all of these and tell me please what is deferred and why and let's ask each other and challenge ourselves
+
+Discovered during PLAN-017 implementation of =stdlib/__dev__/primitives/dev-review.st= (FEAT-015).
+
+* Scope
+
+In-scope:
+- Reproduce minimally: a =%primitive= with =%emit js { ... }= body containing a regex literal whose text portion has unbalanced braces (e.g. =/:root\s*\{[^}]*\}/g=).
+- Determine whether the bug is in the parser or the expander. Reading PLAN-017's experience: =cargo run -- check= reported success; =cargo run -- inspect --layer ir= showed Expanded[N] with an empty body; emit JS contained nothing for that primitive.
+- Fix or document. If a structural fix is too invasive, the minimum acceptable outcome is:
+  1. The parser/expander emits a clear diagnostic instead of silently dropping the body.
+  2. =compiler-debugging.md= reference doc (under =.claude/skills/spacetime-design/references/=) gains a section on this foot-gun with a workaround.
+
+Out-of-scope:
+- Refactoring brace-tracking globally if a focused fix exists.
+- Adding regex-literal lex support to the parser if the parser is fine and only the expander mishandles it.
+
+* Existing Patterns
+
+- Parser entry: =src/parser/chumsky/=. Form-pattern parsing in =metasystem.rs=.
+- Expander: =src/metasystem/expand.rs= (=bind_args=).
+- Working comparison: =stdlib/__dev__/primitives/dev-panel.st= line 516 contains =/^#[0-9a-fA-F]{3,8}$/= which IS a brace-bearing regex (balanced: 1 ={=, 1 =}=) and works fine. PLAN-017's broken regex was =/:root\s*\{[^}]*\}/g= which has 2 opens (=\{= + =[^}]*='s implicit nothing) and 2 closes (=\}= + =[^}]= char class). Net net: the difference may be the =\{= escape sequence, the char class containing =}=, or the count imbalance.
+
+* Tests
+
+Unit (=src/metasystem/expand.rs= test module or new =tests/parser/expander_regex_braces.rs=):
+- T1: A primitive with =%emit js { var r = /a\{b\}/; window.x = r; }= produces a non-empty Expanded body and the emit JS contains the regex.
+- T2: A primitive with =%emit js { var r = /:root\s*\{[^}]*\}/g; window.x = r; }= same expectation.
+- T3: A primitive with =%emit js { /* unrelated */ window.y = 1; }= produces a non-empty Expanded body (control).
+
+Integration:
+- T4: Re-author the original brand-audit walker variant (PLAN-017 commit shows the =/:root\s*\{[^}]*\}/g= form) and confirm it now expands correctly.
+
+Manual:
+- M1: =cargo run -- inspect --layer ir <fixture-with-brace-regex>= shows non-empty Expanded body for the affected primitive.
+
+* Implementation
+
+** ITEM Reproduce minimally
+:PROPERTIES:
+:CUSTOM_ID: BUG-022-metasystem-expander-silently-drops-emit::repro
+:END:
+- File: =tests/fixtures/expander/brace-regex.st= (new).
+- Tiny =%primitive= with the broken regex; tests confirm the emit body is empty today.
+- Run T1, T2, T3 against current code; confirm at least T2 fails.
+
+** ITEM Locate the drop site
+:PROPERTIES:
+:CUSTOM_ID: BUG-022-metasystem-expander-silently-drops-emit::locate
+:DEPENDS: BUG-022-metasystem-expander-silently-drops-emit::repro
+:END:
+- Trace through =parse= -> =resolve= -> =expand= -> =emit=, identifying which stage drops the body.
+- Likely candidates: brace-balanced text scanner in parser =meta_expr_body= capture, or expander's body-string handling.
+- Add a TRACE-level log at the suspected drop site if not already present.
+
+** ITEM Fix or surface as diagnostic
+:PROPERTIES:
+:CUSTOM_ID: BUG-022-metasystem-expander-silently-drops-emit::fix-or-diagnose
+:DEPENDS: BUG-022-metasystem-expander-silently-drops-emit::locate
+:END:
+- Preferred: fix brace-tracking to recognize regex literals.
+- Acceptable fallback: surface a clear =error= or =warning= at parse/expand time so authors know the body was dropped instead of silently producing empty JS.
+- Update T1..T4 to pass.
+
+** ITEM Document foot-gun in skill
+:PROPERTIES:
+:CUSTOM_ID: BUG-022-metasystem-expander-silently-drops-emit::document
+:DEPENDS: BUG-022-metasystem-expander-silently-drops-emit::fix-or-diagnose
+:END:
+- File: =.claude/skills/spacetime-design/references/compiler-debugging.md= (extend the existing "Common Error Patterns" section).
+- Add a "Brace-bearing regex literals in =%emit js=" entry with the original broken regex, the fix or workaround, and a pointer to BUG-022.
+
+* Edge Cases
+
+- Template literals with =${ }= interpolation in =%emit js= bodies: same risk class. Add to T1..T3 if the fix doesn't already cover them.
+- Char classes with unescaped =}= (e.g. =[^}]=): same risk.
+- Real braces inside JS strings (=var s = "{}"=): already worked in PLAN-017's primitive, so the existing scanner handles strings correctly. Confirm in tests.
+
+* Acceptance Criteria
+
+- T1..T4 pass.
+- =cargo run -- inspect --layer ir <fixture>= shows the affected primitive's body in the IR.
+- Either: the bug is fixed (regex literals tolerate any internal braces), OR the parser/expander emits a clear diagnostic naming the offending construct.
+- =compiler-debugging.md= has the new entry pointing back at this BUG.
+
+NOTE [2026-04-27]: PLAN-018: confirmed bug — brace-bearing regex literals (`/:root\\s*\\{[^}]*\\}/g`, `/a\\{b\\}/`) in `%emit js` bodies confuse the lexer's brace counter. Repro pinned in src/metasystem/tests.rs::grammar::test_brace_regex_in_emit_body_surfaces_diagnostic; foot-gun + workaround (string-based `new RegExp(...)`) documented in .claude/skills/spacetime-design/references/compiler-debugging.md under "Brace-bearing regex literals in `%emit js`". Per BUG-022 acceptance criteria the loud-failure path is sufficient; structural fix (regex-literal-aware lexer) tracked at FUP-017-bug-022-structural-fix-regex-literal-awa.

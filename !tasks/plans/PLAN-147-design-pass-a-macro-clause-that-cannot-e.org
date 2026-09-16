@@ -1,0 +1,428 @@
+#+TITLE: Design pass: a macro clause that cannot emit must not compile
+#+STATE: ITEM
+#+SESSION_ID: 153f5ed0617636c7
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-26T21-12-46-213Z_153f5ed0617636c7.jsonl]]
+#+CUSTOM_ID: PLAN-147-design-pass-a-macro-clause-that-cannot-e
+
+* Initial Message
+
+ok so is there any point in keeping the worktree now? verify
+
+* The finding
+
+Three directives shipped dead in one week, each for a different reason, each
+passing `check` and every source-level test:
+
+| directive        | why it did nothing                                   |
+|------------------+------------------------------------------------------|
+| `@fade-in`       | `%when $visible` is COMPILE-time; cannot see a signal |
+| `@fade-in` (v2)  | `const el = %&el;` → `const el = el;`, TDZ throw      |
+| `@mobile-motion` | `%states` emits no CSS                                |
+
+These are not three bugs. They are one STRUCTURAL FACT: **a macro can declare a
+clause the pipeline does not implement, and nothing says so.** The author reads
+the clause as a promise; the compiler treats it as decoration.
+
+* Measured inventory (not estimated)
+
+`scratch/inv.py` — brace-balanced scan of all 381 `%macro` definitions in
+`stdlib/`, classifying by which clauses each declares:
+
+- **381** macros on disk.
+- **29** declare `%form` but NO clause the pipeline emits from
+  (`%binds`/`%emit`/`%includes`/`%registers`/`%derives`).
+- Of those 29:
+  - **20** rely on `%states` alone — VERIFIED DEAD (below).
+  - **9** are `data-kind.st` registry/dispatch forms + `@if`/`@else`
+    (`conditional`, already documented dead under BUG-362) — all with **zero
+    usages** anywhere in the corpus.
+  - **1** false positive: `@exports` has no emitting clause but genuinely works
+    (5/5 in `tests/component-model/exports.test.st`) — a compiler path handles it
+    outside the clause system. Any enforcement MUST NOT break it.
+
+** `%states` is dead — measured four ways
+
+`@mobile-motion`, `@mobile-tokens`, `@mobile-colors`, `@mobile-typography`,
+`@safe-area`: each passes `check` CLEANLY and emits **30 bytes** of CSS, which is
+the probe page's own `body { background: white; }` and nothing else. The macros'
+declared custom properties (`--st-duration-fast`, `--st-ease-out`, …) never reach
+the stylesheet.
+
+`MacroDefAst.states` IS read in `src/pipeline/evaluate.rs` (lines 223, 280, 339),
+so this is not an unparsed clause — it is parsed, carried, and then dropped
+before emission. That is the most dangerous variety: every intermediate layer
+looks correct.
+
+NB the earlier suspicion that `stdlib/mobile` is simply unloaded was WRONG.
+It is an opt-in module (`@import "stdlib/mobile"`, same rail as `stdlib/md`), and
+with the import present `check` passes. The macros resolve. They just emit
+nothing.
+
+* The design question
+
+Two candidate rules. They are not equivalent and the choice matters.
+
+** A. A clause that cannot emit is a COMPILE ERROR at registry load
+
+When the stdlib loads, a `%macro` whose only output clause is unimplemented
+fails immediately, naming the clause. Dead constructs cannot enter the registry.
+
+- ✓ The failure lands on the STDLIB AUTHOR, at the moment of writing, not on a
+  page author months later wondering why their fade does nothing.
+- ✓ Kills the whole class, not the three instances found.
+- ✗ Breaks the build for all 29 today — must be paired with fixing or retiring
+  them in the same change.
+- ✗ Needs an explicit allow-list for `@exports`-style macros whose emission is a
+  compiler path, and an allow-list is the hand-synced list this arc has deleted
+  eight of. Prefer deriving "which clauses can emit" from the pipeline itself.
+
+** B. `%states` gets implemented, and E0964's rule is generalised
+
+E0964 already refuses a `%form` capture that no clause consumes ("a bound-but-
+unread capture is a half-implemented macro whose author intent silently
+vanishes"). That is EXACTLY this rule, one level up: a bound-but-unread CLAUSE.
+
+- ✓ Extends an existing diagnostic rather than adding a subsystem — satisfies the
+  elegance bar.
+- ✓ E0964's wording already carries the argument; it needs a second subject.
+- ✗ Does not by itself fix the 20 `%states` macros; that is separate work.
+
+RECOMMENDATION: **B for the rule, then A's strictness once the corpus is clean.**
+B is a small extension of a diagnostic that already exists and already believes
+this; A is correct but cannot land until the 29 are resolved, and landing a rule
+that breaks 29 macros on day one guarantees it gets reverted or allow-listed into
+uselessness.
+
+* Decisions needed before implementation
+
+1. `%states` — IMPLEMENT (emit the custom properties into the scope's rule) or
+   RETIRE (rewrite the 20 macros onto `%binds` + a primitive, as `@fade-in` now
+   is)? Implementing is less churn; retiring removes a clause and is the
+   one-need-one-implementation answer. **This is the load-bearing decision.**
+2. `@if`/`@else` (`conditional`) — zero usages, documented dead under BUG-362.
+   Delete, or implement? Deleting is honest today; a conditional is a language
+   feature people will expect.
+3. `data-kind.st`'s 7 registry/dispatch forms — zero usages. Same question.
+
+* Acceptance
+
+- A gate that FAILS when a macro declares only an unimplemented output clause,
+  seen RED against `@mobile-motion` before the fix.
+- `@exports` still passes (5/5) — the enforcement must not catch compiler-path
+  macros.
+- For whichever of (1) is chosen: a `--cdp` or CSS-output gate proving
+  `--st-duration-fast` reaches the stylesheet from `@mobile-motion`.
+- The 29 resolved: implemented, retired, or explicitly deferred with a filed item
+  — none left silently declaring a promise.
+
+* Method note
+
+Every defect here was found with `inspect --layer expansion` then `--layer emit`,
+after three hand-written probes proved nothing (grepping `dist/` scores zero for
+the known-working `@magnetic-glow`, so it cannot tell a live directive from a
+dead one). The layer inspector is the instrument for "where in the pipeline did
+this vanish" — it answered in two commands each time.
+
+Related: BUG-364 (closed), FUP-185, BUG-362, BUG-363 (closed).
+
+NOTE [2026-08-12]: INVENTORY CORRECTED — 19, not 29. My first scanner was wrong twice.
+
+Two scanner defects, both making the problem look bigger and more alarming than
+it is:
+1. It did not count `%pipeline-consumed` as an emitting path. That marker means
+   "a compiler stage consumes this", which is exactly how `@exports` works — the
+   false positive I had already noticed by hand but not fixed in the tool.
+2. Its brace-balancing broke on a `%form` containing nested `( ... )` groups, so
+   it truncated macro bodies early and missed real `%binds` clauses below them.
+   `data-signal` HAS a `%binds` (signal-call), 16 lines under its form.
+
+Corrected set (scanner at /tmp/inv2.py, splits on the NEXT `%macro` rather than
+brace-counting):
+
+  17 x `%states`-only  — mobile theme/testing/layout + `@resize-handle`'s states
+   2 x `conditional` / `conditional-else`  (`@if`/`@else`, BUG-362)
+
+EVERY `data-kind.st` form CLEARS. `data-registry-*`, `data-declarations`,
+`data-forms-*`, `data-signal`, `data-stream` all carry `%binds` or
+`%pipeline-consumed`. Decision (3) in this plan is WITHDRAWN — there is nothing
+dead there to delete, and deleting `data-signal`/`data-stream` would have removed
+live surfaces plus the ERROR SIBLING forms that exist specifically to catch
+near-misses (a bare number in a `$type:typeref?` slot) which would otherwise be
+silently dropped.
+
+`%states` IS CONFIRMED DEAD BEYOND MOBILE. `@resize-handle` in
+`stdlib/macros/drag.st` has a real `%binds` AND a `%states` block
+(`resizing when $active { cursor: ... }`). It emits 30 bytes of CSS on a probe
+page — the page's own `body` rule, nothing else. So the defect is the CLAUSE,
+not the mobile module, and it is not confined to macros that lack other output.
+
+WHAT `%states` IS, for the record: conditional CSS state blocks attached to a
+macro — `base { --tok: v }` and `name when $signal { prop: value }`, with
+`$var` placeholders that let a CALLER pass extra states in
+(`MetaStateDef::Variable`, resolved by `resolve_state_variables` in
+evaluate.rs:222). It is parsed, resolved, carried on `EvaluatedMacro.states`,
+and then never emitted.
+
+NOTE [2026-08-12]: DESIGN: what `%states` is, and whether a Spacetime-emitting form replaces it.
+
+* What it is
+
+Conditional CSS attached to a macro, in three shapes:
+
+  base { --tok: v }              unconditional  — 37 of 41 blocks in stdlib
+  name when $signal { … }        signal-gated   — 4 blocks
+  $var / $var?                   caller-supplied states, spliced in by the
+                                 CALLER (MetaStateDef::Variable, resolved by
+                                 resolve_state_variables, evaluate.rs:222)
+
+A fourth shape exists in the compiler but has no stdlib user: pattern-match
+states (`$var:Variant{bindings}`), handled by parse_pattern_match /
+generate_pattern_match_css.
+
+Lowering: `name when $sig` becomes `ST.bindState(el, '$sig', 'name')` + a CSS
+rule scoped to the macro's selector. So a state is a NAMED CSS BUNDLE toggled by
+a signal — the CSS-side counterpart of `@on $sig { true => … }`, which drives
+animation rather than styling.
+
+* The four cases any replacement must carry
+
+A. PURE TOKEN DUMP — `@mobile-motion` emits ~12 custom properties, no condition,
+   no signal. 37 of 41 blocks. This is the one that does not emit today (BUG-365).
+B. SIGNAL-GATED BUNDLE — `@mobile-colors-dark`: `dark when $dark { … }`, ~20
+   properties swapped by one boolean.
+C. DERIVED FAN-OUT — `@mobile-heading`: `%derives` computes `$isH1..$isH6` from a
+   `$size` param, then SIX states each gated on one derived flag. The condition
+   is not an author signal; it is computed from a macro argument.
+D. CALLER-SUPPLIED — a `$var` placeholder lets the CALLER pass extra states into
+   the macro's block. Any replacement must keep a splice point.
+
+* Could a form that outputs Spacetime directly do the trick?
+
+Partly — and the honest answer differs per case.
+
+** The mechanism already exists, one level down: `%emit css`
+
+#+begin_src spacetime
+%emit css {
+  %&el {
+    %property: calc(%from + var(--st-%driver) * (%to - %from));
+  }
+}
+#+end_src
+
+Measured: `%emit css` is used by 8 constructs, and EVERY ONE is a `%primitive`.
+No `%macro` uses it. So the "form that outputs CSS directly" is not a new idea to
+invent — it is an existing mechanism macros are not (or not conventionally)
+using.
+
+** Verdict per case
+
+A (token dump): YES, cleanly. `%emit css { %&el { --tok: v } }` says exactly what
+   it means and needs no state machinery at all. A bundle with no condition is
+   not a "state" — calling it `base` was always a lie of category. 37 of 41
+   blocks are this.
+
+B (signal-gated): NO, not directly. `%emit css` is static text; the whole point
+   is the `ST.bindState` hop that toggles a class when a signal changes. Emitting
+   the rule is the easy half; wiring the toggle is the half `%states` exists for.
+   A direct-output form would have to re-invent it.
+
+C (derived fan-out): NO, worse than B. Six states over six derived flags is a
+   MATCH on `$size`, spelled as six independent conditions. A direct-output form
+   would make the author write six `%emit css` blocks plus six bind calls.
+
+D (caller-supplied): NO. A splice point for caller-provided states is a
+   structural feature of the clause; raw text output has nowhere to put it.
+
+* Implication — the clause is doing TWO jobs
+
+`%states` conflates "a bundle of properties" (A) with "a bundle toggled by a
+condition" (B/C/D). That is why one branch could go missing unnoticed: the
+unconditional case has no business being in a construct whose whole apparatus is
+conditional, so the code path for it was never written, and the guard above it
+(`if properties.is_empty() && condition.is_none() { continue; }`) shows someone
+half-noticed.
+
+Two candidate directions:
+
+1. SPLIT. Unconditional bundles move to `%emit css` (an existing mechanism, no
+   new surface); `%states` keeps ONLY conditional states and its name becomes
+   true. Cost: touch 37 blocks. Benefit: deletes a category error, and the
+   remaining clause has one job.
+2. FIX THE BRANCH (BUG-365) and keep both in `%states`. Cost: ~10 lines.
+   Benefit: no churn. Cost long-term: the clause still does two jobs, and `base`
+   still reads as a state that is not one.
+
+RECOMMENDATION: do (2) NOW because it is a live defect with 17 macros behind it,
+then evaluate (1) separately as a naming/《one job》 question. Do not block the
+bug fix on the taxonomy argument.
+
+* A syntax to pressure-test, if (1) is chosen
+
+The `=>` arm form already in the language (`@on $sig { true => … }`) is the
+natural spelling for B and C:
+
+#+begin_src spacetime
+%styles $size {
+  1 => { font-size: var(--st-text-3xl); font-weight: 700 }
+  2 => { font-size: var(--st-text-2xl); font-weight: 700 }
+  _ => { font-size: var(--st-text-base) }
+}
+#+end_src
+
+That collapses case C's six derived flags + six states into one match on the
+actual argument — the `%derives` block disappears entirely. It reuses a sigil
+meaning the language already has (`=>` selects an arm) rather than inventing
+one, which is the harmony test.
+
+Pressure points that must be answered before adopting it:
+- B is a BOOLEAN signal, not a value match: `true => { … }` reads fine and
+  matches the `@on` precedent exactly.
+- D (caller-supplied) needs a splice arm — `$extra` as a bare arm? Undecided.
+- A does not fit at all, which is the point: A is not a match, it is a bundle,
+  and it belongs in `%emit css`.
+- A state today carries a NAME (`h1 when $isH1`) used for the generated class.
+  An arm has no name. Either the class is derived from the arm value, or the
+  name is lost — this is the unresolved cost of the sugar.
+
+NOTE [2026-08-12]: COUNT CORRECTED AGAIN — 49 conditional states, not 4.
+
+My earlier "4 conditional blocks" came from a grep reading only 3 lines past
+each `%states {`. A brace-balanced scan of every block finds:
+
+  49  conditional  (`name when $sig`)
+  61  unconditional (`base`), across 37 owner macros
+   2  variable splices (`$customStates?` in dnd/drag + dnd/drop-zone)
+
+Crucially FOUR conditional users sit OUTSIDE stdlib/mobile — `drag`,
+`drop-zone` (x2) in `stdlib/dnd/`, and `resize-handle` in
+`stdlib/macros/drag.st`. So the conditional half of `%states` survives ANY
+mobile deletion and must keep working. It is not a mobile-only feature.
+
+* THE FOUR CASES, measured
+
+** Case 1 — LIVE GATE, single state (14 macros)
+`dragging when $active`, `over when $over`, `focused when $focused`,
+`scanning when $scanning`. A boolean signal produced by the macro's OWN
+`%binds` primitive; one state, on/off. This is the archetype the clause was
+built for, and the only case where nothing else in the language substitutes:
+the CSS must react to a signal that does not exist until the primitive runs.
+
+** Case 2 — LIVE GATE, mutually-exclusive family (3 macros)
+`mobile-button`: pressing / loading / disabled. `pull-refresh`: pulling /
+refreshing. `drop-zone`: over / reject. Several live signals feeding ONE
+`data-st-state` carrier, so entering one leaves the other — and this is exactly
+the case `ST.bindState`'s "a falsy clear may only remove THIS declaration's own
+state" guard exists for (GATE 6 P1). Hand-rolled classes get this wrong.
+
+** Case 3 — DERIVED GATE = a match on a macro PARAM (22 of 49, the largest slice)
+`mobile-heading` h1..h6 gated on `$isH1..$isH6`, `mobile-text` xs/sm/base/lg,
+`scroll-view` horizontal/vertical/bidirectional, `modal` card/fullscreen,
+`tabs`/`toast` top/bottom. Every one has a `%derives` block whose ONLY job is to
+explode one argument into N booleans:
+
+    %derives { $isH1: $size == 1  $isH2: $size == 2  ... }
+    %states  { h1 when $isH1 { ... }  h2 when $isH2 { ... } ... }
+
+This is a MATCH ON `$size` written as six independent flags. It is compile-time
+— `$size` is a macro argument, known at build. Nothing needs to be watched at
+runtime at all, yet each one still emits an `ST.bindState` call.
+
+** Case 4 — CALLER-SUPPLIED SPLICE (2 macros)
+`$customStates?` in dnd's drag/drop-zone: the caller passes extra states INTO
+the macro's block. Any replacement needs a splice point.
+
+(A fifth shape — pattern-match states `$ws is Connected` → `[data-st-ws-type]` —
+is implemented in the compiler with ZERO stdlib users.)
+
+* What this changes about the design
+
+Case 3 is the biggest slice AND is not a runtime state at all. 22 of 49
+conditional states are a compile-time match, paying for a signal watcher they
+never need. That is the real redundancy in the clause — bigger than the `base`
+passenger.
+
+So `%states` is carrying THREE different things:
+  - a compile-time match on an argument      (case 3, 22)  → wants `=>` arms
+  - a runtime signal gate                    (cases 1+2, 27) → genuinely wants states
+  - a static bundle                          (`base`, 61)    → wants `%emit css`
+
+Only 27 of 110 total entries are using the mechanism for what it uniquely does.
+
+NOTE [2026-08-13]: INVESTIGATION: can `--` form splices replace the conditional half of `%states`?
+
+The hunch: `when $focused` predates the match statement, so those macros should
+be `--` forms driven by arms instead. Measured, and it is largely RIGHT —
+the mechanism already exists and is already typed.
+
+* What is confirmed (measured, reproducible)
+
+1. A `--name;` SPLICE INLINES PROPERTIES at the splice site.
+   `@form style --hot { color: red; font-weight: 700 }` + `.c { --hot; }`
+   emits `.c { color: blue; color: red; font-weight: 700 }`. Works today.
+
+2. FORMS ARE KINDED, and the kinds are data — `style` (87 uses), `easing` (48),
+   `score` (6), `motion` (6), `markup` (4), `value` (3). "THE KIND IS THE MACRO",
+   the same kinds-as-data shape `data-kind.st` uses.
+
+3. FORMS TAKE PARAMETERS: `@form style --card-surface($pad = 20px) { … }`
+   (demos/brand-catalog/_prelude.st:15).
+
+4. **`@on $sig { true => --form; }` COMPILES AND EMITS ARMS** for a MOTION form.
+   Verified: passes `check`, and the emitted output carries the arms payload.
+   So the arm-driven splice the hunch describes is not hypothetical — it ships.
+
+5. **THE SLOT IS TYPED, AND IT REFUSES A STYLE FORM:**
+
+   #+begin_src text
+   error[E0949]: `--hot` is a `style` form — `@on`'s form slot takes a MOTION form
+   #+end_src
+
+   That is the whole gap, stated by the compiler itself. The arm mechanism
+   exists; it accepts motion (animation) and not style (static properties).
+   `%states`' conditional half is exactly "apply these STATIC properties while a
+   signal holds" — a style form in an arm slot.
+
+6. `%includes` ALREADY EMITS SPACETIME FROM A MACRO — `fade-in-up`'s
+   `%includes { @fade-in(...) }`. So "a macro that outputs Spacetime" is an
+   existing clause, not a new one to design.
+
+* What is NOT established (my probes were unsound — recording so nobody trusts them)
+
+I tried to show that `%emit css` inside a `%macro` silently drops, and that
+`%includes { --hot; }` does not expand. BOTH readings are UNPROVEN: the control
+run — a SHIPPED primitive (`@css-property`, which uses `%emit css`) — also
+emitted nothing on the same scratch page. So the page shape is the fault, not
+the mechanisms. Every conclusion from those three runs is withdrawn.
+
+(The corpus-level fact does stand on its own: all 8 `%emit css` users are
+`%primitive`, zero are `%macro`. That is a convention observation, not proof of
+a defect.)
+
+* Design implication
+
+If a STYLE form were admissible in an arm slot, case 3 (22 of 49 states — the
+`$isH1..$isH6` fan-out) becomes:
+
+    @form style --h1 { font-size: var(--st-text-3xl); font-weight: 700 }
+    ...
+    %styles $size { 1 => --h1; 2 => --h2; _ => --base; }
+
+and the six `%derives` flags, six states and six `bindState` calls collapse into
+one match over the actual argument. Case 1 and 2 (27 runtime gates) become
+`@on $sig { true => --pressing; }` — the SAME spelling that already works for
+motion, with the same primitive behind it.
+
+That is one change — teach the arm slot to accept a `style` form and apply it as
+a state — replacing a clause that currently does three jobs. It reuses:
+  - the `--` splice (exists)
+  - kinded forms (exists)
+  - `=>` arms + drive-arms (exists, works for motion)
+  - E0949's kind-check (exists — it would simply admit one more kind)
+
+NEXT STEP, and it must be measured not assumed: build a page the way a REAL page
+is built (a project dir with `_prelude.st`, not a bare scratch file) and re-test
+(a) `%emit css` in a macro, (b) `--` splice inside `%includes`, (c) whether the
+arms path can carry static properties at all or only WAAPI keyframes. (c) is the
+load-bearing unknown: `drive-arms` may be animation-only by construction, in
+which case admitting a style form means teaching it a second output mode.

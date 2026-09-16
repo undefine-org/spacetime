@@ -1,0 +1,57 @@
+#+TITLE: FEAT-175 — [:st/md] reactive markdown node (stdlib/md rail)
+#+STATE: DONE
+
+* Summary
+A `[:st/md expr]` node renders its value as Markdown via the vendored snarkdown
+engine (stdlib/md), reactively. The markdown analog of [:st/html] (FEAT-174):
+where a text hole writes textContent and [:st/html] parses HTML, [:st/md] runs
+snarkdown(value) into innerHTML and re-renders on signal change. This is the
+affordance a chat/doc UI needs so PROSE renders formatted without a hand-rolled
+markdown parser in the consumer (spell was hand-rolling one in beam-lisp; now
+deleted).
+
+* What landed
+- HtmlExpr::Markdown(String) in src/ir/code.rs — the reactive-builder IR node.
+- HtmlInjection::Markdown in src/parser/ast.rs — the file-scope injection mode.
+- emit_markdown_hole (src/emit/html_reactive.rs): dual of emit_text_hole —
+  createElement span (display:contents), applyMd = () => innerHTML =
+  snarkdown(value), collect_signal_deps + emit_subscribe. Same signal semantics
+  as a text hole, different sink.
+- EDN ingress/egress (src/edn/ingress.rs, src/edn/doc.rs): [:st/md "expr"]
+  round-trips as HtmlInjection::Markdown.
+- File-scope lowering (src/compiler.rs emit_html_blocks): a Markdown injection
+  becomes a mount marker + emit_builder over HtmlExpr::Markdown.
+- Template-body path (src/emit/html_reactive.rs component_html_to_exprs):
+  fold_markdown_nodes converts a `<st-md>` sentinel element (single text-hole
+  child) → HtmlExpr::Markdown. This is how a TEMPLATE body reaches the markdown
+  rail (template bodies parse HTML strings via treesink, which is markdown-
+  unaware; the fold is a post-parse rewrite).
+- Runtime factory path (public/runtime/templates.js buildTemplateFactory): a
+  post-build pass renders any `<st-md>` descendant via snarkdown into innerHTML.
+  REQUIRED because spell's templates register as {html: "..."} bodies (the
+  string-interpolated ST.parseHtml path, not the compiled reactive builder), so
+  the fold alone doesn't cover them. One rule covers BOTH paths.
+- 6 exhaustive-match arms updated (html.rs, html_hydrate.rs, html_reactive.rs,
+  html_ids.rs, html_walk.rs) — Markdown groups with the reactive nodes.
+
+* Bug fixed along the way: vendor-injection ordering
+inject_vendor_preludes ran at compiler.rs ~2248, BEFORE emit_html_blocks (~2293)
+generated hole_hydration_js. A [:st/md] node's snarkdown(...) reference lives in
+that later JS, so the demand-driven vendor scan MISSED it and shipped a page
+calling an uninjected engine. Deferred the injection past the hydration merge so
+it scans the fully-assembled bundle; the vendor IIFE is self-contained (defines
+its global before any site/hydration code), so prepending to the whole bundle
+keeps ordering. This also fixes any future late-generated vendor reference.
+
+* Tests
+- src/emit/html_reactive.rs: folds_st_md_element_to_markdown_node,
+  folds_nested_st_md, markdown_node_emits_reactive_snarkdown (3/3, debug mode).
+- Proven end-to-end: standalone [:st/md] page + spell's chat timeline render
+  <h2>/<ul>/<code>/<strong>/<a> via snarkdown; verse check passes; lean law
+  preserved (no md node ⇒ no snarkdown bytes).
+
+* Note
+Release-mode lib tests have a PRE-EXISTING breakage (form_match.rs
+provenance_scope_html gated #[cfg(debug_assertions)] but called from a #[test]
+that runs under --release). Unrelated to this feature; new tests run green in
+debug mode.

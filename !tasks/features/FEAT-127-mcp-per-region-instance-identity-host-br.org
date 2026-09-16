@@ -1,0 +1,31 @@
+#+TITLE: MCP per-region instance identity (host bridge)
+#+STATE: DONE
+#+CUSTOM_ID: FEAT-127-mcp-per-region-instance-identity-host-br
+#+DEPENDS: PLAN-041-plan-039-unified-live-mcp-environment-or
+#+LAYER: mcp
+#+PRIORITY: A
+
+* Parent
+[[id:PLAN-041-plan-039-unified-live-mcp-environment-or][PLAN-041]] Wave 1 (substrate, parallel with FEAT-125/129).
+
+* Summary
+Move MCP instance identity from =<html>= (one per page) to each region root, so N bundles can co-render with isolated event routing. =@mcp-host= migrates =%scope file= -> =%scope selector= over =[data-st-instance]=; =window.__stHost= resolves by NEAREST ANCESTOR at event time (=target.closest('[data-st-instance]').__stHost=); one bridge per region.
+
+* Why
+Today =data-st-mcp-instance= is on =<html>= and =window.__stHost= is a page-global singleton (recon-verified). Two regions co-rendering would silently misroute events (second @mcp-host overwrites the first). Region-nesting requires per-region identity. The fix reuses the existing mcp-host/mcp-click primitives, just element-scoped instead of page-global.
+
+* Target
+- =stdlib/__mcp__/primitives/host.st= — =mcp-host=: %scope selector over =[data-st-instance]=; read instance from the bound element subtree, not documentElement.
+- =mcp-click-event= / =mcp-action-event= — payload() resolves host via =target.closest('[data-st-instance]').__stHost=, NOT =window.__stHost=. Each region's bridge attaches to its root element.
+- =src/mcp/live.rs= / =src/mcp/mod.rs= — inject =data-st-instance= + =data-st-origin= on region roots (not =<html>=); retire =data-st-mcp-instance= on =<html>=.
+
+* Edge
+- Region with no bundle -> no data-st-instance -> events from its placeholder go nowhere (placeholder has no @mcp-click, fine).
+- Nested bundles (a bundle whose template mounts sub-regions) -> closest-ancestor resolves the innermost; correct.
+- Two regions both using @mcp-click -> events route to their respective bridges; no cross-talk.
+
+* Acceptance
+- Headless: two regions, each with @mcp-click; clicking region A's button signals A's instance only; B unaffected.
+- @mcp-host no longer installs a page-global =window.__stHost= singleton; bridge is element-attached.
+- Emitted-JS asserted for the closest-ancestor resolution.
+- =cargo test= + headless green.

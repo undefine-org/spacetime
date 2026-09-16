@@ -1,0 +1,36 @@
+#+TITLE: %emit js splitter ignores // and /* */ comments (; inside a comment breaks emit)
+#+STATE: DONE
+#+CUSTOM_ID: FUP-063-emit-js-splitter-ignores-comments-semicolon
+#+DEPENDS: PLAN-041-plan-039-unified-live-mcp-environment-or
+#+LAYER: compiler
+#+PRIORITY: C
+#+COMPLETION_HASH: 24c83afabb30ab33
+
+* Parent
+[[id:PLAN-041-plan-039-unified-live-mcp-environment-or][PLAN-041]] — surfaced during W1 gap-fix (FEAT-127), kept out of scope.
+
+* Context
+During PLAN-041 W1, the FEAT-127 mcp-host primitive's `%emit js` contained a line comment with a `;` inside it (`// ...One bridge per region; no page-global singleton.`). This triggered a latent emitter bug.
+
+* The bug
+`find_semicolon_at_depth_zero` in src/emit/js_parser.rs tracks string literals and brace/paren depth to find statement boundaries, but does NOT track `//` line comments or `/* */` block comments. A `;` that appears INSIDE a comment is mis-read as a statement boundary: the chunk splits there and the tail loses its `//` prefix, surfacing the comment text as raw JS → SyntaxError at runtime. Same class as BUG-040 / BUG-041 / FUP-046 (lexer/parser edge cases in %emit js bodies).
+
+* Why not fixed in PLAN-041 W1
+A first-attempt fix (add comment-skip arms to find_semicolon_at_depth_zero) was applied by the W1 gap-fix agent but REGRESSED 3 template-definition snapshot tests — the new output showed `return element;;` (double semicolon), lost indentation, and broken `} else {` formatting. The comment-skip logic over-corrected and disrupted normal statement splitting. The fix was REVERTED; the trigger was sidestepped by removing the `;` from the mcp-host comment. The bug remains.
+
+* What this FUP tracks
+A correct comment-aware fix to `find_semicolon_at_depth_zero` (and any sibling splitters in src/emit/js_parser.rs) that:
+  - skips `//` to end-of-line,
+  - skips `/* */` to closing,
+  - does NOT regress normal statement splitting (the 3 template snapshots must stay green),
+  - is covered by a unit test: a `%emit js` body with a `;` inside `//` and inside `/* */` round-trips correctly.
+
+* Acceptance
+- New unit test: `;` inside `//` and `/* */` does not split.
+- The 3 template-definition snapshots UNCHANGED (no regression).
+- `cargo test --lib` green.
+
+* Harmony note
+When landed, the workaround comment in stdlib/__mcp__/primitives/host.st ("One bridge per region, no page-global singleton." — comma instead of semicolon) may be restored to its natural punctuation; not required, just possible.
+
+NOTE [2026-06-18]: DONE in PLAN-042 commit 2dd2ed01. find_semicolon_at_depth_zero (src/emit/js_parser.rs) made comment-aware: skips // to EOL and /* */ to close, so a ; inside a comment is no longer a false statement boundary; a lone / (division/regex) is untouched so normal splitting is unaffected. The prior regression was avoided — the 4 template-definition snapshots stay byte-identical (cargo test --lib snapshot_tests 13/0, no insta accept). New unit tests: semicolon_inside_comment_is_not_a_boundary (covers // and /* */ and the lone-/ baseline) + emit_js_comment_with_semicolon_round_trips (prefix-preservation: the comment tail keeps its // and never becomes bare JS). cargo test --lib js_parser 45/0.

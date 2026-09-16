@@ -1,0 +1,209 @@
+#+TITLE: dnd over/reject zone highlight: bindState watcher not registering on the zone
+#+STATE: DONE
+#+SESSION_ID: 1511c4913cace6c5
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-21T11-07-12-498Z_1511c4913cace6c5.jsonl]]
+#+CUSTOM_ID: FUP-098-dnd-over-reject-zone-highlight-bindstate
+
+* Initial Message
+
+read the '@research/drag-drop-declarative-design-2026-06-21.org' document, get your own understanding of it, then propose an implementation plan, alongside examples of the resulting Spacetime code, and what that would enable, both for the liveview-kanban demo and overall
+
+* Problem
+
+The dnd `@drop-zone`'s `over`/`reject` STATE highlights do not apply the
+`data-st-state` attribute live, even though the underlying signals are correct.
+
+Verified in a real browser (puppeteer, migrated demos/liveview-kanban):
+- During a drag over a zone: `ST.get(zone, 'over')` === true, hovering/accepting
+  true (the drop-zone primitive's `publish()` computes them correctly).
+- `zone.__stBoundStates` === ["over","reject"] (the bindState fragment ran).
+- BUT `ST.store(zone)['over']` has NO key on a fresh load, so the `over`
+  bindState watcher was never registered — the attribute never sets.
+- Raw `ST.watch(zone,'over',cb)` + `ST.set(zone,'over',true)` works, so
+  ST.watch/ST.set are healthy; the gap is bindState's `this.watch(el,'over',cb)`
+  not landing on the element whose `over` signal the primitive drives.
+
+So bindState RAN but its watch did not create the store dep on the zone — an
+element-resolution mismatch between the drop-zone PRIMITIVE's %emit js element
+and the generate_state_fragments bindState element (both target [data-col]).
+
+* Already fixed in PLAN-058 W5 (keep)
+- ST.bindState strips a leading `$` ('$over' -> 'over') so the watcher keys on
+  the bare name ST.set notifies. This fixed the `dragging` state (now applies
+  live) and is a prerequisite for over/reject.
+- drop-zone primitive computes COMBINED $over/$reject signals (not a compound
+  `$hovering && $accepting` condition, which ST.watch cannot evaluate).
+
+* NOT blocking
+Core drag-drop is fully functional live: a card drags, drops on a zone, and
+`$move({ card: $payload.id, to: $zone.col })` fires + moves the card (verified
+end-to-end in the browser). This is purely the hover HIGHLIGHT.
+
+* Likely root cause
+generate_state_fragments emits the bindState fragment with el_init:
+Selector(selector). Confirm that selector-init resolves to the SAME element node
+the drop-zone primitive's %emit js runs on, sharing one ST store; check init
+ordering (state fragment before the signal store exists) and whether a later
+re-init replaces the store.
+
+* Acceptance
+Dragging a card over a @drop-zone sets data-st-state="over" on the zone live
+(reject when accepts:false). A CDP paint test asserts the highlight (PLAN-056).
+
+* Files
+- src/pipeline/mod.rs (generate_state_fragments el_init), src/pipeline/expand.rs,
+  stdlib/dnd/primitives/drop-zone.st, public/runtime/st.js (ST.bindState/watch).
+
+* ROOT CAUSE (proven empirically 2026-06-21) — NOT a codegen/element mismatch
+
+The original hypothesis (bindState binds a DIFFERENT element than the primitive's
+%emit js drives) is FALSE. Verified in a live browser (puppeteer on served
+demos/liveview-kanban): the drop-zone primitive's publish() and the state
+fragment's bindState BOTH resolve `el` to the SAME [data-col="..."] node via
+`ST.registerSelectorInit` (selectors match exactly; entry.el === querySelector
+node; same ST.store object). Generated JS is correct:
+  primitive IIFE:  ST.set(el, "over", (hovering && accepting))   // el = [data-col]
+  state IIFE:      ST.bindState(el, '$over', 'over')             // el = [data-col]
+Both run on the same element; the `$`-strip (W5) and combined-signal (W5) fixes
+are correct and must be kept.
+
+** The actual mechanism: dev server double-injects the runtime <script>
+
+The SERVED html (cargo run -- serve) contained the runtime script TWICE:
+  line 42: <script src="/__spacetime/runtime.js?entry=index.st"></script>   (from on-disk index.html)
+  line 46: <script src="/__spacetime/runtime.js?entry=index.st"></script>   (injected by server.rs)
+
+`demos/liveview-kanban/index.html` had a hand-authored runtime <script> before
+</body>; the dev server's index_handler (src/server.rs) then UNCONDITIONALLY
+injects its own "Spacetime Runtime" block before </body>. Result: the bundle
+executes TWICE.
+
+Why that kills the highlight (and explains every paradoxical observation):
+1. Load #1 → `ST.signals = new WeakMap()`; inits run on each [data-col] zone:
+   publish() populates the store, bindState registers the watcher (over.d), sets
+   `_st_init_<hash>` OWN-PROPS on the DOM node, registers the __stDnd entry.
+2. Load #2 → bundle re-executes → `ST.signals = new WeakMap()` RESETS every
+   signal store to empty. But the `_st_init_*` flags are element own-properties
+   (survive the reset) and `window.__stDnd = window.__stDnd || (...)` is
+   ||-guarded (survives).
+3. Load #2's `_scheduleInit` pass → every init sees its dedup flag already set →
+   SKIPS → the live store is never repopulated and no watcher is re-registered.
+
+∴ on a fresh load: ST.store(zone) === {} (empty), over.d.size === 0 (no watcher),
+yet zone.__stBoundStates === ["over","reject"] (set in pass #1) and the __stDnd
+entry exists (pass #1). data-st-state never updates because the pass-#2 store has
+no `over` key and no watcher. Manually clearing `_st_init_*` and re-running the
+initializers repopulates everything and the highlight works — confirming the
+init bodies are correct and the failure is the second runtime load + dedup, not
+codegen.
+
+** Fix (two parts)
+
+*** Part A — demo (immediate, already verified)
+Remove the hand-authored `<script src="/__spacetime/runtime.js?entry=index.st">`
+from demos/liveview-kanban/index.html. The dev server injects the runtime itself;
+the export/build path also injects it (export/html.rs strips any pre-existing
+__spacetime tag then re-adds one). After removal the served page has ONE runtime
+tag; on a clean load ST.store(zone) has the over/reject keys, over.d.size === 1,
+and dragging a card over the zone sets data-st-state="over" live (clears to "" on
+leave). VERIFIED in browser.
+
+NB: other demos/projects may carry the same manual tag — grep the tree for
+`__spacetime/runtime.js` in *.html and remove authored ones (keep none; the
+server/export own injection).
+
+*** Part B — dev server hardening (the real fix; prevents recurrence)
+Make runtime injection IDEMPOTENT, mirroring export/html.rs:43 which already
+dedupes (`src.contains("__spacetime") || src.ends_with("/spacetime.js")`).
+There are FIVE inject sites in src/server.rs, each shaped:
+    if let Some(pos) = content.rfind("</body>") { ... content.insert_str(pos, &spacetime_inject); }
+at lines ~672, ~791, ~896, ~1145, ~1344 (try_serve_locale ×2, catch_all_handler,
+admin, index_handler). Guard each so it does NOT inject when the runtime is
+already present:
+    if let Some(pos) = content.rfind("</body>") {
+        if !content.contains("__spacetime/runtime.js") {
+            ... build spacetime_inject ...
+            content.insert_str(pos, &spacetime_inject);
+        }
+    }
+(Or factor the shared block into one `inject_runtime_before_body(&mut content, ...)`
+helper that carries the guard once — preferred, removes the 5-way duplication.)
+This makes a page that already declares the runtime tag (legacy or hand-authored)
+safe, AND keeps the auto-injection for pages that don't.
+
+** Defense-in-depth (optional, separate FUP if pursued)
+The deeper latent hazard: a second runtime execution silently resets ST.signals
+while DOM dedup flags persist. Even with idempotent injection, any accidental
+double-load (e.g. an HMR edge) reproduces this. Consider guarding the core
+runtime bootstrap so a re-execution is a no-op:
+    if (global.ST && global.ST.__booted) return;  // at top of st.js IIFE
+    ...
+    ST.__booted = true;
+This would make the runtime load-once by construction. File as a follow-up; it is
+NOT required to close FUP-098 (Parts A+B suffice) and touches the hot runtime
+path, so it deserves its own RED→GREEN test (load bundle twice in V8, assert
+ST.signals identity is stable and signal stores survive).
+
+** Acceptance (unchanged, now reachable)
+Dragging a card over a @drop-zone sets data-st-state="over" on the zone live
+(reject when accepts:false). A CDP paint test asserts the highlight (PLAN-056).
+Add a regression test: assert the SERVED html for a page whose on-disk html
+already contains a runtime <script> has exactly ONE `__spacetime/runtime.js`
+occurrence (covers Part B directly, no browser needed).
+
+** Files
+- demos/liveview-kanban/index.html (Part A — remove manual runtime <script>)
+- src/server.rs (Part B — idempotent injection at the 5 inject sites / shared helper)
+- (ref) src/export/html.rs:39-52 (the existing dedupe pattern to mirror)
+- (ref) public/runtime/st.js (ST.signals WeakMap reset at load; optional __booted guard)
+- test: a server-level test asserting single runtime tag in served html
+
+* IMPLEMENTED + VERIFIED (2026-06-21)
+
+** Part A — demo (done)
+demos/liveview-kanban/index.html: removed the hand-authored
+`<script src="/__spacetime/runtime.js?entry=index.st">`. The dev server (and the
+export path) inject the runtime themselves. Served page now has exactly ONE
+runtime tag with live-reload + styles.css intact.
+
+** Part B — dev-server idempotent injection (done)
+src/server.rs: all 5 injection sites (try_serve_locale ×2, catch_all subtree,
+admin, index_handler) changed from
+    if let Some(pos) = content.rfind("</body>") {
+to
+    if let Some(pos) = content.rfind("</body>").filter(|_| !content.contains("__spacetime/runtime.js")) {
+The `.filter` keeps the `if let` shape and skips the WHOLE inject block when a
+runtime tag is already present — so a page that declares its own runtime (legacy
+or hand-authored) never double-loads. Pages without a tag still get the full
+injection (runtime + styles + live-reload + validation).
+
+NB on the tradeoff: when the guard skips (page already has a runtime tag), it also
+skips live-reload/validation for that page. This is the correct safety priority —
+a double-load catastrophically breaks ALL reactive state (resets ST.signals);
+losing live-reload on a self-hosting page is benign and rare. The canonical path
+(page declares NO runtime tag, server injects once) keeps everything. The demo now
+follows the canonical path.
+
+** Verification (browser + unit)
+- Live (puppeteer on served demos/liveview-kanban, canonical state): on a fresh
+  load ST.store(zone) has over/reject keys, over.d.size===1; driving a hover sets
+  data-st-state="over" (accept) / "reject" (accepts:false) and clears to "" on
+  leave. The exact acceptance criterion passes.
+- Guard proof: with the manual tag temporarily restored, served HTML had exactly
+  1 runtime tag (injection correctly skipped); removed again → 1 tag (injected),
+  live-reload present.
+- Unit: src/server.rs tests test_fup098_injects_when_runtime_absent,
+  test_fup098_skips_when_runtime_already_present, test_fup098_no_body_no_injection
+  — 3/3 green. They lock the shared guard predicate.
+- cargo build clean.
+
+** Files changed
+- demos/liveview-kanban/index.html (removed manual runtime script)
+- src/server.rs (5 inject sites guarded + 3 regression tests)
+
+** Follow-up (optional, NOT required — filed mentally)
+Defense-in-depth `ST.__booted` guard in public/runtime/st.js so a second bundle
+execution is a no-op by construction (would make any accidental double-load
+harmless). Deferred: touches the hot runtime path, deserves its own RED→GREEN
+test (load bundle twice in V8, assert ST.signals identity stable). Parts A+B fully
+close FUP-098 without it.

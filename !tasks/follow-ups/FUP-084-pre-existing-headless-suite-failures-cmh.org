@@ -1,0 +1,58 @@
+#+TITLE: Pre-existing headless suite failures (CMHT @given misuse + V8 backend limits)
+#+STATE: ITEM
+#+SESSION_ID: 1507711255a45786
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-13T10-37-35-958Z_1507711255a45786.jsonl]]
+#+CUSTOM_ID: FUP-084-pre-existing-headless-suite-failures-cmh
+
+* Initial Message
+
+what are FUP-080 and FUP-081 about?
+
+* Context
+While verifying PLAN-038 FUP-080/081 (reactive output), the full headless suite
+(`cargo run --features headless -- test tests/ --headless`) reported 534 passed,
+59 failed, 2 skipped. ALL 59 failures are PRE-EXISTING and independent of the
+reactive-output work (verified: the only headless test touching the changed
+runtime path — runMutations — is tests/integration/signal-dispatch.test.st, 6/6
+green; lib 2427/0; integration 172/0).
+
+* Two root causes (both predate this session)
+
+** 1. CMHT-001/002/003 tests misuse @given for signal state (commit 776c9a62, 2026-03-07)
+tests/component-model/{scoped-state,reactive-props,content-binding,exports,template-refs}.test.st
+write `@given .el { $count number: 0; }`. But the @given macro
+(stdlib/testing/test.st:267) sets DATA ATTRIBUTES / CSS / content via
+element.dataset/style — it does NOT declare Spacetime signal state (no ST.set).
+So `$count number: 0` is parsed as a property key (→ E0900 "a `$count` hole cannot
+be a state declaration") and the subsequent `ST.get(el,'count')===0` assertion
+fails (undefined). FIX: rewrite these tests to seed state via `@eval (ST.set(el,
+'count', 0))` (the pattern the passing counter.test.st uses), OR extend @given to
+recognize `$sig type: value` state declarations and lower them to ST.set.
+
+** 2. V8 (`--headless`/logic) backend lacks browser APIs (by design — FIDELITY_LADDER)
+Many failures are the EXPECTED fidelity refusals + missing-API errors on the fast
+logic backend: "needs 'layout' fidelity but the current backend tops out at
+'logic'" (layout assertions), `DOMParser is not defined`, `el.animate is not a
+function`, `IntersectionObserver`/`MutationObserver` not firing, focus assertions,
+`registerTimeline`/`clearErrors` debug-runtime hooks. These tests should run under
+`--cdp` (real Chromium), not `--headless`. Per docs/testing/FIDELITY_LADDER.md a
+layout assertion REFUSES on --headless rather than faking green — so these
+"failures" are the ladder working as intended, but the suite counts them as fails.
+
+* The work
+1. Fix the 5 CMHT component-model tests to seed signal state via ST.set (or extend
+   @given to lower `$sig type: value` to ST.set — the more harmonious fix, since
+   the test author clearly EXPECTED @given to set signal state).
+2. Triage the --cdp-only tests: either gate them to run under --cdp in the suite
+   runner, or mark them @test-skip on the logic backend so `--headless` reports
+   clean. Decide a policy: should `cargo run --features headless -- test tests/`
+   skip layout/paint tests automatically (they self-refuse) rather than count them
+   as failures?
+
+* Acceptance
+`cargo run --features headless -- test tests/ --headless` reports 0 unexpected
+failures (either fixed or correctly skipped as cdp-only). The CMHT signal-state
+tests pass on the logic backend (they need no layout).
+
+* Parent
+Surfaced during PLAN-038 FUP-080/081 verification. Not caused by it.

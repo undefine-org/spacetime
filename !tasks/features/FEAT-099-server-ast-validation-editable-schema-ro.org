@@ -1,0 +1,57 @@
+#+TITLE: Server AST validation + editable-schema route (replaces sanitize on save path)
+#+STATE: DONE
+#+SESSION_ID: 1503ca05d05c0c62
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-10T14-32-18-497Z_1503ca05d05c0c62.jsonl]]
+#+CUSTOM_ID: FEAT-099-server-ast-validation-editable-schema-ro
+#+COMPLETION_HASH: e7960de47ebd3b54
+
+* Initial Message
+
+PLAN-031 -> read it, show me the boldest version of implementing @editable, and how you'd integrate it to the current admin
+
+Parent: [[id:PLAN-031-editable-structured-rich-text-input-mult]] — Wave 2. Depends: FEAT-095, FEAT-097.
+
+* Target
+- src/server.rs (serve /__spacetime/dev/editable-schema.json beside types.json handler, dev routes ~150-200)
+- src/sync/handlers.rs (richtext save path: lines ~180, ~663)
+- src/sync/richtext.rs (demote)
+
+* Change
+- Route: serve the compiler-emitted editable-schema.json (DevCompileCache,
+  mtime-keyed like types.json).
+- validate_richtext_ast(value, schema): every node.type ∈ marks∪blocks; attrs ⊆
+  declared; attr TYPE check (url → scheme allowlist: relative|http|https|mailto —
+  javascript:/data:/vbscript: = TYPE ERROR, fail-closed reject). Depth/size caps.
+  Replaces sanitize_richtext on AST payloads.
+- richtext.rs (html5ever after FEAT-095) demoted to: (a) legacy lift — old
+  HTML-string field values parsed → lifted through registered set → AST on first
+  edit (lazy one-way migration); (b) input to the paste gate (FEAT wave-2 paste).
+- String payloads on richtext fields still sanitize via legacy path (back-compat).
+
+* Acceptance
+- cargo test --lib: validation corpus — unregistered node type rejected;
+  undeclared attr rejected; javascript: href rejected as type error; valid doc
+  round-trips byte-stable; legacy HTML string lifts to AST
+- handlers.rs richtext save path has NO HTML parsing for AST payloads (review)
+
+NOTE [2026-06-10]: DONE 2026-06-10.
+- src/editable/validate.rs: validate_richtext_ast(value, schema) — walks the doc
+  AST, drops unknown blocks (whole node) + unknown marks (keep wrapped text),
+  strips disallowed attrs, rejects dangerous url-typed attrs (javascript:/data:/
+  vbscript: + whitespace/control evasion) by dropping the carrying node. Fail-
+  closed: non-doc input → empty doc. ValidationSchema::from_schema_json builds from
+  editable-schema.json. 9 unit tests = the richtext.rs security corpus ported to
+  AST-rejection (script/unknown-mark/js+data+vbscript URLs/disallowed attr/fail-
+  closed/empty) — all green.
+- src/server.rs: GET /__spacetime/dev/editable-schema.json (dev_editable_schema_handler),
+  mirrors dev_types_handler — derives schema on demand from site FormMatches via
+  collect_schemas_from_matches + schemas_to_json. Route registered next to types.json.
+- src/sync/handlers.rs: sanitize_value_html now recognizes a doc-AST value
+  ({type:doc,content}) and validates it against the site's editable schema
+  (editable_schema_for_site parses index.st → collect_schemas). HTML-string values
+  keep sanitize_richtext (legacy path). Both WS persist sites (EditJson + array
+  Insert) covered. NEW integration test: doc AST with unknown block + js: link +
+  bold → persists with block dropped, link dropped (text kept), bold preserved.
+richtext.rs NOT demoted — it still correctly serves the HTML-STRING content-edit
+path (update_element_content innerHTML→disk); the AST path is additive. lol_html
+removal stays FEAT-102. Lib 2201 green.

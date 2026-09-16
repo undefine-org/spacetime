@@ -1,0 +1,39 @@
+#+TITLE: Eliminate double-IIFE wrapping for global primitives with el binding
+#+STATE: ITEM
+#+SESSION_ID: 14aef9c617fc29ee
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-04-05T17-30-02-719Z_14aef9c617fc29ee.jsonl]]
+#+CUSTOM_ID: FUP-008-eliminate-double-iife-wrapping-for-globa
+#+EFFORT: M
+#+PRIORITY: #C
+#+LAYER: pipeline
+
+* Initial Message
+
+Run a full audit of the ora-ventures.com/ website at localhost:9416. A lot of stuff is broken. Please be thorough and list the issues.
+
+* Problem
+
+Commit =dc34e931= changed =JsScope::IIFE= to always wrap primitives in an IIFE to prevent =const= redeclaration across primitives. Commit =84e04d69= added =ElInit::Body= for selectorless global primitives that use =%yield= or =%cleanup=.
+
+Combined, these produce a double-IIFE pattern in the generated JS:
+
+#+begin_src javascript
+(function() {           // outer IIFE (from JsScope::IIFE in expand.rs)
+const el = document.body;
+(function() {           // inner IIFE (from the primitive's own emit)
+    // ... primitive code ...
+    })();;              // double semicolons
+})();
+#+end_src
+
+The outer IIFE is redundant when the inner IIFE already provides scope isolation. The double semicolons =;;= are harmless but cosmetically rough.
+
+* Location
+- =src/pipeline/expand.rs= line 208: =scope: JsScope::IIFE= (always)
+- Snapshot: =src/snapshots/spacetime__compiler__snapshot_tests__data_directive_js.snap= lines 2234-2358 shows the pattern
+
+* Possible Fix
+Detect when a primitive's emitted JS already has its own IIFE wrapper and skip the outer one. Or: merge the =const el = document.body= preamble into the inner IIFE rather than wrapping it.
+
+* Risk
+Low — this is a codegen quality issue, not a correctness bug. The double IIFE adds a few bytes of overhead per primitive and looks rough in dev tools, but does not affect behavior.

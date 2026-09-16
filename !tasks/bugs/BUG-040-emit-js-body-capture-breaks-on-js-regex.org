@@ -1,0 +1,137 @@
+#+TITLE: %emit js body capture breaks on JS regex char-classes containing quotes
+#+STATE: DONE
+#+SESSION_ID: 14f7fa4f27a46bb4
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-01T10-21-30-142Z_14f7fa4f27a46bb4.jsonl]]
+#+CUSTOM_ID: BUG-040-emit-js-body-capture-breaks-on-js-regex
+#+COMPLETION_HASH: 5636f65380d6d3bd
+
+* Initial Message
+
+ok let's think deeply deeply. What would a headless CMS for Spacetime look like? like a headless CMS that has all the nice features of a headless CMS and the power of Spacetime combined. Look at the stdlib and the __dev__ to understand some of the pre-existing experiments, and do a research on the state of headless CMSes, before coming back with your THOUGHTS AND REFLECTIONS (no decisions yet)
+
+* BUG: %emit js body capture breaks on JS regex char-classes containing quotes
+
+** Symptom
+
+A =%emit js= block whose foreign JS contains a regex literal with a quote
+character inside a character class (e.g. =/[&<>"']/g=) fails to compile with:
+
+#+BEGIN_EXAMPLE
+× expected R_BRACE, found EOF
+× expected R_BRACE, found EOF
+#+END_EXAMPLE
+
+The same regex WITHOUT quotes (e.g. chained =.replace(/&/g,...).replace(/</g,...)=)
+parses fine. This is an edge case in the emit-body brace tracker, not user error.
+
+** Minimal repro (FAILS)
+
+#+BEGIN_SRC spacetime
+%primitive bugrepro() {
+  %emit js {
+    function esc(s){ return String(s).replace(/[&<>"']/g, function(c){ return c; }); }
+  }
+}
+@bugrepro
+#+END_SRC
+
+** Control (PASSES) — identical but regex has no quote char
+
+#+BEGIN_SRC spacetime
+%primitive okrepro() {
+  %emit js {
+    function esc(s){ return String(s).replace(/&/g, 'x').replace(/</g, 'y'); }
+  }
+}
+@okrepro
+#+END_SRC
+
+** Root cause
+
+=src/syntax/events/grammar/meta.rs::emit_body= tracks balanced braces by counting
+=L_BRACE= / =R_BRACE= **tokens produced by the lexer**:
+
+#+BEGIN_SRC rust
+let mut depth = 1i32;
+while !p.at_end() && depth > 0 {
+    match p.current() {
+        SyntaxKind::L_BRACE => { depth += 1; p.bump_any(); }
+        SyntaxKind::R_BRACE => { depth -= 1; if depth == 0 { break; } p.bump_any(); }
+        SyntaxKind::PERCENT => { meta_clause_in_emit(p); }
+        _ => { p.bump_any(); }
+    }
+}
+#+END_SRC
+
+But the lexer (=src/syntax/cst/lexer.rs=, string callback at ~line 176, delimiter
+=b'"'=) tokenizes a JS regex =/[&<>"']/g= using *Spacetime string rules*: the
+embedded =\"= opens a STRING token that runs to the next quote (the =']/g...= and
+onward), swallowing intervening ={= / =}= so they never become =L_BRACE=/=R_BRACE=
+tokens. The emit-body depth counter therefore never returns to 0 → it consumes to
+EOF → "expected R_BRACE, found EOF".
+
+The lexer has no notion of a JS regex literal context, so any quote inside foreign
+JS that is not a balanced Spacetime string (regex char-classes, apostrophes in
+comments, etc.) can desync the STRING tokenization and thus the brace count.
+
+** Why it matters
+
+=%emit js= is the primary escape hatch for foreign JS in primitives. Quote-bearing
+regexes (=esc()= HTML-escapers, sanitizers) are common — the entire __dev__ suite
+sidesteps this only by convention (chained single-char =.replace(/&/g,...)= with
+=\x22=). The constraint is invisible and the error message ("expected R_BRACE,
+found EOF") points nowhere near the offending regex. Authors of new primitives
+(e.g. stdlib/__admin__/admin-app.st hit this during CMS V1) lose time to it.
+
+** Fix direction (do NOT special-case in Rust per AGENTS.md spirit — fix the lexer/grammar)
+
+Option A (preferred): make the emit-body capture LEXER-AWARE of foreign-code rules
+— inside =%emit js/css/glsl=, do not apply Spacetime STRING tokenization for the
+purpose of brace counting; instead scan raw characters tracking only ={= / =}=
+while correctly skipping (a) JS string literals ='...'=, ="..."=, =`...`=, (b) JS
+regex literals =/.../flags= including their char-classes, (c) line/block comments.
+This mirrors how a JS lexer disambiguates regex-vs-divide by previous-token context.
+
+Option B (cheaper, partial): in =emit_body=, track quote/regex state at the raw
+char level rather than over lexer tokens, so braces inside JS strings/regexes are
+ignored and braces outside them are counted. Effectively a small foreign-code brace
+scanner local to emit bodies.
+
+Either way the unit of truth for emit-body delimiting should be the foreign-code
+grammar, not Spacetime's STRING token.
+
+** Acceptance
+
+- The minimal repro above compiles.
+- A regex with quotes in a char-class inside =%emit js= round-trips losslessly.
+- Apostrophe inside a JS comment/string inside =%emit js= no longer desyncs braces.
+- Add tests in =src/syntax/events/grammar/meta.rs= (alongside =meta_emit_*=) and a
+  fixture covering =/[&<>"']/g=.
+- Regression guard: stdlib/__admin__/admin-app.st could revert esc() to the
+  char-class form and still compile (currently forced to the chained workaround).
+
+** Discovered
+
+During Spacetime CMS V1 (PROJ-004) building stdlib/__admin__/admin-app.st — the
+esc() helper using =/[&<>\"']/g= produced a parse-fail until rewritten to the
+chained =.replace(/&/g,...).replace(/\x22/g,...)= dev idiom. Filed as a real
+lexer/grammar edge case to handle, not a workaround to remember.
+
+** Related
+
+- src/syntax/events/grammar/meta.rs (emit_body, ~line 105)
+- src/syntax/cst/lexer.rs (string callback ~line 176, delimiter b'\"')
+- stdlib/__admin__/admin-app.st (esc() — current chained workaround)
+- docs/specs/spacetime-cms.md
+
+NOTE [2026-08-02]: FIXED + GATED 2026-07-31, commit aae443a8 (PLAN-122 W0 / FEAT-164).
+
+Root cause was as filed (the lexer applies Spacetime STRING rules inside a foreign-code island, so a quote in a regex char class swallows the block's braces) but the fix landed at a different point than either Option A or B proposed, and a smaller one.
+
+By the time this was picked up, BUG-072's rule — "a string never crosses a NEWLINE" — had already rescued the MULTI-LINE form of this bug: `%emit js {\n const re = /[&<>"']/g;\n}` parsed clean. What survived was only the EOF path, which still consumed the remainder: the single-line `%emit`, or a body whose last line held the regex. So the two ends of the same input recovered two different ways, and the fix was to make the EOF case behave like the newline case — consume just the opening quote, let the rest re-lex. Neither behaviour produces a valid string (this is error recovery either way), but standing as punctuation keeps the following source alive so the surrounding grammar reports the real error instead of a missing brace far downstream.
+
+Notably NOT done: no JS sub-grammar in the lexer (Option A), no local foreign-code brace scanner in emit_body (Option B). Both would have added a parallel scanning path; the actual defect was one asymmetric recovery branch. The filed acceptance criteria are met without them.
+
+Gates in src/syntax/events/grammar/meta.rs: meta_emit_js_regex_char_class_with_quotes (this bug's exact repro), meta_emit_js_regex_char_class_with_backtick (BUG-041), plus three controls that must NOT regress — regex containing braces `/a{2,4}[{}]/g`, apostrophe inside a JS comment, and the regex-vs-divide case `(a+b)/2`. The lexer's own `unterminated` test asserted the old swallow-to-EOF and was updated with the reasoning, since it encoded this bug as the contract.
+
+Verified: meta + lexer 152/152, integration 202/202, and the filed repro compiles via `check`. The stdlib/__admin__/admin-app.st esc() workaround noted in this bug can now be reverted to the char-class form (not done here — separate change, no test depends on it).

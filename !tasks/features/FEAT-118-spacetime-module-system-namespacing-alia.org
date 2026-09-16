@@ -1,0 +1,112 @@
+#+TITLE: Spacetime module system: namespacing, aliasing, active @use
+#+STATE: DOING
+#+SESSION_ID: 1508cbf54b12d2b0
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-14T11-53-10-188Z_1508cbf54b12d2b0.jsonl]]
+#+CUSTOM_ID: FEAT-118-spacetime-module-system-namespacing-alia
+
+* Initial Message
+
+look at ~/code/ora/verse and how it generates tree-sitter from the meta-compiler language.
+
+your goal is to look at how pi-* crates manage dynamic language profiles. Consider runtime/kdl/some other addition (also consider something specific to Spacetime. Weigh in all the options and show me your reasoning).
+
+Please understand the nuances of the work here. You are also free to propose improvements to the tree sitter generator and to the Spacetime LSP to make it world-class, as it hasn't been touched in a while and could benefit from some love. Since I am the creator of both Spell and Spacetime, I would LOVE to make the two seamlessly work with each other (also look at the Spacetime MCP btw).
+
+Deep architecture dive first, then come back with your insights, revelations, challenges (to me and to you), questions, and overall state of things
+
+Design (self-contained): docs/specs/module-system.md. Companion: docs/specs/spell-spacetime-unification.md §3.6/§3.7 (Spell/CodePath consequences, later track).
+
+GOAL: give Spacetime a real module system — folder=namespace, aliasing, re-export, active `@use` — WITHOUT changing %form. Namespace is ambient from folder location.
+
+LINEAGE: Odin (folder=package, concatenation, public-by-default, collections) + PureScript (qualified alias, explicit export, re-export, hiding) + Elixir (use→__using__ active extension).
+
+VERIFIED CODE REALITY (at HEAD):
+- registry.rs: macros: HashMap<String,MacroDefAst> is flat-global; register_macro(:161) keys on def.name; duplicate=error.
+- MacroDefAst.source_file: Option<String> ALREADY EXISTS (meta_ast.rs:313) → namespace-derivation key already threaded.
+- Single lookup chokepoint family: get_macro(:244), find_macro_for_match(:381), find_macro_by_directive, get_macro_by_form_directive, get_all_macros_by_form_directive.
+- dispatch_ambiguity (FEAT-088) ALREADY EXISTS → ambiguity-error machinery partly built for M1.
+- @import: parse-only directive (parser.rs:338), content-merge to flat global.
+- import_resolver.rs: ResolvedImport::{File,Stdlib{module_name},Unresolved} + load_embedded_stdlib + IncrementalStdlibCache exist (LSP side) → collections half-built.
+- COLLISIONS to avoid: %exports taken (primitive $-var exposure, 44 uses) → use %public for module API. %scope taken (positional dispatch, 28) → module visibility implicit file-level, no keyword.
+
+CORE MECHANISM: self-hosted namespace auto-extender = bootstrap %form attaching namespace to SIGIL-names at definition (prefix at register_macro) + reference (resolve bare/alias at the find_macro_for_match chokepoint). DECLARED in .st, COMPILED to native tables (prefixed key + alias hashmap + dispatch pre-filter); never per-token interpreted. Pre-filter SHRINKS candidate set → cheaper than flat dispatch.
+
+5 ELEGANCE PRINCIPLES: P1 sigil-scoped (sigil=membership marker; non-sigil .class/<tag>/$var stay global by construction). P2 reflective/homoiconic. P3 co-location (file defining @ defines @-namespacing). P4 global=empty-namespace degenerate case (no %global). P5 active modules (Elixir %using installs scoped capture_types = modules-as-scoped-dialects).
+
+@import CUTOVER: @import ≡ @use(open,global,unprefixed)=degenerate point. Keep @import as global alias (98 uses unchanged); @use namespaced. "@import floods, @use scopes."
+
+/ UNIFIES 4 AXES: filesystem stdlib/scene/camera.st = FQN std:scene/camera = ref @scene/camera = Spell CodePath scene/camera.st::§macro. / is value-position-only in .st → unambiguous in name position.
+
+PHASING:
+- M0 collections + FQN keying (Ns type, namespace_of from source_file, register_macro prefixing, chokepoint threads FQN). BEHAVIOR-PRESERVING: all existing tests green, zero surface change (everything resolves root/global until @use exists).
+- M1 @use (open/as-alias/explicit/hiding) + bare resolution + ambiguity error (reuse dispatch_ambiguity) + @import-as-global-alias + bootstrap auto-extender %form.
+- M2 MODULE.st manifest (%module/%public/%reexport).
+- M3 Elixir %using active hook + scoped capture_types (the differentiator).
+- M4 LSP provenance-on-hover + Spell exporter consumes namespaces as ::§ (cross-repo, last).
+
+DISCIPLINE (AGENTS.md): %form NEVER edited; no Rust parser for stdlib constructs (self-describing); one-sigil-one-meaning (no overload); elegance bar (new mechanism must DELETE a special-case, variants=data, same-machinery test). NEVER stash/reset/checkout. Stay out of in-flight FEAT-115/BUG-105 files. Build cmds: cargo test --lib (1574+), cargo run -- check.
+
+NOTE [2026-06-14]: M1 STEP 1 COMPLETE (parse, no enactment): ImportsClause AST + MacroDefAst.imports field + "imports" clause-dispatch arm + parse_imports_clause (newline/comma/semicolon field split, paren-depth-aware so only:($a,$b) lists survive) + 4 parse tests. All green (2242 lib). Reframed via docs/specs/declared-effects.md + reflective-spacetime.md (committed dba0d4c9): %imports is rung R1 of the reflective tower, a DECLARED compile-time effect sibling to %registers/%resolves.
+
+CO-TENANCY NOTE: another agent fixed the bootstrap-LazyLock deadlock (hardcoded is_body_bearing -> registry-derived, commit 46a331be "Q3"). That commit also swept my uncommitted M1 STEP 1 comma-split fix into itself (shared git index). Net: STEP 1 is correct + green in HEAD, just attributed to 46a331be rather than a dedicated FEAT-118 commit. Lesson: in a shared working tree, commit own work promptly to avoid index co-mingling.
+
+NEXT: STEP 2 — the %imports enactor. Replace the ImportAst special-case in resolve_imports (parser/mod.rs:5913) with %imports-driven loading, gated to enact ONLY the global case first, parity-tested byte-identical vs the ImportAst path on import fixtures + 2242 suite. Then STEP 3 delete ImportAst; STEP 4 @use namespaced + ImportScope resolver.
+
+NOTE [2026-06-14]: M1 STEP 2 COMPLETE + committed f7c012a2 (green, 2242 lib). Made global-import recognition registry-DERIVED: SyntaxRegistry::is_global_import(name)/global_import_module_capture(name) read RegisteredForm.macro_def.imports; parser uses literal "import" (bootstrap fallback when registry:None) OR registry.is_global_import(name). Mirrors the Q3 is_body_bearing registry-derivation. @import now declares its effect via %macro import's %imports clause (presets.st) rather than a Rust string.
+
+ARCHITECTURE FINDING (reshapes STEP 3/4): @import's EFFECT (resolve_imports, parser/mod.rs:5913) runs in the PARSER phase with NO MetaRegistry (gated by main_ast.imports.is_empty(), before the registry-driven pipeline). So the spec's STEP 3 "delete ImportAst, route effect through registry %imports" would require threading a registry into resolve_imports — a deeper refactor. REFRAME: ImportAst is NOT a special-case to delete; it is the correct parser-phase IR for a declared import effect. The declared-effect win is that ImportAst is now POPULATED via registry-derived recognition (the %imports clause), not a hardcoded "import" string. @use (STEP 4) extends the SAME ImportAst path with namespace/alias/only/hiding fields.
+
+REVISED STEP 3/4 (folded): (a) ImportAst gains optional namespace/alias/only/hiding fields (default empty = today's @import). (b) parser populates them from the matched directive's %imports clause when present. (c) resolve_imports: global -> flat merge (today); namespaced -> assign Namespace (M0 Fqn keying) + record ImportScope. (d) bare/aliased dispatch resolves against ImportScope, ambiguity via dispatch_ambiguity (FEAT-088). The presets.st %macro import gains %imports{module:$path, global:true}; a new %macro use declares the namespaced form.
+
+CO-TENANCY: 2+ agents now live in repo. Discipline: commit own work immediately, stage by explicit path only, never -A/reset/checkout/stash, re-read HEAD before each commit.
+
+NOTE [2026-06-14]: M1 progress (committed, green): STEP 1 parse (in 46a331be), STEP 2 registry-derived recognition (f7c012a2), self-describing @import (4e8f2ab6). The declared-effect substrate (R1) is now PROVEN end-to-end: @import recognition is registry-derived (is_global_import reads %imports{global:true}), and @import self-describes its effect in presets.st. Hardcoded name=="import" remains only as bootstrap fallback. 2244 lib green.
+
+REMAINING M1 (the namespaced half — @use): 
+- @use directive: a new %macro use in stdlib declaring %imports{module:$path} (global:false) + optional as/only/hiding. Needs the @use grammar to parse alias/list args (currently parse_imports_clause handles the CLAUSE, but the @use FORM args as/only/hiding must be captured from the directive invocation).
+- ImportAst gains namespace/alias/only/hiding fields (default empty=@import).
+- resolve_imports: namespaced branch assigns Namespace (M0 Fqn keying) + builds per-file ImportScope.
+- dispatch: bare/aliased @name resolves against ImportScope; ambiguity via dispatch_ambiguity (FEAT-088).
+
+This is the larger, riskier half (touches resolve_imports hot path + dispatch). Next session-block focus.
+
+NOTE [2026-06-14]: M1 CORE COMPLETE (committed, 2250 lib green). Commits: 46a331be (STEP1 parse), f7c012a2 (STEP2 registry-derived recognition), 4e8f2ab6 (@import self-describes), 532fdd05 (@use namespaces defs). 
+
+The declared-effect substrate (R1) + both halves of the import spectrum work:
+- @import: global flat-merge, self-described via %imports{global:true}, recognition registry-derived (is_global_import).
+- @use: namespaced, %imports{global:false}, namespace derived via Namespace::from_module_ref, merge_ast stamps macro.module -> M0 Fqn keying keys it as ns/name.
+
+CRUCIAL CORRECTION to earlier "inseparable/unreachable" worry: dispatch is KEY-AGNOSTIC (get_all_macros_by_form_directive matches form.directive_name, not registry key). So a namespaced macro scene/camera is STILL reached by @camera. Open @use is coherent + reachable NOW; namespace only prevents duplicate-key collisions between modules. The dispatch resolver is NOT needed for basic @use to work.
+
+CLEAN FOLLOW-ONS (separable, not blockers):
+1. Qualified @alias/name references + the ImportScope (alias/only/hiding capture from invocation args; currently open-import only, alias:None).
+2. Bare-name AMBIGUITY error when 2 open modules export same @name (reuse dispatch_ambiguity FEAT-088).
+3. The bootstrap auto-extender %form (P2/P3) + a stdlib %macro use definition.
+
+LANE DISCIPLINE: stay OUT of Q4 zone (ComponentBodyDef/reify_component_body/pipeline/* cutover = other agent's). Verified my edits touch only import path (parser/mod.rs 703/6124/6207/6222), zero Q4 symbols.
+
+NEXT DECISION: M1 follow-ons (alias/ambiguity/auto-extender) vs advance to M2 (MODULE.st manifest) vs the manifest/exporter. Core @use namespacing is shippable as-is.
+
+NOTE [2026-06-14]: M2 SCOPING ANALYSIS (dependency discovery): M2 (MODULE.st manifest: %module/%public/%reexport) and M3 (%using active hook) BOTH partially depend on the dispatch-side ImportScope resolver deferred to FUP-053:
+- %public (export allow-list) can only be ENFORCED by scope-filtering at dispatch (hide a non-public name) — needs the resolver.
+- %reexport (facade) needs qualified-ref resolution — needs the resolver.
+- %module (folder->namespace rename) is standalone-deliverable (parse + bind folder defs to a namespace at load).
+- M3 %using (inject scoped capture-types on @use) needs the resolver to scope them.
+
+So the deferred FUP-053 resolver is actually a SHARED PREREQUISITE for the enforcement halves of M2 and M3, not just an M1 enhancement. REVISED OPTIMAL SEQUENCE:
+(a) Do FUP-053 (the resolver + /-in-directive grammar + ImportScope) NEXT as the shared backbone, THEN M2/M3 enforcement become natural.
+OR (b) Do M2/M3 PARSE-ONLY now (carry manifest + %using as data, no enforcement), defer all enforcement to after the resolver.
+OR (c) Jump to the manifest/exporter (Spell-facing payoff) which consumes M0/M1 namespacing as-is and doesn't need the resolver.
+
+Recommendation: (c) then (a). The exporter delivers the cross-product Spell<->Spacetime value NOW on the solid M0/M1 base, while the resolver (a) is the right next Spacetime-internal backbone. M2/M3 full enforcement lands cleanly after (a). Awaiting direction OR proceeding with (c) under autonomy mandate.
+
+NOTE [2026-06-15]: CLUSTER A status (FUP-055/M2-enforce/FUP-056):
+- FUP-055 CORE DONE+verified: qualified dispatch (0c18c72a) + E0924 ambiguity (e9b99326 + detector verified-passing). Residual ImportScope validation -> FUP-057 (#C).
+- M2-enforce (%public/%reexport hiding) + FUP-056 (%using execution): BOTH BLOCKED on co-tenancy. They land ENTIRELY in src/parser/mod.rs (resolve_imports) + src/pipeline/mod.rs (check_* / CompileContext) \u2014 the two files the other agent is actively churning with uncommitted FEAT-119 W3 (ScopeBlock World-A migration: html/states/refs/exports). Build thrashes green/broken as they sweep ScopeBlock literals. My own E0924 detector hunks ALSO sit uncommitted in pipeline/mod.rs awaiting their next commit of that file.
+
+DECISION: yield on M2-enforce + FUP-056 until the other agent commits their parser/mod.rs + pipeline/mod.rs W3 work and the build stabilizes. Adding more uncommitted changes to actively-thrashing shared files = co-mingle risk + unverifiable. This is the disciplined hold, not abandonment.
+
+RESUME PLAN when hot files settle:
+- M2-enforce: at resolve_imports, when an imported module has manifest.public non-empty, only register/expose listed names; %reexport resolves the facade module's public set. Needs file.imports + the imported file's manifest.
+- FUP-056: at @use resolution, if imported module has manifest.using, inject claims (ns-rewrite) + capture_types (scoped, via rematch_with_registry augmented-registry seam) + defaults into the importing scope. Depends on ImportScope (FUP-057) for 'which scope'.
+- FIRST verify the uncommitted E0924 detector + test landed (grep check_namespace_ambiguity in committed pipeline/mod.rs) once their commit drops.

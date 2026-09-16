@@ -1,0 +1,33 @@
+#+TITLE: EditAst object-literal write unescaped — .st corruption + source injection
+#+STATE: DONE
+#+SESSION_ID: 14fc108ed3772fa8
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-04T14-32-37-965Z_14fc108ed3772fa8.jsonl]]
+#+CUSTOM_ID: BUG-093-editast-object-literal-write-unescaped-s
+
+* Initial Message
+
+what will this look like in the end? why are you saying that EditJson stays out of AST? Think about this: what if the tokens were never in json in the first place? AP1 and AP2 need structural fixes, not this, I think you are not going very far in envisioning this as a full meta-language. What is the ideal syntax and DX and UX?
+
+* Problem (reviewer 67-ReviewWaveBBrand, P1)
+apply_text_patch (src/sync/handlers.rs) wrote an object-literal string value via
+`format!("\"{}\"", new_val_str)` with NO escaping. new_val_str is the raw
+browser-supplied EditAst value. A value containing `"`, `\`, newline, or `}`:
+- CORRUPTS the .st literal (e.g. a font value `"Inter", sans-serif` →
+  `"font": ""Inter", sans-serif"` → unparseable file → broken site).
+- INJECTS .st source: a crafted value `z"; } @data evil { …` closes the string +
+  brace and writes an arbitrary directive to disk — an injection boundary reached
+  directly from a dev-ws ClientMessage::EditAst.
+The EditJson path serde-escapes + sanitizes; this branch did neither.
+
+* Fix
+Write object-literal STRING entries via serde_json::to_string(new_value) (proper
+JSON escaping of quotes/backslashes/newlines). The breakout `"` becomes `\"`, so a
+payload survives only as an escaped string value — the literal still parses as one
+object. Bare directive values + non-string object values keep verbatim text.
+
+* Acceptance (RED→GREEN, unit)
+- test_apply_text_patch_object_literal_value_is_escaped: a value with embedded
+  quotes escapes + the literal round-trips as valid JSON; sibling survives.
+- test_apply_text_patch_object_literal_injection_neutralized: a breakout payload
+  is contained as an escaped string; the literal stays one 2-key object.
+Gates: apply_text_patch 9/0, handlers 99/0.

@@ -1,0 +1,108 @@
+#+TITLE: render verb: same page, virtual clock, mp4 out (W5)
+#+STATE: ITEM
+#+SESSION_ID: 1534a2eae1903af0
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-18T13-07-01-638Z_1534a2eae1903af0.jsonl]]
+#+CUSTOM_ID: PLAN-132-render-verb-same-page-virtual-clock-mp4
+
+* Initial Message
+
+bro stop running cargo test overall for every tiny change
+
+* D5 RULING — the render verb adds NO author-facing syntax
+
+The thesis: a website and a video differ only in WHICH SIGNAL drives the
+timeline. Therefore render CANNOT be a page-level construct — the page must not
+know it is being rendered. The render clock is a substitution at the DRIVER
+source, not a new score domain.
+
+CLI surface:
+  spacetime render <project|page> --out film.mp4 [--fps 60] [--width W --height H]
+
+Mechanism (reuses src/cdp.rs — the SAME Chromium backend as `test --cdp`;
+a second browser stack would violate AGENTS.md §2 one-need-one-impl):
+1. Compile + serve the page exactly as `test --cdp` does.
+2. Emulation.setVirtualTimePolicy(policy=pause) → the page's rAF/timers now
+   advance ONLY when told.
+3. Per frame: advance virtual time by exactly 1000/fps ms
+   (setVirtualTimePolicy with budget), wait for rAF quiescence,
+   Page.captureScreenshot → PNG bytes → ffmpeg stdin (image2pipe, -r fps).
+4. Duration = the longest @score total on the page (data the compiler has).
+5. ffmpeg muxes to h264 mp4. Audio lands later via the D4 filtergraph backend
+   (ruled: one graph, two backends) — video-only first.
+
+* GATES (the negative discipline applied to video)
+- frame count: 2s fixture @ 10fps → ffprobe says exactly 20 frames / 2.0s
+- MOTION: frame 0 vs frame 10 must differ — a FROZEN video must FAIL, exactly
+  as a frozen page fails the CDP gates (BUG-252 doctrine)
+- determinism: two renders of the same page → identical per-frame hashes
+- discrimination: run the motion gate against a static page → it must fail
+- thesis gate: render a fragment that ALSO runs under .time in the browser —
+  one fragment, two clocks, zero page changes (P10's render half)
+
+* Non-goals
+- No new sigils, no @render, no render: keys in .st files
+- No WebAudio render until the D4 audio graph lands
+- No parallel screenshot stack outside src/cdp.rs
+
+* STATUS — VERIFIED + COMMITTED (2026-08-03, by 52-finisher)
+
+5/5 render gates GREEN, each with a discrimination story (see commit):
+- render_2s_fixture_at_10fps_is_exactly_20_frames — 2s fixture @ 10fps → exactly
+  20 frames / 2.0s; render report agrees with ffprobe.
+- motion_frames_0_and_10_differ — frame 0 ≠ frame 10 on film.st (a frozen video
+  must fail). PROVEN discriminating: breaking the clock advance (install-only,
+  no tick) makes this gate FAIL, then restored.
+- two_renders_are_bit_identical_per_frame — two renders, identical per-frame md5.
+- motion_gate_fails_on_a_static_page — the SAME score with no @on consumer
+  (static.st) renders FROZEN; the motion gate fails there. Discrimination via
+  control fixture.
+- one_fragment_two_clocks_zero_page_changes — film.st moves under the VIRTUAL
+  clock (render) AND the real .time clock (page_moves_under_real_time).
+
+Defects found in 52's work and FIXED (not design — same page, same CDP stack):
+1. assemble_page inlined the compiled JS without escaping `</script>`; the
+   runtime emits a literal `</script>` in a richtext comment, which truncated
+   the inline <script> element → ST undefined → "nothing to render". Fixed by
+   escaping `</script` → `<\\/script` (the production shell avoids this by
+   loading JS from a file — src/html/page_shell.rs).
+2. Per-frame advance used Emulation.setVirtualTimePolicy(Pause)+budget, which
+   CDP rejects, and browser-level virtual time does NOT dispatch the runtime's
+   rAF callbacks at all (ST._clock stayed unticked → no motion). Replaced with
+   the runtime's OWN virtual clock: `ST._clock.install()` then
+   `ST._clock.advance(1000/fps)` per frame — the D5 driver-source substitution,
+   the same clock stdlib/testing/timing.st drives.
+3. render_test lives in tests/render/ (a subdir Cargo does not auto-discover);
+   registered it explicitly in Cargo.toml [[test]] (established convention for
+   subdir tests, c.f. registry_addressing_diagnostics).
+4. Removed unused chromiumoxide::Command import.
+
+Real artifacts:
+- tests/render/fixtures/film.st @ 10fps → /tmp/film.mp4:
+  width=1920 height=1080 avg_frame_rate=10/1 duration=2.000000 (20 frames);
+  frame 0 md5 != frame 10 md5 (motion).
+- demos/score-launch/index.st.md @ 10fps → /tmp/score-launch.mp4:
+  width=1920 height=1080 avg_frame_rate=10/1 duration=12.000000 (120 frames).
+- Regression: cargo test --test score_window_map_test (17) and
+  --test clip_driver_test (4) both green after score.rs's declared_score_totals.
+
+* NOTE 2026-08-04 — reviewer-68.3 render fixes (dir form + imported scores)
+
+1. DIRECTORY FORM: `spacetime render <dir>` previously passed the directory
+   verbatim to the compiler (fs::read_to_string(dir) = 'Is a directory'). Now
+   render_page() resolves a directory to its root page (index.st, else
+   index.st.md) via a single resolve_entry() in render.rs — the documented
+   "Project directory or page" form is true. ONE mechanism, reused by CLI and
+   gates alike (render_page + page_moves_under_real_time both call it).
+2. IMPORTED SCORES: render duration was computed from a re-parse of just the
+   entry file, so a score in an imported module was invisible — loud "no
+   score" when it was the only playhead, SILENT truncation to the entry-local
+   shorter score in the mixed case. Now computed from the compiler's fully
+   import-resolved AST via new Compiler::merged_ast() accessor (src/compiler.rs).
+   collect_scope_matches also recursed to full depth.
+New gates (tests/render/render_test.rs, 3 added → 8 total):
+- directory_entry_resolves_to_root_page: proj/ resolves to proj/index.st (1s → 10 frames @10fps)
+- longest_score_in_imported_module_sets_duration: imported 4s score sets 40 frames @10fps
+- imported_longest_score_not_truncated_by_entry_local (NEGATIVE): entry-local 1s + imported 4s → 40 frames, never 10
+Discrimination proven: both import gates FAIL against entry-only totals
+(one loud "no score", one 10-frame truncation). All 8 gates green.
+Committed: src/render.rs, src/compiler.rs, tests/render/.

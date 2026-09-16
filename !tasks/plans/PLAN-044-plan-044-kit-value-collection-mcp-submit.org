@@ -1,0 +1,77 @@
+#+TITLE: PLAN-044: kit value-collection (mcp-submit) + review.st
+#+STATE: DONE
+#+SESSION_ID: 150ccb99745d347e
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-17T14-25-31-601Z_150ccb99745d347e.jsonl]]
+#+CUSTOM_ID: PLAN-044-plan-044-kit-value-collection-mcp-submit
+#+COMPLETION_HASH: 6519b5023d68066e
+
+* Initial Message
+
+Dig into the FUPs and explain to me
+1. what got done
+2. what you can do with it
+3. what we should do next
+
+treat this as an overall report to explain things to me from scratch
+
+* Goal
+Close FUP-068 (form per-field value collection) AND ship the deferred review.st (4th kit fn) in ONE coherent wave, sharing a single new primitive. Builds on PLAN-043 (kit on the region pipeline).
+
+Key realization: both need "collect the region's [name] controls into the emitted envelope" — FUP-068 for form submit, review for approve/reject WITH a comment. So build ONE primitive (mcp-submit) and both consume it. No duplication, no per-kit JS, one generic sink preserved.
+
+Server passthrough CONFIRMED (src/mcp/live.rs:458): payload = raw.payload (whole object) flows to st_await untouched; the dispatcher only reads payload.action. So payload.values arrives intact with ZERO Rust changes.
+
+* Non-negotiables (AGENTS + FEAT-123 harmony)
+- JS only inside the new %primitive; pages stay declarative.
+- ONE generic sink /__mcp/signal/{instance}; NO new Rust route, NO per-kit route.
+- Reuse existing rails (host bridge resolution, handler install/cleanup) — mirror mcp-action-event's structure exactly.
+
+* W1 — mcp-submit primitive (the FUP-068 core)
+stdlib/__mcp__/primitives/host.st:
+- %primitive mcp-submit-event(&el, action: string) — on click: resolve nearest [data-st-instance]; gather every input[name]/select[name]/textarea[name] into {name: value} (checkbox/radio -> boolean .checked; else .value); emit host.signal('mcp-action', {action, values, instance, at}, action). Mirror mcp-action-event's installClickHandler/removeClickHandler/resolveHost/yieldState/%cleanup exactly.
+- %macro mcp-submit { %scope selector; %order 62; %form { @mcp-submit(action: $action:string) }; %binds mcp-submit-event(&self, action: $action) -> {$sent as $mcpSubmitSent, $lastMessage as $mcpSubmitLastMessage, $error as $mcpSubmitError} }
+Verify: cargo run -- check; inspect --layer emit shows querySelectorAll('[name]') gather + host.signal with values, through /__mcp/signal (no new route).
+
+* W2 — form.st uses mcp-submit
+Swap `.kit-submit { @mcp-action(action:"kit-submit", value:"submit") }` -> `.kit-submit { @mcp-submit(action: "kit-submit") }`. Submit now carries payload.values = {field name: current value}.
+Verify: check; emit shows the gather on the submit button.
+
+* W3 — review.st (deferred 4th kit fn)
+stdlib/__mcp__/kit/review.st: input { kind:"review", prompt, body?, approveLabel?, rejectLabel? }. Publish $mcpPrompt + $mcpReviewBody via @mcp-input (extend publish: mcpReviewBody from data.body). Render prompt + optional review body block + a comment textarea (name="comment") + Approve / Request-changes buttons. Both buttons @mcp-submit(action:"kit-approve") / @mcp-submit(action:"kit-reject") so each emits WITH the comment in payload.values.comment. Self-contained warm-dark styling.
+Extend @mcp-input publish in host.st: setSource('mcpReviewBody', data.body || '').
+Verify: check; headless render (prompt + body + buttons + textarea).
+
+* W4 — wiring + verify + harmony + docs
+- Embed kit/review.st in src/stdlib_embedded.rs + extend mcp_prelude_is_embedded guard.
+- kit/index.st: add review to the manifest + its action contract.
+- Headless tests (ISOLATED per BUG-107): mcp-submit gathers {name:value}; review renders.
+- LIVE MCP smoke (the real proof): mount form, fill, submit -> st_await payload.values has field values; mount review, type comment, approve -> st_await action:kit-approve, values.comment.
+- Harmony audit: grep src+stdlib — one sink, no per-kit route, no ChooseForm/etc.
+- Gate: cargo test --lib (incl embed guard) + mcp; kit files check.
+
+* Acceptance
+- FUP-068: form submit envelope carries payload.values = {name: value} for every field (live-verified).
+- review.st: a normal Spacetime fn mounted via st_mount; approve/reject return through the generic sink WITH the typed comment.
+- @mcp-submit is reusable (form + review both consume it); JS only in the primitive.
+- Harmony clean.
+
+* Out of scope
+- Field validation / typed coercion beyond string|boolean (FUP if needed).
+- Multi-step / wizard forms.
+- FEAT-110 canonical @host/@data replacement.
+
+NOTE [2026-06-18]: PLAN-044 COMPLETE — commit 0584b7fd. Closed FUP-068 (form value collection) AND shipped the deferred review.st, sharing ONE new primitive (@mcp-submit). The kit now spans choose / yes-no / collect-input / gated-approval.
+
+Delivered:
+- @mcp-submit primitive+macro (host.st): collects the region's named controls into payload.values and emits through the one generic sink. Gather loop in ST._mcpCollectValues (st.js); primitive calls it as a single expression (sidesteps FUP-070 emit-js splitter bug).
+- form.st: submit now carries payload.values = { field: value }.
+- review.st (NEW): approve/request-changes with a typed comment in payload.values.comment — the gated-approval turn.
+- Embedded review.st + guard; kit/index.st manifest updated.
+
+LIVE END-TO-END (real MCP server + puppeteer): form edited+submitted -> st_await payload.values={service:billing-api,replicas:5}; review commented+approved -> st_await action:kit-approve, values.comment.
+
+GATES: lib 2330/0 (5 _js snapshots regenerated, ONLY delta = the ST._mcpCollectValues helper, verified line-by-line) · mcp 38/0 · v8 428/9 (pre-existing BUG-039, 0 introduced) · kit headless picker 2/0 + form 1/0 isolated · workbench env.st compiles · harmony grep clean.
+
+IMPORTANT FINDING — FUP-070 filed: the %emit js statement splitter mangles a loop-bearing helper function inside a %primitive (for/forEach + nested if collapses; continue hoisted -> 'Illegal continue statement: no surrounding iteration', so the WHOLE page runtime fails to init and a mounted fn renders an inert shell). Same family as FUP-063/BUG-040/041. Worked around by placing the loop in the runtime (st.js) and calling it as a single expression from the primitive — the clean architecture anyway. FUP-070 has root cause + repro + RED->GREEN TDD.
+
+The kit is now feature-complete for the FEAT-123 vision (picker/confirm/form/review). Remaining kit follow-ups: none blocking. FEAT-123 already DONE (PLAN-043).

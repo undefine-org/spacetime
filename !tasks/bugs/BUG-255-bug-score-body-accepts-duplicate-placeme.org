@@ -1,0 +1,67 @@
+#+TITLE: BUG: @score body accepts duplicate placements and unresolved references
+#+STATE: ITEM
+#+SESSION_ID: 1534a2eae1903af0
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-18T13-07-01-638Z_1534a2eae1903af0.jsonl]]
+#+CUSTOM_ID: BUG-255-bug-score-body-accepts-duplicate-placeme
+
+* Initial Message
+
+let's have the score conversation. Please start by reminding yourself of what we were trying to do and what our design goals were. this is like a "Previously on Spacetime" feature where we get to understand what our design intentions were and where we stopped our investigations
+
+#+STATE: ITEM
+
+* Symptom
+
+Both of these compile clean (`✓ All 1 file(s) passed`) and reach the expansion
+layer with their captures intact:
+
+#+begin_src spacetime
+.stage {
+  @score &.time(60s) {
+    &title at 2s at 5s;      // TWO `at` placements on one step
+    &other during &ghost;    // `&ghost` is not an element or a named span
+  }
+}
+#+end_src
+
+Found by the PLAN-128 t2 review swarm (2026-08-02), verified by hand.
+
+* Why they are not domain errors
+
+E0951 (W4/R1) answers "is this measure in the driver's time domain?", and both
+of these are well-formed measures in the right domain. The questions here are
+different:
+
+- =at 2s at 5s= is an ARITY question: a step starts once. Two `at` clauses is
+  either a typo or a misunderstanding, and picking one silently (currently the
+  first, by capture order) is the silent-acceptance class.
+- =during &ghost= is a NAME RESOLUTION question: `during` must resolve to a
+  real element or to a span named by `as` elsewhere in the same score.
+
+* Why this is filed rather than fixed now
+
+Name resolution over the score body is t4's job, and it is not optional there:
+the window map cannot LOWER `during &ghost` at all without resolving `&ghost`
+to a concrete span. So t4 must build the resolver regardless, and the
+diagnostic is a small addition to it rather than a parallel pass. Fixing it in
+t2 would mean writing that resolver twice.
+
+The arity check is genuinely independent and could land either side of t4.
+
+* Acceptance
+
+- =&title at 2s at 5s;= → an error naming the duplicated placement word, with
+  both spans if the diagnostic machinery allows.
+- =&other during &ghost;= → an error naming the unresolved reference, with a
+  did-you-mean over the elements and `as`-named spans in scope (the populations
+  are both available at that point, which is what makes the suggestion
+  mechanical rather than hand-written).
+- Both cases as regression tests in =tests/score_domain_test.rs= or a sibling,
+  asserting rejection AND that the well-formed spellings still compile.
+
+* Notes
+
+Consider whether the arity rule generalizes: `at`/`for`/`in`/`out`/`as` are all
+at-most-once per step, while `during` takes an optional `to`. If so it is one
+rule over the placement set, not five checks — and it should be stated once,
+where the placement capture types are declared.

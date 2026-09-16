@@ -1,0 +1,93 @@
+#+TITLE: Prove the seam from the Erlang side: @before_compile check (declared events ⊆ handle_event heads; reply tags ⊆ page receive discriminators)
+#+STATE: ITEM
+#+SESSION_ID: 153c9c68ea93c166
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-24T17-46-26-602Z_153c9c68ea93c166.jsonl]]
+#+CUSTOM_ID: FUP-143-prove-the-seam-from-the-erlang-side-befo
+
+* Initial Message
+
+look at the spacetime_lv and do a review and show me the features that would be most exciting for you to do there
+
+* Initial Message
+Review of elixir/spacetime_lv (2026-07-24). User accepted point 4 as a tracker
+item: make the LiveView↔.st seam a compile error from BOTH languages.
+
+* The gap (asymmetric proof today)
+"The compiler proves the seam" is currently a HALF-truth — the seam is checked
+from one direction only:
+
+- .st → server: `send emit "typo"` is a COMPILE error. E0928 checks every
+  `send emit "<event>"` against `<Module>.contract.json`. ✓
+- server → .st: NOTHING is checked at compile time. Two concrete holes:
+  1. A declared `event(:move_card, …)` with NO matching `handle_event("move_card", …)`
+     clause in the LiveView → the .st fires into the void; surfaces only when a
+     user clicks, in the browser, at runtime.
+  2. `handle_event` replies `{:reply, %{tag: "weird"}, …}` with a tag that NO
+     `receive` arm on the page decodes → silent drop / fallthrough at runtime.
+
+Mirror image of E0928, owed from the Erlang side (bridge principle 2: "if a
+disagreement can only surface in the browser, the check is missing").
+
+* Fix — a @before_compile check in Spacetime.LiveView
+The module already runs `@before_compile Spacetime.LiveView` (it builds the
+contract + fingerprint). Extend it to also VERIFY, at the host module's compile
+time:
+
+1. **events ⊆ handle_event heads.** For every declared `event(:name, …)`, assert
+   the module defines a `handle_event("name", _, _)` clause. Elixir exposes this
+   via `Module.definitions_in(env.module, :def)` / `__info__(:functions)` +
+   inspecting clause patterns is harder — realistically check that
+   `function_exported?`-style presence holds, or require a companion
+   registration. SPIKE the introspection depth (can we read the literal string
+   pattern of each handle_event head at before_compile? If not, fall back to a
+   runtime boot-time assertion that still fails fast, documented as the limit).
+
+2. **reply tags ⊆ page receive discriminators.** The page's declared receive
+   discriminators live in the contract sidecar (or must be added to it). The
+   server can't easily enumerate every `{:reply, %{tag: …}}` it MIGHT emit
+   (tags are runtime values in case/with bodies), so the tractable direction is:
+   the .st page declares which tags it decodes (already implied by its `receive`
+   arms); emit those into the contract; the SERVER-side check asserts the page's
+   declared response sums are a superset of the tags the handler is annotated to
+   return. If handlers aren't annotated, this half may need a lightweight
+   `replies do reply(:move_card, tags: ["ok", "err"]) end` declaration to check
+   against — SPIKE whether that earns its place or is over-engineering.
+
+* Design constraints
+- Reuse the existing `@before_compile` + contract machinery — no new subsystem
+  (elegance bar).
+- Errors must be REAL compile errors (raise in the macro / Mix.raise), in the
+  E0928 family conceptually, so the message points at the mismatch.
+- Don't require hand-maintained duplication: the check reads what's ALREADY
+  declared (events/assigns/pushes) + what the sidecar carries.
+
+* Open questions
+1. Can `@before_compile` reliably read each `handle_event/3` head's literal
+   first-arg string pattern? (Elixir gives function arities, not clause patterns,
+   at before_compile time without `@on_definition` accumulation.) Likely need
+   `@on_definition` to accumulate handled event names as they're defined, then
+   diff against declared events in `@before_compile`.
+2. For reply-tag checking: is the page's receive-arm tag set available server-
+   side (contract sidecar), and is enumerating the handler's possible reply tags
+   tractable, or do we need an explicit `replies` declaration?
+3. Direction of truth: server declares events, page declares decoded tags —
+   which side's compile fails on a mismatch? Probably BOTH (E0928 on the .st
+   side already; this adds the Elixir side).
+
+* Acceptance
+- Removing a `handle_event("move_card", …)` clause while `event(:move_card, …)`
+  stays declared → `mix compile` FAILS with a clear message (not a runtime
+  surprise).
+- A `{:reply, %{tag: "nope"}}` whose tag no page arm decodes → caught at
+  compile time (or, if OQ2 forces it, at boot with a fast documented failure).
+- No new hand-maintained duplication; the check reads existing declarations +
+  the sidecar.
+
+* Relation
+Completes the bridge thesis sentence ("the compiler proves the seam") from the
+Erlang half. Sibling to E0928 (the .st half). Independent of FUP-121/132,
+FEAT-138, FUP-142.
+
+NOTE [2026-07-26]: HOLE #1 DONE 2026-07-24 via PLAN-119 W5 (commit 64226ae2). @on_definition accumulates each literal handle_event/3 first-arg string; @before_compile asserts declared event(:x) ⊆ handled. Missing handler → raise (E0928 family, Erlang half): `E0928: declared Spacetime event "move_card" for <Module> has no literal handle_event("move_card", _, _) clause`. Non-literal (catch-all/defdelegate) head → :dynamic sentinel → SOFT WARNING, no false positive (SignupFieldLive's defdelegate handler correctly warns, not errors). Test: test/spacetime/live_view_test.exs (assert_raise on a missing-handler module); mix test 17 pass, mix compile clean. The .st→server half (E0928 in Rust) + this server→.st half now make the events-name seam total in BOTH directions.
+
+HOLE #2 (reply-tags ⊆ page receive discriminators) REMAINS OPEN — the spike verdict (W5): NOT soundly tractable from @on_definition because reply tags are handler-BODY runtime values (SignupLive builds `tag` at runtime in a case/with). Requires an explicit `replies do reply(:x, tags: [...]) end` declaration once the contract sidecar exposes the page's receive-arm tag set. Keep this item OPEN for hole #2; consider whether the `replies` declaration earns its place (elegance bar) vs a documented boot-time assertion.

@@ -1,0 +1,18 @@
+#+TITLE: MCP workbench: inspector ALL CONTRACTS leaks host's own internal templates
+#+STATE: DONE
+#+SESSION_ID: 150f785b33edb744
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-19T16-17-16-496Z_150f785b33edb744.jsonl]]
+#+CUSTOM_ID: BUG-115-mcp-workbench-inspector-all-contracts-le
+#+COMPLETION_HASH: 0071d3cd0d798177
+
+VERIFIED root cause (source-traced 2026-06-19). The inspector "ALL CONTRACTS" list shows the workbench's OWN internal card templates (mcp-env-card, mcp-open-env-card, mcp-tab-card, mcp-function-card, mcp-instance-card, mcp-event-card, mcp-param-card, mcp-gallery-card, mcp-param-edit) — renderer plumbing, not user-composed functions.
+
+ROOT CAUSE: src/mcp/live.rs::workbench_snapshot (L320-322) builds `contract_params = flatten_contract_params(&functions)` over ALL functions, INCLUDING the host (mcp-workbench). Contrast the gallery, which correctly self-excludes (L327-330: `.filter(|f| f.name.as_deref() != Some("mcp-workbench") && f.compile_ok)`). The contract list lacks the same filter.
+CodePath: src/mcp/live.rs::workbench_snapshot  (the `contract_params` binding vs the `gallery_functions` binding right below it)
+Renders via: stdlib/__mcp__/workbench/lists.st `.mcp-contract-list @each($mcpContractParams)`.
+
+FIX (review D2): apply the same mcp-workbench self-exclusion to the functions slice feeding contract_params. BETTER: scope the inspector's visible contract list to the SELECTED frame by default (already have stage_mount.contract_params), with "all contracts" behind a disclosure — more Figma-true and sidesteps the leak. Decide in the PLAN.
+
+Evidence: @research/mcp-workbench-review-2026-06-19-round3.org Part 2 R3-C2. Screenshot scratch/wb-09-editable-params.png.
+
+NOTE [2026-06-19]: FIXED (PLAN-048 S4). workbench_snapshot now builds contract_params from a guest_functions slice that excludes mcp-workbench (same filter the gallery uses); the origin-drawer `functions` array still lists the host. Unit test snapshot_contract_params_excludes_workbench_host. Live-verified: inspector ALL CONTRACTS shows only the guest's own param (name·greeter·main), host internals (mcp-env-card etc.) gone. Commit pending.

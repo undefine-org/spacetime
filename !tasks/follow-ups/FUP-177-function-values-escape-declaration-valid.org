@@ -1,0 +1,71 @@
+#+TITLE: Function values escape declaration validation — the gradient gap
+#+STATE: ITEM
+#+SESSION_ID: 153f5ed0617636c7
+#+CUSTOM_ID: FUP-177-function-values-escape-declaration-valid
+
+* The gap
+
+FUP-176 validates a plain CSS declaration's value against the type its property
+accepts. A FUNCTION-shaped value (`radial-gradient(...)`, `image-set(...)`) is
+checked only for parenthesis balance, so a malformed function still reaches the
+stylesheet and is silently dropped by the browser.
+
+BUG-295 is this gap costing something real: three `radial-gradient(circle 2.4%
+...)` "eyes" in `projects/unkn` that have never rendered, because `circle` takes
+a `<length>` and a lone `<percentage>` is invalid.
+
+* Why it was left open rather than closed
+
+Measured, not assumed. lightningcss 1.0.0-alpha.67 REFUSES these, all of which
+are valid CSS:
+
+| value                                      | verdict |
+|--------------------------------------------+---------|
+| =cross-fade(url(a.png) 50%)=               | refused |
+| =paint(myPainter)=                         | refused |
+| =-webkit-linear-gradient(top, #fff, #000)= | refused |
+
+Validating function values against alpha-67 would fail builds over a
+dependency's release schedule. A false positive that blocks a build is strictly
+worse than a missed diagnostic, so functions are exempt for now — and the
+exemption is GATED (`a_function_value_is_not_ours_to_refuse` in
+tests/css_declaration_validation_test.rs) so nobody "fixes" it by accident.
+
+* The three honest options
+
+** A. Bump lightningcss and re-measure (cheapest, do this first)
+
+The exemption is pinned to a VERSION, not to a principle. If a later release
+parses the three cases above, the exemption shrinks to whatever still fails.
+Re-run the probe before designing anything; this may be the whole fix.
+
+** B. Gradient grammar in stdlib (most in keeping with PLAN-122)
+
+`%capture_type radial_gradient` etc. in `stdlib/capture-types/css-values.st`,
+composed from the scalar productions that already exist (`length`, `angle`,
+`percentage`, `color`). Then a gradient is validated by the SAME machinery as
+every other value, and `circle <percentage>` is refused by the grammar saying
+`circle` takes a length — exactly the shape of the `{3|4|6|8}` hex rule.
+
+Cost: gradients are a large grammar (`<radial-size>`, `<radial-shape>`, colour
+stops with two-position syntax, `repeating-` variants). Worth it only if built
+from the existing scalar leaves rather than as a monolith.
+
+** C. Allowlist the functions lightningcss handles, validate only those
+
+Cheap and mostly effective, but it is a hand-synced list keyed to a dependency's
+internals — a seventh scalar list wearing a different hat. Rejected unless A and
+B both prove impractical.
+
+* Gate when implemented
+
+- `background: radial-gradient(circle 2.4% at 18% 50%, #d43e2b 0%, transparent 70%)`
+  is REFUSED with a span at the value (BUG-295's exact declaration).
+- Every value in `a_function_value_is_not_ours_to_refuse` still COMPILES.
+- Corpus stays at zero E0958 across stdlib, demos, examples, fixtures, projects.
+
+* Related
+
+- FUP-176 — the declaration validator this extends.
+- BUG-295 — the live defect this would have caught.
+- PLAN-122 — the arc; option B is its natural continuation.

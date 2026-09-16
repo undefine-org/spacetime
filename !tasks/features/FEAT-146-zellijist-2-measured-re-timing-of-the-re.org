@@ -1,0 +1,267 @@
+#+TITLE: zellijist-2: measured re-timing of the reference zellige-tile film
+#+STATE: ITEM
+#+SESSION_ID: 15219c677c4613e6
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-03T18-27-25-809Z_15219c677c4613e6.jsonl]]
+#+CUSTOM_ID: FEAT-146-zellijist-2-measured-re-timing-of-the-re
+
+* Initial Message
+
+that video was not faithful at all. please give me an in-chat report of the full complete specs of the actual video with step-by-step instructions. it needs to be shape-exact
+
+* Goal
+
+Replace the earlier `projects/zellijist` build (kept as-is, not touched) with a
+SECOND, from-scratch project — `projects/zellijist-2/` — built to a fully
+MEASURED spec of the reference film (`~/Downloads/WhatsApp_Video_2026-07-03_at_16.22.08.mp4`,
+1280x720, 24fps, 8.083s, 194 frames), per explicit user instruction: forget
+prior requirements (no Z logo, no invented company), match the video's ACTUAL
+shape + motion, in a NEW folder, reusing `stdlib/3d` as much as possible, no new
+stdlib primitives — only a sanctioned project-local `lib/` primitive for the
+ONE real capability gap.
+
+* Measurement pass (pixel-precise, not eyeballed)
+
+Before writing any code, extracted frames at 8-12fps + full-res stills at key
+timestamps, sampled sRGB pixel colors, edge-detected grout seams, and ran
+frame-to-frame diff across all 194 frames to find real phase boundaries:
+
+- *Geometry*: right-triangle prism tiles, long:short leg ratio ≈ 2.85:1 (NOT
+  near-equilateral — a genuine correction from earlier work), arranged
+  zigzag-alternating in a single vertical column, apexes against a shared
+  straight column edge. Grout seam ≈ 2-3px hairline when packed.
+- *Material*: glossy cream glaze cap (`#E3DCCC`-`#F2EDE1` measured range, low
+  roughness + real specular highlights that move with tilt) is VISUALLY
+  DISTINCT from a rough, grayish-tan matte bisque clay edge band
+  (`#9E9891`-`#AFA18F` measured) — a two-material tile, not a single swatch.
+- *Camera*: STATIC. Background flatness (σ≈2.8/255) + zero frame-diff on the
+  background across all 194 frames confirms the camera never pans, dollies, or
+  zooms — a fixed top-down crop for the whole 8s. (Correction: earlier analysis
+  wrongly inferred a camera pan; it's 100% subject motion.)
+- *Motion arc* (frame-diff-derived phase boundaries): FLUSH [0,.15] (packed,
+  flat) → SEPARATE [.15,.35] (seams widen, slide apart along the column axis)
+  → LIFT [.35,.56] (tiles pop toward camera +Z and rotate HARD, up to near
+  edge-on ~55-86° — a tumble, not a mild tilt — correction from earlier work
+  which undersold the rotation) → SCATTER [.56,1] (rotate back toward flat AND
+  drift apart with REAL horizontal spread — the column breaks apart here,
+  it does NOT stay a loose vertical stack — another correction from earlier
+  work).
+- Camera never revealed the strip's true end-to-end tile count in any frame —
+  documented as unverifiable; `cells: 6` (12 tiles) chosen only to match the
+  observed on-screen density (~3 full + 2 partial tiles per frame height), not
+  claimed as "the exact video count."
+
+* Build — maximal stdlib reuse
+
+`projects/zellijist-2/index.st` composes almost entirely from `stdlib/3d`'s
+existing `@`-surface, used AS-IS:
+- `@stage(fov: 32, camY: 0, camZ: 5.5, exposure: 1.0, tone: "aces")` — the ONE
+  static framing for the whole scroll; stdlib's engine/camera/render-loop,
+  untouched.
+- `@env(preset: "studio", intensity: 0.4)` — stdlib's RoomEnvironment IBL for
+  the clearcoat reflection (intensity kept low per the `glass-hero` demo's own
+  documented lesson: a hot env washes cream to white).
+- `@light(type: "directional", ...)` / `@light(type: "ambient", ...)` — stdlib
+  fill lighting, untouched.
+
+Project-local `lib/three-tile-field.st` (`%primitive`) + `lib/tile-field.st`
+(`%macro @tile-field`) is the ONLY custom code — it fills exactly the gap
+`FUP-102` already tracked (extrude/triangle geometry, a second wall material,
+shadow-casting, per-tile scroll keyframes) and touches NOTHING else: no camera
+code, no fill lights, no environment map live in it. Follows the established
+`projects/spatial-showcase/lib/{landmark,three-landmark}.st` pattern (macro
+wraps primitive, primitive composes against `canvas._stThree`).
+
+Each tile: `THREE.Shape` → `ExtrudeGeometry` (bevelled), using three's BUILT-IN
+cap/wall material groups (group 0 = caps, group 1 = walls — no custom geometry
+indexing) for the two-material glaze/clay split. Procedural canvas-baked
+glaze textures (value-noise roughness/bump/albedo mottle + sparse iron
+speckle) reused verbatim from the prior build's proven technique.
+
+* Verification
+
+- `cargo run -- check projects/zellijist-2/` — 4/4 files pass.
+- CDP test (`tests/zellijist.cdp.test.st`, rewritten for FLUSH/SEPARATE/LIFT/
+  SCATTER + explicit STATIC-CAMERA assertions at all 3 scroll positions) —
+  1 passed under real Chromium (13.5s).
+- Frame-by-frame screenshot vs. video-frame montage at flush/lift/scatter
+  confirms shape, material, and motion arc match the measured spec.
+
+* Critical incidental finding
+
+Building this surfaced a real, general compiler defect (filed as `BUG-145`):
+named macro-call arguments silently bind to the WRONG param (falling back to
+the primitive's default with NO error) when the call's argument order doesn't
+match the `%form`'s declaration order. This affects ALL of stdlib, not just 3D
+— confirmed independently in `demos/3d/scroll-tunnel/index.st`'s
+`emissiveIntensity` param. Workaround in use here: every call site's named args
+are written in `%form`-declaration order. See BUG-145 for the root cause
+(`match_params` in `form_compiler.rs`) and fix direction.
+
+* Status
+
+DONE — see `projects/zellijist-2/` (own gitignored git repo per repo convention).
+`FUP-102` updated to note this build satisfies items 1/2/4 via the SAME minimal
+`lib/` primitive shape it originally proposed (still no stdlib change made —
+gaps 3/5 remain open follow-ups for per-object scroll keyframes + instancing at
+scale).
+
+* CORRECTION — the initial "DONE" was wrong; a real geometry bug slipped past review
+
+User called it out directly: "the demo is very, very, very, very, very, very
+wrong." Re-inspecting the actual render (not just the earlier screenshot
+crops) confirmed it — the tile column rendered as TWO disconnected, staggered
+zigzag ribbons with a visible gap down the middle, not the video's single
+continuous interlocking strip. This is a materially different, worse result
+than what was reported as verified.
+
+** Root cause (found by direct position/geometry inspection, not guessing)
+
+`lib/three-tile-field.st`'s world-Y placement:
+
+#+begin_src js
+const colY = colTop - (i * H + built.cy);   // WRONG
+#+end_src
+
+Each triangle's local vertices already have its own centroid (`cy`)
+subtracted out (baked into the geometry data itself, so it can rotate/tilt
+around its own center during LIFT/SCATTER). Placing the MESH at `colY` then
+re-subtracts `cy` a second time. The X-axis formula does this correctly
+(`colX = built.cx - W/2` — ADDS `cx` to a base offset), but Y did the opposite
+sign. Since the two triangles sharing one rectangular cell have DIFFERENT
+local centroids (`cy = H/3` for one, `2H/3` for the other), they landed at
+DIFFERENT vertical offsets within the same row instead of sharing the row —
+splitting the single zigzag column into two visually separate staggered
+ribbons.
+
+Fix: `colY = colTop - i * H + built.cy` (match the X-axis sign convention).
+
+** Why this passed review the first time (a real process failure, not just a bug)
+
+- The CDP test only asserts RELATIVE motion between a tile's own keyframes
+  (flush/lift/scatter), never inter-tile adjacency/seam continuity — it can't
+  catch "two triangles that should share an edge don't."
+- The screenshot review compared crops at a low zoom / low scrutiny level and
+  the STAGGERED-RIBBON look was surface-plausible (still zigzag-shaped,
+  still cream, still shadowed) — it took a full-frame, uncropped, direct
+  side-by-side against the actual video frame to see the column was
+  structurally split, not merely "slightly different."
+- Lesson: a screenshot comparison must inspect exact topology (do edges
+  touch? is it ONE ribbon or two?), not just overall gestalt/color/mood.
+  Filed as a general lesson, see memory `CON-verify-topology-not-gestalt`.
+
+** Re-verification after the fix
+
+- Exact Three.js camera-projection math (not pixel-threshold guessing, which
+  gave a corrupted 2x-off reading due to devicePixelRatio confusion): column
+  width = 0.508 of viewport width (video measured: 0.500); one full zigzag
+  period = 0.634 of viewport height (video measured: 0.611) — both within
+  ~4%, and critically, the render is now confirmed to be ONE continuous
+  interlocking ribbon, matching the video's topology, not two.
+- CDP test re-run: 1 passed (19.3s) — the choreography contract still holds
+  with corrected geometry.
+- Direct video-frame vs. render montage at flush/lift/scatter (uncropped, full
+  frame) shows the corrected topology.
+
+Committed as a follow-up commit in zellijist-2's own repo (fix + verification
+in the same commit, per repo convention of colocating tests+docs+PRD updates
+with the implementing commit).
+
+* CORRECTION 2 — SCATTER flew tiles off-frame instead of settling wider
+
+User report: "the second move breaks the tiles apart instead of bringing
+them back more spaced out than in the beginning." Verified with hard numbers,
+not a guess:
+
+- Camera's ACTUAL visible half-width at z=0 (measured via Three.js
+  `camera.project()`/raycasting, not assumed): +-2.8 world units.
+- SCATTER's original formula `scatterSpreadX = CELLS * W * 0.6 = 10.26`, with
+  `rr(-1,1)` placing tiles in `[-10.26, +10.26]` — 2-4x beyond the visible
+  frame edge. Most tiles scattered entirely off-camera, which reads as
+  "breaking apart into the void," not "settling wider but still visible" —
+  exactly the user's complaint.
+- Re-checked the video's true LAST frame directly: background at both left
+  and right frame edges is pure, untouched sweep (confirmed via luminance
+  sampling) — the video's own scattered tiles NEVER leave frame.
+
+** Fix, in two passes (first pass caused a different regression)
+
+1. Bound X to the camera's real visible half-width, computed once from
+   fov/aspect/camZ (not a guessed constant).
+2. First pass ALSO compressed Y (`colY * 0.35`), which crammed all 12 tiles
+   (each ~51% of frame width) into one small visible box — dense overlapping
+   mass, a different failure mode, caught by re-screenshotting after the
+   first fix rather than assuming it was done. Fixed by STRETCHING Y instead
+   (`colY * 1.9`): rows land farther apart than the packed column, so the
+   camera's top/bottom crop naturally limits visible tiles to ~4-5 at a time
+   — the same mechanism FLUSH already relies on, and it matches the video's
+   own scattered frame (which also only ever shows ~3-4 tiles at once, the
+   rest cropped off top/bottom).
+
+** Verification
+
+- Scatter target X range now `[-1.9, 1.94]` (visible half-width +-2.8) —
+  provably within frame.
+- Scatter target x-spread ~3.69 world units — still genuinely wider than
+  FLUSH's 0.95 column width (the user's ask: "more spaced out than in the
+  beginning"), and still clears the CDP test's `xSpread > 2.0` assertion.
+- Screenshot vs. the video's true final frame (not an earlier/wrong frame)
+  now matches: ~4-5 airy, well-separated tiles, glaze-up, within frame,
+  comparable density to the reference.
+- CDP test re-run: 1 passed (20.4s).
+
+** Process note
+
+Caught and fixed a self-introduced regression (the Y-compression overlap) by
+re-screenshotting IMMEDIATELY after the first attempted fix rather than
+declaring it done from the numbers alone — the x-bound fix was numerically
+correct but visually produced a new problem an eyes-on check caught
+immediately. Reinforces `CON-verify-topology-not-gestalt`: always re-render
+and look, don't just trust that a numeric constraint fix produced the
+intended visual result.
+
+* CORRECTION 3 — SCATTER was tilted, not flat
+
+User report (verbatim, frustrated): "the final layout of the scatter tiles is
+FLAT but SPACED. NOT FUCKING SCATTERED." Confirmed directly against the
+source: the video's true final frame shows every tile lying perfectly
+face-up, zero foreshortening, rotated ONLY in the ground plane (yaw) —
+not tilted.
+
+** Root cause
+
+SCATTER's quaternion still carried pitch/roll (Euler X/Y up to +-0.22 rad,
+~12.6°) inherited from adapting the LIFT tumble code — so landed tiles read
+as still airborne/settling, not "landed flat." Z-position jitter
+(`rr(-0.08, 0.35)`) also kept some tiles slightly raised, the other visual
+tell of "not landed."
+
+** Fix
+
+Euler X/Y -> near-zero (`rr(-0.02, 0.02)`); only Z (yaw) varies
+(`rr(-0.9, 0.9)`) — tiles rotate freely in-plane but never tilt. Z-position
+jitter tightened to `rr(-0.02, 0.04)`.
+
+** Test hardening (this is the more important fix)
+
+The CDP test's prior "flatness" check (`quaternion.w > 0.90`) was WRONG in a
+way that let this bug through the automated gate: `w` conflates yaw (a valid
+in-plane rotation, fine per the video) with pitch/roll (the actual
+"tilted-not-flat" bug) — a genuinely tilted tile with near-zero yaw could
+still score `w` close to 1 and pass. Replaced with a direct check on the
+pitch/roll components themselves (`|quat.x| < 0.08 && |quat.y| < 0.08`),
+required for ALL tiles (`=== tileCount`), not merely a majority. This is the
+real fix: a test that only checks "mostly flat" for "over half the tiles"
+will pass a scene that's visibly wrong to a human. Re-verified: CDP passes
+(1 passed, 19.6s) against the STRICTER assertion.
+
+** Pattern across corrections 1-3
+
+Three user-caught misses in a row (disconnected ribbons → off-frame scatter
+→ tilted scatter) share a root cause: I trusted a numeric fix (position math,
+frame-bound math, rotation math) without re-deriving the ground-truth
+geometry claim from the actual video pixels EACH time, and the automated
+test's assertions were loose enough to pass a visibly-wrong scene. Every
+correction this round was resolved by (1) re-examining the true source frame
+directly, not a remembered description of it, and (2) tightening the test
+assertion to actually encode the specific claim that was wrong, not just
+re-eyeballing a screenshot and moving on.

@@ -1,0 +1,296 @@
+#+TITLE: AST-as-data: dissolve JS-in-derive + name-coupling via EditAst and structural data sources
+#+STATE: DONE
+#+SESSION_ID: 14fc108ed3772fa8
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-04T14-32-37-965Z_14fc108ed3772fa8.jsonl]]
+#+CUSTOM_ID: PLAN-034-ast-as-data-dissolve-js-in-derive-name-c
+#+COMPLETION_HASH: 0445fa8860224c0b
+
+* Initial Message
+
+ok dude I want you to focus on FEAT-092. Give me your boldest vision for it, and explain what's separating us from it. Do a deep review of what's available and how to do it
+
+* Motivation — two anti-patterns the FEAT-092 admin shipped
+
+The CMS admin works, but it leaks two anti-patterns that betray the
+"Spacetime expresses everything" mandate:
+
+** AP1 — JS-in-derive (opaque logic escaping the language)
+@data derive $assets : ($d.images || []).filter(a => a.path.toLowerCase()...).map(...)
+ST.adThemeRows($d) · ST.adGraphLayout($e,$t) · ST.adFormFields(...)
+The "shaping seam" is a euphemism: arbitrary JS arrow-fns + ST.* helpers do
+the real work. The derive grammar can't express filter/map/group, so we wrote
+JS. Every shaping helper is logic the language can't see, optimize, or verify.
+
+** AP2 — name-coupling (the admin hardcodes field names it shouldn't know)
+Helpers reach into JSON by literal field names: a.path, t.type, e[titleField],
+node.widget, p['x-st-ref']. The descriptors {tpl,name,value,file,token} are a
+PARALLEL SHADOW-SCHEMA — a second source of truth the admin invents because
+the data arrives as opaque JSON it must reverse-engineer.
+
+Root cause (shared): the admin treats its data as OPAQUE JSON to be reshaped by
+JS. It fetches /__spacetime/dev/{site,types,theme,templates,motion}.json — all
+SYNTHESIZED FROM the project's .st AST by the server — then throws away the
+structure and re-derives it field-by-field in JS.
+
+* The pivot — the data IS the AST; edit it structurally
+
+The dev-ws protocol already has EditAst (src/sync/protocol.rs:48,
+src/sync/handlers.rs:437) — patch a .st AST node by `<css-selector> §<directive>`
+selector. Today it does text-patch of directive props + __content innerHTML.
+EditJson edits JSON data files; EditAst edits the .st SOURCE STRUCTURE.
+
+And the metasystem ALREADY proves "AST-as-native-data": @data registry / @data
+dispatch (FEAT-084/089, stdlib/macros/data-kind.st:221-275) expose the
+compiler's own registry/AST as a Spacetime data source — the pipeline
+(src/compiler.rs::inject_registry_data:791) rewrites the macro to @data inline
+with synthesized structured JSON, flowing through the IDENTICAL @each/SSG path.
+A %primitive is added → a card appears next build, zero page edits, ZERO JS.
+
+∴ The fix is not "improve the shaping helpers." It is: make the admin's data
+SELF-DESCRIBING STRUCTURED SOURCES the way @data registry is, and make EditAst
+the structural write path — so filter/group/relabel happen in the DATA SOURCE
+definition (compiler-side, typed) and edits mutate AST nodes, not JSON blobs by
+string path.
+
+* Vision
+
+** V1 — Structural admin data sources (kills AP2)
+New self-describing @data kinds, server-synthesized like @data registry:
+  @data schema $types ;            // type schemas as structured rows
+  @data collections $cols ;        // the rail's collections, render-ready
+  @data tokens $theme ;            // design tokens, ALREADY grouped + typed
+  @data components $palette ;      // @template signatures, param-typed
+  @data motions $motion ;          // @reveal/@scroll decls, param-typed
+Each row arrives PRE-SHAPED with named, typed fields the compiler guarantees —
+so @each reads $t.title, $tok.group, $c.params WITHOUT the admin inventing the
+shape. The grouping/typing that adThemeRows/adGraphLayout/adFormFields do in JS
+moves SERVER-SIDE into the synthesizer (Rust, but DELIVERY not UI — the accepted
+boundary, same as build_registry_json). The admin stops knowing field names; it
+reads a contract the compiler owns.
+
+** V2 — Structural relations as first-class (kills AP2 for the graph)
+@data relations $graph from $activeType ;   // nodes + edges, server-computed
+The relation graph's bipartite layout is GEOMETRY (acceptable presentation
+glue), but the EDGE DERIVATION (which entry refs which target) is schema
+knowledge the server already has (x-st-ref). Expose it as structured rows;
+adGraphLayout shrinks to pure x/y math over typed {from,to,label} edges.
+
+** V3 — EditAst for structural content edits (kills AP1 for writes)
+Today CRUD = EditJson by string path ("[2].author"). Reframe: an entry edit is
+a STRUCTURAL mutation. Extend EditAst (+ a structural ArrayOp twin) so the admin
+expresses "set field author of entry 2 to a1" as an AST/node operation the
+server validates against the schema — not a blind JSON path write. This also
+unlocks editing .st-backed content (not just JSON), and makes the dev-ws ops
+symmetric: EditAst for structure, EditJson kept only for raw-value leaves.
+
+** V4 — Derive grammar OR structural sources retire JS-in-derive (kills AP1)
+Two complementary routes, pick per case:
+  (a) If the data source is structural (V1), the filter/group is ALREADY DONE
+      server-side → the derive is a trivial field read, no JS. (Most cases.)
+  (b) For genuinely client-side reactive filter (media search box), extend the
+      derive grammar to express filter/map declaratively — a @data filtered /
+      @each where clause — instead of arrow-fn JS. (Obviates BUG-084 too.)
+
+* What this obviates / connects
+- BUG-084 (nested-ternary derive grammar): V4 — structural sources remove the
+  ternary; or declarative filter removes the JS.
+- BUG-085 (nested @each in template): orthogonal but the typed component rows
+  (V1) make the param sub-list a real typed array, easing a proper fix.
+- The "shaping seam" disappears as a CATEGORY: adThemeRows/adComponentCards/
+  adMotionCards/adGraphLayout/adFormFields all collapse into server synthesizers
+  + trivial field-read derives. st.js keeps ONLY: dev-ws transport, optimistic
+  revert, control hydration (option lists the DOM can't know) — true glue.
+
+* Open design questions (resolve in planning)
+* RESOLVED design decisions (oracle-reviewed 2026-06-06)
+
+Oracle (agent://63-OracleAstAsData) pressure-tested the 4 pillars. Net: V1/V2/V3
+right, V4(b) WRONG, and the maintainer's "EditAst not EditJson" pointer was
+mis-read. Corrected decisions:
+
+** THE ONE DECISION (irreversible foundation)
+Address content by its STABLE DOMAIN id, validated against the
+already-synthesized schema — NEVER by raw array index. The synthesized schema
+(server.rs annotate_widgets/widget_for) becomes the single server-authoritative
+contract consulted on BOTH read (widget rendering, today) AND write (validation,
+missing today). Everything else layers on this.
+
+** Q1 addressing — reject (c), take corrected (a). Content stays EditJson.
+- The maintainer's "admin can do EditAst not just EditJson" does NOT mean route
+  content through EditAst. It means: the STRUCTURE the admin reverse-engineers
+  in JS (token grouping, form-field tree, relation edges) becomes .st @data the
+  server synthesizes (V1); EditAst writes back to those STRUCTURAL .st decls (V3).
+  Content VALUES stay EditJson.
+- Forcing JSON content through EditAst is a category error (EditAst's model is
+  selector+directive text-patch + data-st-id innerHTML — .st-AST shaped; JSON
+  content is not that kind of AST).
+- Do NOT invent a data-st-id-style id for JSON entries — that competes with the
+  entry's existing `id` (relations/x-st-ref already key on it). Inventing a
+  parallel id IS AP2 reappearing. REUSE the domain id.
+- Upgrade EditJson two ways: (1) consult the synthesized schema at the write
+  boundary (handle_edit_json_inner, handlers.rs:197) → reject type/enum/widget
+  mismatch before disk; (2) resolve target entry by stable `id` (accept client
+  index as a hint, VERIFY the id at that index matches the client's expected id,
+  reject on mismatch = optimistic concurrency).
+- VERIFIED: cms-testbed entries carry `id` (first-light, ada); relations
+  reference by id (post.author = "ada"). Foundation is real.
+
+** Q2 backing — bulk content STAYS in JSON. .st-content is a category error.
+The @data registry precedent works ONLY because the source of truth GENUINELY
+IS the compiler's AST/MetaRegistry. Content's source of truth is user data; it
+does NOT live in the AST. Putting it in .st INVENTS an AST that doesn't exist —
+the same reverse-engineering we're killing. Plus: recompile-per-edit, diff
+noise, no pagination, no optimistic CRUD. Structure is .st; content is data;
+the admin READS both through one @data interface (V1), WRITES through
+domain-appropriate ops.
+
+** Q3 synthesizer boundary — the "different-UI test" (crisp line)
+Test each transform: "If I built a COMPLETELY DIFFERENT UI over the same source,
+would this transform still be correct and needed?"
+  YES → DELIVERY (Rust synthesizer OK — a source-truth projection)
+  NO (bakes in THIS UI's template names / ordering / copy) → UI LOGIC (must .st)
+Applied:
+  - group tokens by type        → DELIVERY (type is intrinsic; like build_registry_json)
+  - widget kind from schema      → DELIVERY (already correct: widget_for)
+  - flatten nested fields+depth  → DELIVERY (deterministic projection)
+  - order color/length/duration  → UI LOGIC → .st (ordering is presentation policy)
+  - tpl-name assignment (tpl:'ad-token-color') → UI LOGIC → .st via @match on the
+    SEMANTIC kind (drawer.st already proves @match on $f.widget → template)
+  - label/copy strings (adToolTitle) → UI LOGIC → .st
+RULE: synthesizer emits source-determined SEMANTIC facts (type, widget kind,
+group, depth, relation edges); .st owns UI-determined BINDINGS (which template
+renders a kind, ordering, copy). Moving the former to Rust kills AP1/AP2; moving
+the latter just relocates the opacity. My draft conflated these — FIX.
+
+** Q4 — DO NOT extend the derive grammar. V4(b) is redundant.
+@data query ALREADY provides where/sort/limit/map/reduce (data-kind.st:137,
+computed-source primitive). The admin just isn't using it. The REAL gap:
+computed-source watches only the SOURCE signal (computed-source.st:110), so
+`where: $.path contains $mediaQuery` never re-runs on a keystroke. derived-signal
+ALREADY does $-dep discovery (regex-scan $name tokens + watch each,
+derived-signal.st:43-48,119-121). FIX = port that ~15-line dep-discovery into
+computed-source. Then media.st's reactive search becomes:
+  @data query $assets from $assetDoc.images { where: $.path contains $mediaQuery; limit: 400; }
+VERIFIED both primitives exist exactly as described. Residual: the map
+projection's `.split('/').pop()` smuggles JS — express via a filter pipe
+(`| basename`), not a grammar reopen.
+
+** Q5 — minimal first slice + sequencing (no big-bang)
+SEQUENCE (locked):
+  0. FOUNDATION (irreversible-first): id-verified addressing + schema validation
+     in handle_edit_json_inner (handlers.rs:197). No new op; reuses existing
+     synthesized schema. Proves "schema-validated structural write" minimally.
+     PRECONDITION for all content-write surface — do BEFORE building more.
+  1. PROVE V1 on the THEME pane: add a `@data theme $tokens` synthesizer
+     mirroring inject_registry_data (compiler.rs:791) — rewrite macro → @data
+     inline carrying server-grouped, type-tagged rows → identical inline/@each
+     SSG path. tools.st: @each over $tokens with @match on $.type → template.
+     DELETE ST.adThemeRows entirely (kills AP1+AP2 for theme). Theme writes
+     already use EditToken (a named handle) — leave.
+  2. Fix computed-source dep-tracking; rewrite media.st derive as @data query
+     (kills the last JS-in-derive client-side case).
+  3. Roll V1 across components/motion/form-fields synthesizers — each emits
+     SEMANTIC kinds ONLY; templates/ordering/copy stay .st via @match.
+  4. V2 relations as a server-computed @data source keyed on the SAME entry ids
+     the addressing foundation uses (V2 PRESUPPOSES stable id — make explicit).
+BIGGEST REGRET RISK: positional [2].field addressing spreading across write
+surface + relations/CRUD assuming it. Lock id-verified addressing in step 0
+BEFORE more content-write surface. Second regret: migrating content into .st —
+do NOT.
+
+** Corrections to the pillars as drafted
+- V4(b) "extend derive grammar": DROP. Replace with "fix computed-source
+  dep-tracking so @data query reacts to external signals."
+- V3 framing "EditAst becomes uniform content write path": WRONG. Content stays
+  EditJson + schema validation; EditAst writes .st STRUCTURE only.
+- V1 synthesizer: must emit SEMANTIC facts only, never tpl-names/ordering/copy
+  (apply the different-UI test per transform).
+* Acceptance (definition of done for the plan, not this item)
+- [ ] Zero JS arrow-fns in any admin @data derive (grep clean)
+- [ ] Zero hardcoded content field-names in st.js admin helpers (the admin reads
+      only compiler-guaranteed contract fields)
+- [ ] The 5 shaping helpers (adThemeRows/adComponentCards/adMotionCards/
+      adGraphLayout-shaping/adFormFields) reduced to ≤ geometry/transport
+- [ ] EditAst handles a structural content edit end-to-end (browser→disk),
+      schema-validated, with optimistic revert
+- [ ] A new construct/source is added to a project and the admin reflects it
+      with ZERO admin edits (the @data registry self-describing property, now
+      for content)
+- [ ] All gates green; reviewer-swarm clean; browser-verified
+
+* Non-goals
+- Rewriting the dev-ws transport or the optimistic-CRUD revert machinery.
+- Removing EditJson (kept for raw-value leaf writes).
+- Server-side delivery/synthesis is IN scope as Rust (delivery, not UI) — the
+  same boundary @data registry already crossed.
+
+* Execution Manifest (wave-based)
+* Execution Manifest (REVISED 2026-06-06 — maintainer-grounded)
+
+SUPERSEDES the oracle-draft manifest. The oracle's @reflect/synthesizer framing
+was over-engineered: dev_types_handler ALREADY reflects .st → widget-annotated
+JSON; @data inline ALREADY binds a typed literal; the pipe (`| fn`) ALREADY
+exists; @data query ALREADY has where/sort/map. Nothing new to invent — the
+end-state is reached by (a) a brand SINGLETON expressed as a typed @data inline
+literal edited via EditAst, and (b) re-surfacing the EXISTING @data query with a
+:-assignment form + registered predicate/transform fns. No @reflect, no Rust
+synthesizers, no Wave-0 schema-validation ceremony.
+
+THE LAW (corrected): cardinality picks storage + edit-channel, NOT the renderer.
+  singleton  → typed literal in .st  → @cms(T) → EditAst
+  collection → @data + JSON           → @cms(T) → EditJson
+  both are typed $-values rendered by ONE form-renderer (@each schema × @match widget).
+
+** Wave A — AP1: dissolve the JS-in-derive (media.st) via @data query + pipes
+- A.1 [stdlib/primitives/data/computed-source.st] port derived-signal's $-dep
+  discovery (derived-signal.st:43-48,119-121) into computed-source so where/map
+  exprs referencing EXTERNAL signals ($mediaQuery) re-run on change. RED→GREEN v8.
+- A.2 [stdlib/macros/data-kind.st + capture-types] add the :-assignment %form of
+  @data query: `@data query $name : $source where <pred> map {…} take <n> ;`.
+  `where`/`map`/`take` = %capture_type query_clause arms; reuse computed-source.
+- A.3 [stdlib + @fn] register predicate/transform fns callable BOTH as fn-call
+  (`contains($.path,$q)`) AND pipe (`$.path | includes($q)`, `$.path | basename`).
+  These are %macro fn / registered callables — NOT operator grammar.
+- A.4 [stdlib/__admin__/app/media.st] rewrite the $assets derive as the @data
+  query above; DELETE the arrow-fn derive. Browser-verify reactive search.
+- GATE: grep shows no `=>`/`.filter(`/`.map(`/`.split(` in stdlib/__admin__;
+  media search filters reactively; v8 dep-tracking test green.
+
+** Wave B — Brand singleton: typed literal + @cms(Brand) + EditAst
+- B.1 [projects/cms-testbed/index.st] replace `body{--brand-*}` CSS custom props
+  with `@type Brand {…}` + `$brand Brand : {…}` typed literal; reference via
+  `$brand.scarlet` (no var()). Prove $-value reactivity in a .st rule.
+- B.2 [stdlib/__admin__/cms-hint.st] extend @cms(T) to carry `editable: inline`
+  → admin treats Brand as a single-instance pane whose writes route to EditAst.
+- B.3 [src/sync/handlers.rs] EditAst targets the $brand literal's fields (reuses
+  the directive-prop patch path, handlers.rs:437). RED→GREEN: a field edit
+  rewrites the .st literal on disk. No array index, no concurrency (singleton).
+- B.4 [stdlib/__admin__/app/tools.st] Brand pane renders through the SAME
+  @each(schema) × @match($f.widget) form-renderer as the post drawer (types.json
+  already widget-annotates Brand). DELETE ST.adThemeRows + the EditToken path.
+- GATE: brand pane renders+edits via the shared form-renderer; grep shows no
+  adThemeRows; editing scarlet rewrites $brand in index.st; every $brand.scarlet
+  reference repaints; EditToken handler+helper deleted.
+
+** Wave C — Roll the form-renderer across components/motion (kill remaining AP2)
+- C.1 components/motion panes render via @each × @match on the reflected field
+  kind (types.json/templates.json/motion.json already carry kind). DELETE
+  ST.adComponentCards + ST.adMotionCards. Name prettify → `| titleize` pipe.
+- GATE: no adComponentCards/adMotionCards; panes identical; shaping helpers gone.
+
+** Wave D — Reviewer swarm + self-describing proof + docs
+- Reviewer swarm (P1/security on EditAst-to-literal + query dep-tracking).
+- Self-describing proof: add a field to @type Brand AND a new theme token →
+  admin reflects both with ZERO admin edits (the registry property, for content).
+- Docs: CONTENT_EDITING.md + cms-mockups record; note the cardinality→channel law.
+
+* Dependencies (revised)
+A independent (AP1, client-only + 1 primitive). B independent of A but shares the
+form-renderer that C reuses. C depends on B's form-renderer generalization. D last.
+A and B parallelizable.
+* Dependencies
+W0 blocks all content-write surface. W1 independent (read path) but proves the
+synthesizer pattern W3/W4 reuse. W2 independent. W3 depends on W1's synthesizer
+pattern. W4 depends on W0 (id addressing) + W1 pattern.
+
+NOTE [2026-06-12]: COMPLETE. All 4 waves + reviewers landed. AP1+AP2 dissolved structurally. Commits: BUG-090 (b1e5af82/bdc95982/5806aa3a query surface), BUG-091 (c5f87e42 CSS binding), BUG-092 (6b48dbdf object-literal writeback), deaaa72e (brand server delivery), a715fd6f (brand pane), BUG-093 (d61c5370 escaping), 222eb21f (Wave C components/motion), 76fae27b (C P3), docs. Self-describing proof PASSED. Gates: lib 2241/0, integration 172/0, v8 379/12 (BUG-039 baseline). FUPs: FUP-044 (bare-key objects), BUG-084/085 (deferred).

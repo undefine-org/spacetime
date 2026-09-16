@@ -1,0 +1,86 @@
+#+TITLE: A `states` body capture truncates, silently losing its closing braces
+#+STATE: ITEM
+#+CUSTOM_ID: BUG-368-states-capture-truncates-at-nested-brace
+#+PRIORITY: #B
+
+* Found by
+
+PLAN-148's EDN corpus round-trip. The printer carries raw captures VERBATIM
+(SPEC §8.2 rule 2) — it copies the capture text rather than reconstructing it —
+so when the printed text fails to re-parse, the capture itself is wrong. That is
+rule 3 of the fail-loud contract: *verbatim text that does not re-parse is a
+verse defect, with a reproducer.*
+
+Two of the corpus's 403 files failed to re-parse; both trace to this.
+
+* Reproducer
+
+#+begin_src rust
+let src = r#".c {
+  @drag(group: "cards") {
+    dragging { scale: 1.04 }
+    on-drop $zone { $move({ card: 1 }); }
+  }
+}"#;
+
+let ast = spacetime::parse(src).unwrap();
+let drag = /* the `drag` FormMatch */;
+
+// customStates is Expr(...) and is UNBALANCED:
+//   "{\n    dragging { scale: 1.04 }\n    on-drop $zone { $move({ card: 1 })"
+//   open braces: 4, close braces: 2
+#+end_src
+
+The capture stops immediately after `$move({ card: 1 })`, dropping:
+- the `;`
+- the `}` closing `on-drop $zone { … }`
+- the `}` closing the `@drag` body
+
+* Expected
+
+`customStates` holds the balanced body text, or the parser reports an error. What
+it must NOT do is hand back a truncated fragment with no diagnostic: nothing
+downstream can tell a short body from a wrong one.
+
+* Where it likely is
+
+`%macro drag`'s form is
+
+: %form { @drag( … ) {
+:     $customStates:states?
+:     ( $lifecycle:drag_lifecycle )?
+:     on-drop: $onDrop:expr?
+:   } }
+
+so the `states` capture type is the suspect. The truncation point is the first
+`)` that closes a paren opened INSIDE a nested brace (`$move({ card: 1 })`),
+which smells like a scanner tracking paren depth and brace depth with one
+counter, or stopping at the first depth-0 `)`.
+
+Note `lifecycle` captured the same region correctly as structured data
+(`Array([Named({"body": Expr(…)})])`), so the two capture types disagree about
+where the body ends — a useful diff for whoever picks this up.
+
+* Impact
+
+- ANY consumer reading `customStates` gets an unbalanced fragment: the EDN
+  printer, a formatter, a migration rewrite, an agent reading a form's body.
+- It is silent. `@drag` compiles today because the compiler re-derives what it
+  needs from other captures; only re-parsing the capture text exposes it.
+- Scope: 2 of 403 corpus files (`demos/liveview-kanban/index.st`,
+  `stdlib/editable/tests/surface.test.st`).
+
+* Acceptance
+
+- The reproducer above yields a brace-balanced `customStates`.
+- `cargo test --test edn_corpus_roundtrip` reports *0 re-parse failures* (it is
+  at 2, and these are the 2).
+- A test asserts the capture is balanced, so a future scanner change cannot
+  regress it silently.
+
+* Not worked around
+
+The printer will NOT patch the braces back on. Rule 2 says raw captures are
+carried verbatim precisely so that a defect in them surfaces instead of being
+laundered into plausible-looking output — a printer that "fixes" its input hides
+exactly this class of bug.

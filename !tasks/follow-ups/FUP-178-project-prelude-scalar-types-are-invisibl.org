@@ -1,0 +1,74 @@
+#+TITLE: A project `_prelude.st` `%scalar_type` registers without error but is invisible to the reifier
+#+STATE: ITEM
+#+SESSION_ID: 153f5ed0617636c7
+#+CUSTOM_ID: FUP-178-project-prelude-scalar-types-are-invisibl
+
+* What
+
+`is_scalar_capture` (`src/syntax/events/extractors/custom.rs:202`) decides whether
+a production's captured value flattens to its SOURCE TEXT or reifies to a record
+of the grammar's parts. It reads the process-global `STDLIB_REGISTRY`:
+
+#+begin_src rust
+pub(crate) fn is_scalar_capture(name: &str) -> bool {
+    crate::syntax::stdlib_registry::STDLIB_REGISTRY
+        .scalar_captures()
+        .contains(name)
+}
+#+end_src
+
+A project overlay (`<project>/_prelude.st`, PLAN-123) may declare its own
+`%scalar_type`. That row registers into the PROJECT's registry, never the global
+stdlib one — so the scalar is recognised as a type, gets its schema, zero value
+and widget, and then its VALUE reifies as a `Named` record (`{n: 96, u: "dpi"}`)
+where every consumer expects the string `"96dpi"`.
+
+Silent in the way that matters: the type resolves, the page compiles, and the
+wrong shape surfaces downstream as `NaN` or an E0800 far from its cause.
+
+* Why it was not fixed with the rest
+
+The obvious fix — read `cached_stdlib_registry()` — DEADLOCKS. `wrap_reifier`
+runs WHILE the meta registry is loading, so the cached accessor re-enters
+`INCREMENTAL_CACHE`'s mutex. Observed as a test that hangs forever rather than an
+error, which is why it is worth writing down.
+
+The honest fix is to thread the ACTIVE registry's `scalar_captures` through
+extractor compilation, rather than consulting any global. `parse_matches` already
+takes the registry it should use (`src/syntax/events/mod.rs`), and
+`compile_pattern_with_defs` already receives an `ExtractorRegistry` — so the
+seam exists; the set simply is not carried alongside it.
+
+That is a signature change through the extractor-compilation path, which is a
+subsystem edit rather than a leaf, and this arc had already landed its cutover.
+
+* Reproduce
+
+1. In a project's `_prelude.st`:
+   #+begin_src spacetime
+   %capture_type resolution_unit { "dpi" | "dppx" }
+   %capture_type resolution { ( $n:number $u:resolution_unit ) }
+   %scalar_type resolution {
+     %capture "resolution"
+     %schema "string"
+     %zero ""
+     %widget "text"
+   }
+   #+end_src
+2. Use a `resolution` field in a `@type` and seed it with `96dpi`.
+3. The emitted value is a record, not `"96dpi"`.
+
+* Gate when fixed
+
+A `%scalar_type` declared in a project `_prelude.st` flattens exactly like a
+stdlib one. The existing stdlib gate is
+`scalar_flattening_reads_the_table::a_scalar_named_only_in_stdlib_still_flattens_to_its_source_text`
+(`src/syntax/events/extractors/custom.rs`) — the new test is its project-overlay
+twin, and it should FAIL before the fix.
+
+* Related
+
+- FEAT-168 — the `%scalar_type` table this extends.
+- FUP-179 — the embedded-stdlib twin of the same "which registry answers?" question.
+- PLAN-123 — the project overlay mechanism.
+- Found by the PLAN-122 cutover review swarm.

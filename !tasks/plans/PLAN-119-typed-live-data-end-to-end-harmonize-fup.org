@@ -1,0 +1,377 @@
+#+TITLE: Typed live-data, end to end — harmonize FUP-144's deferred surface into one capability
+#+STATE: DONE
+#+SESSION_ID: 153c9c68ea93c166
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-24T17-46-26-602Z_153c9c68ea93c166.jsonl]]
+#+CUSTOM_ID: PLAN-119-typed-live-data-end-to-end-harmonize-fup
+
+* Initial Message
+
+please exlain all you deferred and file with root causes and impacts and fix steps and opportunities
+
+#+STATE: ITEM
+Plan authored 2026-07-24 to execute the six deferred items from FUP-144's close
+(FUP-149, FUP-150, BUG-234, BUG-228, FUP-143, BUG-231) NOT as six tickets but as
+ONE capability — "typed live-data is real end-to-end, and every disagreement is a
+compile error" — plus two orthogonal hygiene fixes batched at the edges.
+
+* The thesis (why these are one thing, not six)
+FUP-144 shipped the SLOT: `@data subscribe $x T from $lv : a` registers
+`binding($name, type: T)`. That type is currently DECORATIVE — it silences a
+warning and nothing else. The deferred items are exactly "make the type DO
+things", and they all consume ONE substrate that ALREADY EXISTS but is unwired:
+
+  - `TypeRegistry::validate_property_path` (src/type_system.rs:404) — recursive
+    nested field-path check, emits E0401 with find_similar "did you mean"
+    hints. FULLY IMPLEMENTED. Called ONLY from src/type_system/tests.rs. DEAD in
+    production. → this IS FUP-150.
+  - `generate_json_schema` (src/type_system.rs:587) + `resolve_type_expr` +
+    `ResolvedType` — recursive structural traversal of a type. The exact shape a
+    zero-value synth walks. → the substrate for FUP-149.
+  - FUP-144's `binding($name, type: $type)` registration — the read site can now
+    ASK "what type is this binding?" It couldn't pre-FUP-144.
+  - The try/catch guard in src/emit/html_reactive.rs (~L798, L843) — null-safe
+    dotted reads. Once a read is BOTH type-checked (FUP-150) AND seeded to a
+    zero-value (FUP-149), the guard is provably unnecessary for that binding.
+
+So: the type checks reads (FUP-150), the type builds the seed (FUP-149), and the
+two together let us DELETE the guard for typed+seeded reads. THAT guard deletion
+is the observable proof the capability composed — and it is precisely the "total
+reads, no try/catch" forms win that BUG-228 blocked. FUP-149's STRUCTURAL synth
+(build the seed AST from the type) sidesteps BUG-228's parser entirely, so the
+forms win lands WITHOUT waiting on the extractor fix.
+
+* Elegance-bar audit (AGENTS: a mechanism earns its place only if it DELETES)
+- FUP-150 wiring: activates dead code (validate_property_path) → stops shipping
+  an untested-in-prod path; DELETES the class "typo in a typed read is invisible".
+- FUP-149 zero-value: DELETES hand-written seed duplication; NARROWS
+  data-subscribe-seeded to "override the default" (its common-case reason to
+  exist evaporates — the type IS the seed).
+- Guard removal for typed+seeded: DELETES the try/catch emission for that case →
+  smaller, faster, more honest emitted JS.
+- BUG-234 keyword-commit: DELETES a silent-degrade fallthrough (malformed
+  subscribe → dead local) → turns it into a hard error.
+- Net: every wave removes a special-case or dead path. Passes the bar.
+
+* Non-goals
+- No new author sigil. Typed subscribe seeds its zero-value BY DEFAULT; an
+  explicit `{ initial: … }` OVERRIDES. "One sigil, one meaning" preserved.
+- No new subsystem. Every wave is a call-site wiring of existing registry
+  methods or a dispatcher/extractor fix. If any wave grows a subsystem, STOP and
+  re-scope to a follow-up.
+- BUG-228's extractor fix is DE-RISKED off the forms critical path by FUP-149,
+  so it drops to "still real for explicit nested literals + @data fetch" — kept
+  in the plan, lowest priority, may be split out if W1-W3 land the forms win.
+
+* The DAG (waves)
+Wave numbers are dependency order; same-wave items are parallel-safe (disjoint
+files). W5/W6 are independent from the start.
+
+** W1 — SUBSTRATE: expose type→value + type→read-check (foundation) [no blockers]
+Files: src/type_system.rs (+ src/type_system/tests.rs)
+- Add `TypeRegistry::zero_value(&self, ty: &TypeExpr) -> Result<Expr, Diagnostic>`
+  next to generate_json_schema, reusing resolve_type_expr + ResolvedType:
+  number→0, string→"", bool→false, record→object of field zero-values, array→[],
+  sum→first-variant-or-null (documented), cycle/opaque→null + a W-note.
+- Add a thin `TypeRegistry::check_read_path(binding_type, &path, span)` wrapper
+  over the EXISTING validate_property_path (so consumers don't reach into it
+  directly; single entry point, testable).
+- NO call sites yet. Unit tests: zero_value for scalar/record/nested/array;
+  check_read_path GREEN on real field, RED (E0401 + did-you-mean) on typo.
+- Acceptance: `cargo test --lib type_system` covers both; zero new call sites so
+  zero emission change (byte-stable bundles).
+
+** W2 — READ CHECK (FUP-150): validate typed reads at compile time [blockers: W1]
+Files: src/emit/html_reactive.rs (read-lowering), the analysis pass that sees
+  binding types, + a feature test.
+- At the dotted-read lowering site, when the base binding carries a registered
+  type (FUP-144 binding(type:)), call check_read_path over the access path.
+  Unknown field → E0401 at the read's span. Untyped binding → unchanged (purely
+  additive; today's behavior preserved).
+- The check runs REGARDLESS of the try/catch guard (validity ≠ null-safety).
+- RED→GREEN test: `@data subscribe $form FormEnvelope … ; … $form.errors.emial`
+  fails E0401 "did you mean 'email'?"; `.email` passes; an untyped subscribe
+  read still passes.
+- Acceptance: signup.st typo fails check; clean signup.st still `✓ 6 files pass`.
+
+** W3 — TYPE-DERIVED SEED (FUP-149): auto zero-value + guard removal [blockers: W1]
+Files: stdlib/macros/data-kind.st, src/emit/html_reactive.rs, feature test.
+- A TYPED bodyless subscribe seeds its zero-value automatically: emit
+  `_localState[assign] = <zero_value(T) AST>` at the same site
+  data-subscribe-seeded uses, BUILT structurally (bypasses BUG-228's parser).
+- An explicit `{ initial: … }` still OVERRIDES (data-subscribe-seeded unchanged;
+  its role narrows to override).
+- GUARD REMOVAL: for a read whose binding is BOTH typed (so the path is valid,
+  W2) AND seeded (so it's non-null from mount, W3), emit DIRECT access, no
+  try/catch. Untyped/unseeded reads keep the guard.
+- RED→GREEN: `@data subscribe $form FormEnvelope from $h : form ;` (no body) →
+  emitted JS seeds the nested FormEnvelope zero-record AND reads `$form.errors.
+  email` with NO try/catch. This is the forms "total reads" win, nested,
+  WITHOUT BUG-228.
+- Acceptance: signup.st nested reads emit guard-free; browser form loop still
+  GREEN (validate/submit); FEAT-159 + signal-flip regressions GREEN.
+
+** W4 — PARSER HONESTY: no silent degrade (BUG-234) [no blockers; parallel with W2/W3]
+File: the src @data directive dispatcher.
+- When the `subscribe` keyword is present, the clause MUST match a subscribe
+  shape or hard-error E09xx naming the expected shape — never fall through to a
+  plain local. RED: `@data subscribe $x zzz : q ;` (missing `from`) must FAIL
+  compile; well-formed subscribes byte-stable.
+- NB BUG-228 (nested-literal/bare-key seed parser) was SPLIT OUT to PLAN-120 at
+  user direction (2026-07-24): FUP-149's structural synth lands the forms win
+  without it, so it is off this plan's critical path. PLAN-119 no longer touches
+  the BalancedExtractor.
+
+** W5 — ERLANG-SIDE SEAM (FUP-143): prove the seam from both languages [independent]
+Files: elixir/spacetime_lv/lib/spacetime/live_view.ex (+ a test LiveView).
+- Add `@on_definition` to accumulate every `handle_event/3` head's literal event
+  string as clauses are defined; in the existing `@before_compile`, assert
+  declared `event(:name,…)` ⊆ accumulated handled names — else Mix.raise with a
+  clear message (E0928 family, Erlang half).
+- Reply-tag half: emit the page's decoded receive-arm tags into the contract
+  sidecar; SPIKE whether the handler's reply tags are enumerable — if not, gate
+  behind a lightweight `replies do reply(:name, tags: […]) end` declaration ONLY
+  if it earns its place (else document the boot-time-assert fallback limit).
+- RED→GREEN: delete a `handle_event("move_card",…)` clause while
+  `event(:move_card,…)` stays declared → `mix compile` FAILS.
+- Acceptance: the missing-handler case is a compile error; existing LiveViews
+  (counter/board/signup) still `mix compile` clean.
+
+** W6 — HYGIENE LINT (BUG-231): primitive body `const el` shadow [independent]
+Files: the %emit js primitive lowering + primitive-authoring doc.
+- Warn when a `%emit js` body declares `const/let el` (or any name colliding
+  with the selector-init param): "primitive-body local `el` shadows the
+  selector-init element param; rename to `node`/`self`." Doc the reserved name.
+- RED→GREEN: a %primitive with `const el = %&el` triggers the warning; `const
+  node = %&el` does not.
+
+* Wave schedule
+  Wave A (parallel): W1, W4, W5, W6         ← W1 is the only foundation; the rest
+                                              are independent hygiene/seam/parser.
+  Wave B (parallel, after W1): W2, W3        ← both consume the W1 substrate;
+                                              disjoint enough to parallelize.
+  Wave C (after W2+W3): guard-removal proof + browser regression + docs + close.
+
+Rationale: W1 is small (two registry methods over existing traversal) and gates
+only the two consumers. Everything else (parser honesty, Erlang seam, lint) is
+independent and can land alongside. The keystone proof (guard-free typed reads)
+is Wave C, gated on W2∧W3.
+
+* Global acceptance (run by orchestrator after each wave joins; NOT by workers)
+- cargo test --lib ; cargo test --test integration_tests
+- cargo run --features headless -- test tests/ --headless
+- cargo run -- check elixir/spacetime_lv/frontend/  → ✓ 6 files
+- Browser: signup validate/submit loop GREEN (unchanged behavior)
+- Emitted-JS assertions: typed+seeded read has NO try/catch; untyped read still
+  guarded (proves the guard removal is scoped, not global)
+- mix compile clean on all LiveViews; FUP-143 RED case fails as designed
+
+* Deletions this plan books (the harmony receipt)
+1. Dead-in-prod validate_property_path → live (FUP-150).
+2. Hand-written seed duplication → type-derived (FUP-149).
+3. try/catch guard for typed+seeded reads → direct access.
+4. Silent-degrade subscribe fallthrough → hard error (BUG-234).
+6. Primitive `const el` silent no-op → lint (BUG-231).
+7. Asymmetric seam (only .st→server checked) → both directions (FUP-143).
+
+* Relation
+Parent: FUP-144 (shipped the slot). Consumes: TypeRegistry (existing). Closes on
+completion: FUP-149, FUP-150, BUG-234, FUP-143, BUG-231; de-risks + likely
+de-risks BUG-228 (split to PLAN-120). Cross-refs FUP-142 (forms — the
+beneficiary) and E0928 (the
+.st-side seam check FUP-143 mirrors).
+
+* WAVE A EXECUTION NOTES (2026-07-24) — all 4 items GREEN
+Full lib suite: 2876 passed, 0 failed. Committed together.
+
+** W1 substrate (src/type_system.rs + tests.rs) — mine
+- `TypeRegistry::zero_value(&TypeExpr) -> serde_json::Value`: number→0, string→"",
+  bool→false, record→object of field zeros, array→[], union→first variant,
+  unknown/opaque→null. Cycle-guarded (visited stack). Optional fields ABSENT.
+- KEY: returns serde_json::Value → serializes DIRECTLY to a JS literal, so the
+  FUP-149 seed never round-trips the seed-expr parser → sidesteps BUG-228 by
+  construction (proven by the nested FormEnvelope test).
+- `TypeRegistry::check_read_path(...)`: single production entry to the EXISTING
+  (dead-in-prod) `validate_property_path` → E0401 + did-you-mean. FUP-150 hook.
+- 7 unit tests. No call sites yet → byte-stable emission.
+
+** W4 BUG-234 (delegated, agent://1-W4Bug234) — E0945 keyword-commit
+- Fallthrough was src/syntax/events/match_sink.rs (unmatched nested directive
+  passed upward) + src/parser/mod.rs DISCARDED MatchSink diagnostics. Fixed:
+  MatchSink keyword-commits a malformed `@data subscribe`; parser converts to a
+  canonical E0945 with the expected shape; CLI maps E0945.
+- RED→GREEN: scratch/w4/red.st (`@data subscribe $x zzz : q ;`) went from
+  silently accepted (0 markers) → hard E0945. Frontend still passes (counter=3,
+  board=4, signup=3 markers). Test: parser::tests::malformed_data_subscribe_is_a_hard_error.
+
+** W5 FUP-143 (delegated, agent://2-W5Fup143) — Erlang seam hole #1
+- `@on_definition` accumulates each LITERAL handle_event/3 first-arg string into
+  :spacetime_handled_events; `__before_compile__` diffs declared events against
+  it. Non-literal (catch-all) head → :dynamic sentinel → SOFT WARNING (no false
+  positive) instead of hard error; a declared event with neither literal head
+  nor catch-all → RAISE. Message: `E0928: declared Spacetime event "move_card"
+  … has no literal handle_event("move_card", _, _) clause`.
+- Test: test/spacetime/live_view_test.exs (assert_raise on a missing-handler
+  module). mix test 17 pass, mix compile clean.
+- HOLE #2 (reply-tags) deferred with an exact comment: not soundly tractable
+  from @on_definition (reply tags are handler-body runtime values); needs an
+  explicit `replies` declaration once the contract sidecar exposes page receive
+  discriminators. → stays in FUP-143 as the remaining half.
+
+** W6 BUG-231 (delegated, agent://3-W6Bug231) — W0115 shadow lint
+- src/pipeline/emit.rs selector-init branch: warns when a %emit js primitive
+  body declares `const/let/var el` (collides with the injected selector-init
+  param). Code W0115. Conservative (exact identifier `el`, declarations only,
+  selector-init path only — no false positive on `const node` or non-selector
+  emit). Doc: docs/language/primitives.md "Selector-init local names".
+- Test: pipeline::emit::tests::selector_init_warns_when_primitive_body_shadows_el.
+
+** Test-fix (mine): W1 test_zero_value_record_and_nested had a brittle literal
+to_string() assertion (serde_json key order isn't a contract) — replaced with a
+round-trip parse assertion. Caught by the W4 worker's full-suite run.
+
+* WAVE B PROGRESS + CONCURRENCY COLLISION (2026-07-24)
+
+** W2 (FUP-150) DONE — committed f41458a9
+- collect_dotted_signal_reads (form_match.rs): path-preserving read extractor
+  (keeps ("form",["errors","email"]); collect_signal_deps truncates to head).
+- validate_typed_reads (analysis/mod.rs): for each data source with a concrete
+  @type, walk each dotted read via check_read_path → E0401. Wired in main.rs.
+  Additive: untyped base skipped, bare base valid.
+- RED→GREEN on real signup.st: `$form.errors.emial` → E0401 "did you mean
+  email?" at the exact line; clean signup.st unaffected. 6 unit tests (3
+  extractor + 3 pass). Full lib suite 2882 pass.
+
+** COLLISION: a LIVE concurrent agent is editing the SAME core files
+- Observed a commit `f75a543e` renumbering a DIFFERENT PLAN-119 → PLAN-121
+  (another agent's plan collided with my PLAN-119 id; theirs was renumbered).
+- src/parser/mod.rs / match_sink.rs / form_compiler.rs / codes.rs carry ~120
+  lines of UNCOMMITTED BUG-229 work (surface every retained match diagnostic as
+  E0946; register same-file %capture_type in rematch). NOT mine.
+- Their in-progress state OSCILLATED: one `cargo run -- check frontend` FAILED
+  with E0946 false-positives on legitimate directives (`value <- $form.values
+  .email`, typed reads → "$type expects Typeref but found DOT"); a later
+  identical check PASSED ("All 6 files"). They are mid-write and converging.
+- I committed ONLY my W2 files (excluded their codes.rs/parser/mod.rs/match_sink
+  /form_compiler). My W2 needs no new diagnostic code (E0401 pre-exists).
+
+** W3 is PAUSED pending direction (ask-trigger)
+W3 (type-derived seed + guard removal) touches the stdlib data-kind macro +
+html_reactive emit + needs a clean `cargo build` and a browser-drive of
+signup.st. Doing that on a tree a live agent is actively editing in the parser
+risks racing their edits / entangling commits. Options recorded in the ask.
+
+* W3 INVESTIGATION (2026-07-24) — auto-seed seam found; architectural fork reached
+
+** What I verified (by build + emitted-JS inspection, not reasoning)
+- Current: a typed bodyless `@data subscribe $form Env …` emits
+  `_localState["form"] = null` + a GUARDED read `try { __v = ST.resolve(node,
+  'form').errors.email } catch …`. The null seed is why the guard is needed.
+- The SEEDED macro (`data-subscribe-seeded`, `{ initial: {…} }`) emits
+  `_localState["form"] = {…}` via `local-state-impl(initial: $seed)`. So the
+  seam that seeds the RUNTIME value is the macro's `local-state-impl` initial —
+  NOT compiler.rs `global_initials` (that only feeds the SSG static HTML render;
+  I tried it there first, it did NOT change `_localState`, reverted it).
+
+** The architectural fork (why W3a isn't a one-liner)
+`data-subscribe` and `data-subscribe-seeded` are DISTINCT %forms. The bodyless
+one hardcodes `local-state-impl(initial: null)`; only the seeded one threads a
+`$seed`. To auto-seed a typed bodyless subscribe I must get `zero_value(type)`
+(Rust) INTO the emitted `local-state-impl` initial. stdlib can't call zero_value.
+Options:
+  A. Rust pre-emit pass rewrites a typed bodyless subscribe FM to carry the
+     zero-value as a seed capture — but the bodyless %binds doesn't READ a seed,
+     so the injection wouldn't emit. Would need the macro to read an (optional)
+     value capture.
+  B. MERGE the two subscribe macros into one with an optional seed, and have Rust
+     fill the zero-value when the seed is absent+typed. Cleaner end state (one
+     macro, harmony) but a bigger refactor of data-kind.st + the expand path.
+  C. A targeted Rust hook at the @data expand site (pipeline/mod.rs ~3095) that,
+     for a typed null-seeded subscribe, substitutes the zero-value into the
+     local-state-impl initial capture. Most surgical, but pipeline/mod.rs is a
+     LARGE file the concurrent BUG-229 agent is actively editing.
+
+** Concurrency status
+A live agent is editing src/parser/mod.rs (E0946), match_sink.rs, form_compiler
+.rs, AND left a `B229_PROBE` debug eprintln in src/compiler.rs:445 (not mine).
+Commits still landing (453fbf9f, f75a543e renumber). pipeline/mod.rs is in their
+blast radius. W3's cleanest seams (B/C) touch data-kind.st + the expand path;
+option C specifically risks colliding in pipeline/mod.rs.
+
+** My state: W3 experiment fully reverted (compiler.rs global_initials restored).
+The only compiler.rs diff now is the concurrent agent's B229_PROBE leftover.
+W1+W2 committed and green (2882 lib tests). Decision needed on W3 approach +
+whether to proceed on contested files now or serialize after the BUG-229 agent.
+
+* W3 RESOLUTION (2026-07-24) — W3a shipped, W3b deferred (honest split)
+
+** W3a (FUP-149) DONE — committed 45283fc7
+Typed bodyless subscribe auto-seeds its type ZERO VALUE. Nested envelopes work
+(signup.st FormEnvelope seeds { values:{email:"",password:""}, errors:{...},
+valid:false }) because the seed is built structurally (zero_value) + serialized,
+never re-parsed → LEAPFROGS BUG-228 for the forms case, exactly as predicted.
+Mechanism: bodyless data-subscribe %binds threads local-state-impl(initial:
+$seed); compiler.rs inject_subscribe_zero_value_seeds fills $seed at the SHARED
+ast_owned pipeline seam (build/check/headless all hit it). Untyped → null
+(byte-stable). Explicit seed still wins. 4 FUP-144 headless tests + 2882 lib +
+202 integration green.
+
+** W3b (guard removal) DEFERRED → FUP-152 (honest, elegance-bar call)
+The try/catch guard on dotted reads is a pure emit-size optimization: with W3a
+the seed is non-null so the guard ALWAYS succeeds — the read already works. The
+guard emitter (Builder in html_reactive.rs) is string/scope-only with NO type/
+seed context; threading it in is invasive emit-core surgery for ZERO behavioral
+benefit and it must stay for untyped/nullable reads anyway. cost >> benefit →
+filed FUP-152 rather than force it. This is the accurate state: the VALUE win
+(reads total from mount) landed; the byte-trim did not.
+
+** CONCURRENCY NOTE: board.st @media E0806/E0946 failure in the shared checkout
+is the LIVE concurrent agent's uncommitted parser/mod.rs BUG-229 change (surfaces
+@media's `(...)` as a grammar mismatch) — NOT my W3 (signup.st, my target,
+passes clean; @media has no subscribe/seed). I committed only my 3 W3a files;
+their parser/match_sink/codes.rs work is untouched.
+
+* WAVE C + CLOSE-OUT (2026-07-24) — PLAN-119 DONE
+
+** Browser proof (the composition win, live)
+Served signup.st on :4019, drove the form:
+- AT MOUNT (before any server diff): SpacetimeLocal.form is the full nested
+  FormEnvelope zero value — { values:{email,password}, errors:{email,password},
+  valid:false }, and the nested read errors.email === "" (TOTAL, no throw). This
+  is the FUP-149 win proven end-to-end: reads total from mount without a
+  hand-written seed, nested, without BUG-228.
+- Full loop still GREEN: errors render on invalid, clear on valid, submit →
+  success "true". The auto-seed broke nothing.
+
+** Docs: bridge README table gained 4 rows (FUP-149 auto-seed, FUP-150 field
+check, FUP-143 Erlang seam, BUG-234 hard error). Macro doc-comment +
+type_system doc-comments carry the per-mechanism detail.
+
+** Final scorecard (7 items → 5 DONE, 1 partial, 1 deferred-optimization)
+- W1 substrate (zero_value + check_read_path) — DONE (64226ae2)
+- W2 FUP-150 (typed read field-check, E0401 live) — DONE (f41458a9)
+- W3a FUP-149 (typed subscribe auto-seeds zero value) — DONE (45283fc7)
+- W3b guard-removal — DEFERRED → FUP-152 (pure emit-size opt, zero behavioral
+  benefit, invasive; honest elegance-bar call)
+- W4 BUG-234 (subscribe silent-degrade → hard E0945) — DONE (64226ae2)
+- W5 FUP-143 hole #1 (Erlang-side event seam) — DONE (64226ae2); hole #2
+  (reply-tags) remains open (not soundly tractable without a `replies` decl)
+- W6 BUG-231 (primitive const-el shadow → W0115) — DONE (64226ae2)
+- BUG-228 (nested-literal seed parser) — SPLIT to PLAN-120, DE-RISKED off the
+  forms path by W3a's structural synth
+
+** The harmony receipt (deletions booked)
+1. dead-in-prod validate_property_path → live (W2)
+2. hand-written seed duplication → type-derived (W3a)
+3. silent-degrade subscribe fallthrough → hard error (W4)
+4. asymmetric seam (only .st→server) → both directions (W5)
+5. primitive const-el silent no-op → lint (W6)
+(3. from the original receipt — guard removal — became FUP-152, not deleted yet.)
+
+** Regression: 2882 lib + 202 integration + FUP-144 headless (4) + FEAT-159 +
+signal-flip all green. signup.st browser loop green.
+
+** Concurrency: a live agent held parser/mod.rs/match_sink.rs/codes.rs with
+uncommitted BUG-229 work (E0946 over-surfacing that intermittently broke board
+.st's @media). I committed ONLY my files across 4 commits (64226ae2, f41458a9,
+45283fc7, + this Wave C), never touching their contested work. My committed
+Wave A parser/mod.rs has E0945=1, E0946=0 (clean).

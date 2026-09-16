@@ -1,0 +1,26 @@
+#+TITLE: MCP workbench: source editor self-mutates guest on hydration (data corruption)
+#+STATE: DONE
+#+SESSION_ID: 150f785b33edb744
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-19T16-17-16-496Z_150f785b33edb744.jsonl]]
+#+CUSTOM_ID: BUG-114-mcp-workbench-source-editor-self-mutates
+#+COMPLETION_HASH: 7e29916daaf15131
+
+VERIFIED (observed + source-traced 2026-06-19). The M6 source editor fires unsolicited mcp_source_edit `change` events during page hydration, silently rewriting the selected guest's source with NO user action.
+
+SYMPTOM (live, observed in event log): selected greeter, opened inspector → event log seq 3+4 = two server mcp_source_edit events; guest source mutated "Hello," → "Heello," and the function bumped to revision 2. I never typed in the textarea. (The corrupted rev-2 greeter persisted in the live server until it was killed.)
+
+ROOT CAUSE: a <textarea> whose content is reactively bound fires a `change` event when hydration/binding sets its value, and the action is wired to dispatch on change.
+- Binding: stdlib/__mcp__/env.st `.mcp-source-input { text: $mcpStageSource; }` (L219) — reactive content set on load and on every snapshot poll that touches stage source.
+- Action: stdlib/__mcp__/workbench/actions.st `.mcp-source-input { @mcp-action(action:"mcp_source_edit", on:"change") }` — fires on the hydration-set value, re-dispatching the (possibly re-serialized) textarea value as a "user edit".
+- Server applies it: src/mcp/live.rs dispatch arm "mcp_source_edit" (~L1244) → resolves stage guest from region_mounts → update_source (recompile + hot-swap + revision bump).
+CodePath: stdlib/__mcp__/env.st::.mcp-source-input
+CodePath: stdlib/__mcp__/workbench/actions.st  (the .mcp-source-input @mcp-action)
+CodePath: src/mcp/live.rs  (dispatch "mcp_source_edit" arm)
+
+IMPACT: a live-coding tool that edits the artifact you merely INSPECTED is a trust break, and it demonstrably corrupted source this session.
+
+FIX DIRECTION (review D4): gate mcp_source_edit on a REAL user edit — a dirty flag, an explicit "save" affordance, or diff the textarea value against the loaded $mcpStageSource before dispatching (skip when equal). The cleanest is likely an explicit save button (also removes the per-keystroke/blur ambiguity). Add a guard test reproducing the hydration self-edit.
+
+Evidence: @research/mcp-workbench-review-2026-06-19-round3.org Part 2 R3-C4; event log seq 3-4.
+
+NOTE [2026-06-19]: FIXED (PLAN-048 S3). mcp-action-event onClick now guards non-click events (change/input/blur) on event.isTrusted: a synthetic event from the reactive text: binding during hydration (isTrusted=false) is ignored; a real user edit (isTrusted=true) dispatches. env.st hint updated. Live-verified BOTH directions: selecting the guest + 4s of polling → 0 events, rev unchanged (was 2 spurious mcp_source_edit + source corruption "Hello"→"Heello"); a real keystroke+blur → commits (rev 2, source contains the edit). Commit pending.

@@ -1,0 +1,207 @@
+#+TITLE: Wire schema-driven editor via CompileAnalysis data-type mapping
+#+STATE: DONE
+#+SESSION_ID: 14a73ce5470c17e5
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-03-30T17-15-27-388Z_14a73ce5470c17e5.jsonl]]
+#+CUSTOM_ID: FEAT-012-wire-schema-driven-editor-via-compileana
+#+EFFORT: M
+#+PRIORITY: #A
+#+LAYER: server
+#+BLOCKER: BUG-003-fix-cms-protocol-contract-violations-in
+
+NOTE [2026-03-30]: Implemented three changes: (1) Added parse_site_ast helper for full import resolution in dev endpoints, (2) dev_types_handler now uses resolved AST so imported types are visible, (3) dev_site_handler includes dataSourceMap with data-source-to-type mapping from CompileAnalysis, (4) data editor uses dataSourceMap to resolve type names for schema lookup.
+
+* Initial Message
+
+Implement these audit recommendations from org://AUD-002-audit-implementation:
+
+There it is — the old `/__spacetime/styles.css` link is NOT removed by `process_html()`. The lol_html removal only targets `link[href*='__spacetime/dev']` (with `/dev/` in the path), but the production-mode compiled CSS is at `/__spacetime/styles.css` (no `/dev/`). This means the exported HTML has a broken link to a non-existent asset.
+
+Let me finalize. I've found enough material for a thorough report.
+
+---
+
+## Audit Findings
+
+### Critical Bugs
+
+**1. Data editor fetches from non-existent route**
+- **Where**: `stdlib/__dev__/primitives/dev-data-editor.st` line 103
+- **What**: `fetch('/__spacetime/dev/data/' + name + '.json')` — no such route exists. The dev server's fallback serves from the site root, so `data/customers.json` would work as `/data/customers.json`, but `/__spacetime/dev/data/customers.json` will 404.
+- **Why**: The data editor tab will always show "Failed to load data source" — the core feature is broken.
+- **Effort**: `trivial` — change URL to `/data/` + name + `.json` or `'/' + name` (since `name` already contains `data/` prefix from site.json).
+
+**2. Data editor sends EditJson without `op_id` — server will reject**
+- **Where**: `stdlib/__dev__/primitives/dev-data-editor.st` lines 353-375
+- **What**: The `sendEdit` function builds an EditJson message missing the required `op_id` field. The Rust serde deserialization will fail because `op_id: String` is not optional in the protocol.
+- **Why**: All form edits will fail to parse server-side and be silently dropped (unparseable messages logged as "Failed to parse client message").
+- **Effort**: `trivial` — add `op_id: 'edit_' + Date.now() + '_' + Math.random().toString(36).substr(2,6)` to the message.
+
+**3. Data editor calls `onAck`/`onReject` with wrong signature**
+- **Where**: `stdlib/__dev__/primitives/dev-data-editor.st` lines 363-374
+- **What**: Calls `window.__stDevWs.onAck(function() {...})` — but the API is `onAck(opId, callback)`. Without an opId, the callback is registered at key `undefined`, never matching any response.
+- **Why**: Save feedback (green/red flash) will never fire. Compounds with finding #2.
+- **Effort**: `trivial` — generate opId, pass it to both the message and the callbacks.
+
+**4. Media picker sends EditJson without `op_id`**
+- **Where**: `stdlib/__dev__/primitives/dev-media-picker.st` lines 146-160
+- **What**: Same issue as finding #2 — EditJson messages lack `op_id`, so the server will reject deserialization.
+- **Why**: Image replacement uploads succeed but the JSON path update is silently dropped.
+- **Effort**: `trivial` — add `op_id` field to both EditJson messages.
+
+**5. Export leaves non-dev `/__spacetime/` asset links in HTML**
+- **Where**: `src/export.rs` line 173-174
+- **What**: `process_html` only removes `script/link` tags matching `*__spacetime/dev*`. The production CSS link `/__spacetime/styles.css` and the live-reload script survive into the export. Verified in `/tmp/dataiku-export/index.html`.
+- **Why**: Exported HTML has broken asset links to `/__spacetime/styles.css` (returns 404 on a static host), and may contain the live-reload script that tries to open a WebSocket.
+- **Effort**: `small` — widen the lol_html selector to also match `__spacetime/styles.css`, `__spacetime/runtime.js`, and inline scripts containing `__spacetime`.
+
+### Moderate Issues
+
+**6. `DefaultBodyLimit` of 11MB applied to all routes**
+- **Where**: `src/server.rs` line 158
+- **What**: The 11MB body limit layer is applied to the entire router, not just the upload route.
+- **Why**: All endpoints (including JSON ones that should accept small bodies) now accept 11MB payloads. Low risk since this is a dev server, but wasteful.
+- **Effort**: `small` — apply the limit only to the upload route using a nested Router or route-specific layer.
+
+**7. `ExportConfig.minify` is a dead field**
+- **Where**: `src/export.rs` line 16
+- **What**: `pub minify: bool` is defined in `ExportConfig` and set from CLI args, but `export_site()` never reads it. Compiled JS/CSS output is never minified.
+- **Why**: Users who pass `--minify` to `build` get unminified output with no warning.
+- **Effort**: `small` — either implement minification or remove the field and warn if `--minify` is passed with a directory target.
+
+**8. Data editor type schema lookup keyed by source name, not type name**
+- **Where**: `stdlib/__dev__/primitives/dev-data-editor.st` line 120
+- **What**: `var schema = typeSchemas ? typeSchemas[currentSource] : null;` — `currentSource` is the data source filename (e.g., `data/customers.json`), but `typeSchemas` keys are `@type` names (e.g., `Customer`). These never match.
+- **Why**: Schema-driven forms will never render — falls back to raw JSON mode for all sources. The core value proposition of the admin panel (schema-driven forms) is inoperative.
+- **Effort**: `medium` — requires mapping from data source filenames to @type names, which needs either a naming convention or CompileAnalysis tracking of `@data` → `@type` relationships.
+
+### Low-Impact Issues
+
+**9. Content tree re-fetches site.json on every DataUpdate**
+- **Where**: `stdlib/__dev__/primitives/dev-content-tree.st` line 130-132
+- **What**: Every DataUpdate message triggers a fetch to `/__spacetime/dev/site.json`, even for data edits that don't change site structure.
+- **Why**: Unnecessary network requests. Low severity but noisy.
+- **Effort**: `trivial` — only re-fetch on file system changes, or debounce.
+
+**10. Collection CRUD doesn't clean up `add` buttons on DataUpdate reset**
+- **Where**: `stdlib/__dev__/primitives/dev-collection-crud.st` lines 149-161
+- **What**: On DataUpdate, old overlays and `__stCrudSetup` flags are cleaned, but the `add` buttons (inserted after the container via `insertBefore`) are not removed. Multiple DataUpdates produce duplicate "Add item" buttons.
+- **Why**: Visual bug — multiple add buttons pile up after data changes.
+- **Effort**: `small` — track add buttons and remove them during reset, or tag them with a data attribute for cleanup.
+
+**11. `dev_types_handler` re-parses index.st on every request**
+- **Where**: `src/server.rs` lines 2632-2640
+- **What**: Every GET to `/dev/types.json` reads and parses `index.st` from disk. The existing `DevCompileCache` is not used.
+- **Why**: Performance. Each request incurs a file read + parse. Low priority since it's a dev endpoint.
+- **Effort**: `small` — piggyback on `get_or_compile` or cache the TypeRegistry in DevCompileCache.
+
+**12. `dev_types_handler` doesn't see types from `@import`-ed files**
+- **Where**: `src/server.rs` line 2640
+- **What**: `TypeRegistry::from_form_matches(&ast.matches)` only sees @type definitions in `index.st` itself, not in imported files. The parse function doesn't resolve imports.
+- **Why**: Sites that define @type in imported .st files (which is common) will show empty types.
+- **Effort**: `medium` — need to use the full compiler pipeline (which resolves imports) rather than raw parsing.
+
+**13. No `%exports` on content-tree and data-editor primitives**
+- **Where**: `stdlib/__dev__/primitives/dev-content-tree.st`, `dev-data-editor.st`
+- **What**: These primitives have no `%exports` block, unlike other dev primitives that export state variables.
+- **Why**: Other components cannot reactively observe admin panel state (selected source, editor status). Cosmetic — current consumers use the global API instead.
+- **Effort**: `trivial`
+
+* Scope
+
+The data editor's schema-driven form generation is inoperative because:
+1. ~typeSchemas[currentSource]~ uses the data source filename (~data/customers.json~) as lookup key, but types.json keys are @type names (~Customer~)
+2. ~dev_types_handler~ re-parses ~index.st~ directly on every request, missing types from @imported files
+3. No data-source-to-type mapping is exposed to the client
+
+=src/analysis/mod.rs= already tracks ~DataAnalysis { name, type_name, is_array, source, ... }~ from ~CompileAnalysis~. This has exactly the mapping we need.
+
+** Out of scope
+- Changing the form rendering logic (it already works once the schema is found)
+- Caching the full CompileAnalysis in DevCompileCache (FUP — would optimize but not block)
+
+* Implementation
+
+** Step 1: Extend site.json to include data→type mapping
+
+In =src/server.rs= ~dev_site_handler~:
+
+Instead of just scanning the filesystem for data/*.json files, use the compile pipeline to get CompileAnalysis and extract data source metadata:
+
+#+begin_src rust
+// Use get_or_compile to get the compiled output (which includes analysis)
+let index_st = site_dir.join("index.st");
+if index_st.exists() {
+    if let Ok(compiled) = compile_from_site(
+        &index_st, &site_dir, *trace,
+        state.debugger_config.as_ref(),
+        state.cache_stdlib, &state.compile_cache,
+    ) {
+        // Extract data source → type mapping from CompileAnalysis
+        let analysis = compiled.analysis;
+        for ds in &analysis.data_sources {
+            data_source_map.insert(ds.name.clone(), serde_json::json!({
+                "type": ds.type_name,
+                "isArray": ds.is_array,
+                "src": match &ds.source {
+                    DataSource::File(p) => p.clone(),
+                    DataSource::Url(u) => u.clone(),
+                    _ => String::new(),
+                },
+            }));
+        }
+    }
+}
+#+end_src
+
+Add to the JSON response:
+: "dataSourceMap": data_source_map
+
+First, verify that ~CompiledSpacetime~ has an ~analysis~ field by reading ~src/compiler.rs~. If not, CompileAnalysis needs to be extracted differently — possibly by running ~CompileAnalysis::from_compiled()~ or similar.
+
+** Step 2: Fix dev_types_handler to use compile pipeline
+
+In =src/server.rs= ~dev_types_handler~:
+
+Replace raw file parsing with ~compile_from_site~ or ~get_or_compile~ (which resolves imports). Extract TypeRegistry from the FormMatches after compilation:
+
+#+begin_src rust
+let (compiled, _, _) = get_or_compile(
+    &index_st, &site_dir, *trace,
+    state.debugger_config.as_ref(),
+    state.cache_stdlib, &state.compile_cache,
+    &state.dev_compile_cache,
+)?;
+// Build registry from the fully-resolved form matches
+let registry = TypeRegistry::from_form_matches(&compiled.form_matches);
+#+end_src
+
+Verify what fields ~CompiledSpacetime~ exposes — check ~src/compiler.rs~ for the struct definition.
+
+** Step 3: Fix data editor to use dataSourceMap
+
+In =stdlib/__dev__/primitives/dev-data-editor.st=:
+
+1. Fetch site.json alongside types.json on init to get the ~dataSourceMap~
+2. In ~loadSource(name)~, look up the type name via ~siteData.dataSourceMap[sourceName]~
+3. In ~renderEditor~, use the type name to look up schema:
+   : var sourceInfo = siteData.dataSourceMap && siteData.dataSourceMap[sourceName];
+   : var typeName = sourceInfo ? sourceInfo.type : null;
+   : var schema = typeName && typeSchemas ? typeSchemas[typeName] : null;
+
+This also fixes the file path resolution — ~sourceInfo.src~ gives the actual file path instead of hardcoding ~data/~ + name + ~.json~.
+
+* Tests
+
+- Serve site/dataiku in debug mode
+- Open dev panel → Content tab shows data sources
+- Click "customers" → Editor tab shows schema-driven form (not raw JSON)
+- Fields match @type Customer: id (text), name (text), logo (url), quote (text), etc.
+- Edit a field → green flash → JSON file updated
+
+* Acceptance Criteria
+
+- ~cargo test --lib~ passes
+- GET ~/__spacetime/dev/site.json~ returns ~dataSourceMap~ with entries like ~{"customers": {"type": "Customer", "isArray": true, "src": "/data/customers.json"}}~
+- GET ~/__spacetime/dev/types.json~ returns types from imported .st files (not just index.st)
+- Data editor displays schema-driven forms when a data source has a known @type
+- Data editor falls back to raw JSON for sources without @type

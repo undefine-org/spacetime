@@ -1,0 +1,78 @@
+#+TITLE: Nested @each inside an inline-HTML @each body is dead text (not expanded)
+#+STATE: DONE
+#+SESSION_ID: 14f94e45c6c3f247
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-02T11-06-49-499Z_14f94e45c6c3f247.jsonl]]
+#+CUSTOM_ID: BUG-081-nested-each-inside-an-inline-html-each-b
+#+COMPLETION_HASH: d5625e87740436a2
+
+* Initial Message
+
+what's next to make this super usable? especially for e.g. multiple dispatch and making it useful as an actual browser. also, could you create a basic Markdown parser in pure Spacetime (only scoped to spacetime-docs for now, if needed), that you would use to integrate Markdown files already written about testing? How hard would that be?
+
+* Symptom
+An ~@each~ whose inline-HTML body contains a NESTED ~@each~ over a field of the
+outer item does not expand the inner loop. The inner ~@each(...) { ... }~ survives
+verbatim in the captured body string and is emitted as dead text (neither SSG-
+unrolled nor hydrated) \u2014 the outer rows may also fail to render.
+
+* Minimal repro
+#+begin_src spacetime
+@data inline $rows : [{"name":"a","tags":[{"t":"x"},{"t":"y"}]}];
+<main><div class="grid"></div></main>
+.grid {
+  @each($rows as $r) {
+    <article class="card"><code>`$r.name`</code>
+      <span class="tags">@each($r.tags as $t) { <em class="tag">`$t.t`</em> }</span>
+    </article>
+  }
+}
+#+end_src
+=> served HTML/JS contains zero ~class="tag"~; the inner @each text is inert.
+
+* Root
+The inline-HTML each body is captured as an OPAQUE string (~$body:html_block~ ->
+ExprExtractor; stdlib/macros/each.st ~each-inline~, src/syntax/events/extractors/
+blocks.rs ~HtmlBlockExtractor~). Both renderers only substitute ~`$field`~ holes:
+- SSG: src/html/ssg_unroll.rs ~render_row~ / ~fill_holes~ / ~fill_bare~.
+- Runtime: stdlib/primitives/data/each-inline.st ~interpolate~ (regex over text
+  nodes/attrs).
+Neither recognises a nested ~@each(...) { ... }~ in the row HTML, so the inner
+loop is never instantiated. (Verified: the body capture string DOES retain the
+full nested @each text.)
+
+* Structural fix (this BUG)
+Make the inline-each renderer NESTING-AWARE in ONE shared place so SSG == hydrate:
+1. A parser/helper that, given a row-HTML string, finds a top-level
+   ~@each($srcExpr as $v[, ...]) { <innerHtml> }~ region (depth-aware brace scan),
+   yielding { outer_html_before, src_path (relative to the outer item, e.g.
+   `r.tags`), inner_var, inner_html, outer_html_after }.
+2. SSG (~render_row~): when the row contains a nested each, resolve ~src_path~
+   against the current item (serde_json) and render the inner_html once per inner
+   item (recursively \u2014 supports >1 level), then continue. Mirrors the existing
+   field substitution.
+3. Runtime (~each-inline~ interpolate): when a cloned row contains a nested-each
+   marker, resolve the path on itemData and clone/interpolate inner rows. To avoid
+   re-parsing @each in JS, prefer emitting the nested structure as a compile-time
+   DESCRIPTOR the primitive consumes (e.g. data-st-each attribute carrying
+   {path, var} + a <template> of inner_html), so the runtime just iterates \u2014 no JS
+   @each parser (AGENTS: don't hand-roll parsers; the compiler already has the
+   structure).
+4. unroll == hydrate invariant: an integration test asserting the SSG HTML and the
+   hydrated DOM contain the same inner rows.
+
+* Relationship
+Sibling to [[id:FEAT-085-ssg-unroll-each-with-template-call-body]] (template-call
+@each bodies). This BUG is the INLINE-HTML nested case; both stem from the each
+body being an opaque string the renderers only field-substitute. Blocks the
+macro-reference chip-styled signatures ([[id:FEAT-090-reference-ui-search-filter-chips-grouped]],
+which @each over $m.tokens inside each card).
+
+* Acceptance
+- The minimal repro renders inner rows in BOTH the served (no-JS) HTML and the
+  hydrated DOM.
+- A 2-level nest works.
+- New ssg_unroll unit test (render_row with nested each) + an integration test
+  (compile -> HTML has inner rows) + a headless/CDP hydrate check.
+- Full lib + integration green.
+
+NOTE [2026-06-10]: FIXED structurally. A nested @each(<path> as <var>) { inner } inside an inline-HTML @each body now expands in BOTH renderers via a shared bounded recogniser (depth-aware brace scan, not a general parser): SSG src/html/ssg_unroll.rs (find_nested_each/match_delim/resolve_nested_array/expand_nested_each; render_row expands-then-fills, recursive for >1 level) and runtime stdlib/primitives/data/each-inline.st (twin findNestedEach/matchDelim/resolveNestedArray/expandNested; resolveHoleExpr+fillHolesOnly parameterised by inner var so inner field holes resolve against their own item). Proven live over CDP: cards=2, tags=3, tagText=x,y,z (unroll==hydrate). Tests: 3 render_row unit (incl 2-level + empty array) + nested_each_unrolls integration. lib 2179/0, integration 169/0. Unblocks FEAT-090 chip-styled signatures.

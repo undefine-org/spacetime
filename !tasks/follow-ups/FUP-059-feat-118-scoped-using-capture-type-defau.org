@@ -1,0 +1,51 @@
+#+TITLE: FEAT-118 scoped %using capture_type/default enactment
+#+STATE: ITEM
+#+SESSION_ID: 1508cbf54b12d2b0
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-14T11-53-10-188Z_1508cbf54b12d2b0.jsonl]]
+#+CUSTOM_ID: FUP-059-feat-118-scoped-using-capture-type-defau
+
+* Initial Message
+
+1. "Scoped %capture_type sub-grammar + %default injection — the deepest third of %using, genuine matcher-level work, not contention." -> can you speak to that? Please exlpain, and then either do it or file it
+2. ProfileYaml in pi-code-engine is probably old news on the pi-code-engine side. You will need to do an investigation and design exploration + rethinking when you get there please
+
+PARENT: FEAT-118
+
+CONTEXT: FEAT-118 Cluster A shipped module namespaces, @use alias/only/hiding, E0926/E0927, and the first executable third of %using: %claims. %claims is enacted by the ImportScope-backed canonicalize_qualifiers pass: a bare directive claimed by exactly one open namespace rewrites to that namespace before normal resolution.
+
+REMAINDER: enact the other two %using hook capabilities as scoped, data-declared behavior:
+
+1. %capture_type scoped sub-grammar activation
+   - Today capture kinds are still effectively global matcher knowledge.
+   - Desired: a namespace imported by @use may declare capture types in its module manifest via %using { %capture_type ... }. Those capture forms become legal ONLY in files/scopes whose ImportScope imports that namespace (respecting alias/only/hiding semantics where relevant).
+   - The matcher/parser must read this from registry data (UsingHook.capture_types), not Rust-side hardcoded predicates/fields.
+
+2. %default value injection
+   - Today missing argument/default behavior is not scoped through %using defaults.
+   - Desired: a namespace imported by @use may declare defaults in %using { %default ... }. When a matched directive omits that capture/arg, the matcher/pipeline injects the declared default into the FormMatch/CapturedValue stream before downstream evaluation.
+   - Must be provenance-aware: diagnostics can distinguish user-supplied vs default-injected values.
+
+WHY THIS IS NOT FUP-057 CLEANUP: these are matcher-level semantics, not import-resolution diagnostics. FUP-057 was resolved at the CompileContext/ImportScope/pipeline canonicalization seam without changing how %form bodies match. %capture_type and %default must participate DURING matching/capture materialization, before resolution/evaluation, because they affect what syntax is legal and what captured data exists.
+
+DESIGN CONSTRAINTS:
+- Self-describing rule: stdlib .st declares behavior; Rust consumes registry data. Do not add per-feature Rust predicates/fields for capabilities stdlib can declare.
+- %form must not change. One sigil, one meaning. Add a hook that deletes a special case or generalizes variants-as-data.
+- Scope matters: same bare syntax can be valid under @use ns A and invalid without it.
+- Determinism: if multiple open namespaces declare conflicting capture_type/default behavior, emit a diagnostic rather than choose by iteration order.
+- Preserve existing global behavior; std/global namespace remains byte-identical for existing files.
+
+IMPLEMENTATION SKETCH:
+- Thread ImportScope (or a read-only HookEnvironment derived from it) into the event matcher / form compiler where capture type lookup and default materialization happen.
+- Add a registry query that resolves active UsingHook capture_types/defaults for the current file scope.
+- Replace any remaining hardcoded capture-kind recognition with lookup(active_hooks ∪ global_hooks).
+- Extend FormMatch/CapturedValue with minimal provenance for injected defaults if absent already.
+- Add diagnostics for unbound/conflicting hook-provided capture types/defaults.
+- Tests: two fixture modules declaring different capture_type/default hooks; compile same consumer with and without @use; assert scoped validity/default injection and conflict diagnostics.
+
+ACCEPTANCE:
+- A module can declare %using %capture_type in .st and consumers only gain that capture grammar when @use imports the namespace.
+- A module can declare %using %default and omitted captures receive default values with provenance.
+- Conflicting active hooks produce deterministic diagnostics.
+- cargo test --lib green.
+
+RELATIONSHIP TO CLUSTER B: not required for Spell-side first-class .st outline/edit. It completes the verse producer's %using hook semantics and strengthens the same one-source-of-truth contract Cluster B consumes.

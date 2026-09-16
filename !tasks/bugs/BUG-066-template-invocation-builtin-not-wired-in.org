@@ -1,0 +1,36 @@
+#+TITLE: template_invocation builtin not wired in %capture_type engine (falls to Expr)
+#+STATE: DONE
+#+SESSION_ID: 14fc108ed3772fa8
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-04T14-32-37-965Z_14fc108ed3772fa8.jsonl]]
+#+CUSTOM_ID: BUG-066-template-invocation-builtin-not-wired-in
+#+COMPLETION_HASH: 7660ae51c2be4ac0
+
+* Initial Message
+
+Ok, start with Phase B. Use a wave manifest with in-chat mid-flight check-ins exlpaining what's going on, what' you've done, and what you're doing next. use main thread for architectural work and reviewer swarms in between waves. add as many gap implementation as needed; you have unlimited time budget. file FEAT/BUG you find mid-flight using the org tool and fix/implement them mid-flight
+
+* Symptom
+A `%capture_type` grammar referencing the builtin `template_invocation` leaf gets ExprExtractor
+(raw `&name(args)` string), NOT TemplateInvocationExtractor (structured Named{name,args}). So
+`$invocations:template_invocation` in a capture-type yields Expr("&signal-card($sig)") instead of
+Named{name,args}, and `( $x:template_invocation )*` stops after the first (Expr swallows to its
+boundary).
+
+* Root cause
+compile_pattern_with_defs -> compile_simple_extractor (src/syntax/events/extractors/custom.rs
+~428) match on CaptureType has NO arm for TemplateInvocation (also likely PatternMatch/Union/
+ParamList/Properties etc.) -> falls to `_ => ExprExtractor`. The registry HAS the extractor
+(extractors/mod.rs:98) but this hand-written match doesn't dispatch to it. Macros work because
+%form patterns use the full parser path (src/parser/mod.rs), a different code path.
+
+* Fix (structural)
+Dispatch the builtin extractors that exist in the ExtractorRegistry from compile_simple_extractor
+instead of a hardcoded partial match: add the TemplateInvocation arm (and audit the other
+registry-backed builtins) so the %capture_type engine and the macro %form path agree on builtin
+leaf semantics. Found building cb_nested_each (FUP-038).
+
+* Test
+A %capture_type with $x:template_invocation reifies Named{name,args}; ( $x:template_invocation )*
+collects all invocations.
+
+NOTE [2026-06-09]: Fixed: (1) added "template_invocation" => CaptureType::TemplateInvocation to the name-map (src/parser/mod.rs) so it resolves to the variant, not Custom; (2) added the TemplateInvocation arm to compile_simple_extractor (custom.rs) dispatching TemplateInvocationExtractor. Now template_invocation reifies Named{name,args} in the %capture_type engine + ()* collects all. Side effects handled structurally: reify_match now reads the Named inv via new template_ref_from_invocation helper (no string re-parse); the missing-; match case now parses leniently as N arms (no silent loss); genuinely-malformed @match (no =>) surfaces E0922 via the None-handler @match guard. lib 2134/0.

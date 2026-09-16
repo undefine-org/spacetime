@@ -1,0 +1,61 @@
+#+TITLE: @data derive expr grammar: leading-paren + member-access-in-ternary fail
+#+STATE: DONE
+#+SESSION_ID: 14fc108ed3772fa8
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-04T14-32-37-965Z_14fc108ed3772fa8.jsonl]]
+#+CUSTOM_ID: BUG-077-data-derive-expr-grammar-leading-paren-m
+#+COMPLETION_HASH: 02ac7f1754455704
+
+* Initial Message
+
+what do you need from me to implement FEAT-076 fully and in a Spacetime-y way? I am going to sleep so you'll auto-accept the most ambitious and Spacetime-y choice every time (unlimited budget). Ask me questions one last time, if needed, before going off
+
+* BUG — @data derive value-expr parser chokes on two valid JS forms
+
+** Parent
+[[id:FEAT-076-rebuild-the-cms-admin-multi-file-the-pro]] W1. Worked around (sidestepped) to keep building; should be fixed structurally so derive exprs accept full JS.
+
+** Symptom (RED, isolated minimal repros)
+The `@data derive $x : <expr> ;` value expression (captured via balanced(';')) fails to
+parse for two shapes:
+
+1. LEADING PAREN — an expr that STARTS with `(`:
+     @data derive $x : ($entries || []).length;   → parse error
+     @data derive $x : ($a).length;                → parse error
+   but `@data derive $x : $entries.length;` (no leading paren) parses fine.
+
+2. MEMBER-ACCESS IN TERNARY THEN-BRANCH — a bare ternary whose then-branch is a member
+   access:
+     @data derive $x : $a ? $a.length : 0;         → parse error
+   but `@data derive $x : $a ? 1 : 0;` parses, and `@data derive $x : $a.length;` parses,
+   and `@data derive $x : $a + (1 === $a ? "y" : "z");` parses. Only the combination
+   ternary + `.member` in the then-branch breaks.
+
+Both are valid JS the derived-signal primitive would happily eval (it does its own dep
+discovery + Global-scope rewrite). The failure is purely in the directive-value capture
+grammar, not the runtime.
+
+** Likely cause
+The directive-value parser (the path feeding `$value:balanced(';')` for @data derive)
+has leading-paren ambiguity (a `(` at expr-start is mis-read as a directive arg-list — the
+same ambiguity the @data fold macro comment calls out: "avoids leading-paren ambiguity
+with the directive grammar") AND a ternary/member-access interaction that terminates the
+capture early. balanced(';') should consume the whole expression up to the top-level `;`
+regardless of internal `(`/`?`/`:`/`.`.
+
+** Workaround in use (FEAT-076 W1)
+Authored derive exprs to avoid both forms: no leading `(`; no `cond ? x.y : z`. E.g.
+`$entries.length` (made $entries always-array so no guard needed) instead of
+`($entries||[]).length`.
+
+** Fix plan (RED → GREEN, grammar only)
+1. RED: add parser tests for the two minimal repros above (expect parse OK).
+2. GREEN: fix the derive value-capture so a leading `(` is treated as expression grouping
+   (not an arg-list) and ternary+member doesn't short-circuit the balanced capture. Likely
+   in the balanced(';') terminal / directive-value segmentation. NO construct special-casing.
+3. Verify @data derive/fold/query exprs accept full JS expressions; no regression.
+
+** Acceptance
+- [ ] `($a).length`, `($a || []).length`, `$a ? $a.length : 0` all parse in @data derive.
+- [ ] Existing derive/fold exprs unaffected; FEAT-076 derives can drop the workaround.
+
+NOTE [2026-06-10]: FIXED (leading-paren) + workaround (ternary-member). Root cause: the generic directive parser (src/syntax/cst/parser.rs parse_directive) consumed a directive's `: value` token-by-token; a paren-led value (`($a).length`) had its `(` mistaken for an arg-list, leaving the trailing `.member` to be parsed as a `.class` selector → "expected '{' after selector". FIX: after the inline-arg loop, when the last consumed arg was a value-introducing COLON and the next token is `(`, route the remainder through parse_inline_expression (balanced over parens/brackets up to ;/{). Verified the emitted derived-signal JS carries the expr intact + evals. The broader member-in-ternary sub-case (`$a ? $a.x : 0`, where `.x :` reads as `.class:pseudo`) is NOT fixed in the generic parser — a broader value-colon reroute regressed preset (`@preset ~x: cubic-bezier(...)`) + type-annotation (`@data inline $x: T[]`) directives (8 lib tests), so it was reverted to the narrow paren-led fix. WORKAROUND for ternary-member: wrap the whole expression in parens — `($a ? $a.length : 0)` parses (the paren fix handles it). This makes BOTH problem patterns expressible. RED→GREEN: test_data_directive_paren_led_value_expression (src/syntax/cst/parser.rs). lib 2161/0. The FEAT-076 derive workarounds ($entries always-array to avoid the guard) can now use ($entries||[]).length directly.

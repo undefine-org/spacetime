@@ -1,0 +1,153 @@
+#+TITLE: :duration/:time brace-body property capture not converted to ms (emits raw token)
+#+STATE: DONE
+#+SESSION_ID: 15132754c6e25396
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-22T12-57-11-707Z_15132754c6e25396.jsonl]]
+#+CUSTOM_ID: BUG-138-duration-time-brace-body-property-captur
+
+* Initial Message
+
+Understrand FUP-099 and its root cause, and surface anything else that may come up during the investigation
+
+* Problem
+
+The `:duration` (and `:time`) capture type, *when captured via the brace-body
+property path*, stores the raw source token as `CapturedValue::Expr("5m")`
+instead of converting it to a number of milliseconds.
+
+src/syntax/events/form_compiler.rs ~1694 (`convert_property_value`):
+
+    CaptureType::Time | CaptureType::Duration => {
+        // Parse time/duration: "5m", "300ms", etc.   <-- comment lies; no parse
+        CapturedValue::Expr(clean.to_string())
+    }
+
+Consequence (PROVEN by CLI build, 2026-06-22):
+`@data fetch $x T : "/u" { refresh: 5m }` compiles to
+
+    const refreshInterval = "5m";                 // a quoted STRING
+    if (refreshInterval > 0) setInterval(load, refreshInterval);
+
+`"5m" > 0` → `NaN > 0` → false → the guard no-ops; even if it passed,
+`setInterval(load, "5m")` is invalid. So a non-zero refresh on `@data fetch`
+silently never fires. The value is DOUBLY wrong: numerically (string, not ms)
+AND it renders quoted (via `looks_like_css_literal`). Verified for both
+`refresh: 5m` (→ "5m") and `refresh: 300ms` (→ "300ms").
+
+* Root cause — one arm, one of three paths
+
+`CapturedValue::Time(ms)` ALREADY EXISTS and already renders to a bare number
+(src/pipeline/expand.rs:1592 `CapturedValue::Time(ms) => ms.to_string()`). There
+are THREE capture paths for `:time`/`:duration`; only ONE is broken:
+
+| Path | Trigger | Conversion | Status |
+|------|---------|-----------|--------|
+| token-stream  (extractors/simple.rs:152) | inline/paren tokens `(duration: $d:time)`, bare `$d:time` | `parse_duration_with_unit` → `Time(ms)` | ✓ correct |
+| param default (resolve.rs:994)           | `= 300ms` defaults | `* get_time_unit_multiplier` → `Time(ms)` | ✓ correct |
+| brace-body property (form_compiler.rs:1696) | `{ key: $v:duration }` property specs | `Expr(raw)` | ✗ BROKEN |
+
+A duration parser already exists and is unit-tested:
+src/syntax/conversions.rs::parse_duration_with_unit ("5m"→(300000,"m"),
+"300ms"→(300,"ms"), "2s"→(2000,"s")). REUSE it; do not write a new parser.
+
+* Regression surface — bounded to exactly ONE consumer
+
+The brace-body property path fires only when a `%form` carries a `{ key: $v:type }`
+property body (`has_property_specs` in form_compiler.rs). Audited every
+`:time`/`:duration` spec in stdlib (2026-06-22):
+
+- ALL animation/timing macros (on-event, loop, timeline, fade-in, waapi-*, cycle,
+  persist, websocket, effect, presets) use PAREN-form `(duration: $d:time)` →
+  token-stream path → already `Time(ms)`. UNAFFECTED by a fix to the brace arm.
+- ONLY stdlib/macros/data-kind.st `data-fetch-opts` uses the brace-body path
+  (`refresh: $refresh:duration?`, `cache: $cache:duration?`).
+
+∴ The previously-feared regression risks (`@on hover(300ms)`, timeline durations,
+CSS timing values) are NOT on this code path. Capture-time conversion of the
+brace-body arm is safe.
+
+* Why it surfaced now (NOT a regression)
+
+Pre-existing. Introduced in 934b27e4 ("switch file-level expansion from
+MacroCallAst to FormMatch, Phase E") — a gap carried in during a refactor, not a
+behavior regression. MASKED until BUG-137: the bodyless `data-fetch-kind` overload
+always won form-matching (it ignored the `{ refresh: … }` body and hardcoded
+`refresh: 0`). BUG-137's body-shape overload resolution (match_sink.rs) now routes
+a `{ refresh: … }` options body to the body-consuming `data-fetch-opts` overload,
+which threads the captured `$refresh` to the data-source primitive — exposing the
+unconverted string. (BUG-137 filed this exact follow-up.)
+
+* Fix
+
+src/syntax/events/form_compiler.rs ~1694: make the `Time | Duration` arm parse via
+`conversions::parse_duration_with_unit(clean)` and emit `CapturedValue::Time(ms)`;
+on parse failure (e.g. `{ refresh: $userInterval }` — a binding/expr, not a
+literal) FALL BACK to `Expr(raw)` so non-literal refs still pass through.
+
+* Acceptance
+
+- `@data fetch $x T : "/u" { refresh: 5m }` emits `refreshInterval = 300000` (bare
+  number, unquoted) and the auto-refresh `setInterval` fires.
+- `{ refresh: 300ms }` → 300; `{ refresh: 2s }` → 2000.
+- `{ refresh: 0 }` still emits 0.
+- A non-literal `{ refresh: $expr }` still passes through as Expr (no crash).
+- No regression to paren-form animation macros (`@on hover(300ms)`, timeline,
+  fade-in) — they never used this path.
+- Restore src/compiler.rs::snapshot_data_directive input to `refresh: 5m` and
+  assert the snapshot shows ms (300000).
+- Add a v8/headless test asserting the emitted number.
+
+* Files
+- src/syntax/events/form_compiler.rs (~1694 Time|Duration arm) + a unit test there
+- src/compiler.rs (restore snapshot_data_directive to `refresh: 5m`; update insta snapshots)
+- tests: a v8/headless test asserting refreshInterval === 300000
+
+* Sub-finding (noted, not separate scope)
+parse_duration_with_unit truncates fps via integer cast (60fps → 16, not 16.67ms).
+Irrelevant to `refresh` (no fps there) and imperceptible; left as-is unless a future
+change centralizes duration conversion.
+
+* Origin
+Surfaced by BUG-137; the FUP-099 investigation (2026-06-22) verified the root cause,
+the three-path split, and the single-consumer regression boundary. Supersedes
+FUP-099.
+
+* IMPLEMENTED + VERIFIED (2026-06-22)
+
+** Fix
+src/syntax/events/form_compiler.rs (~1694, `convert_property_value`): the
+`Time | Duration` arm now parses the literal via
+`crate::syntax::conversions::parse_duration_with_unit(clean)` and emits
+`CapturedValue::Time(ms)`; a non-literal value (binding/expr) fails to parse and
+falls back to `Expr(raw)` so `{ refresh: $userInterval }` still threads through.
+Reused the existing unit-tested parser — no new parser, no Rust special-case.
+
+** Tests
+- src/syntax/events/form_compiler.rs (bug127_property_value_tests): added
+  duration_literal_converts_to_ms (5m→300000, 300ms→300, 2s→2000),
+  time_literal_converts_to_ms, non_literal_duration_falls_back_to_expr.
+- tests/v8_runtime/data_source_tests.rs: added
+  test_data_fetch_refresh_duration_converts_to_ms (asserts `refreshInterval = 300000`,
+  and NOT `"5m"`), test_data_fetch_refresh_units (300ms→300, 2s→2000),
+  test_data_fetch_refresh_zero_unchanged (0 stays 0).
+- src/compiler.rs::snapshot_data_directive: restored input to `{ refresh: 5m }`;
+  insta snapshot data_directive_js now shows `const refreshInterval = 300000;`
+  (was 0). Snapshot accepted.
+
+** Verification
+- CLI build of `@data fetch … { refresh: 5m }` → `const refreshInterval = 300000;`
+  (unquoted ms), and `300ms`→300, confirmed end-to-end.
+- cargo test --lib → 2501 passed, 0 failed.
+- cargo test --test integration_tests → 181 passed (1 pre-existing ignored).
+- cargo test --test v8_runtime_test → 437 passed (9 pre-existing ignored); the 3
+  new refresh tests pass.
+- Headless: all duration/timing/data-source tests pass. 62 pre-existing headless
+  failures remain in the @each/collection-ref subsystem — orthogonal to this diff
+  (no @each/classList/MutationObserver/collection-ref code touched; verified by
+  diff inspection). Not introduced here.
+
+** Files changed
+- src/syntax/events/form_compiler.rs (conversion arm + 3 unit tests)
+- src/compiler.rs (snapshot input restored)
+- src/snapshots/spacetime__compiler__snapshot_tests__data_directive_js.snap
+- tests/v8_runtime/data_source_tests.rs (3 tests)
+- stdlib/macros/data-kind.st (cache drop — see BUG-139, same form)

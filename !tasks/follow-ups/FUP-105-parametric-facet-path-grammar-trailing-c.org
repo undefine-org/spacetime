@@ -1,0 +1,88 @@
+#+TITLE: Parametric facet-path grammar — trailing-call support on &entity.component.facet(args)
+#+STATE: ITEM
+#+SESSION_ID: 15219c677c4613e6
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-03T18-27-25-809Z_15219c677c4613e6.jsonl]]
+#+CUSTOM_ID: FUP-105-parametric-facet-path-grammar-trailing-c
+
+* Initial Message
+
+ok now let's think about this failure and look at it in the context of IMPROVING SYNTAX just like we did with the Spacetime ECS. Take this example and add more to pressure test the options we come up with. Let's come up with a syntax that feels natural and lets us easily explain everything we just talked about
+
+* Initial Message
+
+Deferred from PLAN-062 Wave 1 (FEAT-149 typed 3D pose tracks). Wave 1 originally
+proposed author-facing dotted-facet-call sugar `&stage.camera.bounds(z)`, reusing
+FEAT-142's entity/facet mechanism (`src/parser/entity.rs::FacetPath`,
+`ST.worldFacet` runtime resolver). Investigation found the grammar has no support
+for a trailing call after a dotted facet path.
+
+* Gap (verified against source)
+
+- `tree-sitter-spacetime/grammar.js:604`: `element_ref: $ => seq('&', $.identifier)`
+  — no trailing-call production at all (dotted-path support for `&e.c.f` comes
+  from token-level extraction, not the tree-sitter grammar rule itself).
+- `src/syntax/events/extractors/reference.rs::ElementExtractor` — walks `& IDENT
+  (DOT IDENT)*` and stops; has zero logic for a trailing `(args)` after the last
+  segment.
+- `src/parser/entity.rs::FacetPath` — `entity`/`component`/`facet`/`tail: Vec<String>`
+  is a pure dotted-segment model; no slot for call arguments on any segment.
+- `ST.worldFacet(entity, component, facet)` (runtime resolver, `public/runtime/st.js`)
+  — takes 3 fixed string args; no mechanism to pass through caller-supplied
+  arguments to the resolved facet function.
+
+Closing this gap would let `&entity.component.facet(args)` resolve to a live
+function CALL against the facet's exported value (e.g. `.camera.bounds(0)` where
+`bounds` is a function-valued facet), not just member access on a plain value.
+
+* What's needed (all four, in some order — not scoped/sequenced here)
+
+1. Grammar: extend `element_ref` (or wherever facet-path parsing ultimately
+   lives) to accept an optional trailing `(args)` after the last dotted segment.
+2. `ElementExtractor`: capture the trailing call's argument tokens (reuse
+   `%form` param-list style argument capture where possible — do NOT hand-roll
+   a parallel arg parser; `param_list`/`expr` extractors already exist).
+3. `FacetPath`: add an `args: Option<Vec<String>>` (or similar) to the tail
+   segment, OR a dedicated `call: Option<CallArgs>` field — needs a design pass,
+   not a mechanical bolt-on (interacts with revB's guidance to centralize the
+   facet-path split in ONE typed helper, not scatter parsing).
+4. `ST.worldFacet`: extend to accept and forward call arguments to the resolved
+   facet, when the facet's exported value is itself a function (vs a plain
+   value/signal) — needs a design decision on how `%exports` declares a
+   function-typed facet (today's `%exports { $summit: worldpos }` shape is
+   value-typed only; a callable facet is a new export kind).
+
+* Interim workaround (shipped, PLAN-062 Wave 1)
+
+`canvas._stThree.bounds(z)` — a plain JS method on the `_stThree` handle every
+3D primitive already receives via `&el`. Delivers the identical VALUE
+(camera-frustum half-width/half-height at a given world-space Z-plane,
+correctly derived from the camera's REAL view direction via
+`camera.getWorldDirection()`, not a naive axis-delta) without any grammar work.
+Consumers read it directly in their `%emit js` primitive bodies — same pattern
+as `ctx.size()`/`ctx.registerFrame()`, no new authoring friction. See
+`stdlib/3d/primitives/three-stage.st` (`boundsFn`) +
+`stdlib/3d/tests/camera-bounds.test.st` (3 CDP-verified tests, including a
+tilted-camera regression case).
+
+* Why this is filed separately (not folded into PLAN-062)
+
+Per PLAN-062 Wave 1's own scope-narrowing decision: the interim `ctx.bounds(z)`
+JS-method surface fully unblocks Waves 2-5 (pose tracks, zellijist-2 migration,
+second-consumer proof) without this grammar work. Elevating this to its own
+FUP keeps PLAN-062 moving on its actual critical path (typed pose values) while
+this genuinely separate compiler-grammar project gets scheduled on its own
+merits later — closing it would let a FUTURE build use the terser
+`&stage.camera.bounds(0).halfW` author syntax instead of the `_stThree.bounds()`
+JS-method workaround, but is not required for FEAT-149's pose-track goal.
+
+* Status
+
+OPEN — not scheduled. No PLAN filed for this yet; would need its own
+build-waves plan (grammar -> extractor -> FacetPath -> runtime, each with its
+own RED/GREEN gate, mirroring PLAN-061's WAVE A-F discipline) if/when picked up.
+
+* Provenance
+
+Filed 2026-07-04 from PLAN-062 Wave 1 (FEAT-149), during a reviewer swarm that
+caught the scope gap between what Wave 1 originally proposed and what the
+existing grammar/extractor/runtime actually support.

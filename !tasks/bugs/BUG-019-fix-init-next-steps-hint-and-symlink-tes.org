@@ -1,0 +1,171 @@
+#+TITLE: Fix init next-steps hint and symlink test coverage
+#+STATE: DONE
+#+SESSION_ID: 14cb4663c8d20fb9
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-04-27T17-02-15-332Z_14cb4663c8d20fb9.jsonl]]
+#+CUSTOM_ID: BUG-019-fix-init-next-steps-hint-and-symlink-tes
+#+LAYER: tooling
+
+* Initial Message
+
+Implement these audit recommendations from org://AUD-006-audit-implementation:
+
+## Audit findings
+
+Sorted by effort-to-impact ratio.
+
+---
+
+- **What**: Stale `cargo run -- serve site/` / `check site/` / `build site/` and "Site Directory (`site/` and subdirectories)" ownership in agent context prompts.
+- **Where**:
+  - `.claude/agents/site-designer.md` — multiple, including `## Tools & Technologies` "`cargo run -- serve site/` for live development server", `## Owns / Site Directory (`site/` and subdirectories)`, `## Notes / Development Workflow` step 1 "Start dev server: `cargo run -- serve site/`", debugging tips `RUST_LOG=trace cargo run -- serve site/`, plus `site/examples/todo-app` example.
+  - `.claude/agents/pipeline-engineer.md` — the shell block under `## Notes / Key Debugging Commands` contains `RUST_LOG=spacetime::pipeline=trace cargo run -- serve site/`, `cargo run -- check site/`, `cargo run -- build site/`.
+  - `.claude/agents/code-quality-guardian.md` — 1 example mention `site/examples/todo-app`.
+- **Why**: `site/` no longer exists in the repo. Subagents loaded under these identities will paste broken commands and propose changes to a non-existent directory. This is precisely the work item FEAT-014::update-skills was meant to cover (the plan explicitly listed "Update only verbatim copy-paste-ready commands"); execution missed `.claude/agents/`.
+- **Effort**: trivial (3 files, literal find/replace `site/` → `projects/<name>/`, plus rename "Site Directory" ownership stanza to point at `projects/`).
+
+---
+
+- **What**: `# Or from the Spacetime repo root: cargo run -- serve <cd_target>` hint in `run_init` success output assumes the caller's cwd is the Spacetime repo root.
+- **Where**: `src/main.rs::run_init` ~line 1782–1783.
+- **Why**: When `cd_target = projects/<name>` the hint is correct only if cwd was already the repo root (so `projects/` was the in-repo gitignored dir). When `cd_target = <name>` (no `projects/` parent), the hint prints `cargo run -- serve <name>`, which only resolves to the right place if the user's cwd happened to be the Spacetime repo root. Misleading for users who installed `spacetime` and ran `init` from a personal scratch dir without `projects/`.
+- **Effort**: trivial (gate the "Or from the Spacetime repo root" hint behind the `cd_target.starts_with("projects/")` branch, or drop the hint entirely).
+
+---
+
+- **What**: `resolve_init_target_returns_pathbuf` test is a tautological type assertion duplicating `resolve_init_target_no_projects_dir`.
+- **Where**: `src/main.rs` ~lines 3736–3741.
+- **Why**: Adds noise without coverage. The function signature already declares `-> PathBuf`; the cargo build proves the type. Dead test.
+- **Effort**: trivial (delete).
+
+---
+
+- **What**: No test for `projects/` being a broken symlink (target missing).
+- **Where**: `src/main.rs::init_target_tests`.
+- **Why**: `std::fs::metadata` follows symlinks; on a broken symlink it returns `Err`, so `unwrap_or(false)` falls back to cwd/name. Behavior is correct but unverified. Adjacent to the existing `with_projects_symlink_to_dir` test, easy to add.
+- **Effort**: trivial.
+
+---
+
+- **What**: Tracked compiler bug documentation (`bugs/BUG-000-each-template-rendering-overview.md` … `BUG-003-template-invocation-js-serialization.md`) moved to gitignored `scratch/bugs/`.
+- **Where**: `scratch/bugs/` (was root `bugs/`, listed in plan as "non-Spacetime debris").
+- **Why**: Reading file contents, these are Spacetime-compiler-specific BUG notes (template-invocation extractor stub, body capture quantifier loop, etc.). They look like the older equivalent of the `!tasks/bugs/` org-mode bug tracker. Demoting them to gitignored `scratch/` removes them from the main repo's history going forward and from anyone cloning the repo. The plan scoping called this a "decision" but the deletion is irreversible after the next prune; consider whether they should instead be archived under `!tasks/` or `docs/legacy-bugs/` before falling out of git visibility.
+- **Effort**: small (move tracked-but-still-needed entries into `!tasks/bugs/` legacy area; or `git mv scratch/bugs docs/legacy-bugs` and adjust .gitignore exception).
+
+---
+
+- **What**: `tests/PHASE8_SUMMARY.md` and other historical task summaries still contain absolute `/home/user/code/ora/spacetime/...` paths.
+- **Where**: `tests/PHASE8_SUMMARY.md` lines 19, 62, 163, 378; `.serena/memories/STDLIB_JS_EMISSION_TRACE.md:273` references `cargo run -- serve site/`.
+- **Why**: Plan deliberately scoped historical notes out ("only forward-facing instructional docs change"), but `tests/PHASE8_SUMMARY.md` is in `tests/`, not under `!tasks/` or `@tasks/`, and might get crawled by future readers as if it were current docs. Borderline — flagged for awareness, not necessarily action.
+- **Effort**: trivial (one sed-style substitution) if you choose to action.
+
+* Scope
+** In scope
+- Update =src/main.rs::run_init= so the extra hint =# Or from the Spacetime repo root: cargo run -- serve <cd_target>= is printed only when the resolved target is under =projects/=.
+- Preserve current success output for the primary workflow:
+  - In a repo root containing =projects/=, =spacetime init demo= creates =projects/demo/= and prints =cd projects/demo= plus the repo-root =cargo run -- serve projects/demo= hint.
+- Fix the no-projects fallback workflow:
+  - In a directory without =projects/=, =spacetime init demo= creates =./demo/= and prints =cd demo= and =spacetime serve .=, but does not print a misleading repo-root =cargo run -- serve demo= hint.
+- Delete the tautological =resolve_init_target_returns_pathbuf= unit test.
+- Add a unit test for a broken =projects= symlink, proving =metadata()= failure falls back to =cwd/<name>=.
+
+** Out of scope
+- Do not add new CLI flags such as =--projects= or =--no-projects=.
+- Do not change mobile/Tauri scaffolding behavior except that the same success-output hint gating applies to mobile output.
+- Do not refactor =run_init= into a Result-returning API in this audit cleanup.
+
+* Existing Patterns
+- =src/main.rs::resolve_init_target(name: &str, cwd: &Path) -> PathBuf= already implements the projects/ detection via =std::fs::metadata(&projects_dir).map(|m| m.is_dir()).unwrap_or(false)=.
+- =src/main.rs::init_target_tests= already uses =tempfile::tempdir= and Unix =std::os::unix::fs::symlink= for symlink coverage.
+- =run_init= currently computes =cd_target= by stripping =cwd= from =project_dir= and printing =cd <cd_target>=.
+- The existing user-facing output pattern is:
+  - =Next steps:=
+  - =  cd <target>=
+  - =  spacetime serve .=
+  - optional repo-root hint.
+
+* Tests
+- Unit scenario A: =cargo test --bin spacetime init_target_tests= passes after deleting =resolve_init_target_returns_pathbuf= and adding a broken-symlink test. Expected count becomes 5 tests: no projects dir, projects dir, projects file, projects symlink to dir, projects broken symlink.
+- Unit scenario B: broken symlink test creates =cwd/projects= as a symlink to a missing directory and asserts =resolve_init_target("foo", cwd) == cwd.join("foo")=.
+- Manual smoke scenario C: In a tempdir with =projects/= present, run =spacetime init demo-with= and assert stdout contains =cd projects/demo-with= and =cargo run -- serve projects/demo-with=.
+- Manual smoke scenario D: In a tempdir without =projects/=, run =spacetime init demo-without= and assert stdout contains =cd demo-without= and does not contain =cargo run -- serve demo-without=.
+- Regression scenario E: =cargo check --tests= still succeeds.
+
+* Implementation
+** ITEM Capture init output and unit-test baseline (TDD: before implementation)
+:PROPERTIES:
+:CUSTOM_ID: BUG-019-fix-init-next-steps-hint-and-symlink-tes::capture-init-baseline
+:END:
+- Run =cargo test --bin spacetime init_target_tests= before editing to document current 5-test state including the tautological test.
+- Run the two manual smoke commands described in Tests scenarios C and D against the current binary or via =cargo run -- init= and capture that the no-projects workflow currently prints the misleading repo-root hint.
+
+** ITEM Add broken symlink test and remove tautological test
+:PROPERTIES:
+:CUSTOM_ID: BUG-019-fix-init-next-steps-hint-and-symlink-tes::update-init-helper-tests
+:DEPENDS: BUG-019-fix-init-next-steps-hint-and-symlink-tes::capture-init-baseline
+:END:
+- File: =src/main.rs=, module =init_target_tests=.
+- Delete =resolve_init_target_returns_pathbuf= entirely.
+- Add =#[cfg(unix)] #[test] fn resolve_init_target_with_projects_broken_symlink()=:
+  - Create a tempdir.
+  - Create a symlink =cwd/projects= pointing to =cwd/missing-projects= without creating the target.
+  - Assert =resolve_init_target("foo", cwd)= equals =cwd.join("foo")=.
+- Keep existing symlink-to-dir test unchanged.
+
+** ITEM Gate repo-root serve hint in run_init
+:PROPERTIES:
+:CUSTOM_ID: BUG-019-fix-init-next-steps-hint-and-symlink-tes::gate-init-root-hint
+:DEPENDS: BUG-019-fix-init-next-steps-hint-and-symlink-tes::update-init-helper-tests
+:END:
+- File: =src/main.rs=, function =run_init=.
+- After =cd_target= is computed, only print:
+  - =  # Or from the Spacetime repo root:=
+  - =  cargo run -- serve <cd_target>=
+  when =cd_target= starts with =projects/=.
+- Keep primary =cd <cd_target>= and =spacetime serve .= lines unconditional.
+- Preferred implementation: use a tiny pure helper such as =fn init_repo_root_serve_hint(cd_target: &str) -> Option<String>= if that keeps the condition unit-testable; otherwise use a direct conditional and rely on manual smoke tests. Do not over-refactor =run_init=.
+
+** ITEM Verify init output and tests
+:PROPERTIES:
+:CUSTOM_ID: BUG-019-fix-init-next-steps-hint-and-symlink-tes::verify-init-output
+:DEPENDS: BUG-019-fix-init-next-steps-hint-and-symlink-tes::gate-init-root-hint
+:END:
+- Run =cargo test --bin spacetime init_target_tests=.
+- Run =cargo check --tests=.
+- Re-run both manual smoke scenarios and save exact stdout snippets in the completion report.
+
+* Edge Cases
+- =projects= as a regular file continues to fall back to =cwd/<name>=.
+- =projects= as a symlink to an existing directory continues to redirect to =cwd/projects/<name>=.
+- =projects= as a broken symlink must not panic and must not try to create =projects/<name>= through a dangling path.
+- Running =spacetime init= from inside =projects/= still creates =./<name>= and should not print the repo-root cargo hint because there is no nested =projects/= signal.
+- If =current_dir()= fails, current behavior falls back to =PathBuf::from(".")=; do not change this in the audit cleanup.
+
+* Acceptance Criteria
+- No-projects init output no longer prints =cargo run -- serve <name>=.
+- Projects-detected init output still prints =cargo run -- serve projects/<name>=.
+- =resolve_init_target_returns_pathbuf= no longer exists.
+- A broken-symlink test exists and passes on Unix.
+- =cargo test --bin spacetime init_target_tests= and =cargo check --tests= pass, except for pre-existing unrelated warnings only.
+
+** Completion [2026-04-27]
+*** Verification
+- Baseline: =cargo test --bin spacetime init_target_tests= → 5/5 ok (including tautological =resolve_init_target_returns_pathbuf=).
+- Post-change: =cargo test --bin spacetime init_target_tests -- --list= →
+  - resolve_init_target_no_projects_dir
+  - resolve_init_target_projects_is_file
+  - resolve_init_target_with_projects_broken_symlink (new)
+  - resolve_init_target_with_projects_dir
+  - resolve_init_target_with_projects_symlink_to_dir
+  → 5/5 ok, tautological test removed.
+- Smoke =spacetime init demo-with= in tempdir with =projects/=: stdout contains =cd projects/demo-with= and =cargo run -- serve projects/demo-with= (hint preserved).
+- Smoke =spacetime init demo-without= in tempdir without =projects/=: stdout contains =cd demo-without= and =spacetime serve .= and does *not* contain =cargo run -- serve demo-without= (misleading hint suppressed).
+- =cargo check --tests= passed with only pre-existing warnings.
+*** Artifacts
+- [[file:!tasks/plans/plan-artifacts/PLAN-016-aud-006-implementation-remediation/init_tests_before.txt]]
+- [[file:!tasks/plans/plan-artifacts/PLAN-016-aud-006-implementation-remediation/init_with_projects_before.txt]]
+- [[file:!tasks/plans/plan-artifacts/PLAN-016-aud-006-implementation-remediation/init_without_projects_before.txt]]
+- [[file:!tasks/plans/plan-artifacts/PLAN-016-aud-006-implementation-remediation/init_with_projects_after.txt]]
+- [[file:!tasks/plans/plan-artifacts/PLAN-016-aud-006-implementation-remediation/init_without_projects_after.txt]]
+- Code: =src/main.rs::run_init= and =src/main.rs::init_target_tests=.
+*** Deviations
+None.

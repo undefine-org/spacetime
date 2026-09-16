@@ -1,0 +1,82 @@
+#+TITLE: @media with styles emits JS instead of CSS (12 v8 media_dedup/selector_init failures)
+#+STATE: DOING
+#+SESSION_ID: 14f48ced503111a7
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-05-29T18-28-09-664Z_14f48ced503111a7.jsonl]]
+#+CUSTOM_ID: BUG-039-media-with-styles-emits-js-instead-of-cs
+
+* Initial Message
+
+Ok do me a full summary of the spec. Now we're PLANNING, and once the plan is valid, we ORCHESTRATE. Get yourself ready and pumped
+
+* Symptom
+12 v8_runtime_test failures, all pre-existing at HEAD (verified via clean worktree):
+- v8_runtime::media_dedup_tests::* (10): @media blocks emit matchMedia JS + ST.set instead of
+  plain CSS @media rules. e.g. test_media_emits_css_not_js: "Should not generate JS for @media
+  with styles" but JS contains window.matchMedia('max-width: 1023px') (also note: missing the
+  `(min-width:...)` parenthesised form — emits raw 'max-width: 1023px').
+- v8_runtime::selector_init_tests::test_comment_in_selector_string_causes_error
+- v8_runtime::selector_init_tests::test_init_element_with_text_node
+
+* Pre-existing / scope
+Reproduces at HEAD independent of PLAN-023 W0 (CST HTML literal) and BUG-037 (macro dispatch).
+NOT a regression from current work. Filed for tracking; OUT OF SCOPE for PLAN-023 W0 (different
+layer: CSS @media emit vs CST parsing). Surfaced while gating Wave 0.
+
+* Root cause (hypothesis, unverified)
+@media style-only blocks should lower to a CSS @media rule (static, no runtime). The current
+path routes them through the responsive-signal primitive (matchMedia + ST.set), which is correct
+for @media-bound *reactive signals* but wrong for plain style blocks. Likely a dispatch/branch in
+the @media macro or media emit that doesn't distinguish "styles only" from "binds a signal".
+Related to BUG-037 territory (form disambiguation) but distinct.
+
+* Acceptance
+- media_dedup_tests + selector_init_tests GREEN (12)
+- @media style-only → CSS @media rule; @media with signal bind → matchMedia JS (both correct)
+- no regression in cargo test --lib / integration / headless
+
+NOTE [2026-06-07]: Dispatched async fix subagent (parallel with PLAN-030 Wave 0 review). Covers the 12 v8 media_dedup + selector_init failures. Also folds in BUG-057.
+
+* ROOT CAUSE (verified 2026-06-07, main thread — by reading emitted CSS/JS + stdlib)
+
+The =media= primitive (=stdlib/primitives/media.st=) emits BOTH branches
+unconditionally:
+- =%emit css { @media (%query) { %self { %styles } } }= — the CSS path
+- =%emit js { window.matchMedia('%query') ... %yield -> $matches }= — the JS path
+
+Two concrete defects:
+1. The =%emit css= branch is DEAD: the =%self= and =%styles= placeholders inside a
+   =%emit css= body are NOT handled by the pipeline (grep: no handler in
+   src/pipeline/expand.rs or src/emit/css.rs). So a style-only @media emits NO CSS
+   @media rule at all — only the JS matchMedia path fires. (Confirmed: a
+   `.responsive { @media("max-width: 1023px") { font-size: 14px } }` fixture builds
+   to dist/spacetime.css with NO @media rule, and dist/spacetime.js with
+   `window.matchMedia('max-width: 1023px')` + `ST.set(el,'media',...)`.)
+2. The query string is passed verbatim to matchMedia WITHOUT parenthesising:
+   `matchMedia('max-width: 1023px')` instead of `matchMedia('(max-width: 1023px)')`.
+   (The macro %form takes `$query:string`; callers pass `"max-width: 1023px"`
+   unparenthesised; the primitive does not wrap it.)
+
+** Correct design (the fix, deferred — see DECISION)
+The =@media= macro (responsive.st `media-query`) should lower a STYLE-ONLY block to a
+native CSS @media rule (no JS), and only emit the matchMedia primitive when the
+block's =$matches=/=$media= exports are actually CONSUMED by reactive code. This needs:
+(a) wiring =%self=/=%styles= placeholders in =%emit css= so the CSS @media rule is
+    produced from the block's properties (the infrastructure exists — animations wrap
+    output in @media at expand.rs:728), and
+(b) a usage check so the JS matchMedia path is emitted only when an export is read,
+    OR splitting into two macros (static @media -> CSS; reactive @media-bound signal
+    -> JS), mirroring the @on style/behavior split.
+Always parenthesise the query when building the matchMedia string.
+
+** DECISION (2026-06-07)
+This is a PRE-EXISTING bug ORTHOGONAL to PLAN-030 (media queries vs scoped state). It
+does NOT block any Wave. The placeholder-wiring in =%emit css= is a non-trivial
+pipeline change deserving its own focused pass. Deferring it out of the keystone
+campaign to avoid scope-creep; the diagnosis above is complete enough to execute
+directly. Keeping STATE: DOING (not REVIEW) since the fix is not yet landed. The 12 v8
+failures remain pre-existing and are excluded from PLAN-030 wave gates (documented in
+PLAN-030 global gates: "pre-existing media_dedup/selector_init cluster, baselined").
+
+** Selector_init 2 failures
+test_comment_in_selector_string_causes_error + test_init_element_with_text_node: NOT
+yet diagnosed; likely independent of @media. Tracked here pending the focused pass.

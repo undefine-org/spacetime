@@ -1,0 +1,107 @@
+#+TITLE: pos/face keyframe-property authoring syntax for 3D pose tracks (needs %scope within dispatch wiring)
+#+STATE: ITEM
+#+SESSION_ID: 15219c677c4613e6
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-03T18-27-25-809Z_15219c677c4613e6.jsonl]]
+#+CUSTOM_ID: FUP-106-pos-face-keyframe-property-authoring-syn
+
+* Initial Message
+
+ok now let's think about this failure and look at it in the context of IMPROVING SYNTAX just like we did with the Spacetime ECS. Take this example and add more to pressure test the options we come up with. Let's come up with a syntax that feels natural and lets us easily explain everything we just talked about
+
+* Initial Message
+
+Deferred from PLAN-062 Wave 3 (FEAT-149 typed 3D pose tracks). The original
+Wave 3 plan proposed `pos`/`face` as recognized properties inside the
+EXISTING `%capture_type keyframes` grammar, authored via `@scroll` (or a
+sibling directive) with a body like:
+
+#+begin_src st
+@scroll tile-pose(scrub: true) {
+  pos:  (0,0,0) -> (5,2,-1)
+  face: flat -> tumble(axis: (0,0,1), angle: 90deg)
+}
+#+end_src
+
+dispatching to a 3D-aware `apply-pose-animations` primitive instead of the
+DOM `apply-animations`, chosen by whether the enclosing scope is inside
+`@stage` (`%scope within(stage)`, reusing PLAN-039's mechanism).
+
+* Gap (verified against source)
+
+`macro_within_matches` (`src/metasystem/registry.rs:991`, PLAN-039) is
+unit-tested in isolation (`test_macro_within_matches_containment`) but has
+ZERO production call sites — `find_macro_by_directive`/`score_macro_form`
+(the actual dispatch-scoring path BUG-037 fixed for `@light`'s scene-vs-
+responsive ambiguity) never consume it. So a form declaring
+`%scope within(stage)` today has NO enforcement — the mechanism to
+disambiguate `@scroll`'s DOM-vs-3D forms by construct-containment does not
+actually exist in the compiler yet, only its data model + a standalone
+predicate function.
+
+* Interim shipped instead (PLAN-062 Wave 3)
+
+A NEW, unambiguous directive `@pose-track` (not `@scroll`) that sidesteps the
+dispatch-ambiguity problem entirely:
+
+#+begin_src st
+@pose-track(ease: 1, stops: [
+  { at: 0, pos: { x: 0, y: 0, z: 0 }, face: window.__stPose.flat() },
+  { at: 1, pos: { x: 0, y: 2, z: -1 }, face: window.__stPose.tumble(0, 0, 1, Math.PI / 2) }
+])
+#+end_src
+
+`stops:` is a plain `:expr` array literal (JS-native, using Wave 2's tested
+`window.__stPose` value-kinds directly), not stdlib-grammar keyframe syntax.
+See `stdlib/3d/primitives/three-pose-track.st` +
+`stdlib/3d/macros/pose.st`'s `@pose-track` macro.
+
+* What's needed to close this gap
+
+1. Wire `macro_within_matches` into `find_macro_by_directive`/
+   `score_macro_form` — a REAL compiler change (not a mechanical bolt-on;
+   needs the scope-stack construct-ref chain threaded through the same path
+   BUG-037's fix touched). This is the actual blocking piece; everything
+   below depends on it.
+2. Give `@scroll` (or a new-but-still-terse directive name) TWO `%form`s: one
+   `%scope within(stage)` (or whatever the settled construct-ref name is)
+   binding a NEW `apply-pose-animations` primitive, one unscoped (today's)
+   binding the existing DOM `apply-animations` — mirroring exactly how
+   `@light` disambiguates scene-vs-responsive by shape/scope today.
+3. `apply-pose-animations` — the primitive Wave 3 was originally going to
+   build, consuming the SAME `keyframes` capture-type structure
+   `apply-animations.js` already parses (confirmed empirically during Wave 3:
+   `pos: (0,0,0) -> (5,2,1)` parses cleanly through the EXISTING unmodified
+   `keyframes` grammar into `{properties: [{property:'pos', keyframes:
+   [{at:0,value:'(0,0,0)'}, ...]}]}` — the grammar reuse claim from the
+   original PLAN-062 design doc is CONFIRMED, not just assumed). The
+   primitive's JS interpreter needs vec3-tuple and orientation-keyword
+   (`flat`/`tilt`/`tumble`) value-kind branches, consuming
+   `window.__stPose`'s already-tested functions (Wave 2) — this part is
+   low-risk, already proven, just needs wiring once #1/#2 land.
+
+* Why filed separately (not folded into PLAN-062)
+
+Per PLAN-062 Wave 3's own scope-narrowing decision (mirrors Wave 1's and
+Wave 2's precedent): the interim `@pose-track(stops: [...])` JS-array-literal
+surface fully unblocks Wave 4 (zellijist-2 migration) and Wave 5
+(second-consumer proof) without this dispatch-wiring compiler work. This FUP
+tracks the terser, more Spacetime-native `pos: ... -> ...` authoring syntax
+as its own project, to be picked up on its own merits.
+
+* Status
+
+OPEN — not scheduled. Depends on `macro_within_matches` production wiring
+(item 1 above), which is itself a standalone, non-trivial compiler change
+that should probably get its own small PLAN if picked up (RED test: a form
+with `%scope within(stage)` actually REFUSES to match outside a `@stage`
+body; GREEN: wire it into `find_macro_by_directive`'s scoring; verify
+`@light`'s existing scene-vs-responsive disambiguation still works
+unregressed, since that's the nearest precedent this would generalize).
+
+* Provenance
+
+Filed 2026-07-04 from PLAN-062 Wave 3 (FEAT-149), after confirming
+`macro_within_matches` is dead code via `grep -rn "macro_within_matches"
+src/**/*.rs` (only its own definition + unit tests, zero production callers).
+Related: BUG-037 (the precedent this generalizes — scope/shape-based macro
+disambiguation, already shipped for `@light`).

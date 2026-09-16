@@ -1,0 +1,504 @@
+#+TITLE: Implicit type inference — make Spacetime a type-inferred language (value-level)
+#+STATE: DONE
+#+SESSION_ID: 14fc108ed3772fa8
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-04T14-32-37-965Z_14fc108ed3772fa8.jsonl]]
+#+CUSTOM_ID: FEAT-109-implicit-type-inference-make-spacetime-a
+
+* Initial Message
+
+can you check how that looks like in the admin? Can you compare that with stuff that is present in Framer/online/in mockups? I want it to look good please
+
+DEEP RESEARCH FUP: research/FUP-implicit-type-inference.md (full 8-section design).
+
+THESIS: Spacetime ALREADY lexes type evidence (#FF0020→SyntaxKind::Color; 600ms/8px→NUMBER_WITH_UNIT, lexer.rs:75/315/220) and has a rich type vocabulary (CaptureType: Color/Length/Duration/Easing, meta_ast.rs:434). But convert_property_value (form_compiler.rs:1581) is PURELY declaration-driven — a literal's type is known ONLY if a macro form declared `:color`, otherwise it reifies to opaque Expr. ZERO value-level inference. So Spacetime is a type-ANNOTATED language wearing the costume of a type-inferred one (a lexer that secretly knows).
+
+THE COST — FOUR drifting re-implementations of "what kind of value is this string?":
+1. compiler capture (declared-type only)
+2. sync/protocol.rs:281 classify_value → (ValueType, ControlHint) — a FULLY-FORMED shadow inferrer (#hex/rgb/hsl→Color, ms/s→Duration, px/em/%→Dimension, ease-*→Easing), 19 tests, walled off in the sync layer for the old theme scrape
+3. lsp/colors.rs:13 provide_document_colors — its own byte-scan hex detector (322 lines)
+4. analysis/visual_lint.rs — its own color-awareness
++ src/color/mod.rs is the canonical color VALUE parser but not the DETECTOR, so each silo re-derives "is this a color?" before delegating. Five columns, no shared row — a "one need = one implementation" violation.
+
+WHY FOUNDATIONAL (maintainer's framing, confirmed):
+- type evidence is PRODUCED then DESTROYED at capture
+- inference is the PRECONDITION for value-level type-checking: darken:(color,number)→color can't be enforced today (FEAT-108 must trust the pipe); with inference darken($brand.radius) (a length) becomes a compile error
+- collapses the 4-way fragmentation into one classifier (net code DELETION)
+- makes the metasystem honest about VALUES (the value describes itself)
+- universal not opt-in: every color literal everywhere gets typed, zero annotation
+
+STAGED DESIGN (no Rust parser for stdlib constructs; engine generic):
+- Tier 0: unify the 4 shadow classifiers into one canonical infer_value_type; lsp/colors + annotate_widgets + visual_lint + sync all delegate. Net deletion, ZERO behavior change. Low risk.
+- Tier 1 (keystone): infer UNAMBIGUOUS literals at capture by READING THE LEXER TOKEN KIND (Color/NUMBER_WITH_UNIT) — "stop discarding the token kind", not a new parser. #hex→Color, *px→Length, *ms→Time. Brand singleton renders swatches WITHOUT @type; motion params get real widgets; FEAT-107 picker applies to any color literal.
+- Tier 2: contextual inference from the bound param CaptureType (the macro form ALREADY declares $easing:easing, $stagger:number — just not propagated to the widget/inference layer). Makes FEAT-106 motion params fully-typed. Needs CapturedValue::Easing + @type easing (close vocab gap).
+- Tier 3: inferred types in the type-checker → value-level checking of @fn signatures over domain scalars (turns FEAT-108 from trust→checked color algebra, with miette spans).
+- Tier 4 (north star): self-describing inference — the SET of inferable shapes declarable in stdlib (%infer/%literal), zero Rust to add `angle` for 45deg. The value-layer dual of the self-describing grammar (mirrors PLAN-023 W2 %capture_type migration).
+
+INTERACTION w/ PLAN-036: FEAT-107 + FEAT-108 do NOT require inference to SHIP (both ride declared format:color). FEAT-108's SAFETY (reject darken(aLength)) IS Tier 3. ∴ ship ③/④ on declared types now; pursue inference as a parallel foundational track whose first deliverable (Tier 0) is pure cleanup, no feature risk.
+
+FIRST PR (when greenlit): Tier 0 + sliver of Tier 1 — create src/types/value_infer.rs, move classify_value, all consumers delegate, delete dup hex scanners; in convert_property_value emit Color/Length/Time for undeclared captures whose SOURCE TOKEN KIND is Color/NUMBER_WITH_UNIT, behind golden-snapshot gate. Acceptance (GREEN=behavioral): $brand:{scarlet:#FF0020} with @type Brand REMOVED still renders a swatch; bare .x{foo:#abcdef} gets LSP swatch AND admin widget from the SAME call; corpus emit snapshots unchanged for non-color/length/time.
+
+RISKS: over-inference (mitigate: whole-token unambiguous only; String captures never re-inferred); two-parser rule (read lexer token kind = shared substrate, aligned by construction). NON-GOAL: full HM inference — this is literal-shape + declared-context inference for domain scalars.
+
+* 2026-08-11 — RE-ANCHOR. The plan was right; the substrate moved; I drifted.
+
+The user asked for a TYPE INFERENCE SYSTEM. Over the PLAN-122 → PLAN-136 →
+PLAN-147 arc I built value-type machinery and filed all of it under VALIDATION,
+then wrote a design document (research/what-a-value-is.typ) that argued inference
+was unnecessary here — "the type is always written down, so there is nothing to
+reconstruct". That argument is wrong, and it is wrong in the specific way that
+matters: it is true of a value that carries a SIGIL and false of every bare CSS
+literal, which is the entire population this FEAT is about. `#FF0020` does not
+announce itself in the sigil. `600ms` does not. That is the whole point.
+
+** What PLAN-122 predicted, and what actually happened
+
+PLAN-122 § Relations recorded the collision in advance:
+
+  "CONFLICT TO RESOLVE at W3: FEAT-109 Tier 1 infers from lexer token kinds
+   (Color/NUMBER_WITH_UNIT) which W3 dissolves — inference must migrate to
+   reading grammar/capture results instead."
+
+W3 landed. Tier 1's substrate is gone as predicted. And the replacement the note
+asks for — a way to read grammar/capture results — is exactly what the arc since
+then built (`capture_type_matched_arm`, `matched_value_node_arm`, the
+`%scalar_type` table with its `%capture` join). The pieces are on the floor.
+Nobody picked them up because each was filed as validation.
+
+** Measured state (tests/infer_feasibility_probe.rs, this session)
+
+Tier 0 was never done. All four shadow classifiers are still live and still
+drifting apart:
+
+  1. src/sync/protocol.rs         classify_value(raw) -> (ValueType, ControlHint)
+  2. src/lsp/colors.rs            provide_document_colors — own hex byte-scan
+  3. src/analysis/visual_lint.rs  parse_css_color(value) -> Option<Color>
+  4. src/color/mod.rs             parse_color_to_normalized_rgba — the VALUE
+                                  parser, not the detector
+
+  src/types/value_infer.rs        DOES NOT EXIST
+  infer_value_type                ZERO occurrences in the tree
+
+And the type evidence is still destroyed at capture, unchanged since the FEAT was
+filed. src/syntax/events/form_compiler.rs:2336 `convert_property_value` matches
+on the DECLARED `capture_type` and ends `_ => CapturedValue::Expr(...)`. A
+literal whose type nobody declared reifies to opaque Expr. Still zero value-level
+inference.
+
+** THE FINDING — polarity. This is why the reverse join does not just work.
+
+The `%scalar_type` table already declares the join: each row names its grammar in
+`%capture` (stdlib/scalars/types.st). So inference looks like it should be the
+REVERSE of a join that already exists: given a literal, find the scalar whose
+production accepts it. Two lines of code.
+
+Measured, it returns garbage. 17 of 19 sample literals come back AMBIGUOUS, and
+the two "UNIQUE" answers are the WRONG ones:
+
+  "#FF0020"               AMBIGUOUS  ["color", "date"]
+  "8px"                   AMBIGUOUS  ["date", "length"]
+  "600ms"                 AMBIGUOUS  ["date", "duration", "time"]
+  "chartreuse"            AMBIGUOUS  ["date", "richtext", "string", "url"]
+  "--ink"                 AMBIGUOUS  [all 13 scalars]
+  "1px solid red"         UNIQUE     ["date"]      <- the only unique answers
+  "garbage ~~~ nonsense"  UNIQUE     ["date"]      <- are both nonsense
+
+The cause is not a bug in any grammar. It is that `capture_type_accepts`
+(src/syntax/events/mod.rs:125) is a REFUSAL function wearing a recognition
+function's name. Its terminal arms all default to ACCEPT:
+
+  - a name that is neither a stdlib production nor a builtin
+    (`date`, `url`) -> `CaptureType::Custom` -> `return true`, commented
+    "genuinely unknown, and not ours to refuse"
+  - `match_capture_type` returning None -> `!defs.contains_key(...)` -> true
+  - a token reference (`--ink`, `var(--ink)`) -> true for EVERY scalar, by the
+    deliberate rule that a scalar accepts a reference to itself
+
+Every one of those defaults is CORRECT for the question it was written to answer.
+"Should I refuse this value?" must answer no when it does not know, because a
+false refusal blocks a build the author cannot fix and a missed diagnostic costs
+five minutes. That asymmetry is load-bearing and must not be touched.
+
+It is exactly inverted for "what type is this value?". Inference must default to
+NO ANSWER when it does not know, and answer only on a POSITIVE match.
+
+  refusal:     unknown -> accept   (never block a build)
+  recognition: unknown -> abstain  (never invent a type)
+
+One function cannot have both polarities. This is not a refactor of
+`capture_type_accepts` — it is a SECOND function over the SAME grammars, and the
+grammars are the shared substrate that keeps them aligned by construction. That
+satisfies the two-parser rule the original FEAT set as a risk mitigation.
+
+** Three consequences for the staged design
+
+1. Tier 1 no longer reads lexer token kinds (W3 dissolved them). It runs the
+   scalar productions the `%scalar_type` table names, with recognition polarity.
+   The tier is unchanged in INTENT and completely changed in MECHANISM.
+
+2. Inference must answer with a LATTICE, not a bool. The measured ambiguity is
+   not all noise — some of it is real and structural:
+     - `600` is genuinely both `number` and (in a duration slot) a time. Unit
+       ambiguity is REAL; PLAN-122 C7 and the stagger incident are the scar.
+     - `chartreuse` is genuinely both `color` and `string`. This one is
+       resolvable: prefer the MOST SPECIFIC production. `string` accepts
+       everything, so it must never win a contest.
+     - `100%` matching both `length` and `percentage` is CORRECT — the length
+       grammar includes percentage by design (documented in scalars/types.st).
+   So the return type is not Option<Scalar>. It is a set, plus a specificity
+   order, plus an explicit Ambiguous answer that downstream must handle. An
+   inferrer that picks arbitrarily from a tie is the stagger bug with a new face.
+
+3. A REFERENCE is not an inference failure, it is its own answer. `--ink` and
+   `$brand.ink` are not "unknown type" — they are `Reference`, and the arc
+   already has grammar for exactly this (`token_ref`, `binding`, `hole` in
+   stdlib/capture-types/value-node.st). Inference should return Reference and let
+   RESOLUTION take over. That is the one distinction from the syntax-inference
+   doc worth keeping: recognition is total and local, resolution is partial and
+   global, and they are different mechanisms — but recognition is NOT the whole
+   story, which is what I overclaimed.
+
+** Acceptance, restated as behaviour
+
+Unchanged from the original FEAT, and still the right gates:
+  - `$brand: { scarlet: #FF0020 }` with `@type Brand` REMOVED still renders a
+    swatch in the admin.
+  - a bare `.x { foo: #abcdef }` gets an LSP swatch AND an admin widget from the
+    SAME call.
+  - `darken($brand.radius)` — a length where a colour is required — becomes a
+    compile error with a span (Tier 3).
+  - corpus emit snapshots byte-identical for everything not colour/length/time.
+
+** Next
+
+W0 (this session): `src/types/value_infer.rs` — recognition-polarity inference
+over the `%scalar_type` productions, returning a lattice answer. RED tests first,
+seeded from the probe table above, incl. the four wrong answers as explicit
+refutations. Then Tier 0 delegation of the four shadow classifiers.
+
+Probe kept at tests/infer_feasibility_probe.rs — it is the measurement that
+justifies the polarity split, and it must keep reporting `date` as an
+accept-everything row until that row grows a real production or leaves the
+inference set.
+
+* 2026-08-11 — WHAT IS LEFT, and exactly how to do it
+
+Tier 1 landed (58859f83): `convert_property_value`'s `_ => Expr` arm now asks
+`infer_value_type` first. Evidence survives capture. NOTHING CONSUMES IT YET —
+that is the whole of what remains, and it is four independent pieces of work.
+
+Each wave below names its CodePath targets, the seam, the RED gate, and the
+deletion it must produce. A wave that does not DELETE something has not landed.
+
+** Verified state (measured this session, not recalled)
+
+  find "src/**/*.rs::§line[text~=\"classify_value\"]"
+    -> src/sync/protocol.rs:315         the definition, 86 lines
+       src/sync/handlers.rs:1800,1842   the only two real callers
+       src/sync/protocol.rs:544-766     15 unit tests (the behaviour contract)
+
+  find "src/lsp/colors.rs::§line[text~=\"^(pub )?fn \"]"
+    -> :25  provide_document_colors     the entry point
+       :70  skip_prose_region           hand-rolled comment/string skipping
+       :109 colour_candidate_at         hand-rolled `#`/`rgb(` byte scan
+       :149 is_ident_byte
+       :158 parse_css_color             delegates to lightningcss (KEEP)
+       :172 provide_color_presentations the edit side (KEEP)
+
+  find "src/analysis/visual_lint.rs::§line[text~=\"parse_css_color\"]"
+    -> :165 the third detector; called at :31,:34,:98,:101
+
+  find "src/**/*.rs::§line[text~=\"enum ValueType\"]"
+    -> src/sync/protocol.rs:249      Color/Duration/Dimension/Easing/Number/Str/…
+       src/functions/registry.rs:7   Number/Length/Angle/Duration/Color/String/…
+    TWO enums, same scalars, neither derived from stdlib/scalars/types.st.
+
+  find "src/functions/**/*.rs::§line[text~=\"fn validate|type_error|mismatch\"]"
+    -> EMPTY. `param_type: ValueType::Length` is declared 40+ times in
+       src/functions/builtins.rs and checked NOWHERE.
+
+** A live drift bug, found while mapping (file before starting W1)
+
+`src/sync/protocol.rs:315` classifies a colour as:
+
+    if trimmed.starts_with('#') && (trimmed.len() == 7 || trimmed.len() == 4)
+
+So `#e8eef7ff` (8-digit) and `#abcd` (4-digit) are NOT colours to the sync layer,
+while `hex_color` in stdlib/capture-types/css-values.st accepts 3/4/6/8 and
+`src/lsp/colors.rs` accepts all four lengths. Three detectors, three answers.
+This is the drift argument in one line — cite it in the W1 commit rather than
+fixing it separately; delegation fixes it by construction.
+
+** W1 — Tier 0: the four classifiers delegate (PURE DELETION, no behaviour change)
+
+Do this FIRST. It is the lowest-risk wave, it pays for itself in deleted lines,
+and it makes every later wave cheaper by giving one place to change.
+
+*** W1a — sync/protocol.rs
+
+    target  src/sync/protocol.rs::classify_value#body
+    seam    infer_value_type(raw) -> map Inferred to (ValueType, ControlHint)
+
+    The 15 tests at src/sync/protocol.rs:544-766 ARE the contract. Do not touch
+    them; they must pass unchanged. Two will need thought:
+      - test_classify_value_unknown_string ("some-identifier") — inference
+        returns Ambiguous(richtext|string|url); map Ambiguous -> Str/TextInput.
+      - test_classify_value_var_expression ("var(--my-color)") — inference
+        returns Reference; today the test expects Unknown+TextInput. Reference
+        SHOULD map to Unknown+TextInput for now (a reference has no editable
+        literal), so the test still passes. Note it: when the admin can edit
+        through a reference, that mapping changes.
+
+    ValueType::Dimension { value, unit } needs the number and unit SPLIT, which
+    `Inferred::Scalar("length")` does not carry. Use
+    `crate::syntax::conversions` for the split, exactly as the Time arm in
+    form_compiler.rs does. If no splitter exists, that is the one piece of new
+    code this wave is allowed.
+
+    DELETES: the hex/rgb/hsl/ms/px/ease-* recognizer body (~70 of 86 lines).
+
+*** W1b — lsp/colors.rs
+
+    target  src/lsp/colors.rs::colour_candidate_at
+            src/lsp/colors.rs::skip_prose_region
+            src/lsp/colors.rs::is_ident_byte
+
+    KEEP `parse_css_color` (:158) — it converts a colour to RGBA for the swatch
+    and is not a detector. KEEP `provide_color_presentations` (:172).
+
+    The seam is NOT a straight swap: the LSP scans a whole document for colour
+    SPANS, and the inferrer answers about one value. The correct move is to stop
+    scanning bytes and ask the compiler for the captured values it already has —
+    which after Tier 1 include `CapturedValue::Color(text)` with spans.
+
+    ∴ this wave depends on span plumbing. If `CapturedValue` does not carry a
+    span, DO NOT invent one here: file it, do W1a and W1c first, and come back.
+    Check with:
+        find "src/syntax/form_match.rs::CapturedValue"
+        find "src/syntax/form_match.rs::FormMatch"
+
+    RED gate: a document containing `oklch(70% 0.1 200)` and `color-mix(…)` gets
+    swatches. Both are invisible to the current byte-scan for the modern-syntax
+    cases its own comment admits. Write that test FIRST — it fails today.
+
+    DELETES: ~150 lines of byte scanning, and with it the class of bug the file's
+    own comment describes ("had to be kept in agreement with the compiler's").
+
+*** W1c — analysis/visual_lint.rs
+
+    target  src/analysis/visual_lint.rs::parse_css_color
+
+    Smallest of the three. It already delegates to lightningcss; the duplication
+    is the DETECTION, not the parsing. Replace the call sites (:31,:34,:98,:101)
+    with an inference query, keep the RGBA conversion.
+
+    DELETES: :165's body, and the fourth independent answer to "is this a
+    colour?".
+
+*** W1 acceptance
+
+  - `find "src/**/*.rs::§line[text~=\"starts_with('#')\"]"` returns nothing
+    outside src/types/ and the grammar.
+  - the 15 sync tests pass UNCHANGED.
+  - `#e8eef7ff` classifies as a colour in all three subsystems (the drift bug).
+  - lib + integration flat; examples 35 / demos 36 / fixtures 6.
+
+** W2 — the admin stops guessing (the user-visible payoff)
+
+    target  src/server.rs::widget_for
+    read    src/server.rs:6343-6395  (the heuristic: field NAME, then `format`)
+
+Today `format` is populated only from a declared `@type`, and the corpus has 21
+of those against 2,999 inferable values (tests/corpus_inference_scan.rs). So the
+overwhelming majority of values reach the admin as `"string"` -> text box.
+
+    seam: where the JSON schema node is BUILT for an untyped value, set
+          `format` from `infer_value_type(literal)` -> the `%format` column of
+          the matching `%scalar_type` row.
+
+The scalar table already maps format -> widget as DATA
+(stdlib/scalars/types.st), and `widget_for` already consults it — see the
+comment at src/server.rs:6386 ("a scalar added there gets its admin control with
+no Rust change"). So this wave adds NO widget logic. It feeds the existing path.
+
+    RED gate (the FEAT's original acceptance, unchanged since it was filed):
+      a `$brand` seed with its `@type Brand` REMOVED still renders a colour
+      picker for `#FF0020` and a range-duration for `600ms`.
+
+    Find the schema-generation seam with:
+      find "src/server.rs::§line[text~=\"generate_json_schema\"]"
+      find "src/type_system.rs::§line[text~=\"primitive_to_schema\"]"
+
+** W3 — Tier 2: contextual inference (where the UNIT problem is solved)
+
+Recognition is local and cannot know that `600` in a `duration:` slot is
+milliseconds. That is not a defect to fix in the inferrer — it is the boundary
+where CONTEXT takes over, and the context already exists: the form declared
+`$duration:duration`.
+
+    target  src/syntax/events/form_compiler.rs::convert_property_value
+            (the DECLARED arms, above the Tier-1 fallback at :2375)
+
+The declared type is already in hand there. The wave is to thread it into the
+inference call so `infer_value_type_in_context(text, declared)` can narrow an
+`Ambiguous` answer — and ONLY narrow it. It must never widen: `number ≤ time` is
+the edge that made every stagger 1000x too slow, and it stays forbidden.
+
+    RED gates:
+      - `$x:duration` with value `600` -> Time(600), because the SLOT said time
+      - `$x:number`   with value `600` -> Number(600.0)
+      - a bare `600` with NO declared type -> still Number, never Time
+      - `100%` in a `length` slot -> Length; in a `percentage` slot -> Percentage
+        (the legitimate Ambiguous, narrowed by context rather than by guessing)
+
+    This is also where `Inferred::Ambiguous` earns its existence: today it always
+    degrades to Expr. Here it becomes the input to a real decision.
+
+** W4 — Tier 3: value-level type checking (the payoff the FEAT was filed for)
+
+    target  src/functions/builtins.rs   (40+ `param_type: ValueType::…` rows)
+            src/functions/registry.rs::ValueType
+    gap     find "src/functions/**/*.rs::§line[text~=\"fn validate|type_error\"]"
+            -> EMPTY. Declared everywhere, enforced nowhere.
+
+`parallax(range: Length, center: Length)` accepts a colour today. `wave(type:
+Identifier, frequency: Number)` accepts anything. The types are WRITTEN DOWN and
+inert, because at the call site the argument is `Expr`.
+
+    seam: at function-call compilation, `infer_value_type(arg)` -> compare with
+          `param_def.param_type` -> miette diagnostic with a span on mismatch.
+
+    RED gate: `parallax(range: #FF0020)` is a compile error naming the parameter,
+    its expected type, and what was found. Today it compiles.
+
+    NB the THIRD enum. `functions::registry::ValueType` and
+    `sync::protocol::ValueType` and the `%scalar_type` table are three spellings
+    of one vocabulary. W4 must not add a fourth mapping — it should map ONCE,
+    beside `Inferred`, and both enums become consumers. If that is not possible
+    without a large refactor, file it rather than growing a third converter.
+
+** W5 — the debt this arc created, paid
+
+  1. `LOSES_TO` in src/types/value_infer.rs is a Rust list of language facts.
+     It belongs in stdlib as a `%loses_to` row on `%scalar_type`, read through
+     the registry like `%capture`/`%widget` already are. Written as DATA so the
+     migration is a move, not a rewrite.
+       target  src/types/value_infer.rs::LOSES_TO
+               stdlib/scalars/types.st
+
+  2. `CapturedValue` has no lossless home for `angle`/`percentage`/`easing`.
+     `infer_captured_value` (src/syntax/events/form_compiler.rs) drops them to
+     Expr today. A general `Scalar { ty, text }` variant collapses that fn to one
+     line and stops the enum needing an arm per scalar — the closed-enum rot the
+     AGENTS corollary names.
+       target  src/syntax/form_match.rs::CapturedValue
+               src/syntax/events/form_compiler.rs::infer_captured_value
+
+  3. `date`, `url`, `string` name productions that do not exist, so
+     `capture_type_accepts` returns true for them on ANY input. They are excluded
+     from inference by `production_exists`, which is a WORKAROUND for a malformed
+     row. Either give them real productions or drop `%capture` from those rows.
+       target  stdlib/scalars/types.st
+               src/types/value_infer.rs::production_exists
+     Gate: tests/infer_feasibility_probe.rs must keep reporting the current
+     state until this is fixed — it is the measurement that justifies the guard.
+
+** Order and why
+
+  W1 first  — pure deletion, no behaviour change, lowest risk, and it collapses
+              four answers into one BEFORE anything new depends on them.
+  W2 next   — the visible payoff, and it needs no new mechanism (the widget
+              table is already data and already consulted).
+  W3 then   — unlocks units, which W4 needs to be trustworthy.
+  W4 last   — the checking, once the vocabulary is single and context exists.
+  W5 anytime — independent; do a piece whenever touching that file anyway.
+
+Each wave: RED gate first, seen to FAIL, then the change, then the DELETION, then
+lib + integration + corpus flat (35/36/6) before commit.
+
+* 2026-08-11 — ALL WAVES LANDED. State -> DONE.
+
+Tier 0 through Tier 3 plus the self-created debt, in five waves, each RED-first
+and each deleting something. Report: research/inference-report.typ (8pp, on the
+reMarkable at Architecture/Spacetime).
+
+** What shipped
+
+  W1  five answers to "is this a colour?" become one          14ff10ac
+  W2  the admin stops guessing from field names               e1563ecc
+  W3  the slot supplies the unit the spelling cannot          1c583eac
+  W4  a declared parameter type refuses a wrong value         dede1715
+  W5  scalar precedence moves from Rust into the table        b12d44e7
+
+  (Tier 1, the keystone, landed earlier as 58859f83; the inferrer itself as
+  319c8b69.)
+
+** Original acceptance criteria, as filed
+
+  [x] `$brand: { scarlet: #FF0020 }` with `@type Brand` REMOVED still renders a
+      swatch  -> tier1_seed_sample_test::an_untyped_brand_seed_still_gets_typed_controls
+  [x] a bare colour literal gets an LSP swatch AND an admin widget from the SAME
+      call  -> the canonical parser is now that call; tier0_lsp_swatch_test
+      asserts the swatch matches it
+  [x] value-level checking of declared signatures  -> tier3_arg_type_check_test
+  [x] corpus emit snapshots unchanged  -> examples 35 / demos 36 / fixtures 6,
+      flat at every wave gate; lib 3209 -> 3214, integration 217, zero failures
+
+** Tier map, as originally staged
+
+  Tier 0  unify the four shadow classifiers          DONE (W1) — five, not four
+  Tier 1  infer at capture                            DONE (58859f83)
+  Tier 2  contextual inference from the declared type DONE (W3)
+  Tier 3  inferred types in the type-checker          DONE (W4), on a different
+                                                      surface than planned
+  Tier 4  self-describing inference (%infer/%literal) PARTIAL — `%loses_to`
+                                                      (W5) is the first clause
+                                                      to move; the inference SET
+                                                      is still the scalar table
+                                                      rather than a declarable
+                                                      mechanism
+
+** Found on the way (each measured, not assumed)
+
+- BUG-367 filed: `src/validator/functions.rs` walks `ast.presets`, which is
+  EMPTY for every file in the corpus. Its arity/unknown-name/did-you-mean checks
+  have never run. Not fixed inside a wave about something else.
+- `ValidationErrorKind::ParameterTypeMismatch` + `DiagnosticCode::E173` existed
+  complete with rendering and Display, and were NEVER CONSTRUCTED. W4 connects
+  them.
+- `parse_color_to_normalized_rgba` — the "canonical" colour parser — knew 3- and
+  6-digit hex and ELEVEN named colours, so both real consumers bypassed it. It
+  is lightningcss behind a primitive now.
+- A test asserted `color-mix(...)` must FAIL to resolve, grouped with `var()`.
+  Measured: lightningcss evaluates it. The test pinned a limitation of the
+  eleven-colour table as if it were a property of the language, and would have
+  blocked the fix that removed it.
+- `color_fn_name` in stdlib did not know `color-mix`/`light-dark`/`device-cmyk`.
+- A drift bug across three subsystems: `#e8eef7ff` and `#abcd` were not colours
+  to the sync layer, `#zzz` WAS (it counted characters without reading them).
+
+** The two mistakes worth keeping in the record
+
+1. Deriving precedence from language inclusion does NOT work. `string` and
+   `color` OVERLAP — neither language contains the other — so inclusion answers
+   "incomparable" for exactly the pairs needing an answer. 17/18 -> 13/18.
+   Precedence is a judgement (a MEANING beats a SHAPE) and must be declared;
+   W5 moved that declaration into stdlib where a person can read it.
+2. Mutation testing found two Wave-3 mechanisms no test could see. The gates
+   written to close that gap failed on their first run and found a REAL bug:
+   `slot_supplies_a_unit` was derived as "refuses a bare number", so a `color`
+   slot swallowed `600`. A slot may supply a UNIT the spelling omits; it may not
+   supply a KIND the value contradicts.
+
+** Still open (deliberately, with reasons)
+
+- BUG-367 (the dead validator).
+- `date`/`url`/`string` name productions that do not exist; `production_exists`
+  is a workaround for malformed rows. Either give them grammars or drop
+  `%capture` from those rows.
+- `CapturedValue` has no lossless home for `angle`/`percentage`/`easing` — they
+  infer correctly and are dropped to `Expr`. Wants ONE general
+  `Scalar { ty, text }` carrier, not a variant per scalar.
+- Named colours do not infer. The fix is property-contextual grammar, never a
+  list of 148 names in Rust.
+- `tests/corpus_inference_scan.rs` is a crude line-splitter and says so; it
+  sizes a population, it is not a parser.

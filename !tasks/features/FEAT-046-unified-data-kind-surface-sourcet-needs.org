@@ -1,0 +1,83 @@
+#+TITLE: unified @data <kind> surface (source<T>) — needs dispatch fix + derive dep-extraction
+#+STATE: DONE
+#+SESSION_ID: 14f48ced503111a7
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-05-29T18-28-09-664Z_14f48ced503111a7.jsonl]]
+#+CUSTOM_ID: FEAT-046-unified-data-kind-surface-sourcet-needs
+#+COMPLETION_HASH: 92b47e27f1912f7e
+
+* Initial Message
+
+Ok do me a full summary of the spec. Now we're PLANNING, and once the plan is valid, we ORCHESTRATE. Get yourself ready and pumped
+
+* Goal (PLAN-023 W3)
+Replace the dual legacy @data + @computed with ONE kind-word surface:
+  @data <kind> $name <type>? : <value>   (inline / fetch / derive / fold)
+Each kind = a source<T> with a {static, trigger} contract; staticity drives W4 SSG.
+
+* What was attempted + REVERTED (this session)
+An additive stdlib attempt (stdlib/macros/data-unified.st) was built and REMOVED because a
+reviewer wave (agent 4-ReviewW3Dispatch) found it non-functional end-to-end. The recon +
+spike + reviewer findings are the value to carry forward. The form PARSES
+(@data $kind:ident $name:ident $type:typeref? : $value:expr matches, kind-word
+discriminates at the parse layer), but it does NOT lower correctly. Verified:
+`@data inline $count number: 3` -> 0 primitives, 0 JS emitted.
+
+* BLOCKER 1 — macro re-dispatch ignores leading literals (the core issue)
+find_macro_by_directive (src/metasystem/registry.rs:~358) + score_macro_form
+(src/syntax/form_scoring.rs) score CAPTURES only; CaptureMapInput.literal_matched defaults
+to `true` (form_scoring.rs:36-39), so a leading literal/kind-word does NOT discriminate at
+re-dispatch. Consequences:
+  (a) The legacy `data` macro (literally NAMED "data") wins the get_macro("data") fast-path
+      and scores Some against {name,type,value}, hijacking typed @data <kind> invocations.
+  (b) Two kind-macros with identical capture sets tie -> resolved by registry order, not the
+      kind word.
+FIX DIRECTION: score required leading literals in score_form_match (a form with a required
+leading literal the invocation lacks must score lower / None), so the kind word genuinely
+discriminates. This is shared-scorer surgery (BUG-037 territory) — needs care + full reactive
+regression gating. Alternatively (lesser): single `udata` macro capturing $kind:ident +
+%if routing (mirrors on-event-dispatcher) — but it STILL must out-score the legacy `data`
+fast-path, so the scorer fix is likely required regardless.
+
+* BLOCKER 2 — derive/fold need dependency extraction
+@data derive $total: sum($items) has the dep ($items) implicit in the expr. The legacy
+@computed requires an explicit `from: $source:binding`. computed-source treats `source` as a
+source NAME (ST.afterData subscription), so passing the expr as source breaks recomputation
+(reviewer finding). compute-fn takes explicit deps:params. NEEDS: a mechanism to extract
+signal deps from the value expression (Rust has collect_signal_deps at
+src/syntax/form_match.rs:1119 but it is NOT exposed to stdlib %binds). Either expose dep
+extraction to the macro layer, or have derive/fold compile through a Rust-assisted path.
+
+* SCOPE for the focused session
+1. Fix BLOCKER 1 (literal scoring) — gate with full reactive suite + headless + live demos.
+2. inline -> local-state-impl (proven), fetch -> data-source (proven): these work once
+   dispatch is fixed; live-verify through COMPILATION (not @eval bypass — the reverted test's
+   mistake).
+3. derive/fold: design dep-extraction (BLOCKER 2), then map to computed-source/compute-fn.
+4. Register {static,trigger} facts (source_kind, source_static) for W4 SSG.
+5. Migration of legacy @data/@computed call-sites + deletion = W5 big-bang.
+
+* Verified groundwork (reusable)
+- @on $event:ident + %if routing is the correct single-macro discriminator pattern
+  (stdlib/macros/on-event.st).
+- Proven primitives: local-state-impl (stdlib/syntax/local-state.st),
+  data-source (stdlib/primitives/data/source.st), computed-source / compute-fn
+  (stdlib/primitives/data/).
+- 163 @data/@computed call sites across corpus; cart-demo/reactive-list/reactive-configurator/
+  namespaced-signals are the live-verify demos.
+- Reviewer artifact: agent 4-ReviewW3Dispatch (3 P1 findings, all confirmed).
+
+* Acceptance
+- @data inline/fetch compile to working reactive output (live-verified IN BROWSER/headless
+  through compilation, DOM reflects values).
+- Kind-words discriminate reliably vs legacy @data (no mis-dispatch).
+- Full suite + headless + reactive demos green. NEVER regress the FEAT-042/BUG-036 arc.
+
+NOTE [2026-06-01]: BLOCKER 1 RE-DIAGNOSED (empirically traced, prior diagnosis was WRONG):
+The failure was NOT the dispatch scorer / get_macro fast-path hijack. It was the CAPTURE TYPE.
+- `@data $name:ident` routes the binding name through IdentExtractor (src/syntax/events/extractors/simple.rs:13) which rejects $-prefixed DOLLAR tokens (returns None on first token).
+- ∴ `@data inline $count : 3` fails at the PARSE layer (data: 0) and never reaches dispatch.
+- Proof: `@data inline count : 3` (BARE name) matched a minimal probe udata fine (data: 1). Switching the form to `$name:binding` makes `@data inline $count : 3` match (data: 1) AND resolve correctly (legacy `data` scores None — it requires `:typeref` + a body block — so NO hijack; the scorer already discriminates).
+- Full pipeline proven: udata{ %form @data $kind:ident $name:binding : $value:expr } %binds local-state-impl(name:$name, initial:$value) -> emits `window._localState["count"] = 3;` (clean name, correct value).
+CONCLUSION: No shared-scorer surgery (the feared BUG-037 territory) is needed for Blocker 1. The single-macro $kind:ident discriminator pattern (mirrors on-event-dispatcher) works once the name capture is :binding. Proceeding to implement the real udata with TDD. Blocker 2 (derive/fold dep-extraction) stands and is the remaining hard part.
+
+NOTE [2026-06-01]: DONE (PLAN-023 W3). Unified @data <kind> surface shipped: inline/fetch/derive/fold, all four live browser-verified incl. reactive recompute. Commits f8bfae4b (inline+fetch dispatch via FormMatch.matched_macro — parse decides, resolve honors; Blocker 1 was a misdiagnosis, no scorer surgery), 9cba7d06 (derive+fold via derived-signal raw-expr dep-discovery — Blocker 2 dissolved; required BalancedExtractor source byte-scan + parse_capture_type balanced-in-forms + BUG-041 workaround), 500b3d35 (multi-reviewer-wave hardening: byte-scan slice-bound, fold watches signal deps, escaped string literal, quote-aware rewrite). source_kind/source_static facts registered for W4 SSG. 10 enshrining tests. Filed BUG-041 (backtick-in-regex-charclass lexer). Legacy @data/@computed untouched (migration=W5). Gate: lib 2070, integration 147, headless 441, balanced fuzz 12.

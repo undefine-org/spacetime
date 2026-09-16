@@ -1,0 +1,48 @@
+#+TITLE: Wave C — the real Phoenix LiveView vertical (Spacetime.LiveView, first clean slice)
+#+STATE: DONE
+#+SESSION_ID: 1510a559ccf03ced
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-20T14-12-20-403Z_1510a559ccf03ced.jsonl]]
+#+CUSTOM_ID: FEAT-136-wave-c-the-real-phoenix-liveview-vertica
+#+COMPLETION_HASH: 6955a76f5e7c40df
+
+* Initial Message
+
+ok i want you to design a prototype a deep integration between Spacetime and elixir, especially Phoenix LiveView and it should be a la Djinn.LiveView (~/code/ora/monorepo).
+
+What could it look like? Show me your DSL design so we can think about it together. Look at the recent Spacetime $host improvements and whatnot, maybe you can extend it to a canonical host for Phoenix LiveView that makes the integration insanely seamless and self-aware (re-uses the power of Elixir macros/Spark and the introspectability of Spacetime to deliver an experience that leverages the best of both).
+
+* Purpose
+Prove the Spacetime⇄Phoenix LiveView bridge END TO END on a REAL Phoenix socket:
+a CounterLive whose ENTIRE view is a Spacetime-compiled bundle (no HEEx), whose
+state lives in LiveView assigns, where a click on the .st page fires a phx event,
+the server mutates the assign, and the new value is pushed back as a DATA diff and
+re-rendered by Spacetime. Env verified: Elixir/OTP 29, mix, phx_new 1.8.5, hex
+cache + live network, 817M reusable monorepo deps.
+
+* This slice (DONE-able now)
+- elixir/spacetime_lv/ — a minimal hand-rolled Phoenix + LiveView app (bandit,
+  phoenix_live_view, jason). Boots, serves a page.
+- Spacetime.LiveView: the use-macro + the data-channel GLUE (the legitimate
+  bridge layer per design §5 — NOT the Spacetime page). It (a) serves the
+  compiled .st bundle as the LiveView body, (b) a ~tiny bridge shim mapping
+  LV push_event → ST.set (assign→signal) and ST intent → pushEvent (signal→event).
+- CounterLive: count assign, handle_event("inc"/"dec"), push the count diff.
+- counter.st: pure Spacetime view (display + buttons), reused from demos/liveview-counter.
+- PROOF: browser loads the page over the real LV socket; clicking + increments the
+  SERVER count and the .st re-renders. Captured via puppeteer.
+
+* Out of scope → recorded as follow-ups (see children)
+- FEAT: signal-call `live` transport in stdlib (speak phx events natively, retire
+  the bridge shim) — the shim is the slice's stand-in.
+- FEAT: spacetime_nif (Rustler) — compile .st from mix; dev hot-reload.
+- FEAT: __spacetime_contract__/0 Spark transformer (emit the contract Wave B reads).
+- FUP: assign-diff render channel replacing HEEx diffing wholesale (the §8 optimisation).
+- FUP: reply/push (correlated {:reply} + pushes section) over the live transport.
+
+* Acceptance
+- `mix deps.get && mix compile` clean in elixir/spacetime_lv/.
+- Server boots; GET / serves the Spacetime page.
+- Browser: click + → server count increments → page shows new count (puppeteer proof).
+- A README documents boot + the proven loop + what's shim vs real.
+
+NOTE [2026-06-20]: Built + proven 2026-06-20. The real Phoenix LiveView vertical in elixir/spacetime_lv/ (Phoenix 1.8.5, OTP 29, bandit). Spacetime.LiveView use-macro (lib/spacetime/live_view.ex) generates render/1 serving a Spacetime bundle as the LV body — no HEEx interp in the view subtree (phx-update=ignore so Phoenix's differ never touches it). CounterLive owns state+events; SpacetimeBridge JS hook (assets/js/app.js) maps push_event st-set → window.SpacetimeLocal (assign→signal). Verified end-to-end in browser: click + → handle_event(inc) → server count 0→1→2→3 → push_view → bridge → Spacetime text:$count binding re-renders .value. Server log confirms real socket handle_event. Screenshot: glowing 3 + −/+ buttons. Key finding: file-scope scalar binding into host-supplied DOM needs `text: $sig` surface, not `$hole` (FUP-095). Committed d9373392 (my files only — Wave B+C, not the pre-existing PLAN-053 working-tree dirt). Follow-ups: FEAT-137 (native live transport), FEAT-138 (NIF), FEAT-139 (contract transformer), FUP-095, BUG-128.

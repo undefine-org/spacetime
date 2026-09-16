@@ -1,0 +1,222 @@
+#+TITLE: Close out my open bugs — an unknown driver param must never be silently absorbed
+#+STATE: ITEM
+#+SESSION_ID: 153497be379ff5cc
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-18T12-18-12-318Z_153497be379ff5cc.jsonl]]
+#+CUSTOM_ID: PLAN-145-close-out-my-open-bugs-an-unknown-driver
+
+* Initial Message
+
+list all the remaining open BUGs in your session then maek a full PLAN
+
+* Thesis
+
+Five of the eight bugs I still own are the SAME defect wearing different
+clothes: *a named argument that no one reads is accepted, dropped, and never
+mentioned.* `from:` on a click driver, `once:` on a visible driver, `bind:` on
+`@editable`, a `%into` splice, a page with no markup — in every case the
+compiler's answer to "I didn't understand that" is silence plus exit 0.
+
+So this plan is NOT "fix eight tickets". It is: *make the silent-absorb class
+impossible*, and let the individual tickets fall out of that. The tickets that
+remain after are genuinely separate defects (a parse gap, a browser behavior
+gap), sequenced behind it.
+
+** Why the class matters more than the instances
+
+A silent drop is worse than a crash for a compounding reason: it *defeats the
+verification that would catch it*. While confirming BUG-334 I produced TWO
+vacuous confirmations in a row — grepping an empty `dist/` (BUG-351: a
+styles-only page exports zero pages with a ✓), then matching `closest(` from
+the runtime library rather than page code. Both times "absence of the feature in
+the output" was an artifact of my own method, not evidence.
+
+That is the real cost. Each silent drop manufactures false negatives for the
+next person trying to prove something is missing. AUD-011 records the same
+lesson from the other direction (a `src/`-only grep declaring live stdlib code
+dead). The fix is not more careful greppingated it is making the compiler SPEAK.
+
+* Root cause (verified in-repo, not inferred)
+
+`bind_driver_args` in =src/pipeline/drivers.rs= (~:2473-2525) binds a named arg
+by applying the registry's `param_map` rename and pushing it:
+
+#+begin_src rust
+match text_of(a.get("name")) {
+    Some(name) => {
+        let name = param_map.iter()
+            .find(|(from, _)| *from == name)
+            .map(|(_, to)| to.clone())
+            .unwrap_or(name);        // <-- unknown name passes through unchanged
+        args.push(BindArg::Named { ... })
+    }
+#+end_src
+
+There is *no check that the resulting name is a param the primitive declares*.
+An unrecognized name is bound to nothing and disappears downstream.
+
+Evidence this is one root, not two:
+
+- `%primitive on-mutation-handler` (=stdlib/primitives/animation/drivers.st:1971=)
+  DOES declare `target: selector?`, and the emitted JS has a complete, correct
+  delegation path (`if (delegateSelector) { $ = e.target.closest(...) }`).
+  The runtime was never the problem.
+- `param_map` exists and works — but only *2 of 28* drivers declare one, and the
+  one mapping `from:` is =text-change-driver= (`param_map:
+  "stagger:charStagger,from:staggerFrom"`, drivers.st:562). The click/visible/
+  hover drivers declare none, so `from:` and `once:` match nothing.
+- Proof by A/B emit diff: building `@on &.click(from: ".item")` and the same
+  source without the clause yields *byte-identical* `dist/spacetime.js`. Same
+  for `@on &.visible(once: true)`. The clauses are parsed, accepted, discarded.
+
+∴ the mechanism to route a named param already exists *as data*; what is missing
+is the refusal when the data says nothing.
+
+* Waves
+
+Ordered by whether they REMOVE A CLASS or fix an instance. W1 is the plan.
+
+** W1 — Refuse an unknown driver param (the whole point)
+
+Add validation at the single site where a named arg is bound: after the
+`param_map` rename, the name MUST be a param the primitive declares, else a
+diagnostic naming the param, the driver, and the params that ARE accepted.
+
+- Registry-driven, not a Rust allowlist: read the primitive's declared params
+  (they are already parsed — `typed_primitive_arg` consults them for typing).
+  A new driver gets validation for free; no Rust arm per driver. This is the
+  AGENTS elegance bar: variants stay DATA.
+- Deletes a special case rather than adding one — the `unwrap_or(name)`
+  fall-through IS the bug.
+- Diagnostic quality is the deliverable, not the refusal. `@on &.click(once:
+  true)` should say `once` is not a param of driver `click`, and list what is.
+
+*Acceptance*: a RED test first — `@on &.click(nonsense: 1)` compiles clean today
+and must fail after. Seen failing before the fix, passing after.
+
+*Risk*: this will light up currently-silent sites across the repo, including in
+`projects/` and `demos/`. That is the fix working. Triage each: a real typo gets
+corrected; a param that SHOULD exist gets a `param_map` entry or a primitive
+param. Budget for this — it is the majority of W1's work, and each site found is
+a bug that was shipping.
+
+** W2 — BUG-334: route `from:` to `target` (falls out of W1)
+
+Once W1 refuses unknown params, `from:` on an event driver must either be
+accepted or refused deliberately. It should be ACCEPTED: the primitive param
+exists, the runtime path exists, only the mapping is missing.
+
+Add `param_map: "from:target"` to the event drivers (click, submit, focus,
+keydown, pointerdown, …). One data line each, no Rust.
+
+*Acceptance*: the A/B emit diff that is currently byte-identical must DIFFER —
+`const delegateSelector = ".item"` instead of `null`. Then a `--cdp` gate: a
+click on `.item` fires the handler, a click on the container does not.
+Per AGENTS: this feature's job is to make a click work in a browser, so it needs
+a browser gate. The emit diff is necessary, not sufficient.
+
+** W3 — BUG-331: decide `once:`, then honor or refuse it
+
+Unlike `from:`, there is no `once` param anywhere — the runtime has no one-shot
+path for this driver (`unobserve`/`disconnect` in the bundle are the
+IntersectionObserver library's own, not a once implementation).
+
+Two honest options:
+1. REFUSE it (W1 does this for free) and point at the existing spelling if one
+   exists.
+2. IMPLEMENT it: add `once: bool?` to the primitive and `observer.unobserve(entry.target)`
+   after first fire.
+
+Prefer (2) *only if* a real page wants it; otherwise (1) is the correct answer
+and costs nothing. Do not implement a param on speculation — that is how the
+unread-param class started.
+
+*Acceptance for (2)*: `--cdp`, element scrolled in/out/in, animation fires
+exactly ONCE. A headless run cannot prove this (no scroll model, BUG-305) and
+must not be used.
+
+** W4 — BUG-351: a build that emits nothing must say so
+
+Warn (naming the file) when a page produces no output. Cheap, and it removes the
+false-negative trap that cost me two wrong conclusions in this very session.
+
+*Acceptance*: assert on the RUN — stdout contains the warning, exit code
+unchanged. Not a source-string assertion.
+
+** W5 — BUG-350 / BUG-307: `@editable(bind:)` is not per-instance
+
+The one v8 failure (`editable_bind_is_per_instance_across_two_compiled_instances`,
+confirmed RED at HEAD). `bind:` emits the literal backtick hole unlowered under
+the raw `from_ast` compile path. Related to the class (a param not properly
+consumed) but a distinct mechanism: lowering, not binding.
+
+BUG-307 and BUG-350 describe the same failure — confirm and merge, don't fix
+twice.
+
+** W6 — BUG-342: object-literal declaration (independent, hardest)
+
+`$u object: { name: "Ada" };` → E0946. Blocks the last 2 `migrations_test`
+failures. Already narrowed hard, and *the search space is documented so it is
+not re-walked*:
+
+- Only TYPE + BRACE fails. `$u: { … }`, `$u object: [1,2]`, `$u object: 3`,
+  `$l string[]: ["a"]` all compile. The type NAME is irrelevant (`object` and a
+  user type `Foo` fail identically → not a keyword/registry lookup).
+- RULED OUT by reading and testing: `ExprExtractor` (tracks brace depth
+  correctly), `TyperefExtractor` (bounded, stops at the colon), and the
+  `balanced(';')` theory (tested with a full rebuild — no effect; the original
+  report still reads as though this is the lead, it is not).
+- The CST is INNOCENT: the gate
+  `a_typed_declaration_accepts_an_object_literal_value` PASSES on all three
+  object shapes. So the value is lost BETWEEN a correct CST and the form
+  matcher — that is the remaining search space.
+- Next probe: `inspect --layer parse` shows 0 nodes for the failing file while
+  `--layer registry` shows 8. Find which layer drops it; do not start from the
+  capture type again.
+
+NB `parse_object_or_body` is a literal stub ("For now, treat { } as a body") and
+is worth fixing on its own merits — but it is NOT this bug.
+
+** W7 — BUG-343: scroll reveal flashes partially-faded (user-visible)
+
+`--cdp` only, 7 failures, unchanged throughout. A scroll-driven element does not
+hold its first keyframe at progress 0, so a reveal flashes mid-fade before
+settling.
+
+Sequenced last here ONLY because it is browser-investigation work with a
+different rhythm — by user impact it arguably outranks everything above. If the
+choice is a green count vs. a visible flash on a real page, take this first.
+
+*Acceptance*: must be SEEN failing under `--cdp` before the fix and passing
+after. Headless proves nothing about scroll (BUG-305).
+
+* Out of scope, still mine, still open
+
+- *AUD-010* — five `.st` files don't parse, so `spacetime migrate` SKIPS them
+  silently. Same class as this plan (silence where a refusal belongs), but in
+  the migration tool. Best next capsule candidate; item #2 there is retired
+  `~name` presets with no capsule at all (mechanical `~name` → `--name`).
+- *BUG-300* residuals — bare `@pull-refresh`, context-dependent `@edit-toggle`,
+  `@script`/`@log`.
+- *BUG-301* — `check` passes files that `build` rejects (import validation never
+  runs under `check`). Also a silence bug, one layer up.
+- *BUG-326* — stdlib resolution is cwd-relative, so `check`'s verdict depends on
+  where you stand. A concurrent session filed BUG-350 (different number, same
+  finding); reconcile before working either.
+
+* Global acceptance
+
+- Every wave's behavioral claim is backed by a RUN — an emit A/B diff for
+  compile-time claims, `--cdp` for anything whose job is to move or fire in a
+  browser. A source-string assertion is not acceptable evidence (AGENTS,
+  BUG-252).
+- Every gate is seen FAILING before the fix. A gate never observed red is not a
+  gate.
+- No new Rust match arm per driver — driver variation stays DATA in the registry.
+- Baselines to hold: lib 3173/0, integration 217/0, rail 12/0. Regressions in
+  these are the stop condition.
+
+* Numbering hazard
+
+A concurrent session reused BUG-343/344/346/348/349/350 for unrelated defects.
+Mine are identifiable by TITLE, not number. Check the title before touching any
+of those six.

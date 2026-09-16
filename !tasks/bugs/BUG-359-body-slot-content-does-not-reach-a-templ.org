@@ -1,0 +1,61 @@
+#+TITLE: body-slot content does not reach a template element param
+#+STATE: ITEM
+#+SESSION_ID: 153497be379ff5cc
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-18T12-18-12-318Z_153497be379ff5cc.jsonl]]
+#+CUSTOM_ID: BUG-359-body-slot-content-does-not-reach-a-templ
+
+* Initial Message
+
+where is edit-toggle  used? and besides that, I would like all remianing erors to be fixed
+
+* Summary
+
+A template invoked with a BODY passes nothing to its element param. The slot
+element renders; the content the author put in the body never lands inside it.
+
+#+begin_src spacetime
+@template &card($t, &slot?) {
+  <article class="card"><div class="acts">`&slot`</div></article>
+}
+
+<main class="host"></main>
+
+.host { &w &card("A") { <button class="bt">E</button> } }
+#+end_src
+
+- ~.host .acts~   → EXISTS  ✓ (the template renders, the slot element is there)
+- ~.host .acts .bt~ → MISSING ✗ (the body's `<button>` never arrives)
+
+Measured under `--headless`; both assertions in one test, so the difference is
+not a timing artifact of the harness.
+
+* Why it was hidden
+
+This is the substance behind four failures in
+`tests/fixtures/native-template/*.test.st` that were previously masked by TWO
+layers of test defects, both now fixed (commit 0a8d1a28):
+
+1. `@claim(selector: …, exists: …)` matched no macro at all, so those files ran
+   ZERO assertions and failed only on the harness's "test made no assertions"
+   guard — no information about the feature reached anyone.
+2. `@assert exists .host .card` referenced an undefined identifier, and the
+   fixture never put `.host` in the DOM.
+
+With both repaired the fixtures now fail on the REAL contract, which is this
+ticket.
+
+* Not the same as BUG-358
+
+BUG-358 is `@if` inside template markup rendering as page text. This is
+independent: there is no `@if` in the repro above, and the slot element itself
+renders correctly. A fix for one will not fix the other, though both must land
+before `tests/fixtures/native-template/` can go green.
+
+* Verify
+
+#+begin_src sh
+cargo run --features headless -q -- test tests/fixtures/native-template/ --headless
+#+end_src
+
+Done when a body-slot invocation places its content inside the element param's
+hole — i.e. `.host .acts .bt` exists in the repro.

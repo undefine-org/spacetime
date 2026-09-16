@@ -1,0 +1,99 @@
+#+TITLE: Admin panel with schema-driven forms and content tree
+#+STATE: DONE
+#+SESSION_ID: 14a73642da4c17dd
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-03-30T14-30-47-693Z_14a71735234c17b2/21-CreateFeat5.jsonl]]
+#+CUSTOM_ID: FEAT-010-admin-panel-with-schema-driven-forms-and
+#+EFFORT: L
+#+PRIORITY: #A
+#+LAYER: stdlib
+#+BLOCKER: FEAT-005-collection-crud-sync-protocol-for-json-a FEAT-009-site-introspection-api-for-type-schemas
+
+NOTE [2026-03-30]: Implemented Content Tree tab (fetches site.json, renders pages/data/locales tree) and Data Editor tab (schema-driven forms from types.json, debounced EditJson saves, array CRUD). Macro admin-panel composes both. Wired into dev panel.
+
+* Scope
+
+** In scope
+- Two new tabs in the dev debug sidebar (Shadow DOM)
+- Content Tree tab: navigable sitemap showing pages, data sources, templates, locales
+- Data Editor tab: schema-driven form generator from @type JSON Schema
+- Form fields: string -> text input, number -> number input, bool -> checkbox, url -> URL input with preview, optional fields shown with add/remove toggle
+- Array fields: expandable item list with per-item form, add/remove buttons (wired to collection CRUD protocol)
+- Navigate: click data source in content tree -> opens in Data Editor
+- Save: form edits dispatch EditJson messages via dev-save.st
+
+** Out of scope
+- Inline WYSIWYG editing (already exists in dev-editable)
+- Rich text formatting in forms (forms use plain inputs; rich editing happens inline)
+- Image upload UI (separate item)
+
+** Boundary rationale
+The admin panel is the structured editing interface. It complements (not replaces) inline WYSIWYG. Developers configure @type definitions; content editors use the generated forms.
+* Tests
+
+** Headless .test.st
+- ~tests/dev-tools/admin-panel-forms.test.st~: verify form generation from known @type schema (string, number, bool, url fields produce correct input types)
+- ~tests/dev-tools/admin-panel-edit.test.st~: verify edit round-trip: change value in form -> EditJson sent -> file updated -> DataUpdate received -> form reflects saved state
+- ~tests/dev-tools/admin-panel-array.test.st~: verify array add/remove in form -> EditJsonArray sent -> file updated
+
+** Playwright E2E
+- ~tests/playwright_st/admin_panel.spec.ts~: open dev panel, click Content Tree tab, verify pages/data sources listed, click data source, verify form renders with correct fields, edit a field, verify JSON file updated
+
+** Rust unit tests
+- JSON Schema -> form field mapping: test the type inference (string, number, bool, url, array, nested object)
+* Implementation
+
+** Step 1: Content Tree primitive (~stdlib/__dev__/primitives/dev-content-tree.st~)
+- New %primitive that fetches /__spacetime/dev/site.json on init
+- Renders tree structure: Pages (with routes) -> Data Sources (with type + src) -> Templates (with name)
+- Click handlers emit navigation events
+- Auto-refreshes when file changes detected (via existing dev-ws DataUpdate)
+
+** Step 2: Data Editor primitive (~stdlib/__dev__/primitives/dev-data-editor.st~)
+- New %primitive that fetches type schema + data for a given data source
+- Dynamic form renderer:
+  - Reads JSON Schema from /__spacetime/dev/types.json
+  - Fetches current data from the @data src path
+  - For each field in schema: generate appropriate form element
+  - For array types: render item list with collapsible per-item forms
+- Save logic: on field change (debounced 300ms), construct EditJson message and send via dev-ws
+- Array operations: add/remove buttons send EditJsonArray messages
+- Visual feedback: green flash on successful save, red on reject (reuse dev-save patterns)
+
+** Step 3: Admin panel macro (~stdlib/__dev__/macros/admin-panel.st~)
+- New %macro that composes content-tree + data-editor into the dev panel tab system
+- Adds "Content" and "Data" tabs to the existing panel tab bar
+- Manages tab state (which tab is active, which data source is selected)
+
+** Step 4: Integration into dev panel (~stdlib/__dev__/primitives/dev-panel.st~)
+- Extend existing tab system to support the new tabs
+- Content Tree tab: shows site structure
+- Data Editor tab: shows form for selected data source (defaults to first data source)
+
+** Step 5: Import and wire up (~stdlib/__dev__/index.st~)
+- Import new primitives and macro
+- Apply @admin-panel macro after existing @dev-editor and @dev-panel
+
+** Key files
+- ~stdlib/__dev__/primitives/dev-content-tree.st~ (new)
+- ~stdlib/__dev__/primitives/dev-data-editor.st~ (new)
+- ~stdlib/__dev__/macros/admin-panel.st~ (new)
+- ~stdlib/__dev__/primitives/dev-panel.st~ (extend)
+- ~stdlib/__dev__/index.st~ (extend)
+* Edge Cases
+- Type with no data source: show in tree but disable Data Editor navigation
+- Data source with no @type: show raw JSON in editor (no schema-driven form)
+- Very large collection (100+ items): paginate or virtualize item list
+- Nested objects: collapsible sections in form
+- Optional fields with no value: show "Add field" button
+- URL fields: show small preview thumbnail if value is an image URL
+- Empty site (no pages, no data): show helpful empty state message
+- Schema changes (type modified in .st file): form auto-rebuilds on next fetch
+* Acceptance Criteria
+- Dev panel has Content Tree tab showing all pages, data sources, templates
+- Dev panel has Data Editor tab with auto-generated forms from @type schemas
+- Form inputs match field types (text, number, checkbox, URL)
+- Editing a field in the form persists to the JSON file
+- Array fields show add/remove buttons; operations persist correctly
+- Content Tree navigation selects data source in Data Editor
+- All tests pass (headless + Playwright)
+- Screenshot artifact: admin panel showing content tree and data editor side by side

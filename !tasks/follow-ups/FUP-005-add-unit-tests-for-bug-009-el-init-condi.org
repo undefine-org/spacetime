@@ -1,0 +1,111 @@
+#+TITLE: Add unit tests for BUG-009 el_init condition in expandrs
+#+STATE: ITEM
+#+SESSION_ID: 14a77002fa8c180b
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-03-30T20-58-47-146Z_14a77002fa8c180b.jsonl]]
+#+CUSTOM_ID: FUP-005-add-unit-tests-for-bug-009-el-init-condi
+#+EFFORT: S
+#+PRIORITY: #B
+#+LAYER: pipeline
+
+* Initial Message
+
+Implement these audit recommendations from org://AUD-003-audit-implementation:
+
+Here are my findings:
+
+---
+
+## Audit Findings
+
+### 1. Latent duplicate-token bug in catch-all `_ =>` arm
+- **What**: The `_ =>` catch-all in `extract_body_captures` still uses `collect_descendant_tokens` which produces duplicate tokens. Any future `$var:fields`, `$var:params`, or `$var:states` body capture would silently fail the same way `Properties` did.
+- **Where**: `src/syntax/events/form_compiler.rs:1054-1111` (the `_ =>` arm)
+- **Why**: Silent extraction failure — the capture returns `None`, the field is silently absent, and the downstream consumer gets empty data. Latent today (no stdlib captures hit this), but a trap for the next person who adds a body capture using a complex extractor type.
+- **Effort**: `medium` (would need the same re-lex approach or fix `collect_descendant_tokens` to deduplicate)
+
+### 2. No unit tests for BUG-009 fix (el_init condition)
+- **What**: The plan's BUG-009 item specified 3 unit test scenarios (exports → Body, cleanup → Body, neither → None) but none were added. The fix is only covered by the snapshot test `data_directive_js`.
+- **Where**: `src/pipeline/expand.rs` — no `#[test]` module exists
+- **Why**: The snapshot test validates one case (data-source with exports). The critical distinction — a selectorless global with neither exports nor cleanup staying `None` — has no coverage. A future refactor could regress this without test failure.
+- **Effort**: `small`
+
+### 3. No unit test for BUG-010 fix (Properties re-lex path)
+- **What**: The plan's BUG-010 item specified unit tests (parse `@type Foo { name: string; }` → TypeRegistry with fields), but none were added. Verification was done via server endpoint only.
+- **Where**: `src/syntax/events/form_compiler.rs` — no test for the `CaptureType::Properties` arm
+- **Why**: The re-lex + pointer-arithmetic offset calculation is subtle. A regression (e.g., someone refactoring `inner` derivation to use `String` instead of `&str` slice) would silently break the offset math with no test failure.
+- **Effort**: `small`
+
+### 4. Pointer arithmetic assumes `inner` is a subslice of `source`
+- **What**: `inner.as_ptr() as usize - source.as_ptr() as usize` is safe today because `inner` is derived via `&source[body_start..body_end].trim().trim_start_matches('{')...`. But there's no `debug_assert!` guarding this invariant.
+- **Where**: `src/syntax/events/form_compiler.rs:1025`
+- **Why**: If a future refactor changes `inner` to be heap-allocated (e.g., `.to_string()` or `.replace(...)` earlier in the chain), the pointer arithmetic would produce garbage offsets silently. A `debug_assert!(inner.as_ptr() >= source.as_ptr() && ...)` would catch this in debug builds.
+- **Effort**: `trivial`
+
+* Scope
+** In Scope
+- Add 3 unit tests to ~src/pipeline/expand.rs~ test module (~mod tests~ at line 1679) for the el_init condition added by BUG-009
+- Tests exercise ~ir_to_expanded~ (private fn, accessible from the inline test module)
+** Out of Scope
+- Changing the el_init logic itself (already correct, just needs coverage)
+
+* Tests
+File: ~src/pipeline/expand.rs~ inside ~mod tests~ (line 1679+)
+
+** Scenario 1: Global selectorless + exports → ElInit::Body
+#+begin_src rust
+#[test]
+fn test_global_selectorless_with_exports_gets_el_body() {
+    let mut ir = GeneratedPrimitiveIR::new();
+    ir.js_stmts.push(JsStmt::Raw("test();".to_string()));
+    ir.exports.push("connected".to_string());
+
+    let primitive = ResolvedPrimitive::new("dev-panel", BoundArgs::new(), Phase::Global, 0);
+    let expanded = ir_to_expanded(ir, &primitive);
+
+    assert_eq!(expanded.js.unwrap().el_init, Some(ElInit::Body));
+}
+#+end_src
+
+** Scenario 2: Global selectorless + cleanup → ElInit::Body
+#+begin_src rust
+#[test]
+fn test_global_selectorless_with_cleanup_gets_el_body() {
+    let mut ir = GeneratedPrimitiveIR::new();
+    ir.js_stmts.push(JsStmt::Raw("test();".to_string()));
+    ir.cleanup_stmts.push(JsStmt::Raw("cleanup();".to_string()));
+
+    let primitive = ResolvedPrimitive::new("dev-ws", BoundArgs::new(), Phase::Global, 0);
+    let expanded = ir_to_expanded(ir, &primitive);
+
+    assert_eq!(expanded.js.unwrap().el_init, Some(ElInit::Body));
+}
+#+end_src
+
+** Scenario 3: Global selectorless + neither → None
+#+begin_src rust
+#[test]
+fn test_global_selectorless_without_exports_or_cleanup_gets_none() {
+    let mut ir = GeneratedPrimitiveIR::new();
+    ir.js_stmts.push(JsStmt::Raw("test();".to_string()));
+    // No exports, no cleanup
+
+    let primitive = ResolvedPrimitive::new("dev-flag", BoundArgs::new(), Phase::Global, 0);
+    let expanded = ir_to_expanded(ir, &primitive);
+
+    assert_eq!(expanded.js.unwrap().el_init, None);
+}
+#+end_src
+
+* Implementation Notes
+- ~ir_to_expanded~ is a private fn in ~expand.rs~, accessible from the inline ~mod tests~ block
+- ~GeneratedPrimitiveIR::new()~ exists (metasystem_codegen.rs:104)
+- ~JsStmt::Raw~ is a variant for raw JS strings — check ~src/ir/code.rs~ for the exact variant name; if ~Raw~ doesn't exist, use ~JsStmt::Expr(JsExpr::Raw("test();".to_string()))~ following existing test patterns
+- ~ResolvedPrimitive::new~ takes ~(name, BoundArgs, Phase, order)~ (types.rs:86)
+- ~ElInit~ derives ~PartialEq~ (types.rs:150) so ~assert_eq!~ works
+- Existing test imports: ~use crate::pipeline::types::{BoundArgs, Phase};~
+- Need to add: ~use crate::pipeline::types::ElInit;~ and ~use crate::metasystem::GeneratedPrimitiveIR;~
+
+* Acceptance Criteria
+1. 3 new tests in ~src/pipeline/expand.rs~ test module
+2. ~cargo test --lib test_global_selectorless~ runs all 3 and passes
+3. All 3 scenarios are tested: exports only, cleanup only, neither

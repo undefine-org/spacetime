@@ -1,0 +1,116 @@
+#+TITLE: A third of the diagnostic table can never fire
+#+STATE: TODO
+#+PRIORITY: #A
+#+CUSTOM_ID: BUG-373-a-third-of-the-diagnostic-table-can-never
+
+* Summary
+
+32 of 97 declared =DiagnosticCode= variants are referenced NOWHERE outside
+their own declaration in =src/diagnostics/codes.rs=. Each one names a real
+authoring mistake, carries a docstring describing what it catches, and cannot
+be produced by any code path in the compiler.
+
+This is the BUG-367 pathology one level up: BUG-367 was a validator that never
+ran, found because its input was always empty. These are error CODES that no
+validator ever constructs. Same consequence — a promise of refusal that the
+compiler does not keep — but invisible to =rustc=, because a declared enum
+variant that is never constructed in a =pub enum= is not a dead-code warning.
+
+* Measurement (this session)
+
+Method: for each =E[0-9]{4}= declared in =src/diagnostics/codes.rs=, count
+references to =DiagnosticCode::<code>= across =src/=, excluding the declaration
+file itself.
+
+    declared codes                        : 97
+    never constructed anywhere            : 32   (33%)
+
+** The 32, with the promise each one makes
+
+    E0403   Slot does not exist in template
+    E0404   Type mismatch (filter, binding)
+    E0406   Wrong number of function arguments
+    E0407   Invalid function argument type
+    E0505   JSON parse error
+    E0601   @each container selector not found in HTML
+    E0603   Slot not found in template
+    E0604   Element reference selector not found
+    E0605   Template/component not defined
+    E0801   Unknown element in emit resolution
+    E0802   Signal marker invalid in CSS context
+    E0803   VarRef marker invalid in CSS context
+    E0804   Directive marker invalid in CSS context
+    E0810   Stdlib file not found
+    E0811   Stdlib parse error
+    E0812   Duplicate macro definition in stdlib
+    E0901   Unclosed HTML tag in component body
+    E0902   Invalid CSS selector in component body
+    E0903   Invalid state declaration in component body
+    E0904   Invalid export declaration in component body
+    E0906   Unsupported state action expression in @on body
+    E0908   .class: used with non-boolean expression
+    E0914   &ref.$var: $var is not exported by template
+    E0915   &ref.$var <- value: export $var is read-only (not mut)
+    E0916   &ref references undefined template instance
+    E0920   &name .selector { @each } without [] — singular ref w/ iteration
+    E0921   &name[] .selector { } without @each — collection marker, no iteration
+    E0922   block missing its trailing `;`
+    E0925   (documented as "compiler bug, never author error")
+    E0952   filter-pipe split / `||`
+    E0956   (failure path)
+    E0964   capture lint over registry data
+
+** Confirmed by live CLI, not just by grep
+
+E0605 / E0916 promise "template/component not defined". A page whose entire
+body references a component that does not exist:
+
+    <main>
+      <NoSuchComponent />
+    </main>
+
+    $ cargo run -- check
+    ✓ All 1 file(s) passed
+
+Nothing is defined, nothing is refused, nothing is emitted for it.
+
+* Why this matters more than the count suggests
+
+E0406 ("wrong number of function arguments") and E0407 ("invalid function
+argument type") are the SAME two checks BUG-367 was filed about. BUG-367
+deleted the dead validator and replaced the type half with E173 at the driver
+argument loop — where it provably runs. These two codes are the residue of that
+older, never-reachable attempt, and their continued presence in the table reads
+as coverage that does not exist.
+
+Several others describe checks a user would reasonably assume exist: filling a
+nonexistent slot (E0403/E0603), writing to a read-only export (E0915), a
+=&name[]= collection marker with no =@each= (E0921).
+
+* Suggested resolution — triage, do not bulk-delete
+
+Each code needs one of three verdicts, and the verdict differs per code:
+
+  1. WIRE IT UP — the check is wanted and the site is known.
+     Requires a RED test through =collect_document_diagnostics= first
+     (the CLI path), per the BUG-367 lesson.
+  2. DELETE — the feature it guarded is retired, or the check moved
+     (E0406/E0407 → superseded by E173).
+  3. KEEP, DOCUMENTED AS RESERVED — genuinely reachable-in-future, marked so
+     nobody reads it as live coverage.
+
+Do NOT bulk-delete: some of these are likely wanted checks whose wiring was
+simply never finished, and deleting them silently discards the design intent
+recorded in their docstrings.
+
+* Gate for whichever verdict
+
+A code that stays in the table should have a test that produces it. The cheap
+version is a single table-driven test asserting that every declared
+=DiagnosticCode= is either constructed somewhere in =src/= or listed in an
+explicit =RESERVED= allowlist with a reason. That converts "33% of the table is
+a lie" from a thing discovered by an audit into a thing that fails CI.
+
+* Found by
+
+Dead-code sweep following BUG-367 (=fix(BUG-367)= =0d1ce6ae=).

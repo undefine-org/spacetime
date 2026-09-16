@@ -1,0 +1,142 @@
+#+TITLE: BUG: all five event drivers emit trigger "hover" — .click/.focus/.submit/.key are dead or wrong
+#+STATE: DONE
+#+SESSION_ID: 1534a2eae1903af0
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-18T13-07-01-638Z_1534a2eae1903af0.jsonl]]
+#+CUSTOM_ID: BUG-253-bug-all-five-event-drivers-emit-trigger
+
+* Initial Message
+
+other bugs we need to solve? also, weren't we supposed to implement the rest of SIP-001 with `@score` and stuff? Please recall
+
+* Summary
+
+`@on &.click: --form;` does not listen for click. It listens for *mouseenter*.
+So do `.focus`, `.submit`, and `.key`. Every one of the five event-driver rows
+emits the same line into the bundle:
+
+  const trig = "hover";
+
+which is the `event-driver` primitive's PARAM DEFAULT (stdlib/primitives/animation/drivers.st:485,
+`trigger: string = "hover"`). The registry row's identity never reaches the
+primitive, so all five collapse onto one behavior.
+
+Observed effect per row (built /tmp/drvprobe, one element, one motion form):
+  .hover   -> mouseenter   (correct BY ACCIDENT — it is the default)
+  .click   -> mouseenter   (WRONG: fires on hover, not click)
+  .focus   -> mouseenter   (WRONG)
+  .key     -> mouseenter   (WRONG)
+  .submit  -> mouseenter   (DEAD for its purpose: zero submit listeners emitted;
+                            `grep -c "addEventListener('submit'"` = 0 on a real
+                            <form class="c"> with a submit button)
+
+Note `.click` "works" in casual testing only because the primitive carries a
+hardcoded `else if (trig === 'click')` branch — which is unreachable, since trig
+is never anything but "hover". The generic `else` branch
+(`addEventListener(trig, forward)`) would have handled submit/focus/key
+correctly had the trigger arrived.
+
+* Root cause — the same shape as BUG-252
+
+The driver registry has NO WAY TO DECLARE A STATIC PRIMITIVE ARGUMENT.
+
+A row (stdlib/macros/drivers.st) declares `primitive: event-driver` and its
+policy data (value_type, seekable, reduced_motion, on_kinds), but there is no
+slot saying "and pass trigger: \"submit\" to that primitive". `param_map`
+exists and is used by exactly ONE row (text-change, line 335) — and it RENAMES
+caller-supplied args; it does not SUPPLY a constant. So five rows share one
+primitive with no way to differentiate themselves.
+
+This is BUG-252's class exactly: registry data that must reach a primitive,
+with the transport missing, failing silently. There it was a Named map
+stringifying to "[object Object]"; here it is a parameter that is simply never
+passed, so the default wins. Both build clean, emit plausible code, and do
+nothing (or the wrong thing).
+
+The old `@on-click`/`@on-hover`/`@on-focus` macros in stdlib/macros/on-event.st
+(lines 53/77/101) DO pass `trigger: "click"` / `"hover"` / `"focus"`
+explicitly. The @on cutover (PLAN-124/W3) moved to registry-driven dispatch and
+dropped the trigger on the floor. The pre-cutover surface was correct; the
+generalization lost it.
+
+* Why every gate stayed green
+
+Same reason as BUG-252 — assertions are on emitted TEXT, and the text is all
+present. `addEventListener(` appears. `forward` appears. The animation data
+appears. A source gate cannot see that the event NAME is wrong, because a wrong
+name is still a string in the right place. Coverage audit of the 20 driver
+registry rows against tests/: submit, mouse, pointer, playback, clip, change,
+text-change had ZERO test references; click/focus/key have references that
+evidently assert compile output, not behavior.
+
+* The fix must be registry DATA, not a Rust match arm (AGENTS elegance bar)
+
+Wrong: a match arm mapping driver name -> trigger string in drivers.rs. That is
+a Rust branch per variant, exactly what the registry exists to prevent, and it
+would need extending for every future event row.
+
+Right: give the registry a slot for constant primitive arguments, e.g.
+
+  %registers driver(submit) {
+    primitive: event-driver
+    primitive_args: "trigger:submit"     // <- the missing transport
+    value_type: event
+    ...
+  }
+
+then thread it in src/pipeline/drivers.rs beside the existing `param_map`
+handling (~line 2070), which already reads registry fields as data. One
+mechanism, five rows become data, and any future event driver is a registry row
+with no Rust change. Check whether `param_map` should simply be generalized
+(rename + supply) rather than adding a sibling field — one need, one
+implementation.
+
+* Gates (TDD, per the BUG-252 rule now in AGENTS.md)
+
+1. Rust contract test: each event row emits its OWN trigger — assert
+   `const trig = "submit"` for the submit row, etc. RED first.
+2. CDP behavior gate (REQUIRED — this is a "must move in a browser" feature):
+   clicking a `.click` element animates it and HOVERING IT DOES NOT. That
+   negative is the whole point; the current code passes any positive-only test.
+3. Coverage gate: the 7 registry rows with zero test references
+   (submit, mouse, pointer, playback, clip, change, text-change) each get at
+   least one behavior assertion, or the driver table's P4 promise
+   ("one @test per driver row" — PLAN-121) is not met.
+
+* Blast radius
+
+`@on &.click:` is in the launch article and in user projects. Anything relying
+on click-to-animate is currently hover-to-animate. High user-visible impact,
+zero diagnostics.
+
+* References
+
+- stdlib/macros/drivers.st:60,74,88,102,115 (the five rows)
+- stdlib/primitives/animation/drivers.st:485 (`trigger: string = "hover"`), :551-565 (trig dispatch)
+- stdlib/macros/on-event.st:53,77,101 (the pre-cutover surface that passed trigger correctly)
+- src/pipeline/drivers.rs:2070-2110 (param_map threading — where the fix belongs)
+- BUG-252 (same class: registry data not reaching the primitive, silently)
+
+NOTE [2026-08-02]: FIXED — four commits (57d2ffc6 L1+L2, 905dfd31 L2b, 08ff2f76 rung, plus RED gates).
+
+WHAT THE FIX ACTUALLY WAS. Not "pass the trigger". The registry lookup was keyed on PRIMITIVE, and .find returns the first match, so all five rows sharing `primitive: event-driver` read HOVER's row. Any per-row data added to submit would have been unreachable too. driver_param_args now takes the ALREADY-RESOLVED row — which all three call sites already had in hand, resolved by entry_key(member), the idiom three sibling lookups in the same file already used. After this NO code path searches the driver registry by primitive, so a row cannot read a sibling's data. Not "must remember not to" — cannot.
+
+Then `primitive_args` gave a row the means to distinguish itself on a shared primitive (5 registry lines, zero Rust per row), and the primitive's `if (trig === 'hover') … else if (trig === 'click')` dispatch was deleted in favor of two row-declared REVERSAL SHAPES: `untrigger` (an opposed event that runs backward — hover/mouseleave) and `toggle` (the same event reverses by position — click). Those branches were never dispatch; they were behavior hiding inside dispatch, which is why the primitive had to know driver names at all. A sixth event driver is now a registry row and this code never changes.
+
+CAUGHT DURING THE DELETION: the LEGACY surface (@on-hover/@on-click in stdlib/macros/on-event.st, and the on-cutover migration entries) passed trigger:"hover"/"click" — the old sentinel names. Deleting the special-case would have silently turned those into dead listeners. Found by grepping every event-driver call site before removing the branches, not after.
+
+THREE GATES, each proven to fail before it passed:
+1. tests/driver_row_identity_test.rs — compile one page per row, normalize cosmetic identity (timeline names, _st_init hashes), hash; two rows with identical logic = failure naming both. RED naming exactly .click/.focus/.hover and .key/.submit. Needs no per-row expectations, so it cannot rot.
+2. Registry-level invariant — rows sharing a primitive must carry primitive_args or declare `alias_of`. Fires when a row is WRITTEN, not when its output is diffed. Proven to discriminate against a deliberately added duplicate row, then restored.
+3. tests/event-driver-triggers.test.st — 8 CDP behaviors. The NEGATIVE is load-bearing: .click animates on click AND NOT on hover. Every pre-existing driver gate was positive-only, which is exactly why five wrong drivers passed for so long.
+
+mouse/pointer declare `alias_of: mouse`, and gate 1 READS that from the registry rather than hardcoding the pair — a future alias needs no test edit.
+
+TWO THINGS I GOT WRONG, both worth recording:
+- First wrote the CDP assertions against getAnimations(). The event driver drives a PROGRESS SIGNAL on a rAF loop mapped to style, not a WAAPI animation, so getAnimations() reads 0 even when it works perfectly. The .hover row passing is what validated the corrected opacity vehicle — a known-good row is the cheapest way to test your test.
+- Declared no rung, so the timing assertions inferred `logic` and RAN on --headless, failing 8/8 at the wrong rung. `needs timing` makes the logic backend REFUSE instead, which is the ladder working as designed.
+
+FULL BATTERY: lib 2894 · integration 202 · v8 451 · w36 29 · article 9 · change-watch 2 · driver-identity 3 · snapshots 82 (zero .snap.new — no drift) · CDP 16/16 across all three suites · headless 615/74/44, exact baseline parity.
+
+examples/mobile-tasks shows 6 E0946 grammar errors — verified PRE-EXISTING by checking out the pre-fix stdlib and re-running (identical 6). Unrelated to triggers; not filed here.
+
+SWEEP RESULT (the question that started this): of 20 driver rows, 11 live and correct, 5 broken (these), 4 honestly dead — steps/playback/clip/running carry `planned:` and raise E0948 at compile. That contrast is the lesson: an UNIMPLEMENTED driver is impossible to use, while a MISIMPLEMENTED one shipped silently to five rows. No further dead rows found.

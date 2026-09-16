@@ -1,0 +1,108 @@
+#+TITLE: W1 fidelity ladder: rung enum, needs declaration, refuse-to-fake gate
+#+STATE: DONE
+#+SESSION_ID: 14f94e45c6c3f247
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-02T11-06-49-499Z_14f94e45c6c3f247.jsonl]]
+#+CUSTOM_ID: FEAT-057-w1-fidelity-ladder-rung-enum-needs-decla
+#+LAYER: compiler
+
+* Initial Message
+
+actually, Land the PLAN-026 core now (done/committed); file the testing-macro cluster (@assert swap, @then/@eval nested-match) as a new BUG/PLAN with the diagnosis captured, and STOP — .test.st gating remains blocked
+ on that follow-up. Don't register text tests yet.
+
+Put text tests as FEAT within the plan. Be comprehensive
+
+Wave 1 of [[id:PLAN-027-spacetime-testautomation-infra-fidelity]]. Introduce the
+fidelity ladder as a first-class, declared property and the anti-rot gate that
+makes a backend physically refuse to fake a rung it lacks. This is the keystone
+that permanently kills the silent-false-green class (BUG-051/053 family).
+
+* The ladder
+| rung   | world                        | backend           |
+| pure   | no DOM, no time              | V8                |
+| logic  | LinkeDOM + fake rAF          | V8 + LinkeDOM     |
+| layout | real CSSOM/getComputedStyle  | CDP (W2)          |
+| timing | real/seekable clock          | CDP (W2/W5)       |
+| paint  | pixels                       | CDP + screenshot  |
+build-js = pure/logic at build time (same V8 embed). Document this equivalence.
+
+* Syntax
+- =@test "name" needs <rung> { … }=. Optional; default rung = INFERRED floor.
+- Inference: each assertion/probe declares its MIN rung (e.g. =computed(<css>)= ⇒
+  layout; =@clock=/timeline ⇒ timing; =@capture screenshot= ⇒ paint; pure value
+  asserts ⇒ pure/logic). The test's effective rung = max(inferred floor, declared).
+- =needs= can only RAISE above the inferred floor, never lower it (lowering = error).
+
+* Refuse-to-fake gate
+- Each backend advertises its max rung. Running a test whose effective rung exceeds
+  the selected backend's max is a HARD ERROR (compile-time where possible; else a
+  runner-refusal that reports FAILED with a clear message), NEVER a silent pass.
+- Concretely: a =layout=/=timing= assertion on the V8/LinkeDOM backend errors with
+  "needs layout; run via CDP backend" — it must not execute against the fake
+  getComputedStyle (=el.style||{}=) or synchronous rAF.
+
+* Implementation seams
+- Rung enum + per-assertion min-rung table (data, not scattered conditionals).
+- Min-rung inference reads the new claim grammar (W3) and probe set; until W3
+  lands, seed inference from the current then-*/@assert macros.
+- Relabel today's =--headless= path as the =logic= backend; expose =pure= (no DOM
+  load) as a fast sub-path. Wire the gate into both main.rs run_headless_tests and
+  the playwright/CDP path.
+- Backend selection: =cargo run -- test … --rung <max>= or auto (logic locally,
+  CDP when a layout+ test is present).
+
+* Tests
+- A =needs layout= test on the logic backend ⇒ reports FAILED with the refusal msg
+  (mutation: flip backend ⇒ behavior changes). Lock as a committed test.
+- A pure assertion runs on pure rung without loading LinkeDOM (prove via timing or a
+  DOM-absent probe).
+- Inference: a test using =computed(width)= auto-routes to layout even without
+  explicit =needs=.
+
+* Acceptance
+- Rung declared + inferred; effective rung = max(floor, declared); lowering errors.
+- Refuse-to-fake proven: layout/timing assertion cannot silently pass on V8.
+- build-js documented as a rung-caller; no behavior regression to i18n/locale build.
+
+* Depends on
+- [[id:FEAT-056-w0-grammar-bedrock-fix-capture-type-for]] (bodies must emit to gate)
+
+* Parent
+[[id:PLAN-027-spacetime-testautomation-infra-fidelity]]
+
+* COMPLETED (commit 4c6024c3)
+Fidelity ladder shipped: declared/inferred rung + refuse-to-fake gate.
+
+Model (src/rung.rs, 5 unit tests): Rung{Pure<Logic<Layout<Timing<Paint}; parse/
+as_str; assertion_min_rung + directive_min_rung inference tables; effective_rung
+= max(floor, declared) with hard error when needs LOWERS the floor;
+backend_satisfies predicate.
+
+Runtime (public/runtime/st.js): ST._rung.{order,backendMax,setBackend,setCurrent,
+satisfies,require}. Layout assertions (be_visible/be_hidden/have_style/have_width/
+have_height) call require('layout', …) before reading faked getComputedStyle/
+offsetParent → throw (FAIL) instead of fake-pass.
+
+Syntax: @test "…" needs <rung> { } (test-needs macro form) + upfront require.
+Runner: --rung flag (default logic); main.rs setBackend from Rust model.
+
+KEY ENABLER FIX: resolve_single now names the ResolvedPrimitive by the SPECIFIC
+matched macro (macro_def.name) not the directive name, so Expand emits the form
+that actually matched. Fixes ALL multi-form directives (test/test-needs,
+reveal-simple/…), previously the base form won at emit. (src/pipeline/resolve.rs)
+
+Proven: tests/import_resolution_test.rs::w1_refuse_to_fake_layout_on_logic_backend
+(inferred + declared layout REFUSED, logic passes) + w1_logic_backend_runs_logic_
+tests_clean (no false refusals). Plus 5 rung:: unit tests.
+
+Docs: docs/testing/FIDELITY_LADDER.md (ladder, inference, build-js equivalence,
+--rung semantics). build-js documented as the pure/logic rung at build time
+(same V8 embed) — i18n fixture + build-js test verified unaffected.
+
+AUDIT: headless 201/27 → 183/45. The +18 are layout/visibility assertions that
+were FAKE-PASSING and now correctly refuse on the logic backend (need W2's real
+browser). No true regressions (previously-green logic suites unchanged; non-test
+compile + i18n build unaffected). lib 2098/integration 162/import 16/text 8 green.
+
+DEFERRED: `pure` no-DOM fast sub-path (optimization only — pure≤logic so pure
+tests already run correctly). Noted in FIDELITY_LADDER.md.

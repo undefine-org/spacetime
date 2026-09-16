@@ -1,0 +1,137 @@
+#+TITLE: Dock widget panels occlude each other — no z-index or mutual-collapse policy
+#+STATE: DONE
+#+CUSTOM_ID: FUP-137-dock-widget-panels-occlude-each-other
+#+PRIORITY: #C
+
+* Summary
+
+The dev dock now hosts three pills — host, migrations, and the inspector
+(PLAN-112). Each owns an independently-openable panel, and there is no policy
+governing what happens when two are open at once: the panels overlap and occlude
+each other. Observed directly in a screenshot of the inspector panel open over
+the host widget's drawer.
+
+* Severity: cosmetic / UX
+
+Nothing malfunctions — both panels work, and each is fully usable once the other
+is closed. But the dock looks broken, and on a short viewport the occlusion can
+hide the very control the user is reaching for.
+
+* Relevant prior constraint (do not regress this)
+
+Dock widgets share ONE global reactive scope. PLAN-112 made the inspector's
+signals strictly `$ins`-prefixed after an un-prefixed `$isExpanded` was observed
+opening BOTH existing panels simultaneously. Any "mutual collapse" implementation
+must therefore NOT reintroduce a shared open/closed signal name; if the widgets
+need to coordinate, the coordination key must be explicit and unambiguous about
+which widget owns it.
+
+* Where it lives
+
+Injection: `host_widget_inject` in `src/server.rs` composes the dock and is the
+one place that knows all three widgets exist. Each widget's panel markup and
+styles live in its own module (`stdlib/__host__/`, `stdlib/migrations/`,
+`stdlib/__inspector__/index.st`). Verify these before working.
+
+* Options to weigh (pick in the write-up, do not just list)
+
+1. *Mutual exclusion* — opening one panel closes the others. Simple, predictable,
+   and matches how a single dock "drawer" usually behaves. Cost: the user cannot
+   watch migrations while editing a param.
+2. *Layout, not stacking* — the dock lays panels out side by side / stacked so
+   they never overlap. No behavioural surprise, but needs a real layout owner and
+   degrades on narrow viewports.
+3. *Explicit z-order + offset* — last-opened wins and panels are offset so both
+   remain partly visible. Cheapest, but still overlaps; only makes the overlap
+   intentional rather than accidental.
+
+Given the shared-scope constraint and that this is a dev surface, option 1 is the
+most likely right answer — but state the reasoning, and note that whichever is
+chosen, the policy belongs in ONE place (the dock composition), not duplicated
+into each widget.
+
+* Tests to write
+
+- With two panels opened in sequence, assert the resulting visible state matches
+  the chosen policy (e.g. under option 1: exactly one panel has `.is-open`).
+- Assert opening/closing the inspector panel does NOT change the host or
+  migrations widget's open state via a name collision (the `$ins`-prefix
+  regression guard — this is the property that actually broke once).
+
+Sabotage-verify both.
+
+* Non-goals
+
+Do not restyle the pills or change any widget's internal panel markup beyond what
+the policy requires. Do not introduce a shared un-prefixed signal.
+
+* RESOLVED (2026-07-25, PLAN-113 W3.2)
+
+Reproduced live first: opening the host pill then the inspector pill left BOTH
+panels `.is-open`, overlapping in the bottom-right dock.
+
+** Option 1 (mutual exclusion) chosen — reasoning
+
+A dock is a single drawer, and all three panels are transient inspectors rather
+than things to watch simultaneously, so exclusion matches the user's mental model.
+It also degrades safely on a narrow viewport, where option 2's side-by-side layout
+would not, and unlike option 3 it removes the overlap rather than making it
+deliberate. The stated cost — not watching migrations while editing a param — is
+small on a dev-only surface.
+
+** Implementation
+
+`DEV_DOCK_EXCLUSIVE_PANELS_JS` in `src/server.rs`, injected by the dock: the one
+place that knows all three widgets exist, so the policy is not duplicated into
+each.
+
+It coordinates on the rendered `.is-open` CLASS, NOT on a shared signal. That is
+the constraint this item flagged: dock widgets share one global reactive scope, and
+an un-prefixed `$isExpanded` once opened both existing panels at once. A sibling is
+closed by CLICKING ITS OWN PILL, so the widget's own toggle runs and its signal
+stays authoritative — reaching in to strip `.is-open` directly would desynchronise
+the class from the signal that renders it, and the next toggle would appear to do
+nothing.
+
+A click that CLOSED a panel skips the pass entirely, so closing the only open panel
+cannot reopen another.
+
+** Verified live
+
+| gesture                  | result                        |
+|--------------------------+-------------------------------|
+| host → inspector         | only the inspector panel open |
+| inspector → host         | only the host panel open      |
+| close the open one       | none open                     |
+| after opening inspector  | `insIsExpanded: true`, `isExpanded: false` |
+
+The last row is the `$ins`-prefix regression guard: the two widgets' signals remain
+independent, which is the property that actually broke once.
+
+3 tests in `src/server.rs::dock_panel_policy_tests` lock the parts that can rot in
+source — that the policy is injected, that it introduces no shared signal, and that
+it bails on a closing click.
+
+** W3 REVIEW FOLLOW-UP — the policy did not fire on the primary interaction path
+
+The reviewer found it, and it reproduced immediately: clicking a pill's LABEL — what
+a user actually hits, since the label fills the pill — left BOTH panels open.
+
+`closest('[class*="__pill"]')` matched `<widget>__pill-label` first, because that
+class CONTAINS the substring. The sibling lookup then derived a different element
+and the exclusion silently did nothing. My own live verification had clicked
+`.st-host-widget__pill` directly, which is not how the control is used.
+
+Fixed by resolving the pill as the nearest element whose OWN class ENDS in
+`__pill`. Re-verified live on the label path: host label → inspector label leaves
+exactly one panel open, and the pill path still works.
+
+Test added (`the_pill_is_resolved_by_exact_class_not_substring`).
+
+*** On test adequacy
+
+The reviewer is right that these tests assert on the JS constant's TEXT rather than
+its behaviour, and that a real browser test would be better. That is recorded rather
+than papered over: the behaviour IS verified live in Chromium each time, but a
+`--drive`/`--cdp` test would make it repeatable. Filed as part of FUP-139's scope
+(dock/workbench interactions needing a real browser).

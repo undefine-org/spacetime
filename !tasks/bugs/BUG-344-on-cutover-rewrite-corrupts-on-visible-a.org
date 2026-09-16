@@ -1,0 +1,140 @@
+#+TITLE: on-cutover %rewrite corrupts `@on &.visible(...) as $name` — captures `as` as the name, drops the binding
+#+STATE: ITEM
+#+SESSION_ID: 153497be379ff5cc
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-18T12-18-12-318Z_153497be379ff5cc.jsonl]]
+#+CUSTOM_ID: BUG-344-on-cutover-rewrite-corrupts-on-visible-a
+#+COMPLETION_HASH: a0aba3c2d49579c7
+
+* Initial Message
+
+can you list all the migratins, and what needs to be done, and what root causes they share, and what your plan is? then keep going autonomously until the end (use the todo tool to record everything)
+
+* Summary
+
+`spacetime migrate` would rewrite CURRENT, CORRECT syntax into broken code and
+silently discard a binding. Caught by dry-run before applying; nothing on disk
+is damaged.
+
+Source (current, supported syntax — `tests/unit/macros/on-visible-immediate.test.st`):
+
+#+begin_src spacetime
+.imm-test {
+  @on &.visible(600ms, immediate: true) as $reveal {
+    opacity: 0 -> 1;
+  }
+}
+#+end_src
+
+What `migrate --dry-run` proposes:
+
+#+begin_src spacetime
+@on &.load(name: as, duration: 600ms, delay: 0ms, threshold: 0.1, immediate: true) {
+  easing: ease-out;
+  ...
+}
+#+end_src
+
+Two independent defects in one rewrite:
+
+1. *Data loss.* ~name: as~ — the literal keyword `as` is captured as the
+   animation name, and the actual binding `$reveal` is DROPPED entirely. Any
+   reference to `$reveal` elsewhere in the file is silently orphaned.
+2. *Wrong target driver.* `&.visible` → `&.load`, when `&.visible` is the
+   correct CURRENT surface for this code (see below).
+
+* Root cause
+
+`%rewrite on-visible` (stdlib/migrations/entries/2026-07-26-on-cutover.st:636)
+matches:
+
+#+begin_src spacetime
+@on &.visible $name:ident ( $duration:time, ... ) { $body }
+#+end_src
+
+i.e. the name comes BEFORE the parens — the retired named form. The modern
+form puts the binding AFTER, with `as`:
+
+#+begin_src spacetime
+@on &.visible(600ms) as $reveal { ... }
+#+end_src
+
+The `$name:ident` capture is unanchored, so it happily matches the trailing
+`as` token, the paren group lines up, and the rule fires on a shape it was
+never meant to claim.
+
+* Why `&.visible` must not be rewritten here
+
+`visible` is a REGISTERED, CURRENT driver — `stdlib/macros/drivers.st:94`:
+
+#+begin_quote
+An ENTRANCE, not a sensor. `@on &.visible(300ms)` means "when enough of me is
+on screen, play this over 300ms"
+#+end_quote
+
+And the capsule's own `%hint for @on` says it outright:
+
+#+begin_quote
+`@on &.visible` maps to `&.load` (its behavior was always the load driver —
+**for viewport-entry reveals use `&.visible`**)
+#+end_quote
+
+So the intended scope of `on-visible` is the RETIRED `@on visible $name(...)`
+spelling, not every occurrence of the live `&.visible` driver. The rule is
+over-matching its own documented intent.
+
+* Blast radius
+
+31 sites across 10 files use the `(...) as $binding` shape, including a
+dedicated regression suite for the syntax:
+
+- tests/on_as_sigil_test.rs  ← the `as` sigil has its own test file
+- tests/sip_001_w36_facets_test.rs
+- tests/v8_runtime/timeline_macro_tests.rs
+- tests/e2e/page-load.test.st
+- tests/integration/{animation-chain,apply-animations}.test.st
+- tests/unit/macros/{on-hover,on-visible-immediate}.test.st
+- tests/bugs/BUG-193-on-visible-fill-forwards-investigation.test.st
+- tests/repro/gh-6-hold-end-state/on.st
+
+These are among the 20 sites still reported pending after the AUD-009 sweep.
+They must NOT be migrated until this is fixed — `spacetime migrate .` across
+the repo today would corrupt all of them at once.
+
+* Fix direction (NOT YET VERIFIED)
+
+The `%match` needs to not claim a shape whose name is supplied via `as`.
+Options to evaluate:
+
+- anchor the match so `$name:ident` cannot bind the literal `as` (a negative
+  literal, or requiring the ident to be immediately followed by `(`)
+- give the modern `as` form its own rule that is a NO-OP / not claimed at all
+- narrow `on-visible` to only the pre-cutover spelling it documents
+
+Whichever is chosen, it should be expressible in the capsule as DATA — no
+Rust match-arm per case.
+
+* Acceptance
+
+- `migrate --dry-run` proposes NO change for `@on &.visible(600ms) as $reveal`
+- the retired `@on visible reveal(600ms) { ... }` form still rewrites correctly
+- a gate asserting the `as` binding survives (or the site is left alone)
+- re-run `migrate --explain on-cutover .`: the `as`-shaped sites drop out of
+  the pending count for the right reason
+
+NOTE [2026-08-07]: SCOPE IS WIDER THAN on-visible — the `%rewrite on-hover` rule has the identical defect. `tests/unit/macros/on-hover.test.st` dry-run proposes:
+
+  + @on &.hover(name: as, duration: 300ms) {
+  + @on &.hover(name: as, duration: 200ms) {
+  + @on &.hover(name: as, duration: 150ms) {
+
+So `name: as` is not specific to the visible→load mapping; it is a property of EVERY rewrite rule whose %match declares `$name:ident` before the paren group. Any such rule will claim the modern `(...) as $binding` form and swallow the `as` keyword as the name.
+
+∴ the fix must be applied per-rule across the capsule (or, better, expressed once in how `$name:ident` anchors), not patched in `on-visible` alone. Rules to audit: on-visible, on-hover, on-intersect, and every sibling with the same `$name:ident (` prefix shape.
+
+MEASURED after the AUD-009 sweep: 13 of the 20 remaining "pending" sites are this bug — i.e. the majority of what `migrate --explain` still reports as debt is NOT debt at all, but correct current syntax the capsule wrongly claims. The true remaining debt in tracked files is ZERO; the only other pending site is one @value-change in gitignored scratch/w36/.
+
+This also means the pending COUNT is not a usable progress metric until BUG-344 is fixed — it will never reach 0, and running `spacetime migrate .` to make it do so would corrupt 13 working sites.
+
+NOTE [2026-08-08]: FIXED and VERIFIED at HEAD (90f449df). Gate `the_as_binding_form_is_not_claimed_by_any_migration` passes. Cause: `IdentExtractor` (src/syntax/events/extractors/simple.rs) accepted the keyword `as` as an identifier, so `%rewrite on-visible`/`on-hover` claimed already-current syntax and DROPPED the binding across 31 sites / 10 files. Fix returns None when the token text is `as`. Pending sites 20 -> 4 (both remaining in gitignored scratch/).
+
+NB a concurrent session later filed a DIFFERENT BUG-344 (template invocation in markup becomes literal text). Same number, unrelated defect.

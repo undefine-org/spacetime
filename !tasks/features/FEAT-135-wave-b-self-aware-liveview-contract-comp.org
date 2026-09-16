@@ -1,0 +1,52 @@
+#+TITLE: Wave B — self-aware LiveView contract comparator (live() host ⋈ server schema)
+#+STATE: DONE
+#+SESSION_ID: 1510a559ccf03ced
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-20T14-12-20-403Z_1510a559ccf03ced.jsonl]]
+#+CUSTOM_ID: FEAT-135-wave-b-self-aware-liveview-contract-comp
+#+COMPLETION_HASH: 7c31142271815e38
+
+* Initial Message
+
+ok i want you to design a prototype a deep integration between Spacetime and elixir, especially Phoenix LiveView and it should be a la Djinn.LiveView (~/code/ora/monorepo).
+
+What could it look like? Show me your DSL design so we can think about it together. Look at the recent Spacetime $host improvements and whatnot, maybe you can extend it to a canonical host for Phoenix LiveView that makes the integration insanely seamless and self-aware (re-uses the power of Elixir macros/Spark and the introspectability of Spacetime to deliver an experience that leverages the best of both).
+
+* Purpose
+The keystone of the Spacetime⇄Phoenix LiveView design (@research/spacetime-phoenix-liveview-bridge.org §4):
+make the integration VALIDATE ITSELF at compile time. A `@host $b : live("Mod")`
+page declares which events it fires (`send emit "move"`) and which reply variants
+it decodes (`receive to MoveResult { Moved | Blocked }`). Wave B unifies that page
+contract against the server's introspected `__spacetime_contract__` and FAILS the
+build on mismatch — turning 6 runtime footguns (catalog #1-5,#14) into compile
+errors. It is the ONLY wave buildable in pure verse, no Elixir, RED→GREEN testable.
+
+* Design — one comparator, two contract sides
+1. Server side (fixture for now): a `<page>.contract.json` checked in beside the
+   .st — the exact shape `__spacetime_contract__/0` will emit:
+     { "module": "...", "events": [{"name":"move","payload":{...}}],
+       "pushes": [{"name":"flash",...}], "fingerprint": "..." }
+2. Page side: walk FormMatches for `@data signal/stream` whose `host:` resolves to
+   a `live(...)` @host. Extract verb+target (the emitted event name) and the
+   receive arms' variant names (the decoded replies).
+3. Comparator (new, ~one module): every `send emit "X"` ⊆ server events (name);
+   nothing fires an event the server doesn't handle. Emit E0928 via the existing
+   format_compile_errors rail on mismatch.
+
+* Scope (this item)
+- Pure-verse comparator + extraction + fixture loader + E0928 diagnostic.
+- Wired into `check` after register_macro_yield_signals.
+- NOT in scope: deriving the page holes from the schema (Tier-1 dotted sugar),
+  the Elixir __spacetime_contract__ emitter (Wave C), hot-swap.
+
+* Acceptance
+- A `live()` page firing an unknown event → E0928 (RED test).
+- The same page aligned with its .contract.json → passes (GREEN test).
+- A demo (counter or the kanban) carries a real .contract.json + the check runs.
+- cargo test --lib green; the comparator has unit tests on its core (subset check
+  + name resolution) independent of the full pipeline.
+
+* Diagnostic
+E0928 — "live host event/reply not in server contract": the page fires/decodes
+something the named LiveView module does not declare.
+
+NOTE [2026-06-20]: Built 2026-06-20. The self-aware LiveView contract comparator: src/analysis/liveview_contract.rs (pure data-in/out core + extraction + sidecar loader + E0928). collect_live_hosts reads @host live() bindings; collect_page_intents extracts send-emit events from @data signal/stream; compare() checks each intent's event ⊆ the bound server module's contract; load_contracts reads <page>.contract.json sidecars. Wired into check (main.rs) + doctor.rs after register_macro_yield_signals. New diagnostic E0928. Tests: 6 unit tests on the comparator core (aligned/typo/no-contract/non-live-host/extraction×2). Proven end-to-end on demos/liveview-counter: aligned passes, `increment` typo → E0928 listing [inc,dec]. Opt-in (no sidecar → no check, no false positives). Found BUG-128 (empty send body { } drops capture) while building — filed, worked around with no-body form. cargo test --lib 2449 passed + 179 integration. NOTE: refreshed 5 pre-existing stale snapshots (signal-call rail from uncommitted PLAN-053 working state, unrelated to this work). NOT in scope (deferred): Tier-1 dotted-sugar hole derivation, the Elixir __spacetime_contract__ emitter (Wave C), reply/push variant checking.

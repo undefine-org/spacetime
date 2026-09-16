@@ -1,0 +1,66 @@
+#+TITLE: The kanban wow demo: collaborative board with optimistic drag, cursor trails, and animated transitions between server states
+#+STATE: DONE
+#+SESSION_ID: 1539989eb44441ea
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-22T09-34-26-513Z_1539989eb44441ea.jsonl]]
+#+CUSTOM_ID: FEAT-162-the-kanban-wow-demo-collaborative-board
+#+DEPENDS: FEAT-159 FEAT-160 FEAT-161
+#+COMPLETION_HASH: a56fde16e1ee2ce6
+
+* Initial Message
+
+explain the FUPs and show me your vision for the Spacetime <> LV connection and what would make it *wow*. Exlpain the impact of each bug that you saw
+
+* The wow demo — exercises all three pillars in one page.
+Depends on FEAT-159 (subscribe), FEAT-160 (contract DSL + pushes),
+FEAT-161 (continuity). Principles: elixir/spacetime_lv/AGENTS.md §bridge
+principles — this demo is their living proof; anything it needs that breaks a
+principle is a missing mechanism, designed per the repo-root elegance bar.
+
+* What it is
+A collaborative kanban in elixir/spacetime_lv: `SpacetimeLvWeb.BoardLive`
+(server-authoritative board state: columns, cards, positions) +
+`frontend/board.st` (the ENTIRE view) + `frontend/$hosts.st` gains
+`@host $board : live("SpacetimeLvWeb.BoardLive")`. PubSub broadcasts board
+changes to every connected socket. No HEEx view logic, no phx-click, no custom
+JS beyond the SpacetimeBridge hook.
+
+* The three wow moments, concretely
+1. *Optimistic drag.* Drag a card → it snaps to the target column INSTANTLY
+   (@handle optimistic arm, FEAT-161) while `send emit "move_card"` round-trips;
+   on {:reply, %{tag: "ok"}} it stays, on a rejection (card locked / version
+   conflict) it glides back. Server applies the move and broadcasts.
+2. *Cursor trails.* Every connected client's cursor renders on every other
+   client as a labelled trail (ephemeral presence channel, FEAT-161 §3;
+   Presence tracks join/leave so trails appear/disappear with users). Your own
+   cursor is pure .st — zero wire cost.
+3. *Animated transitions between server states.* When another user moves a
+   card, the assign diff streams in (FEAT-159) and the card GLIDES to its new
+   column on your screen (@clock/@timeline, FEAT-161 §2) — never a snap, never
+   a full re-render. A typed push ("Mara moved 'Write docs' → Done") fires the
+   @data stream toast (FEAT-160 §2) exactly once.
+
+* Contract
+BoardLive declares its sections via the FEAT-160 DSL (events: move_card,
+add_card, lock_card…; assigns: items, presence; pushes: flash) —
+`mix spacetime.contract` emits BoardLive.contract.json; the .st build checks
+against it (E0928-family, all three rules).
+
+* Layout
+    frontend/board.st                ← the page
+    frontend/$hosts.st               ← + @host $board
+    lib/spacetime_lv_web/live/board_live.ex
+    test/spacetime_lv_web/live/board_live_test.exs
+
+* Acceptance (all four)
+1. mix test green incl. BoardLive tests (markup, move_card reply contract,
+   PubSub broadcast → st-set diff asserted).
+2. cargo check frontend/ green; deliberate contract violation (emit an
+   undeclared event / subscribe an undeclared assign) → RED.
+3. Two-browser e2e (@drive --cdp or puppeteer): drag in browser A → card
+   animates in browser B < 1 frame of snap; cursor in A visible in B;
+   rejection path (lock a card in B, drag it in A) → card glides back in A.
+4. Zero custom JS added outside the SpacetimeBridge hook (diff-audited).
+
+NOTE [2026-07-22]: 2026-07-22: BoardLive/server contract, .st board, optimistic versioned move/rollback, PubSub items diff, FLIP, typed one-shot flash, focused tests, full mix tests, and frontend contract check are green. NOT DONE: remote cursor trail acceptance cannot be truthfully completed: bridge has `pushEphemeral` rAF coalescing in app.js but no generic declarative client→server ephemeral signal/Presence reconciliation surface; board-specific JS would violate bridge rule 5. Two-browser cursor/rejection evidence and deliberate contract-violation RED remain pending after that reusable bridge mechanism lands.
+
+NOTE [2026-07-22]: DONE 2026-07-22 (orchestrator e2e closure, commit dd6b514c on top of adb318ba + 746137af). TWO-BROWSER EVIDENCE (puppeteer A + CDP-driven headless Chromium B; artifacts/FEAT-162-browser-{A,B}.png): (1) remote cursor — A's ephemeral publish ($localX/$localY → `send emit "cursor" ephemeral`, rAF-coalesced by the bridge) → Presence.update → presence assign diff → B's `@data subscribe $presence` → B renders A's labelled cursor at the exact coalesced coords (507.5, 370 traced); (2) cross-client drag sync ×5 (research/brief→doing, docs→todo, brief→done, prototype→done) — every move appeared in the other browser via PubSub → assign diff → subscribe; (3) observer toasts — broadcast carries the flash, non-origin sockets push it to their own stream (mover got its direct push; fire-once both ways; "Moved Shape the brief to done" observed in B, "Moved Prototype the flow to done" in A); (4) drag physics — 12 intermediate transform frames sampled during a drag in B; (5) optimistic rollback on the board — stale-version move_card → server {:reply, %{tag: "err"}} → "Card version is stale" surfaced via $moveError, items restored. mix precommit 16/16 · cargo check frontend/ 3/3 · contract-violation RED→GREEN (prior agent). E2E found + fixed five silent chain-breaks: pointer.st JSON-array-string events param (attached ZERO listeners — @local-pointer never worked in a real browser), bare-ident signal params → empty callParams (BUG-210 filed), $.clientX in @on body ($ = element, not event) → publish via @local-pointer yields, presence map→list (@each does not walk maps), unbound .toast node, mix spacetime.contract one-module default. HONEST GAP: @flip does not visibly animate card transitions on remote updates in a real browser (no intermediate frames on $items writes; likely @each node-identity vs FLIP persistence) — FUP-132. Zero board-specific JS (app.js untouched by the demo).

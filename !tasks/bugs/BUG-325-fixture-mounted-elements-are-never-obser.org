@@ -1,0 +1,118 @@
+#+TITLE: Fixture-mounted elements are never observed, so every viewport-driven cdp gate is vacuous
+#+STATE: ITEM
+#+SESSION_ID: 154d0baaa942d918
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-08-06T12-08-13-733Z_154d0baaa942d918.jsonl]]
+#+CUSTOM_ID: BUG-325-fixture-mounted-elements-are-never-obser
+
+* Initial Message
+
+exlpain #30, and for #14 and #11, does the new @on's text-change facet solve this?
+
+#+STATE: ITEM
+#+PRIORITY: A
+
+* Symptom
+
+Under `--cdp` (real Chromium, `google-chrome-stable`), a `@on &.visible(...)` timeline
+attached to a `@fixture`-mounted element NEVER runs. The element's inline `opacity` stays
+at the literal `'0'` it was given; it never reaches `'1'`.
+
+#+begin_src spacetime
+@import "stdlib/testing/test"
+.curtainF {
+  @on &.visible(300ms) as $reveal { opacity: 0 -> 1; }
+}
+@test "baseline" needs layout {
+  @fixture { <div class="curtainF" style="opacity: 0">x</div> }
+  @wait 800ms
+  @assert (document.querySelector('.curtainF').style.opacity === '1')  // FAILS
+}
+#+end_src
+
+* What is NOT wrong (each checked against the built bundle)
+
+- The selector reaches the bundle: `grep -c curtainF spacetime.js` = 4.
+- The observer is emitted: `grep -c "new IntersectionObserver"` = 1.
+- The same shape on a REAL page (`build` of an ordinary index.st) wires the observer to the
+  same class correctly.
+- The element exists at assert time (a sibling assertion on `document.querySelector` passes).
+- No timeline/runtime properties are attached to the fixture element at all: enumerating its
+  own keys for `st*`/`_st*` yields an empty string.
+
+So the compiler output is right and the runtime is right on a real page. What is missing is
+that an element mounted by `@fixture` is never handed to the initialization path that
+registers it with the IntersectionObserver.
+
+* Why this is worse than one failing test
+
+`needs layout` makes these tests SKIP on `--headless`. They therefore reported
+"0 passed, 0 failed, 0 skipped" or a silent skip on the fast backend, and could only ever
+run under `--cdp` — which had never been run, because the binary was not built with
+`--features cdp` and the environment was wrongly recorded as having no browser.
+
+The result: EVERY viewport-driven `.cdp` gate in the repo is currently incapable of proving
+its feature. They do not fail — they never execute the thing they assert. This is precisely
+the vacuity class that BUG-309's zero-assertion rule was written to eliminate, reappearing
+one rung up the fidelity ladder: the assertion runs, but the feature under it was never
+armed.
+
+BUG-309 made "a test that asserts nothing fails". The missing sibling rule is "a test whose
+subject never initialized fails" — a fixture that mounts markup but does not run the
+element-init path is a harness that certifies nothing.
+
+* Fix direction
+
+Make `@fixture`'s mount call the same element-initialization path a real page load uses
+(the one that flushes pending selector-scoped primitives and registers observers), rather
+than only inserting markup. GH-19 fixed the analogous gap for the HEADLESS backend —
+selector-scoped primitives not initializing — so the shape of the repair is known; this is
+the `--cdp` half of the same defect and should reuse it, not fork a second path.
+
+* Gate
+
+The repro above must pass under `--cdp`. Then re-run every `needs layout` / `needs paint`
+gate in tests/repro — several are expected to change verdict once their subject actually
+initializes, and each new verdict must be re-triaged rather than assumed green.
+
+* Consequence for GH-6 (BUG-315)
+
+`tests/repro/gh-6-hold-end-state/re-entry.cdp.test.st` fails today, but NOT for the reason
+it was written to detect. It fails at its FIRST assertion (the reveal never reaches
+opacity:1) rather than at the re-entry revert it was built to catch. So the re-entry
+question — the caveat raised when GH-6 was closed — remains genuinely UNANSWERED, and will
+stay unanswerable until this bug is fixed. Do not read that red as evidence either way.
+
+NOTE [2026-08-07]: RESOLVED — and the original diagnosis was WRONG. Recording both, because the wrong diagnosis is
+the more useful lesson.
+
+I filed this as "fixture-mounted elements are never handed to the element-init path, so they are
+never registered with the IntersectionObserver". That was inference from a symptom, not an
+observation: I saw `@on &.visible` never reach opacity 1 under --cdp, checked that the compiler
+output and a real page were both fine, and concluded the fixture path must be the gap.
+
+The actual cause was BUG-328 (`&$capture.member` read as a CSS selector), which made EVERY page
+importing stdlib emit a bundle that does not parse. The reveal never ran because the whole
+bundle was dead. There was never a fixture-init defect.
+
+Verified after BUG-328's fix (commit cdd3e397), on /home/user/cdp-target/debug/spacetime:
+- the exact repro from this bug's body: 1 passed (was: "never reached opacity 1")
+- tests/generalizations/g2-subject-armed.cdp.test.st: 2 passed
+- tests/repro/gh-6-hold-end-state/re-entry.cdp.test.st: 1 passed
+
+That last one settles the question left open when GH-6 was closed: a one-shot `@on &.visible`
+does NOT revert when the element leaves and re-enters the viewport. BUG-315's premise is
+disproved — see its own note.
+
+THE LESSON, which outlives this bug: a dead bundle is indistinguishable from a dead feature at
+the assertion layer. Both produce "the element did not move". I attributed a global compile
+failure to a local subsystem because I checked that the SOURCE compiled (`check` passed on a
+minimal page) without checking that the BUNDLE parsed on the page under test. The distinguishing
+observation cost one command — building the actual fixture page — and I did not spend it before
+filing.
+
+What stays true from this item: `needs layout`/`needs paint` tests SKIP on --headless and the run
+still exits 0, so a whole dead file reads exactly like a green one. That half was real and is now
+covered by BUG-332 (a run that executed nothing must not report success) and by
+tests/generalizations/g2-subject-armed.cdp.test.st, which asserts the subject is ARMED before
+asserting anything about its behavior — so a future failure of this shape is attributable instead
+of mysterious.

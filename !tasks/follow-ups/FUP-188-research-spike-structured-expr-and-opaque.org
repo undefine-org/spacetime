@@ -1,0 +1,90 @@
+#+TITLE: Research spike: structured Expr / opaque-body IR (kill the raw-text captures)
+#+STATE: ITEM
+#+CUSTOM_ID: FUP-188-research-spike-structured-expr-and-opaque
+#+PRIORITY: #B
+
+* Origin
+
+Split out of PLAN-148 (EDN-Spacetime). PLAN-148 deliberately does NOT depend on
+this: it adopts a fail-loud contract instead (raw captures print VERBATIM from
+capture text, and text that fails to re-parse is a verse bug with a reproducer).
+
+The ask that produced this spike: "ideally we improve verse to not have any of
+these fallbacks so that it always fails loudly or it's impossible by
+construction." Fail-loud ships in PLAN-148 W2. IMPOSSIBLE-BY-CONSTRUCTION is
+this spike.
+
+* Measured scope (probe over the live STDLIB_REGISTRY, 2026-08-13)
+
+Across 415 registered forms, ~1150 captures. The non-structured remainder:
+
+| capture | count | why it resists printing |
+|---------+-------+-------------------------|
+| =Expr= | 71 | holds raw JavaScript source text |
+| =Balanced(';')= | 4 | opaque balanced token run |
+| body =expr= | 7 | raw body text |
+| body =block= | 13 | raw body text |
+| body =balanced= | 10 | raw body text |
+| body =template= | 6 | raw body text |
+| body =component_body= | 5 | bare presence-marker (payload lives in the =@template:<name>= scope) |
+
+~10% of captures, clustered on exactly TWO concepts: embedded JS, and opaque
+balanced blocks. Everything else (Number 216, String 182, Ident 119, Binding 89,
+Time 68, Selector 61, Bool 46, Typeref 23, =Union([...])= 21, properties 35,
+keyframes 20, on_motion_body 18, param_list 14, ...) is already structured and
+pattern-printable.
+
+* Observed defects that motivate this
+
+Parsing =@fn add($a: number, $b: number) : number { $a + $b }= yields:
+
+- =body= => =Expr("{ $a + $b")= — UNBALANCED BRACE (leading ={=, no closing =}=)
+- =params= => =ParamList([TemplateParamDef { name: "a", ... }])= — =$b= DROPPED
+
+Both are silent. Nothing downstream complains. This is the class of defect a
+structured IR makes impossible rather than merely detectable.
+
+* The question
+
+Can =CapturedValue::Expr= become a typed JS expression rather than a =String=?
+
+=swc_ecma_parser= / =swc_ecma_ast= are ALREADY dependencies (used today for JS
+syntax validation without V8), so the parsing capability exists in-tree.
+
+* Why this is a language-design project, not a refactor
+
+It changes:
+- what =.st= authors may write inside an expression (the accepted grammar becomes
+  explicit rather than "whatever survives to codegen");
+- what diagnostics say (errors can point INSIDE an expression, with spans);
+- how =%emit= substitutes bound arguments into generated code;
+- the =CapturedValue= serde shape (=FormMatch= is serialised in artifacts).
+
+Hence its own plan, its own waves, its own risk budget. Coupling it to the EDN
+translator would block both.
+
+* Payoff (beyond EDN)
+
+1. Real diagnostics inside expressions instead of opaque strings.
+2. Safe refactoring/renaming across expression boundaries.
+3. =%emit= substitution CHECKED rather than textual.
+4. Removes the last non-structured corner of "the grammar is data".
+5. Makes the PLAN-148 W2 printer total by construction — no verbatim path at all.
+
+* Deliverable of the SPIKE (not the implementation)
+
+- Enumerate what the 71 =Expr= sites actually contain (expression? statement?
+  fragment? interpolation?) — a census, not a guess.
+- Decide whether ONE IR covers all of them or whether =Expr= is really several
+  distinct capture types wearing one name.
+- Assess the =component_body= presence-marker case separately: its payload lives
+  in a sibling scope, so it may need scope-reference rather than inline IR.
+- Cost/risk estimate for the real plan, incl. the serde-compat break.
+- Recommendation: do it, defer it, or narrow it.
+
+* Depends on
+
+PLAN-148 W2 — its corpus run produces the authoritative defect list (every form
+that cannot pattern-print, and every verbatim capture that fails to re-parse).
+Run the spike AFTER that list exists, so the census is grounded in measured
+failures rather than in this file's estimates.

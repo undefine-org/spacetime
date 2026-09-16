@@ -1,0 +1,62 @@
+#+TITLE: MCP region clear leaves guest mounted (registerBundle ignores empty bundle)
+#+STATE: DONE
+#+SESSION_ID: 15107fcc57696c12
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-20T11-28-16-221Z_15107fcc57696c12.jsonl]]
+#+CUSTOM_ID: BUG-125-mcp-region-clear-leaves-guest-mounted-re
+#+LAYER: mcp
+#+PRIORITY: #A
+#+COMPLETION_HASH: 726259f4b450441f
+
+* Initial Message
+
+launch the spacetime mcp
+
+* Summary
+Clearing a composed region on the MCP workbench (W1 clear-stage button, or
+PLAN-049 W4 per-frame unmount, or st_unmount of a stage guest) drops the
+server-side `region_mounts[region]` correctly, and the server's
+`/bundles?region=` endpoint returns an EMPTY bundle (`{ empty: true,
+templates: [] }`) — but the browser guest is NOT torn down. The stage keeps
+showing the old composed frame; the empty-state never returns.
+
+* Root cause (source-verified)
+`public/runtime/templates.js::Spacetime.registerBundle` returns early with
+`false` when `registeredCount === 0` (the empty-bundle case):
+
+    if (registeredCount === 0) {
+      console.warn('[ST] registerBundle: no templates registered for region', regionId);
+      return false;
+    }
+
+It never RESETS the region's `stageTpl` signal, so the `@view $stageTpl { _ =>
+&$stageTpl(); }` on the region root keeps the previously-mounted guest. The
+server side is correct (returns empty); the teardown half was never wired.
+
+* Impact
+- PLAN-049 W1 clear-stage glyph: server clears, UI keeps the guest.
+- PLAN-049 W4 per-frame unmount (×): same.
+- Pre-existing since the clear path shipped; only surfaced now because W1/W4
+  added the UI affordances that exercise it (round-1/2/3 never cleared a region
+  from the browser, only composed).
+
+* Fix
+In `registerBundle`, when the bundle is empty (`bundle.empty === true` OR zero
+templates AND no css), CLEAR the region signal instead of returning false:
+resolve the region root, `ST.set(regionRoot, signalName, null)` (or ''), and
+remove the scoped `<style id="st-bundle-{region}">` element, so `@view`
+unmounts the guest and the empty-state CSS (`:has(> :not(.mcp-stage-empty))`)
+re-reveals. Guard the existing fingerprint/no-op path so a steady-state empty
+poll doesn't thrash.
+
+* Acceptance
+- Compose a guest on the stage; click clear-stage (or a frame ×); within one
+  poll the guest is gone and the empty-state returns.
+- A steady empty region does not churn (no repeated re-mount).
+- v8 runtime tests + MCP headless tests stay green.
+
+* Provenance
+Found during PLAN-049 W4 live-verification (frame strip unmount left the guest
+DOM). Belongs to PLAN-049 (the lifecycle/driveability round) but is a runtime
+fix, tracked as its own BUG since it predates W4.
+
+NOTE [2026-06-20]: Fixed in PLAN-049 W4 (commit 8364eaee) + race-fix (a0924370). registerBundle empty-bundle branch now tears down the mounted guest (resets stageTpl signal, fires @view update, clears auto-stage DOM, removes scoped style) instead of returning false. Race-hardened: per-region response-sequence guard drops stale out-of-order poll responses. Live-verified: compose -> clear -> recompose cycle clean.

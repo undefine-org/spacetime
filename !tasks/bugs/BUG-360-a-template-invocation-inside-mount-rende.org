@@ -1,0 +1,75 @@
+#+TITLE: a template invocation inside @mount renders twice
+#+STATE: ITEM
+#+SESSION_ID: 153497be379ff5cc
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-18T12-18-12-318Z_153497be379ff5cc.jsonl]]
+#+CUSTOM_ID: BUG-360-a-template-invocation-inside-mount-rende
+
+* Initial Message
+
+please explain and cluster the remaining failures from zero context so that we may have a last push to fix them all
+
+* Summary
+
+A template invoked inside a test's ~@mount~ block produces TWO elements: the
+correct one inside its container, and a stray duplicate appended as a direct
+child of the mount ~<div>~.
+
+#+begin_src spacetime
+@test "where is the second copy" {
+  @mount {
+    @template &pl4() { <div class="pe">x</div> }
+    <main class="page"></main>
+    .page { &pl4(); }
+  }
+  @then .page .pe      should have_count 1   // ✓ correct one
+  @then body > div > .pe should have_count 1 // ✓ STRAY duplicate
+  @then .pe            should have_count 2   // ✗ should be 1
+}
+#+end_src
+
+That test passes today — it documents the CURRENT (wrong) shape. The contract
+is that `.pe` has count 1.
+
+* Not caused by the named ref
+
+Reproduces with a BARE invocation and no ref anywhere (`.page { &pl4(); }`), so
+it is independent of BUG-360's registry work. It also reproduces with a
+signal-free template, so it is not about reactivity.
+
+* Mechanism (partly established)
+
+`@mount` (`stdlib/testing/test.st`, `%macro mount`) does two things in sequence:
+
+1. `__mount.innerHTML = ` + the block's `fixture_html`
+2. runs the block's compiled `%$content.js`
+
+The invocation appears to be realized by BOTH paths — once into the fixture
+HTML and once by the runtime `invoke-template` primitive.
+
+The real-build path has a guard for exactly this: `invoke-template` looks for
+`:scope > [data-st-ssg="1"]` and REPLACES the SSG placeholder rather than
+appending beside it. Measured under `--headless`, the mounted DOM contains NO
+`[data-st-ssg]` element at all (`@then [data-st-ssg] should have_count 0`
+passes), so that guard cannot fire — the placeholder is either not marked or
+not present in the fixture-HTML path. Whether the fixture HTML lacks the
+marker, or the mount path strips it, is the open question.
+
+* Why it stayed invisible
+
+Every existing assertion is scoped (`.page .pe`, or a `&ref`-scoped descendant)
+and matches the correct copy, so a duplicate outside the container is never
+observed. It surfaced only when a `have_count` assertion was pointed at the
+bare class while investigating BUG-360.
+
+Consequence for tests: any unscoped `have_count` in a `@mount` test that
+invokes a template is off by the number of invocations. Any such assertion
+currently passing with an inflated expected value is encoding this bug.
+
+* Verify
+
+#+begin_src spacetime
+@then .pe should have_count 1
+#+end_src
+
+with the repro above. Done when a single invocation yields a single element and
+no stray child of the mount div.

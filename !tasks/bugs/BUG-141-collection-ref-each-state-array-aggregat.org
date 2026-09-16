@@ -1,0 +1,43 @@
+#+TITLE: Collection-ref @each state-array aggregation (&cards[] populates $cards)
+#+STATE: DONE
+#+SESSION_ID: 151324b4cb5d38d9
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-22T12-45-43-597Z_151324b4cb5d38d9.jsonl]]
+#+CUSTOM_ID: BUG-141-collection-ref-each-state-array-aggregat
+#+COMPLETION_HASH: 6ccf0d392316ba30
+
+* Initial Message
+
+review all headless tests and categorise them. which ones are code issues and which ones are test harness problems? this is an overall review of the test infra. i want to get to 0 at the end of this session
+
+* Context
+Follow-up from PLAN-059 (headless test infra review). The COLLECTION-REF render gap (BUG-130 tail) is now FIXED: `&cards[] .sel { @each(…){ &child } }` inside a @template body RENDERS its children (was dropped entirely). Two layers landed:
+1. src/parser/mod.rs `collection_ref_scopes_from_body` — harvests ELEMENT_REF_STMT bodies as nested scopes (selector = the block's selector, `[]` marker stripped), recording the ref name in the new `NestedScope.collection_ref` field.
+2. src/syntax/events/match_sink.rs — a collection-ref `&name[] .sel { @each }` body surfaces its interior @each FLAT (grandparent ELEMENT_REF exemption), so the @each FormMatch exists and span-assigns into the harvested scope, then emits + renders.
+
+Verified: tests/unit/templates/collection-ref-each.test.st went 4 fail → 2 fail; the two render tests ("collection ref + @each creates children", "each child is a cref-card element") now PASS.
+
+* Remaining gap (this item)
+The COLLECTION-REF STATE ARRAY is not yet populated. The two still-failing tests:
+- "MutationObserver sets collection ref state to array" — expects `Array.isArray(ST.get(host, 'cards'))`.
+- "collection ref state elements match container children" — expects `ST.get(host,'cards').length === container.children.length`.
+
+The `&cards[]` collection marker semantics: the host element should expose `$cards` = the live array of the `.cref-cards` container's child elements (the @each output), maintained by a MutationObserver. Today `NestedScope.collection_ref` carries the name (`cards`) through the parser, but NOTHING emits the observer — so `ST.get(host,'cards')` is undefined.
+
+* Fix direction
+Emit, for a nested scope with `collection_ref: Some(name)`, a `registerSelectorInit` on the scope selector (`.cref-cards`) that:
+  (1) installs a MutationObserver on the container watching childList,
+  (2) on change, `ST.set(<host root>, name, Array.from(container.children))`,
+  (3) fires once initially.
+The host root is the enclosing @template instance root (walk to the template's root selector). The runtime already accumulates collection refs for DIRECT `&cards[] &tmpl()` invocations (templates.js bodyRefs, is_collection) — this is the @each-driven sibling of that path.
+
+Insertion point: a new `generate_collection_ref_fragments` analogous to `generate_state_fragments` in src/pipeline/mod.rs, OR thread it into the template factory builder (src/emit/html_reactive.rs) which already owns per-instance scope wiring. The `collection_ref` field is already plumbed parser→AST; the emit is the only missing piece.
+
+* Acceptance
+- The 2 collection-ref-each state tests pass headless.
+- No regression in the 5 render/structure tests already green in that file.
+- DIRECT collection-ref invocations (templates.js bodyRefs path) unaffected.
+
+* Severity
+Low — collection-ref AGGREGATION is a niche binding; the common case (render a list via @each) works. Filed to keep the headless suite's intent visible; the 2 tests are the formal pins.
+
+NOTE [2026-06-22]: RESOLVED in the same PLAN-059 session. Wired the collection-ref state array: src/compiler.rs::emit_collection_ref_js emits a registerSelectorInit on the container selector that installs a MutationObserver mirroring the container's children into ST.set(host, name, [children]) on the enclosing instance root (host = container.parentElement for the direct-child shape, the common case). NestedScope.collection_ref carries the ref name parser→emit. All 7 tests/unit/templates/collection-ref-each.test.st pass (was 2 failing). Full headless suite: 598 passed, 0 failed, 15 skipped. No regressions (lib 2502, integration 181, v8 437, snapshots 74 all green).

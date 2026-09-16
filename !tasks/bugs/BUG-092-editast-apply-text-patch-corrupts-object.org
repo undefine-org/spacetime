@@ -1,0 +1,39 @@
+#+TITLE: EditAst apply_text_patch corrupts object-literal siblings + misses quoted keys
+#+STATE: DONE
+#+SESSION_ID: 14fc108ed3772fa8
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-04T14-32-37-965Z_14fc108ed3772fa8.jsonl]]
+#+CUSTOM_ID: BUG-092-editast-apply-text-patch-corrupts-object
+
+* Initial Message
+
+what will this look like in the end? why are you saying that EditJson stays out of AST? Think about this: what if the tokens were never in json in the first place? AP1 and AP2 need structural fixes, not this, I think you are not going very far in envisioning this as a full meta-language. What is the ideal syntax and DX and UX?
+
+* Problem
+EditAst's apply_text_patch (src/sync/handlers.rs) was built for directive option
+bodies (`duration: 800ms;` — bare key, `;`-terminated). Editing one key of an
+OBJECT-LITERAL value (the brand singleton `@data inline $brand : { "scarlet":
+"#FF0020", "ink": "#0a0a0a", "radius": "8px" }`) corrupted siblings:
+- It matched `key:` only (bare) → a quoted `"ink":` key was "not found".
+- It terminated the value at the first `;` OR `}` → for a comma-separated object
+  literal with no `;`, editing `ink` ate everything up to the closing `}`,
+  destroying the `radius` sibling.
+
+* Root cause (oracle 65-BrandSingletonScope rank-2)
+apply_text_patch is the EditAst .st writeback. It assumed flat directive-body
+shape. Object literals use quoted keys + comma separators + quoted string values.
+
+* Fix
+- Match BOTH `"key":` (object entry) and `key:` (directive body).
+- Terminate the value at the first DEPTH-0 `,`, `;`, or `}` (respecting nested
+  ()[]{} + quoted strings), so a sibling entry after a `,` is never swallowed.
+- Preserve JSON quotes when the original object value was a quoted string
+  (`"ink": "#00FF00"` stays quoted); bare directive values stay verbatim.
+
+* Acceptance (RED→GREEN, unit)
+- test_apply_text_patch_object_literal_middle_key_preserves_siblings: editing the
+  middle key changes only it; scarlet + radius survive byte-exact.
+- test_apply_text_patch_object_literal_last_key: last key edits, literal closes
+  cleanly. Original directive-body tests still pass (7/7, handlers 96/0).
+
+This unblocks PLAN-034 Wave B: the admin's Brand pane edits a token → EditAst
+rewrites the .st singleton literal without destroying other tokens.

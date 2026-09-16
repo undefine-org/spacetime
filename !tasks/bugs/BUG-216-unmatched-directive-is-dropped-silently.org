@@ -1,0 +1,202 @@
+#+TITLE: A directive body that fails to parse compiles to silence — @assert with an expression message vanished and the test PASSED
+#+STATE: DONE
+#+CUSTOM_ID: BUG-216-unmatched-directive-is-dropped-silently
+#+PRIORITY: #A
+
+* Summary
+
+When a directive matches no registered `%form`, the compiler records a
+`MatchDiagnostic` — and then every caller THROWS IT AWAY. The directive vanishes
+from the emitted bundle with no error, no warning, and a green `spacetime check`.
+
+The visible instance: an `@assert` whose failure message is a parenthesized
+EXPRESSION rather than a string literal compiles to NOTHING, so the assertion
+never runs and the test PASSES.
+
+#+begin_src st
+  @assert (false) ("expected 3, got " + rows.length)   // compiles to NOTHING — test passes
+  @assert (false) "expected 3 rows"                    // works
+  @assert (false) ("literal")                          // works (no dot/call inside)
+#+end_src
+
+* Why this is #A
+
+A test that reports the value that failed is the test you most want to write —
+and it is exactly the one that silently stops asserting. The failure mode reads
+as CORRECT in review: the assertion is right there in the source. It is only
+absent from the compiled output.
+
+This is not limited to `@assert`. ANY directive whose form fails to match is
+deleted without complaint, so a typo'd or slightly-off directive anywhere is a
+silent no-op.
+
+* Reproduction (verified this session)
+
+#+begin_src bash
+  cat > /tmp/p/index.st <<'EOF'
+  @import "stdlib/testing/test";
+  @test "probe" {
+    @fixture { <div class="x"></div> }
+    @assert (false) ("m " + foo.bar)
+  }
+  EOF
+  cargo run -- build --output /tmp/o /tmp/p/index.st
+  grep -c "__cond" /tmp/o/spacetime.js     # → 0   (the string-message form gives 2)
+  cargo run -- check /tmp/p/index.st       # → "✓ All 1 file(s) passed"
+#+end_src
+
+Narrowed by bisection: the trigger is a DOT (member access) or a call inside the
+parenthesized message. `("a" + "b")` and `("a" + (1+2))` match; `("a" + x.y)`
+does not — because `StringExtractor` explicitly refuses an ident followed by
+`.`/`(`/`[` (correctly — it must not capture the head of a larger expression),
+and the form has no other arm to fall back to.
+
+* Root cause (two layers)
+
+** Layer 1 — the silence (the real bug)
+
+`src/syntax/events/match_sink.rs` builds a `MatchDiagnostic` for a top-level
+unmatched node. But every caller discards it:
+
+: src/parser/mod.rs:423    let (matches, _diags) = parse_matches(source, reg);
+: src/parser/mod.rs:2032   let (augmented_matches, _diags) = parse_matches(source, &augmented);
+: src/parser/mod.rs:2035   let (stdlib_matches, _)  = parse_matches(source, &STDLIB_REGISTRY);
+: src/parser/mod.rs:2115-6 (same pair again)
+
+Note this cannot be a blanket "promote all diagnostics to errors": the
+multi-registry passes parse the SAME source twice (stdlib-only, then augmented
+with user macros), and the stdlib-only pass legitimately fails to match
+project-local directives. The fix must only report a directive unmatched by the
+FINAL/augmented registry.
+
+** Layer 2 — `@assert`'s form is too narrow
+
+: @assert $condition:expr $message:string? = ""
+
+`:string` cannot hold an expression. Attempts made this session and why each
+failed (recorded so they are not retried blindly):
+
+- `( $message:string | $message:expr )?` inline in the `%form` — an ordered-choice
+  group inline in a form did not bind; `|` choice appears only in `%capture_type`
+  productions in the current stdlib.
+- A `%capture_type assert_message { ( $message:string ) | ( "(" $message:expr ")" ) }`
+  — the type did not register/resolve as a form capture (`inspect --layer macros`
+  showed nothing); needs the capture-type→form-capture path understood first.
+- `$message:expr?` alone — the greedy `:expr` CONDITION then swallows the
+  message and BOTH forms break.
+
+A `NextBoundary::ParenExprCapture` was added to
+`src/syntax/events/form_compiler.rs` (landed, commit 4655ee0e): when an `:expr`
+capture is followed by another `:expr`/custom capture, the first stops at the
+top-level `(` that opens a new expression. This is the boundary the string arm
+already had (`NextBoundary::StringCapture`) and is a prerequisite for any
+two-expression form. It is in place and harmless, but not yet sufficient on its
+own — the message slot still needs a capture type that ACCEPTS an expression.
+
+* Fix plan
+
+1. Report unmatched directives from the final registry pass as a hard error
+   (E-code), with the directive name and its span. This alone converts every
+   instance of this class from silent-wrong to loud-wrong.
+2. Give `@assert` a message slot that accepts a string OR a parenthesized
+   expression, using the boundary already landed.
+3. Regression tests: (a) a directive that matches no form FAILS the build;
+   (b) `@assert (false) ("x " + a.b)` emits a throw and FAILS at runtime;
+   (c) `@assert (false) "plain"` still works; (d) `@assert (cond)` bare still works.
+
+* Blast radius (measured, not estimated)
+
+A scan of every `.st` under `stdlib/ tests/ examples/ projects/ demos/` found
+ZERO currently-inert assertions of this shape — the one instance was a debug
+assertion written this session and already replaced. So this is a latent trap
+with no live damage today, which is why it is #A-priority but not an incident.
+
+* Partial fix already landed (commit 4655ee0e)
+
+`@assert`'s emit no longer treats a falsy message as absent (a `0` message
+became "Assertion failed") and stringifies a non-string message. The FORM is
+unchanged, so the silent-drop remains until the plan above is executed.
+
+* RESOLVED (2026-07-25, commit b956a25d + W1.1 review follow-up)
+
+** The root cause above is WRONG — corrected here
+
+Everything before this heading is the original filing. It named the mechanism as
+"an unmatched directive is dropped, and every caller discards the
+MatchDiagnostic", citing the four `_diags` sites in `src/parser/mod.rs`. Measured
+with a probe, that is not what happens: this source produces ZERO diagnostics, and
+the `@assert` DOES match. The `_diags` sites are real and still worth addressing,
+but they are not this bug.
+
+Kept rather than rewritten, because the misdiagnosis is the point: a plausible
+cause was written up with the confidence of a verified one, and anyone picking the
+item up would have started by threading a diagnostics channel that would not have
+fixed anything.
+
+** What was actually happening — two links
+
+1. *The CST over-narrowed.* `parse_directive`'s post-arglist loop consumed a
+   SECOND parenthesized group token-by-token. `("m " + a.b)` was eaten as far as
+   the `.`, which that loop treats as the start of a nested `.class` scope, so it
+   broke mid-expression and left `b)` to parse as a new statement — "expected '{'
+   after selector". This is why the trigger looked arbitrary: `("literal")` has no
+   `.`/`(`/`[` inside and parsed fine, while any message reporting a VALUE did not.
+
+2. *The emit swallowed the error.* The opaque-block recompile (FUP-069) bailed
+   with `let Ok(ast) = parse(..) else { return String::new() }`. An unparseable
+   body compiled to an EMPTY string, indistinguishable from a body that
+   legitimately emits nothing. The `@test` still registered, ran nothing, and
+   reported PASS.
+
+Link 2 is the severity. Link 1 was one construct failing to parse; link 2 is the
+reason no one could see it.
+
+** Fixes
+
+- `src/syntax/cst/parser.rs` — a trailing `(` in the post-arglist loop is consumed
+  as exactly ONE balanced group by a new `parse_balanced_paren_group`.
+- `src/emit/js.rs` — `block_body_parse_failure_js` emits a `throw` naming this bug
+  and stating that the body's contents did not run, instead of returning "".
+
+*** Review follow-up (important)
+
+The first version of the parser fix called `parse_inline_expression()`, which
+consumes to a STATEMENT boundary (`;` `{` `}`) rather than to the group's matching
+`)` — so after the group closed it kept going and ATE THE NEXT STATEMENT. A
+sibling `.after { … }` scope silently disappeared, and an unclosed group consumed
+to EOF. That is a worse defect than the one being fixed, and it was caught by the
+W1.1 reviewer swarm, not by my own tests. Both cases are now locked by tests
+(`a_trailing_paren_group_does_not_swallow_the_next_statement`,
+`an_unclosed_paren_group_errors_instead_of_eating_the_file`).
+
+** Still NOT fixed — `@assert`'s message slot
+
+The assertion now RUNS and FAILS correctly, but its custom message is still
+dropped: the form captures `$message:string?`, which cannot hold an expression, so
+`("m " + rows.length)` reports the default "Assertion failed".
+
+Two approaches were tried and REVERTED rather than shipped half-working:
+
+- `$message:expr?` — the greedy `:expr` condition swallows the message. Observed:
+  `condition = Expr("(false) \"plain\"")`, and all four assert forms then pass
+  VACUOUSLY (4 passed, 0 failed on a suite where every assertion is `(false)`).
+- `%capture_type assert_message { ( $message:string ) | ( "(" $message:expr ")" ) }`
+  in `stdlib/capture-types/assert-message.st` — the type REGISTERS (confirmed: it
+  appears in the registry's capture types) but never binds as a form capture; the
+  `message` field simply does not appear in the match. The capture-type →
+  form-capture resolution path needs to be understood before this can work. File
+  created, then deleted.
+
+`NextBoundary::ParenExprCapture` (`src/syntax/events/form_compiler.rs`, commit
+4655ee0e) remains in place and is still the right boundary for a two-expression
+form — but it is NOT sufficient alone, and remains unexercised by any stdlib form.
+
+Follow-up work, if picked up: the goal is a message slot that accepts a string OR
+a parenthesized expression, written as DATA (a capture type), not as a Rust arm.
+
+** Side effect: BUG-218
+
+Making the drop loud immediately exposed a test that had never mounted anything
+(`tests/fixtures/w8-seed/state-claims.test.st:18`). Proven pre-existing by
+restoring the old silent bail — it returns to green with an EMPTY body. Filed as
+BUG-218 with the blast radius measured: exactly 1 instance repo-wide.

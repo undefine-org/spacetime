@@ -1,0 +1,49 @@
+#+TITLE: Audit implementation
+#+STATE: DOING
+#+CUSTOM_ID: AUD-005-audit-implementation
+#+EFFORT: 1h
+#+PRIORITY: #B
+#+LAYER: coding-agent
+
+* Source
+Manual audit
+
+* Findings
+Three usages of the scoring pattern. The full "get_all_macros_by_form_directive + filter scope + score + max" block appears in 3 places:
+1. `evaluate_match` (evaluate.rs:122-134) — new
+2. `resolve_evaluated` (resolve.rs:57-70) — new
+3. `resolve_single` (resolve.rs:130-142) — pre-existing
+
+This is a DRY violation at 3 copies. Per the project rules: "DRY at 2. When you write the same pattern a second time, stop and extract a shared helper."
+
+Let me also check whether the test covers the negative case (no matching macro at all):
+
+The test only checks the happy path (directive-derived name finds the macro via fallback). There's no test for:
+1. When the fallback also finds nothing (both `get_macro` and form-directive return None)
+2. Multiple macros matching the same directive (scoring disambiguation)
+
+But the first case is already covered by the pre-existing behavior (returns empty `EvaluatedMatch` with `body_was_evaluated = false`), and the scoring tests exist in `form_scoring.rs`.
+
+Here are my findings:
+
+---
+
+## Findings
+
+### 1. DRY violation: form-directive lookup + scoring block is triplicated
+- **What**: The pattern `get_all_macros_by_form_directive → filter scope → score → max` is now copy-pasted in 3 locations across evaluate.rs and resolve.rs.
+- **Where**: `src/pipeline/evaluate.rs:122-134`, `src/pipeline/resolve.rs:57-70`, `src/pipeline/resolve.rs:130-142`
+- **Why**: Per project rules "DRY at 2", this should be a shared helper (e.g. `find_best_macro_for_form` on `MetaRegistry`). A fourth caller will copy-paste the pattern incorrectly. If the scoring logic changes (e.g. tiebreaker rules), all three must be updated in sync.
+- **Effort**: `small` — extract a method on `MetaRegistry` that takes `&str` name, `&HashMap<String, CapturedValue>` captures, and `&Option<String>` selector, returns `Option<&MacroDefAst>`. Wire it into all three call sites.
+
+### 2. No test for the resolve_evaluated fallback path
+- **What**: The fix in `resolve_evaluated` (resolve.rs:53-71) has no direct test. The unit test only covers `evaluate_match`. If the evaluate fix were reverted but the resolve fix remained, we'd have no test coverage proving `resolve_evaluated` can find form-directive macros.
+- **Where**: `src/pipeline/resolve.rs:53-71`
+- **Why**: Low risk — the full pipeline integration (cargo run inspect, visual test) does exercise this path end-to-end. But a targeted unit test would prevent silent regressions if someone refactors resolve_evaluated independently.
+- **Effort**: `small`
+
+### 3. Dead comment in resolve_evaluated: "shouldn't happen" is now misleading
+- **What**: Line 81 says `"No macro def but we have binds — shouldn't happen, fall through"`. After the fix, this path is even less reachable than before (both evaluate and resolve now have the same fallback). The comment is accurate but could benefit from clarification that both layers now use form-directive lookup.
+- **Where**: `src/pipeline/resolve.rs:81`
+- **Why**: Cosmetic; slightly misleading to a future reader who might think this is a common path.
+- **Effort**: `trivial`

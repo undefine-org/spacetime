@@ -1,0 +1,105 @@
+#+TITLE: BUG: `||` in a reactive text binding is split as a filter pipe — emits invalid JS
+#+STATE: DONE
+#+SESSION_ID: 1534a2eae1903af0
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-18T13-07-01-638Z_1534a2eae1903af0.jsonl]]
+#+CUSTOM_ID: BUG-262-bug-in-a-reactive-text-binding-is-split
+
+* Initial Message
+
+ok please explain everything that is next and that got carried forward. What would be your plan for achieving it all?
+
+#+STATE: ITEM
+
+* Symptom
+
+: Uncaught SyntaxError: missing ) in parenthetical   runtime.js:17039
+
+Reported from `cargo run -- serve projects/backdesk-new --port 3335 --debug`.
+The whole comments dev widget is dead on any page that serves it — a
+SyntaxError at load means the entire bundle never evaluates.
+
+* Reproduced
+
+The failing bundle is `/__spacetime/comments/runtime.js` (17197 lines), NOT
+the page runtime. The other four served bundles (`runtime.js`,
+`dev/runtime.js`, `host/runtime.js`, `inspect/runtime.js`) all pass
+`node --check`; this one fails:
+
+: /tmp/cm.js:17039
+:       try { __v = ((ST.resolve(__node, 'comError')); } catch (e) { return; }
+:                                                    ^
+: SyntaxError: Unexpected token ';'
+
+Two opening parens, one closing. And the sibling line names the cause:
+
+: if (typeof ST !== 'undefined' && ST.filter) __v = ST.filter("| $comLoadError)", __v);
+
+The FILTER NAME is `"| $comLoadError)"` — a fragment of the author's
+expression, with the closing paren swallowed into the string.
+
+* Cause
+
+`stdlib/comments/__dev__/pill.st:183`:
+
+#+begin_src spacetime
+.st-comments-widget__error {
+  .is-hidden: ($comError == "" && $comLoadError == "");
+  text <- ($comError || $comLoadError);
+}
+#+end_src
+
+The reactive-text emitter splits the expression on `|` to find a filter
+pipe (`value | filter`), but `||` is the LOGICAL OR operator. It splits
+between the two pipe characters, so:
+
+- the value becomes `($comError ` — unbalanced, hence the `((` line
+- the filter becomes `| $comLoadError)` — carrying the real closing paren
+
+`src/emit/html_reactive.rs` around lines 790/831/836 is where `__v` and the
+`ST.filter` call are formatted.
+
+* Fix
+
+The pipe split must not match `||`. A `|` immediately preceded or followed by
+another `|` is an operator, never a filter separator. Same for a `|` inside a
+string literal or inside parens/brackets — the split should be at DEPTH ZERO
+only, which is the general form of the bug (`(a | b)` inside a call would break
+identically today).
+
+* Gate
+
+A `--cdp` test whose page contains `text <- ($a || $b);` and asserts the
+element renders — plus the NEGATIVE that makes it meaningful: the emitted
+bundle must pass a JS parse. A bundle-level `node --check` (or the equivalent
+in-process parse) over the served runtime would have caught this at build,
+which is the more valuable gate: an emitted SyntaxError is silent at compile
+and total at runtime.
+
+That gate generalizes past this bug — it is the same class as FEAT-170 (a
+primitive emit-block parse error being dropped rather than failing the build).
+
+* Provenance
+
+NOT from the SIP-001/@score work. Found while investigating the report; the
+`@score` changes touch `src/pipeline/score.rs`, `stdlib/macros/score.st` and
+`stdlib/primitives/animation/score-window.st`, none of which participate in
+reactive-text emission. `stdlib/comments/__dev__/pill.st` and the comments
+runtime route are from the concurrent PLAN-123 comments feature (commits
+`66217b7e`, `36a98bf0`, `af6fb0f8`).
+
+* RESOLVED 2026-08-02 — commit 63143ad7
+
+One helper (`syntax::split_filter_pipe`) now serves both emitters. Depth-aware,
+string-aware, `||`-aware.
+
+Verified against the reported command: all SIX served bundles pass
+`node --check` (before: `comments/runtime.js` failed at line 17039). The
+emitted line is now balanced with `||` intact and zero stray filter names.
+
+7 unit tests, proven to discriminate — restoring the naive split fails 5 of 7,
+the 2 survivors being the positives.
+
+The BUILD-TIME PARSE GATE proposed in this bug is NOT yet done and is the more
+valuable half. Tracked as its own roster item: an emitted SyntaxError is silent
+at compile and total at runtime, and `node --check` found this in one second
+while the compiler shipped it green.

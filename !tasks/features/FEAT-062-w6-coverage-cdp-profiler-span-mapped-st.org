@@ -1,0 +1,86 @@
+#+TITLE: W6 coverage: CDP profiler span-mapped .st coverage + macro-expansion coverage
+#+STATE: ITEM
+#+SESSION_ID: 14f94e45c6c3f247
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-06-02T11-06-49-499Z_14f94e45c6c3f247.jsonl]]
+#+CUSTOM_ID: FEAT-062-w6-coverage-cdp-profiler-span-mapped-st
+#+LAYER: testing
+#+PRIORITY: #A
+
+* Initial Message
+
+actually, Land the PLAN-026 core now (done/committed); file the testing-macro cluster (@assert swap, @then/@eval nested-match) as a new BUG/PLAN with the diagnosis captured, and STOP — .test.st gating remains blocked
+ on that follow-up. Don't register text tests yet.
+
+Put text tests as FEAT within the plan. Be comprehensive
+
+Wave 6 of [[id:PLAN-027-spacetime-testautomation-infra-fidelity]]. Coverage as a
+READ of structures we already own — JS coverage mapped back to .st source via
+source-spans, plus directive/macro-expansion coverage (a genuine moat no other web
+framework can offer).
+
+* Two layers
+** JS line coverage → .st source coverage
+- CDP exposes =Profiler.takePreciseCoverage= natively (W2 client). Collect per-test.
+- Map emitted-JS ranges → .st source via the source-spans the kernel already
+  threads through emit (SourceSpan on every AST/IR node). Produce per-.st-file and
+  per-primitive line coverage.
+** Macro / primitive expansion coverage (the moat)
+- Instrument the expander (src/pipeline/expand.rs) to record which macro FORMS and
+  which form BRANCHES (alternations in %form / %capture_type) were exercised by the
+  suite, and which primitives emitted.
+- Report gaps: "@when … drag never tested", "claim op =matches= never exercised",
+  "primitive X never mounted". Requires owning the macro layer — unique to Spacetime.
+
+* Surface
+- =cargo run -- test … --coverage= → summary (source % + directive %) + a detailed
+  report artifact (json + human). Optional lcov export for CI tooling.
+- Thresholds: =--coverage --min-source 70 --min-directive 60= fails under target.
+
+* Implementation
+- Coverage is additive/read-only: no change to emitted code (precise coverage works
+  on unmodified JS). Span map already exists; add the range→span resolver.
+- Expansion coverage = a counter keyed by (macro, form-branch) flushed per run.
+
+* Tests
+- A file with an untested branch shows < 100% and names the branch.
+- Source coverage attributes executed lines to the correct .st file+line (spot-check
+  a primitive: mount it, assert its lines covered; don't mount it, assert uncovered).
+- Directive coverage flags a deliberately-unexercised macro form.
+
+* Depends on
+- [[id:FEAT-058-w2-cdp-substrate-chromiumoxide-warm-chro]] (Profiler via CDP)
+- [[id:FEAT-059-w3-assertion-grammar-mount-block-claims]] (stable directive set to measure)
+
+* Parent
+[[id:PLAN-027-spacetime-testautomation-infra-fidelity]]
+
+* Introspection + lean-meta mandate (priority #A — money shot)
+Coverage IS introspection made visible. Macro/form-branch expansion coverage needs a
+queryable model of every macro form + its alternation branches — build it as a
+FIRST-CLASS introspection surface, not a one-off counter:
+- Expose =Spacetime.forms= / expansion-trace query: enumerate macros, forms, and
+  =%form=/=%capture_type= branches + which were exercised. This same surface powers
+  LSP, docs, and the W4 generator — DRY it across consumers (one form-registry view).
+  If src/lsp/form_registry.rs + src/syntax/registry.rs + the coverage counter each
+  re-derive forms, COLLAPSE to one.
+- The span->source resolver (emitted-JS range -> .st SourceSpan) must reuse the spans
+  the kernel already threads; if spans are lossy/missing on any emit path, file a BUG
+  (weakens coverage AND error messages — a twofer).
+- Every redundant form-enumeration path found -> collapse or file. Note collapses here.
+- Deliverable: introspection surface spec + meta-compiler simplifications made/filed +
+  confirmation LSP/docs/generator share the one surface.
+
+* W6 CORE DONE (commit 9f7b22e9) — directive coverage moat
+Macro-expansion (directive) coverage SHIPPED: src/coverage.rs thread-local sink +
+resolve.rs hook + --coverage/--min-directive CLI + report_directive_coverage. A
+suite reports which of the 34 testing macros it exercised and lists the gap;
+--min-directive gates. Proven: w6_directive_coverage_reports_and_gates.
+
+INTROSPECTION MANDATE: the coverage sink IS the form-exercised introspection
+surface (iter_macros = the registry enumeration, shared denominator). A future
+Spacetime.forms surface unifying LSP/docs/generator/coverage is the natural
+extension; the macro enumeration (MetaRegistry::iter_macros) is already the one
+source.
+
+JS->.st source coverage (the second layer) needs source-map EMISSION which does
+not exist -> filed [[id:FEAT-070-js-st-source-coverage-via-cdp-profiler-s]].

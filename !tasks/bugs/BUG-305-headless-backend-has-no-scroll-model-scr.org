@@ -1,0 +1,25 @@
+#+TITLE: Headless backend has no scroll model — scroll-driver behavior is untestable in-harness
+#+STATE: ITEM
+#+SESSION_ID: 1534a2eae1903af0
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-18T13-07-01-638Z_1534a2eae1903af0.jsonl]]
+#+CUSTOM_ID: BUG-305-headless-backend-has-no-scroll-model-scr
+
+* Found
+2026-08-05, while building the BUG-297 easing behavior gate.
+
+* Evidence
+`window.scrollTo is not a function` under --headless. `grep scroll src/headless_shims.js` → 1 hit (a comment). There is no scroll model: no scrollTo/scrollY/scrollTop/scrollHeight shims, no scroll-event dispatch.
+
+Consequence: ZERO scroll-driver behavior tests exist in the suite. tests/unit/primitives/scroll-scope.test.st (9 tests) asserts only `have_timeline` — registration, never a driven value. The scroll scrub driver is the ONE driver proven to tick end-to-end in a real browser (BUG-297 verification: scrollTo → exact curve values on elements), and it has no in-harness mid-animation gate.
+
+* Suggested shape
+Mirror the IntersectionObserver shim's "honor the inline-style declaration" heuristic: derive a virtual scrollHeight from fixture content (or a test-declared viewport/content height), implement scrollTo/scrollY + scroll-event dispatch, and let the scroll driver compute progress from it. Geometry precision stays a layout-rung (CDP) concern; progress MONOTONICITY and mid-run values are logic-rung and testable today.
+
+* Repro
+#+begin_src spacetime
+@test "probe" {
+  @fixture { <div style="height:150vh">x</div> }
+  @eval (window.scrollTo(0, 100))
+}
+#+end_src
+→ "window.scrollTo is not a function"

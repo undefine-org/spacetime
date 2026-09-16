@@ -1,0 +1,94 @@
+#+TITLE: md module: snarkdown has no table support — GFM pipe tables render as raw pipe-soup
+#+STATE: ITEM
+#+SESSION_ID: 153da24d967d2bb2
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-25T12-50-40-345Z_153da24d967d2bb2.jsonl]]
+#+CUSTOM_ID: BUG-224-md-module-snarkdown-has-no-table-support
+
+* Initial Message
+
+ok my friend, I want us to think deeply about a system that lets you ask me questions that we need to answer to bring the right vision to the next version of backdesk-new (commit the current projects/backdesk-new into its own git repo before we start, by the way)
+
+You should look into your intuition and online about how to ask the sharpest questions that lead to the right insights, both for you and for me. Amongst the copy- and brandig-specific theories you should pull, also use Ericksonian hypnotherapy principles applied to both the brainstorming process, and the copywriting process.
+
+Your final output should be sets of guidelines to provide agents when they want to make new webpages or when they want to update them.
+
+Let's design and brainstorm this. Please come back to me with your exploration results, and don't make assumptions/form settled hypotheses until we discuss them together. Let's go for depth of understanding before producing any work
+
+** Symptom
+
+A GitHub-flavoured markdown pipe table in a =.st.md= literate document (or in
+any =@doc(src:)= / =@doc(content:)= render) is emitted as raw text with the
+pipes intact:
+
+#+begin_example
+| ✓ structure | ✗ feeling | |---|---| | "The promise that lives in a group
+chat" | "Take control of your business" | | "The follow-up nobody owns" | …
+#+end_example
+
+=document.querySelectorAll('table').length= → 0. The content is present but
+unreadable — column structure is destroyed and the delimiter row (=|---|---|=)
+appears inline as literal text.
+
+** Cause
+
+=stdlib/md/vendor/snarkdown= (developit/snarkdown, ~2KB) implements a
+deliberately minimal markdown subset and has **no table grammar**. This is a
+documented property of the upstream library, not a regression or a wiring bug.
+
+** Repro
+
+1. Put any pipe table in a =.st.md= file.
+2. =cargo run -- serve <dir>/= — compiles clean (✓ no diagnostic).
+3. Load the page → pipes render as literal text.
+
+Observed live at =method/= (10 files, 103 pipe-lines) on 2026-07-25.
+
+** Impact
+
+Silent authoring footgun: the compiler reports success, so the defect is only
+visible in a browser. Markdown tables are the natural encoding for exactly the
+comparison/decision matrices that documentation pages are made of — the
+=method/= docs hit it 103 times, and =projects/backdesk-new/process/*.md=
+previously hit it too (worked around the same way).
+
+Prior sighting: logged as an NB in PROJ-007 ("snarkdown has no table support —
+md tables written as lists") but never filed as a bug, so it was re-discovered.
+
+** Current workaround
+
+Hand-convert tables to definition-style lists:
+
+#+begin_src markdown
+- **unaware** — *doesn't see a problem* → make the normal look costly
+#+end_src
+
+Lossy for wide tables, and it costs the scannability that made a table the
+right choice in the first place.
+
+** Options
+
+1. *Vendor a table-capable renderer.* Swap snarkdown for a small GFM-capable
+   engine (e.g. marked, ~40KB; or micromark/mdast subset). Cost: bundle size —
+   snarkdown was chosen precisely because it is ~2KB and demand-injected.
+2. *Patch snarkdown behind the primitive.* Add a table rule in
+   =stdlib/md/vendor/snarkdown-entry.ts= (the vendoring seam already exists,
+   per the AGENTS "vendor + own behind a primitive" rail). Keeps the size
+   budget; costs a maintained delta against upstream.
+3. *Pre-tangle transform.* Convert pipe tables → HTML =<table>= in the literate
+   tangler before snarkdown sees them. Keeps vendor pristine; adds a markdown
+   responsibility to =src/literate.rs= that arguably belongs in the md module.
+4. *Author-level primitive.* A =@table= directive fed by typed data — more
+   Spacetime-native (content-as-data), but it does not fix plain markdown
+   tables in =@doc(src:)= of an existing =.md= file, which is the common case.
+
+Option 2 looks best against the elegance bar: it is a small extension of an
+existing vendoring seam, the variant is data (a rule), it deletes the
+hand-conversion workaround, and it is testable by the same =stdlib/md/tests/=
+machinery.
+
+** Acceptance
+
+- A pipe table in a =.st.md= renders as a real =<table>= with =<thead>=/=<tbody>=.
+- =stdlib/md/tests/doc.test.st= gains a RED→GREEN table case.
+- =method/*.st.md= tables restored from lists to tables, verified in a browser.
+- Alignment row (=|:--|--:|=) at minimum does not leak as text.

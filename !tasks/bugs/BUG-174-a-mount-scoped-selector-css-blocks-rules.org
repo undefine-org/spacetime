@@ -1,0 +1,104 @@
+#+TITLE: a @mount-scoped .selector{} CSS block's rules do not reliably apply to the mounted element under the CDP/headless test harness
+#+STATE: ITEM
+#+SESSION_ID: 152939d2e5b25e66
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-09T16-24-34-454Z_152939d2e5b25e66.jsonl]]
+#+CUSTOM_ID: BUG-174-a-mount-scoped-selector-css-blocks-rules
+
+* Initial Message
+
+it still looks weird
+
+* Symptom
+
+A =.selector { property: value; }= CSS scope block declared inside a
+=@test { @mount { ... } }= body, targeting a class on markup mounted in the
+SAME =@mount= block, does not reliably apply its declared CSS properties to
+the mounted DOM element — =getComputedStyle= on the element does not reflect
+the declared rules.
+
+** Minimal repro
+
+#+begin_src spacetime
+@import "stdlib/testing/test"
+
+@test "css scope in mount does not apply" needs layout {
+  @mount {
+    <span class="vc-flap">short</span>
+    .vc-flap {
+      display: inline-block;
+      font-size: 32px;
+      font-weight: 700;
+    }
+  }
+  @eval (window.__disp = getComputedStyle(document.querySelector('.vc-flap')).display)
+  @eval (window.__fs = getComputedStyle(document.querySelector('.vc-flap')).fontSize)
+  @assert (window.__disp == "inline-block") "display should be inline-block per the .vc-flap rule"
+  @assert (window.__fs == "32px") "font-size should be 32px per the .vc-flap rule"
+}
+#+end_src
+
+Both assertions FAIL under =--cdp=: =getComputedStyle=.display= comes back as
+the element's default (=inline= for a bare =<span>=, not =inline-block=), and
+=fontSize= comes back as the ambient/inherited default, not =32px=.
+
+** Workaround (used in BUG-172's fixture)
+
+Applying the SAME declarations via an inline =style= attribute on the mounted
+element directly (=<span class="x" style="display: inline-block;
+font-size: 32px; font-weight: 700;">=) DOES apply correctly — confirmed via
+the same =getComputedStyle= assertions passing. This proves the DOM/CSSOM
+pipeline itself works fine under CDP; specifically the =@mount='s
+CSS-SCOPE-BLOCK-to-stylesheet compilation/injection path is what's not
+reaching the mounted node.
+
+* Root cause — NOT YET INVESTIGATED
+
+Not traced this session (discovered as a side effect of debugging BUG-172's
+regression fixture, and worked around via inline =style=  rather than
+blocking on a full root-cause dig). Plausible starting points for the next
+investigation:
+- Whether =@mount='s =%$content.js= recompile path (=compile_block_body_to_js=,
+  same function implicated in BUG-173) emits the =.selector {}= block's CSS
+  as a real =<style>= injection at all, or only emits its BEHAVIORAL
+  (=@on=/=@reveal=/etc.) JS while dropping the plain CSS declarations.
+- Whether the CSS *is* emitted into a stylesheet, but that stylesheet is
+  attached to a stale/detached document (a fresh-per-file V8 context or a
+  fresh CDP page issue, similar in spirit to the BUG-107 cross-file isolation
+  precedent noted in =tests/fixtures/isolation/iso-file-a.test.st=), and
+  therefore never reaches the ACTUAL rendered =document.body= the mounted
+  node lives in.
+- Whether CSS specificity/ordering causes the mounted node's inline UA
+  defaults to always win regardless (ruled UNLIKELY — an explicit
+  class-selector rule should out-specificity a UA default with zero
+  specificity, and the workaround's inline =style= — which has even HIGHER
+  specificity than a class selector — working confirms the CASCADE is fine;
+  it's the RULE'S PRESENCE in the stylesheet that's in question).
+
+* Impact
+
+Any CDP test that relies on a =@mount=-local =.selector {}= CSS block (rather
+than inline =style= or a page-level stylesheet) to set up visual/layout
+preconditions for a =needs layout=/=needs timing=/=needs paint= assertion is
+unverified — the precondition CSS may silently not be applying, making the
+downstream assertion measure the WRONG (unstyled) element state. This is
+distinct from BUG-173 (which silently drops the ENTIRE test body when a
+keyframe arrow is present); this bug affects tests using ONLY static CSS
+properties in a mount-scoped block, no animation involved.
+
+* Acceptance
+- [ ] Root cause traced: confirm whether =@mount='s CSS-scope compilation
+  ever reaches a real =<style>= tag in the rendered document under
+  =--cdp=/=--headless=, and if so, why the computed style doesn't reflect it.
+- [ ] Fix: whatever's needed so a =.selector {}= block nested in =@mount=
+  reliably styles its mounted markup (this is presumably the DOCUMENTED,
+  intended way to write component-scoped test styling — see e.g.
+  =tests/fixtures/native-template/on-visible-animation-only.test.st='s
+  =.an-card { opacity: 0 -> 1; }= pattern, which likely has the SAME gap but
+  wasn't caught because that test only asserts on the ANIMATED property
+  reaching its final value, not on a STATIC property set by the same block).
+- [ ] Regression test: the minimal repro above (or equivalent), asserting
+  =getComputedStyle= on a mounted element reflects its =@mount=-local
+  =.selector {}= CSS block's static declarations.
+- [ ] Once fixed, BUG-172's fixture can drop its inline-=style= workaround
+  and go back to styling via a =.vc-flap {}= scope block, matching the
+  documented/idiomatic =@mount= testing pattern.

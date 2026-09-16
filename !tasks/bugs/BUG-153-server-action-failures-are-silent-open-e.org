@@ -1,0 +1,37 @@
+#+TITLE: Server-action failures are silent — Open environment click has no visible result
+#+STATE: DONE
+#+SESSION_ID: 1522aa9778a04732
+#+TRANSCRIPT_PATH: [[file:/home/user/.spell/agent/sessions/-code-ora-verse/2026-07-04T14-07-53-826Z_1522aa9778a04732.jsonl]]
+#+CUSTOM_ID: BUG-153-server-action-failures-are-silent-open-e
+#+COMPLETION_HASH: b124605eb022b609
+
+* Initial Message
+
+i have restarted the session, can you do the visual confirmation now?
+
+User-reported (2026-07-05): "Clicking on 'Open environment' does nothing."
+
+** Root cause (source-confirmed + oracle agent://18-WorkbenchRedesign)
+The route EXISTS and is correct: cards.st:11 <button class="mcp-open-env" data-env-path="$env.path">; actions.st:16-18 binds st_env_open with targetAttr:"data-env-path"; actions.rs:64 routes st_env_open as a Server action; host.st:245-249 maps targetAttr -> payload.target. So the click reaches the server.
+The failure is FEEDBACK, in two layers:
+  1. Silent server-action failure: live.rs:1963-1971 returns a NESTED {ok:false,...} (e.g. empty/invalid target path); but live.rs:1880-1925 still wraps it in a TOP-LEVEL {ok:true, event, action} (transport succeeded); and host.st:62-63 only treats TOP-LEVEL data.ok===false as a bridge error. So an action FAILURE is acknowledged as transport SUCCESS and rendered as nothing.
+  2. No positive result surface: even on SUCCESS, opened envs render in a drawer the user isn't looking at, so a working click also looks dead. A click must produce IMMEDIATE local feedback independent of the 1s poll.
+
+** Fix (PLAN-065 W_feedback)
+Host bridge classifies nested action.ok===false as an ACTION error while keeping transport success distinct; publish $mcpActionPending/$mcpActionError/$mcpLastAction; surface the server's own error/summary in a toast/status rail; make st_env_open produce a visible result (open/focus the nav result area on success).
+
+** Verify
+Click Open environment with a valid path -> immediate success toast + visible opened-env card. Click with empty/invalid target -> visible error toast carrying the server error; no silent no-op.
+
+Parent: PLAN-065.
+
+** DEEPER ROOT CAUSE FOUND (live-traced on self-launched server, 2026-07-05)
+The feedback layer has TWO faults, not one:
+1. (as filed) host.st only classified TOP-LEVEL data.ok; a nested action.ok===false looked like success. FIXED in host.st (classify both levels + surface action.error/summary) + env.st toast now binds action.error/summary/ok + styles.st .is-error red pill. But this fix is INERT because of fault 2:
+2. (NEW, deeper) $mcpLastMessage NEVER RECEIVES the bridge's value. Live-proven: after a REAL click on 'Open environment', root.__stHost.lastMessage = {ok:true, action:{ok:true, summary:'Environment env-2 → tutorial'}} (CORRECT — the env DOES open server-side, confirmed via curl: action.ok:true, summary set), but ST.get(root,'mcpLastMessage') === undefined. So the toast (and the U6 toast before it) is driven by a signal that is never written.
+
+Mechanism: the host %primitive does `%yield lastMessage -> $lastMessage` (compiles to ST.set(el,'lastMessage',lastMessage)); the %macro %binds maps `$lastMessage as $mcpLastMessage`. But the compiled JS shows NO `ST.set(...,'mcpLastMessage',...)` — the output-alias remap (resolve_signal_name via ctx.outputs, src/emit/js.rs:913) is NOT applied to a %yield inside a %primitive's %emit js block. Same for $mcpConnected/$mcpError (all host aliases). The mcp-INPUT primitive appears to work ONLY because a separate data-registry layer republishes derived signals (mcpStageStructure etc.) from the raw `data` signal — mcpInput itself appears 0× in the compiled JS. $mcpLastMessage has no such republish, so the alias's brokenness is exposed.
+
+** So BUG-153 is really: server-action FAILURE feedback (host.st classification — done) + a COMPILER/RUNTIME alias-threading gap (the %macro %binds output alias does not remap a %primitive %emit-js %yield's signal name). The latter is a separate, broader bug. Options: (A) fix the compiler alias threading (risky, broad); (B) republish $mcpLastMessage via the data-registry path like mcp-input; (C) have the host primitive yield directly under a name the page reads. Needs a decision + likely a librarian/oracle read of the alias path before touching the compiler.
+
+NOTE [2026-07-05]: FIXED + live-verified (commits ac0f115b BUG-154 compiler + 531fca9f workbench). Real bridge dispatch (the exact path buttons use): valid Open environment -> "Environment env-1 → tutorial" toast; invalid path -> red toast with the server's verbatim error. Was a silent no-op before. Depended on BUG-154 (the %binds alias never reached $mcpLastMessage). Feedback now uses a single host-computed $mcpActionText/$mcpActionOk (avoids the reactive-|| gap FUP-111). Pure Spacetime, no page JS.
