@@ -1,0 +1,546 @@
+#+TITLE: SIP-001c — Forms: reusable chunks as dashed-idents (=--name=)
+#+DATE: 2026-07-26
+#+STATUS: DRAFT v3 — kind inference replaced by an explicit kind marker (user ruling, 2026-07-26) after BUG-245 showed inference-by-body is registration order in disguise
+#+SIP: 001c
+
+* Header
+
+| Field | Value |
+|-------+-------|
+| SIP | 001c |
+| Title | Forms: reusable chunks as dashed-idents |
+| Status | Draft v2 |
+| Batch | Lands WITH SIP-001 v5 + SIP-001b — one cutover, one migration wave |
+| Supersedes | v1 of this doc (proposed =%=; rejected — wrong layer, metasystem-only) |
+| NB | SIP-002 is Literate Spacetime (=.st.md=), unrelated. This doc was mis-numbered in its first draft |
+
+* Abstract
+
+Spacetime names three categories of thing and ships two sigils. The missing
+category — **a pure, parameterized chunk of language, spliced where it is
+referenced** — is introduced here as a **form**, written =--name=, declared
+with =@form=.
+
+| Sigil | Category | Lifetime | Answers |
+|-------+----------+----------+---------|
+| =&= | identity — a thing in the world | live, stateful, addressable | /which one?/ |
+| =$= | data — values that flow | reactive | /what value?/ |
+| =--= | **form** — a chunk of language | pure, compile-time splice | /what shape?/ |
+
+=--= is not an invention. **CSS already uses dashed-idents for exactly this
+concept** (=css-mixins-1=): =@function --double(--x)= (shipping in
+Chromium), =@mixin --my-mixin= + =@apply --foo= (specced). Spacetime adopts
+the convention and extends it with a body kind CSS has no equivalent for:
+motion.
+
+Forms subsume easings, motion definitions, style mixins, transition
+definitions, and score fragments. They DELETE: =&ease-*= as entities (a
+category error), the =%= proposal (wrong layer), SIP-001 v3's =@anim=
+(never built), and copy-paste style reuse.
+
+* Motivation
+
+** M1 — The ontology crisis
+
+SIP-001 v2 review: /"it is still unclear how =distance: 40px= relates to
+the fact that =&reveal= is neither a proper function nor a proper
+elem-ref."/
+
+v3 answered by inventing =@anim= — patching the wrong layer. =&reveal= is
+neither because it belongs to a THIRD CATEGORY with no sigil: no identity
+(not addressable, not seekable), not data (does not flow or hold state) —
+it is a SHAPE: pure Spacetime text with holes, spliced into a host.
+
+∴ the fix is a sigil, not a construct.
+
+** M2 — Easings are a live category error
+
+=easing: &ease-out-expo= uses the IDENTITY sigil for a pure function of =t=
+(28 of them in =public/runtime/easing.js=). No identity, no state, no
+address. It should be =--ease-out-expo=.
+
+** M3 — CSS got there first (the decisive evidence)
+
+=css-mixins-1= (W3C draft; custom functions shipping in Chromium):
+
+#+begin_src css
+@function --double(--x) { result: calc(var(--x) * 2); }   /* value-returning */
+@mixin --my-mixin { property: value; }                     /* block of declarations */
+@apply --my-mixin;                                          /* splice */
+#+end_src
+
+CSS uses ONE namespace (dashed-idents) for three roles — value, function,
+mixin — disambiguated by POSITION. Adopting =--= is therefore not
+overloading CSS's namespace; it is **using CSS's own convention for the
+same concept**. "Spacetime is reactive CSS" stops being an analogy and
+becomes a compatibility claim.
+
+** M4 — Sigil candidates: the evidence
+
+| Candidate | Verdict |
+|-----------+---------|
+| =%name= | ✗ REJECTED — =%= is the METASYSTEM layer (=%form=, =%macro=, =%capture_type=, =%migration=). Author code must not reach into it; and =%= does not refer to values |
+| =~name= | ✗ not chosen — a private Spacetime invention for a thing CSS names =--=; also a dead key on many EU layouts. (=~= already exists as PRESET_REF in the parser; it keeps that role or is retired separately) |
+| =^name= / ='name= | ✗ arbitrary; ='= fights strings |
+| **=--name=** | ✓ ADOPTED — CSS-native convention, registry-compatible (see §Feasibility), reads well: =@on $cart.open true => --slide-in;= |
+
+* Feasibility — verified against the compiler source
+
+| Question | Finding |
+|----------+---------|
+| Does the form registry support it? | ✓ =extract_prefix()= = =form.directive_name.chars().next()= (src/syntax/registry.rs:168). A form named =--slide-in= registers under prefix ='-'=. **Zero registry change** |
+| Does =--name= lex cleanly? | ✓ =--my-var= lexes as ONE =IDENT= token (src/syntax/cst/lexer.rs, =css_custom_property_tests=). SIMPLER than =&=/=$=, which are separate SIGIL + IDENT tokens |
+| Vendor prefixes still safe? | ✓ =-webkit-transform= merges as one IDENT; =-- foo= (spaced) does NOT merge |
+| Ambiguity with custom properties? | ONE case, position-resolved: =--x:= property · =--x;= splice · =--x(…)= depends on position |
+
+** How =--= is lexed today, and the two-char sigil question
+
+Current lexer (=src/syntax/cst/lexer.rs=, =RawToken::Minus= arm) already
+merges dashed idents into ONE token, by an explicit rule ladder:
+
+| Input | Merge rule | Result |
+|-------+------------+--------|
+| =-42=, =-0.3= | MINUS + Number | NUMBER |
+| =-45deg=, =-50%= | MINUS + Number + unit | NUMBER_WITH_UNIT |
+| =-webkit-transform= | MINUS + Ident (adjacent) | IDENT (vendor prefix) |
+| =--custom-prop= | MINUS + MINUS + Ident (adjacent) | IDENT |
+| =-- foo= (spaced) | no merge | MINUS, MINUS, IDENT |
+
+∴ =--slide-in= arrives as a single IDENT whose text starts with =--=.
+
+*** Multi-char sigil support: the actual engineering case
+
+The question asked: should the lexer gain general multi-character sigil
+support, so =--= (and any future =::=) is a first-class prefix?
+
+"It would invite other sigils" is not an argument — we maintain this
+language and can decline a bad sigil. The real analysis is about WHERE
+AMBIGUITY IS RESOLVED and what each option costs.
+
+**How prefixes work today.** =extract_prefix()= = =directive_name.chars()
+.next()= → a =HashMap<char, Vec<RegisteredForm>>= bucket. The lexer emits
+=&= =$= =@= =~= as their own single-char tokens; =--x= is instead MERGED
+into one IDENT by the =RawToken::Minus= ladder (which also produces =-42=,
+=-45deg=, =-webkit-*=). So =--= is ALREADY special-cased in the lexer, and
+the registry ALREADY buckets it correctly under ='-'=.
+
+∴ nothing is BLOCKED. The question is only what representation is cleanest.
+
+**Option A — general multi-char sigil table.** Registry key becomes
+=String=; lexer gains a longest-match sigil table.
+
+| For | Against |
+|-----+---------|
+| Uniform: every sigil declared in one place, single- and multi-char alike | =--= must NOT be lexed as a bare sigil: =--x= is one IDENT precisely so =--brand: red= keeps working. A sigil table would have to re-merge sigil + ident anyway — the ladder returns by the back door |
+| Future-proof for a genuinely multi-char prefix | Changes every =forms_for_prefix(char)= call site + the =HashMap<char, _>= key type, for zero present-day capability |
+| | Longest-match interacts with =-42=/=-45deg=/=-webkit-*=: the sigil table and the numeric/vendor ladder must agree, and they are in different code paths — a real conflict surface |
+
+**Option B — =DASHED_IDENT= token kind.** Keep the merge; label it.
+
+| For | Against |
+|-----+---------|
+| The parser stops re-deriving a fact the LEXER already knew (currently: =text.starts_with("--")= — the string-sniffing ARCHITECTURE.md forbids) | Does not generalize to a hypothetical =::= |
+| One =SyntaxKind= variant + one lexer branch; registry untouched | |
+| Vendor prefixes (=-webkit-*=, ONE dash) stay IDENT — the two rules stay visibly distinct | |
+| Matches how CSS itself specifies it: =<dashed-ident>= is a TOKEN CLASS, not a sigil + name | |
+
+**Recommendation: B — but the reason is representational, not defensive.**
+A sigil is a token that SEPARATES from its name (=&= + =foo=); a
+dashed-ident does not (=--foo= is atomic, and must stay atomic for CSS
+compatibility). Modelling =--= as a sigil would assert a structure the
+language does not have, and the lexer would immediately undo it.
+
+If a future construct wants a genuine multi-char sigil — one that
+separates from its name — Option A becomes the right change AT THAT TIME,
+and it is a mechanical refactor (=char= → =String= in one map + one
+extractor). Nothing here forecloses it. We are not avoiding the capability;
+we are declining to pay for it before it buys anything.
+
+** The one disambiguation rule
+
+| Source | Position | Meaning |
+|--------+----------+---------|
+| =--brand: #FAF7F2;= | declaration head | CSS custom property (unchanged) |
+| =color: var(--brand);= | value, inside =var()= | CSS custom property read (unchanged) |
+| =width: --double(20px);= | VALUE position | CSS custom function (css-mixins-1) |
+| =--card-surface;= | STATEMENT position | form splice |
+| =--card-surface(12px);= | STATEMENT position | form splice with args |
+
+Rule: **statement position ⇒ splice; value position ⇒ CSS function.**
+
+*** MEASURED AGAIN (2026-07-26, PLAN-121 W2.3) — the splice needs a PARSER change
+
+The fix proposed below ("register a =%form= for statement-position
+dashed-idents, so the variant stays DATA") was spiked and does NOT work as
+stated. Two attempts, both silent no-ops:
+
+1. =%form { $name:dashed_ident ";" }= registers under prefix ='$'=
+   (=extract_prefix()= reads the first char of =directive_name=), i.e. the
+   BINDING bucket — which a bare =--x;= never reaches.
+2. =%form { --splice $name:ident ";" }= registers under ='-'= and is still never
+   consulted: =parse_body_item= dispatches on =AT_SIGN=, =DOLLAR=, =AMPERSAND=,
+   =COLON= and the combinators, so a leading-dash IDENT falls to the
+   CSS-property arm and is discarded when no =:= follows.
+
+∴ the gap is BODY-POSITION DISPATCH, not registry coverage. The parser must ask
+the registry about a leading-dash IDENT before a =%form= can claim it. That is
+one dispatch arm — still small, still leaves the variants as DATA — but it IS a
+parser change, so "zero lexer changes, zero parser changes" is now: zero lexer,
+ONE parser dispatch arm. Tracked in BUG-241. GREEN-LIT (user ruling,
+2026-07-26): the arm ships with this SIP; an unregistered =--name;= is a HARD
+compile error (E-UNKNOWN-FORM, §4), never another silent drop. The general
+solution — registry-driven body-item dispatch, rethinking the matcher's
+ASSIGNMENT phase — is FUP-155.
+
+**BUG-245 — KIND INFERENCE DOES NOT DISCRIMINATE.** This is the =@form=
+mechanism's core, and it does not work. Two macros declaring the same surface
+with different body capture types (=$body:properties= vs =$frames:keyframes=):
+a keyframes body (=opacity: 0 -> 1=) was claimed by the DECLARATIONS form, and
+the keyframes macro never matched. =check= green.
+
+Cause: matching takes the first successful body-consuming candidate
+(=match_sink.rs:164=), equal-permissive body types tie on specificity
+(=registry.rs:103=), and =keyframes= accepts any nonempty body as raw text
+(=form_compiler.rs:1509=). So =properties= vs =keyframes= is not a
+discrimination — both accept the same input, and selection is
+registration-order dependent.
+
+∴ "kind inferred from body, no kind keyword" is NOT implementable on the
+current matcher. Either the body capture types must be tightened until they
+genuinely reject each other's input (preserves the design; measure the blast
+radius, since other constructs depend on both), or an explicit kind marker is
+needed. RESOLVED (user ruling, 2026-07-26): the design CHANGES — kind is an
+explicit leading marker, =@form <kind> --name { … }=, always required. See
+Proposal §1. Inference may return as a convenience via lightningCSS
+classification (FUP-154), but an uninferrable body is a compile-time error
+regardless, and the marker grammar stays valid forever. Tracked in BUG-245
+(fixed by the marker; the mechanism description above is the historical record
+of WHY inference was abandoned).
+
+NB a third gap was filed here and then WITHDRAWN: "a top-level user directive
+is silently dropped" was measured with =inspect --layer expansion=, which only
+walks scopes (=cli/inspect.rs:2026=) while file-level matches live in the flat
+=ast.matches= the compiler consumes. The construct worked all along; the
+INSPECTOR was blind. Re-filed as BUG-244 against =inspect=. Lesson kept in the
+test: assert against an observable compile effect, never against a reporting
+tool — measuring the tool manufactures phantom bugs.
+
+All gaps are locked by =tests/sip_001_w2_form_surface_test.rs=.
+
+*** VERIFIED (2026-07-26, PLAN-121 W1.2) — and the earlier claim was WRONG
+
+This section previously asserted "the parser already distinguishes these
+contexts … this is the one rule to implement — the rest is free." That was an
+assumption. Measured through =build= and =inspect --layer parse=:
+
+| position  | source                   | result                          |
+|-----------+--------------------------+---------------------------------|
+| property  | =--brand: red;=          | ✓ preserved (real custom prop)  |
+| value     | =width: --double(20px);= | ✓ preserved verbatim            |
+| statement | =--card-surface;=        | ✓ FORM_REF; unknown = E0947 (BUG-241 FIXED) |
+
+A scope containing =--card-surface;= plus one real declaration reports
+=css_declarations: 1=: the bare statement becomes no declaration, no CST node,
+and no diagnostic. It vanishes.
+
+What this changes:
+- The two positions CSS itself defines already work, untouched. A value-position
+  custom function (=--double(20px)=) passes through TODAY, so the =@form=
+  FUNCTION kind needs no parser work.
+- Statement position — the MIXIN splice, the form this SIP leans on hardest —
+  needs a real grammar addition, not merely a =DASHED_IDENT= token label.
+
+∴ "zero registry change, one lexer change" holds for every kind EXCEPT the
+splice. The splice must be spiked (options in BUG-241; preferred is registering
+a =%form= for statement-position dashed-idents, so the variant stays DATA) before
+the =@form= surface is treated as settled.
+
+Filed: BUG-241. Note the silent drop is a defect on its own terms — a bare
+=--foo;= typo disappears from an author's stylesheet with no warning, whether or
+not this SIP ever ships.
+
+* Proposal
+
+** 1. =@form= — one declaration, kind marked explicitly
+
+#+begin_src spacetime
+@form easing --ease-out-expo { cubic-bezier(0.16, 1, 0.3, 1) }        // easing form
+
+@form motion --fade-in { opacity: 0 -> 1; }                           // motion form
+
+@form motion --reveal($distance = 20px, $duration = 600ms) {          // motion, composed
+  --fade-in;
+  translate-y: $distance -> 0;
+  easing: --ease-out-expo;
+}
+
+@form style --card-surface {                                          // style form (≡ css @mixin)
+  border-radius: 12px;
+  box-shadow: 0 2px 8px rgb(0 0 0 / 0.08);
+}
+
+@form value --double(--x) { result: calc(var(--x) * 2); }             // value form (≡ css @function)
+
+@form motion --whip-pan(&from, &to, $duration = 300ms) { … }          // takes & and $ params
+
+@form score --outro-sequence { &logo -> --fade(200ms) -> &cta; }      // score fragment
+#+end_src
+
+Form KIND is an EXPLICIT LEADING MARKER — the kind-word sits between the
+directive and the name: =@form <kind> --name { … }=. Always required, uniform
+across kinds; usage sites are unchanged and carry no marker.
+
+Why not inference: this SIP originally inferred kind from the body blocktype
+("kinds-as-data, no kind keyword"). PLAN-121 W2 measured that the matcher
+cannot implement it (BUG-245): =properties= and =keyframes= accept the same
+input, so "first successful candidate" = registration order in disguise. The
+marker makes ambiguity impossible by construction — each kind is its own
+=%macro= whose =%form= carries the literal kind-word, discriminated by the
+SECOND token, the matcher's strongest and best-tested path. This is exactly
+the established =@data= idiom (stdlib/macros/data-kind.st: "THE KIND IS THE
+MACRO"). The leading position was chosen over a trailing word
+(=@form --fade-in motion=) because declaration-site modifiers are already
+leading (=@data inline $brand Brand : {…}=), and a trailing word collides
+with the form's own parens: =--reveal($distance = 20px) motion= presses the
+language's word against the form's argument list.
+
+The body capture type still VALIDATES the body against the declared kind
+(=@form motion --x { color: red; }= must fail: not a keyframes body), and per
+the user ruling an uninferrable or ambiguous body is a COMPILE-TIME ERROR,
+never a silent default. Inference may return later as a convenience layered on
+the marker — lightningCSS classification is FUP-154, a research spike — but
+the marker grammar remains valid and accepted forever.
+
+| Marker    | Body blocktype            | Form kind | CSS analog | Splices into |
+|-----------+---------------------------+-----------+------------+--------------|
+| =style=   | declarations (=prop: value;=) | style | =@mixin= | selector blocks |
+| =value=   | =result:= descriptor      | value     | =@function= | value position |
+| =motion=  | keyframes (=->= chains)   | motion    | — (Spacetime extension) | =@on= form slot, score edges |
+| =easing=  | curve expression          | easing    | —          | =easing:= slots |
+| =score=   | score lines               | score-fragment | —   | =@score= bodies |
+| =markup=  | markup                    | markup    | —          | markup holes (anonymous; use =@template= when identity is needed) |
+
+** 1b. How this relates to CSS's =@mixin= / =@function= (mechanics)
+
+*** What CSS does
+
+=@function= — VALUE-returning, called in value position:
+#+begin_src css
+@function --double(--x) { result: calc(var(--x) * 2); }
+.a { width: --double(20px); }        /* → width: 40px */
+#+end_src
+Params are dashed-idents scoped to the body as local custom properties; an
+optional CSS type or =type()= constrains them; the body yields =result:=.
+Shipping in Chromium.
+
+=@mixin= + =@apply= — BLOCK-returning, spliced in statement position:
+#+begin_src css
+@mixin --card { border-radius: 12px; box-shadow: 0 2px 8px rgb(0 0 0 / .08); }
+.b { @apply --card; }                /* splices both declarations */
+#+end_src
+Specced, not yet shipped anywhere. =@apply --foo;= ≡ =@apply --foo();=.
+
+∴ CSS's model: ONE namespace (dashed-idents), TWO body kinds (value vs
+block), position decides which is meant.
+
+*** What =@form= does
+
+Same namespace, same position rule, but ONE declaration keyword and MORE
+body kinds — because Spacetime has body kinds CSS has no concept of. The
+kind marker (§1) carries what CSS expresses as the =@mixin=/=@function=
+keyword split:
+
+| Marker   | =@form= body | CSS equivalent | Splice position |
+|----------+--------------+----------------+-----------------|
+| =style=  | declarations | =@mixin= | statement |
+| =value=  | =result:= | =@function= | value |
+| =motion= | keyframes (=->= chains) | — NONE (Spacetime) | =@on= form slot, score edge |
+| =easing= | curve expression | — NONE (Spacetime) | =easing:= slot |
+| =score=  | score lines | — NONE (Spacetime) | =@score= body |
+
+Why one keyword rather than CSS's two: the author is always doing the same
+thing — naming a reusable chunk. The kind-word is a MARKER on that one
+declaration, not a second directive to learn (it plays the role CSS splits
+across keywords, in the position =@data inline= already owns). Splice needs
+no =@apply= keyword either: =--card;= in statement position is unambiguous.
+
+Historical note: this section originally argued the kind was "already evident
+from the body", so a marker was redundant. BUG-245 falsified that for the
+COMPILER (capture types could not discriminate; see §1), and on reflection it
+was never quite true for the READER either — a human scanning
+=@form --rise { opacity: 0 -> 1 }= also learns the kind only after parsing
+the body. The marker makes the declaration self-describing to both.
+
+Why this is not divergence: the NAMESPACE and the POSITION RULE are CSS's.
+A CSS author reading =--card;= or =--double(20px)= sees what they expect.
+The extra body kinds are additive, in a place CSS left empty.
+
+DECISION (this wave): ship unified =@form=. CSS keyword parity
+(=@mixin=/=@function=/=@apply= as aliases; native =@function= emission where
+supported) is **FUP-145**, deliberately deferred until =@form= has been
+exercised enough to know whether the CSS-shaped split earns its keep.
+
+** 2. Splice sites
+
+#+begin_src spacetime
+.card {
+  --card-surface;                          // style form — statement position
+  @on &.visible --reveal(distance: 40px);  // motion form — into @on's form slot
+}
+
+.cart { @on $cart.open true => --slide-in; }
+#+end_src
+
+** 3. Purity rules
+
+1. No identity — never addressable, seekable, or a =<-= target.
+2. No state — forms read =$params= and host signals; they declare none.
+3. Splice ≠ instance — two splices are two independent expansions.
+4. Hygiene — a form's =$params= never capture same-named host signals.
+5. Compile-time — forms do not exist at runtime. A form as a template param
+   (=@template &card($motion = --fade)=) is MONOMORPHIZATION, not a
+   callback. This is what gives the catalog =&code-block(theme: --dracula)=.
+
+** 4. Kind checking & errors (agent-facing)
+
+| Case | Diagnostic |
+|------+------------|
+| unknown kind-word after =@form= | E-FORM-KIND-MARKER: "expected kind (style\|value\|motion\|easing\|score\|markup), got `mootion`" — discriminated at token 2 |
+| body doesn't match declared kind | E-FORM-BODY: "--x is declared motion; its body is not keyframes" (per user ruling: never a silent default) |
+| motion form in a markup hole | E-FORM-KIND: "--reveal is a motion form; markup forms in scope: --badge, --chip" |
+| style form in =easing:= | E-FORM-KIND + easing forms in scope |
+| unknown =--name= in statement position | E-UNKNOWN-FORM + did-you-mean over the form registry |
+| cyclic composition | E-FORM-CYCLE with the cycle path |
+| =<-= targeting a form | E-FORM-PURITY: "forms are pure; did you mean a signal?" |
+| =--x(…)= in value position, no CSS function | E-FORM-POSITION: "value position expects a CSS custom function; did you mean a splice statement?" |
+
+The form registry makes did-you-mean populations mechanical — the same
+argument as SIP-001's projection registry: **a design that makes good
+errors cheap is an agent-friendly design.**
+
+* What this deletes
+
+| Deleted | Replaced by |
+|---------+-------------|
+| =&ease-*= entities (28) | =--ease-*= forms — category error fixed |
+| =%= form proposal (v1 of this doc) | =--= — right layer, CSS-native |
+| SIP-001 v3's =@anim= | =@form= with a keyframes body (never built) |
+| SIP-001 v3's =anim_application= capture type | generic =form_application= |
+| SIP-001 v3's "declare-inline-and-apply" =@on= case | =@form= declares · =--x= splices · =as &n= names |
+| copy-paste style blocks | style forms |
+| bespoke theme-passing in the catalog | forms as monomorphized params |
+
+Added: ONE sigil (CSS's own), ONE directive (=@form=), one registry, one
+position rule.
+
+* Migration — wave 2026-07-26 (with the SIP-001 batch)
+
+#+begin_src spacetime
+%migration easing-entities-to-forms {
+  %date 2026-07-26
+  %docs "SIP-001c: easings are forms, not entities (category error). &ease-* → --ease-*."
+
+  %rewrite easing-ref {
+    %match { easing: &$name:ident }
+    %into  { easing: --`$name` }
+  }
+
+  // NB this %hint belongs to the MIGRATION WAVE capsule, not this one — `~` is
+  // still live syntax until that wave lands (FUP-152).
+  %hint for ~preset "~presets are retired — declare an @form and splice it: --name;"
+}
+#+end_src
+
+(Capsule shape verified against =src/parser/meta_ast.rs=: =%rewrite <rule>
+{ %match {…} %into {…} }=, holes backtick-quoted, splicing raw source
+slices. See SIP-001 §Migration for the full capsule semantics.)
+
+Plus the =&ease-*= → =--ease-*= sweep across stdlib/examples/tests/demos,
+and =spring(…)= re-exposed as =--spring(stiffness:, damping:, mass:)= —
+author-defined springs become possible (today: three hardcoded variants in
+=public/runtime/easing.js=).
+
+* Retiring =~= (PRESET_REF) — DEFERRED to the migration wave
+
+=~= exists in the toolchain today — =SyntaxKind::TILDE=, =parse_preset_ref()=
+(SEVEN call sites — parser.rs 363, 983, 1163, 1470, 1806, 2593, 3526; the
+"three" in an earlier draft was wrong and would have left four contexts still
+accepting the retired form), =PresetRef= AST node with =name_text()=, a registry
+prefix bucket, and =%preset easing ~linear: linear= meta-invocations — but
+**zero =~= uses in stdlib =%form=s**. It is a half-built mechanism for
+exactly the concept =--forms= now own: a named, reusable, pure chunk.
+
+Decision: retire it. Keeping two mechanisms for one concept is the parallel
+implementation the harmony rule forbids, and an unused-but-present sigil is
+a trap for authors and agents alike (it appears in ARCHITECTURE.md's prefix
+table as if it were live).
+
+Scope of retirement:
+1. =%preset= meta-invocation → =@form= declarations.
+2. =parse_preset_ref()= + =PresetRef= + TILDE dispatch → deleted; TILDE
+   remains a lexer token (it is still a CSS sibling combinator and the
+   =~== claim operator in tests — both unaffected, both INFIX).
+3. ARCHITECTURE.md prefix table → =--= replaces =~=.
+4. Any =~name= in projects/ → =%migration= entry with a =%hint=.
+
+**MEASURED (2026-07-26, PLAN-121 W1.4) — items 1 and 4 above were WRONG.**
+
+| what                                       | count |
+|--------------------------------------------+-------|
+| =~name= CONSUMPTION sites (used as a value) |   267 |
+| =%preset= / =@preset= DECLARATIONS          |   106 |
+
+Live in =stdlib/macros/presets.st= (43 easing/duration/style presets), in
+=demos/spacetime-docs/=, and in the =projects/ora-ventures.com/= landing site
+across six modules. "Zero =~= uses" was measured against =%form= PATTERNS — but
+=~= was never used there. It is used in =%preset= DECLARATIONS and at every
+CONSUMPTION site (=easing: ~ease-out-expo;=).
+
+∴ =~= is NOT dead syntax and cannot be deleted in W1. Retirement is a MIGRATION
+WAVE (capsule + =%rewrite= for all 267 sites + idempotence/equivalence gates),
+so it belongs beside the =@on= cutover in the migration wave — sequencing it
+earlier would mean migrating twice. Tracked as FUP-152.
+
+NB this is the SECOND load-bearing =~= assumption to fail (the first: "TILDE
+probably isn't the CSS sibling combinator"). Both came from recalling a grep
+rather than running one. Every other entry on the deletion list should be
+re-measured item-by-item before the migration wave plans around it.
+
+**VERIFIED (2026-07-26)**: TILDE *is* load-bearing for CSS general-sibling
+selectors — =src/syntax/cst/parser.rs= §parse_selector, arm
+=SyntaxKind::TILDE => { bump; parse_selector_part() }= sits beside =GT=
+(child) and =PLUS= (adjacent). ∴ the retirement removes ONLY
+=parse_preset_ref()= + =PresetRef= + the PREFIX dispatch sites; the INFIX
+selector-combinator path must be preserved and covered by a test
+(=.a ~ .b= still parses). This is exactly the kind of assumption that had
+to be checked rather than asserted — the earlier draft's "should parse
+through a different path" was a guess, and it was wrong.
+
+* Elegance-bar check (AGENTS.md)
+
+1. Extension of EXISTING grammar/registry — ✓ prefix indexing unchanged
+   (='-'= bucket); lexer unchanged (dashed-idents already one token).
+2. Variants as DATA — ✓ form kinds by body type; registry entries.
+3. DELETES special cases — ✓ see table; plus aligns with a W3C spec rather
+   than inventing a private convention.
+4. Same-machinery testable — ✓ capture-type RED→GREEN + kind-error tests +
+   position-rule tests.
+
+* Open questions
+
+1. **Position rule implementation** — confirm the parser's value/statement
+   distinction is available at the point =--x(…)= is parsed. THE blocking
+   unknown; spike before W1.
+2. CSS custom-function interop: do we IMPLEMENT =@function --x= semantics
+   (=result:=) or only reserve the shape? Leaning implement — it is a
+   shipping CSS feature and authors will expect it to work.
+3. RESOLVED — ONE unified =@form=; CSS parity (=@mixin=/=@function=/=@apply=
+   as aliases + native emission) deferred to **FUP-145**, to be decided
+   after =@form= has been exercised enough to show how it is really used.
+4. RESOLVED — =~= retirement is DEFERRED to the migration wave, NOT this one
+   (see §Retiring =~=). The earlier "retire it now" ruling rested on "zero =~=
+   uses", which was measured against =%form= patterns and was wrong: =~= is live
+   at hundreds of consumption sites and ~88 declarations, including a shipping
+   project. It is a migration, not a deletion. Tracked as FUP-152.
+5. Namespacing/import of forms across modules (=--md/toc=?) — confirm
+   against module resolution.

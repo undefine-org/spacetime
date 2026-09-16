@@ -1,0 +1,104 @@
+#+TITLE: Scope <kind> IS a capture-type / construct reference — does the elegance bar hold?
+#+DATE: 2026-06-12
+#+STATUS: ANALYSIS (FUP-050 deepened; tests the 4-point bar under the user's reframing)
+
+* The user's reframing
+"The <kind> itself is a capture type *of types/syntax constructs*, I believe."
+
+i.e. `%scope within(template)` should NOT introduce a new hardcoded scope enum variant
+`template`. `template` is the CONSTRUCT that introduces the region; the scope kind is a
+REFERENCE to that registered construct (a macro / capture type), by name. Scope vocabulary and
+construct vocabulary become ONE namespace. "Valid within X" = "valid inside the region a
+construct of kind X owns."
+
+* Why this is right — the current MacroScope enum is already half-dead rot
+VERIFIED, and it's worse than I framed it:
+- MacroScope is a CLOSED Rust enum: File, Selector, PropertyValue, Operator, Expr, TimelineBody,
+  Template (meta_ast.rs:252). Each is a hardcoded variant with a hardcoded `as_str` match arm
+  and a hardcoded parse arm (`"file" =>`, `"selector" =>` at mod.rs:2044).
+- BUT macro_scope_matches (registry.rs:764) ONLY checks File vs Selector:
+      match selector { None => scopes.contains(File), Some(_) => scopes.contains(Selector) }
+  → Template, TimelineBody, Expr, Operator, PropertyValue are DECLARED but NEVER ENFORCED by the
+    matcher. They are vestigial: a macro can say `%scope template` and it changes nothing.
+- So the scope-kind enum is ALREADY a zombie abstraction (variants the matcher ignores) + a
+  hardcoded special-case ladder. The user's instinct targets real rot, not a hypothetical.
+
+* The reframing, concretely
+- A scope region is identified TODAY only by `selector: String` (ast.rs ScopeBlock/NestedScope).
+  Generalise its identity to: `kind: ConstructRef` where ConstructRef is the NAME of the macro/
+  capture-type that introduced the region (`"selector"` for `.sel{}`, `"template"` for a
+  template body, `"each"` for an @each body, `"timeline"` for a @timeline body). The CSS selector
+  becomes one KIND of scope identity (kind="selector", payload=the selector string), not a
+  privileged field.
+- `%scope` declares a RESTRICTION as a construct reference: `%scope within(template)` =
+  "this macro matches only inside a region whose owning construct is `template`". `file` and
+  `selector` become the two built-in construct kinds (the root region; a CSS selector region),
+  expressed in the SAME within(...) vocabulary — no privileged enum.
+- macro_scope_matches generalises from a 2-arm enum match to a CONTAINMENT QUERY:
+      "does the scope-stack at this position contain a region of kind K?"
+  The scope stack is ALREADY built (assign_match_to_nested_scopes walks the containment tree,
+  mod.rs:536). The kinds are DATA (registered construct names), not Rust arms.
+
+* Does the 4-point ELEGANCE BAR hold? — tested point by point
+** Bar 1: small %scope grammar extension, no new subsystem.  HOLDS — IMPROVES.
+   `%scope` already parses an identifier list. `within(<ident>)` is one more production where
+   <ident> is a construct/capture-type NAME validated against the EXISTING registry
+   (register_capture_type / get_macro). No new subsystem — it REUSES the capture-type registry as
+   the kind vocabulary. NET: the closed MacroScope enum + its hardcoded as_str/parse ladders
+   DELETE, replaced by a ConstructRef(String) validated against the registry. That is LESS code.
+** Bar 2: kinds-as-DATA, not a Rust match-arm per kind.  HOLDS — this is the crux win.
+   Today: every kind is an enum variant + as_str arm + parse arm (3 hardcoded sites each).
+   After: a kind is a string key into the construct/capture-type registry. Adding a scope kind =
+   defining a construct in stdlib (already how `template`/`each`/`timeline` are defined). ZERO
+   Rust per kind. macro_scope_matches becomes `scope_stack.any(|r| r.kind == required)` — one
+   query, kinds are data. This is EXACTLY the self-describing-metasystem discipline (AGENTS):
+   the kind set lives in stdlib, not in a Rust enum.
+** Bar 3: deletes >=1 existing special case (target @exports).  HOLDS — deletes SEVERAL.
+   - The MacroScope enum's vestigial variants (Template/TimelineBody/Expr/Operator/PropertyValue)
+     collapse into within(<construct>) — the enum shrinks to nothing privileged.
+   - @exports (component_body-only field) → a macro `%scope within(template)` — the field dies.
+   - &ref / &cards[] collection refs → macros within(template)/within(each) — bespoke fields die.
+   - @timeline-body, @match-arm, @each-item scopes all become within(<construct>) — uniform.
+   So it deletes the MacroScope ladder AND >=3 component_body special fields. Strongly clears Bar 3.
+** Bar 4: testable by the SAME scope-assignment machinery.  HOLDS.
+   The containment tree (assign_match_to_nested_scopes) already assigns a match to its
+   most-specific scope. The test: a macro `%scope within(each)` MATCHES a use inside an @each
+   region (scope stack contains kind="each") and is REFUSED outside (E-diagnostic). This is a
+   pure unit test over the scope stack + macro_scope_matches — the SAME machinery, one new
+   predicate. RED→GREEN: place the construct in/out of the region, assert match/refuse.
+
+* The subtlety that decides whether this folds into PLAN-039 or stays FUP
+For within(<kind>) to work, a scope region must RECORD its owning construct kind. Today:
+- `.sel{}` regions record `selector: String` but NOT "kind=selector" explicitly (it's implied).
+- A template body region does not exist yet as a scope (that's PLAN-039 S1).
+So PLAN-039 S1 (make a template body a scope) is the NATURAL place to introduce `kind` on the
+scope struct — because S1 is ALREADY adding a non-selector scope and must identify it somehow.
+If S1 identifies it as `kind: ConstructRef` (the general form) instead of a one-off "is_template"
+flag, then within(<kind>) falls out for free and the MacroScope enum can retire in the SAME pass.
+i.e. the reframing makes PLAN-039's REQUIRED scope-identity work do double duty as the general
+mechanism — it is STRICTLY cleaner to do it general than to add a template-specific flag.
+
+∴ VERDICT: the elegance bar HOLDS on all 4 points, AND the reframing (kind = construct ref)
+is what makes Bar 2 (kinds-as-data) genuinely true rather than "a slightly bigger enum." It
+should be FOLDED INTO PLAN-039: S1 records `scope.kind: ConstructRef`; the MacroScope enum +
+its hardcoded ladders DELETE; macro_scope_matches becomes a containment query; @exports/refs/
+collection-refs migrate to within(<construct>) macros (added to the kill-list). This converts
+PLAN-039 from "kill the component_body parallel parser" into "kill BOTH parallel systems — the
+body parser AND the scope-kind enum — by making scope identity a construct reference." One
+unifying move, more deletions, no new subsystem.
+
+* Caveat / scope-control (don't let it balloon)
+The MINIMUM to fold in: scope.kind as ConstructRef + within(<kind>) matching + retire the
+MacroScope enum + migrate @exports. The collection-ref/&ref machinery (template-component-
+model.org) is a LARGER surface; migrating it to within(<each>) macros can be a LATER wave of
+PLAN-039, not S1. Gate each migration by: does it DELETE a special-case field and pass a
+within(...) unit test? If yes, fold; if it needs new infra, defer. The bar is per-construct.
+
+* Provenance
+Verified: src/parser/meta_ast.rs:252 (MacroScope closed enum + as_str), src/parser/mod.rs:2044
+(hardcoded file/selector parse arms), src/metasystem/registry.rs:764 (macro_scope_matches checks
+ONLY File/Selector — Template/TimelineBody/etc vestigial), registry.rs:122/191 (capture_types
+HashMap + register_capture_type — the kind registry the reframing reuses), src/parser/ast.rs:290
+(ScopeBlock/NestedScope identified by selector:String only), src/parser/mod.rs:536
+(assign_match_to_nested_scopes — the containment tree the query reuses). Cross-ref FUP-050,
+PLAN-039, research/spacetime-directives-injections-disposition.org.

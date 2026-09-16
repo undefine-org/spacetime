@@ -1,0 +1,193 @@
+#+TITLE: @timeline / @scene / @score — the driver-generic composition language
+#+DATE: 2026-07-18
+#+STATUS: design draft (companion to stdlib-video-hyperframes-study.org; supersedes its "Author surface" sketch)
+
+* Intent
+
+One construct — =@timeline= — owns every coordinate space Spacetime animates
+through: wall-time (video), scroll, mouse, media position, discrete steps.
+Scenes are =&=-entities placed in that space by a =@score= block. Video is the
+special case where the driver is =time= and a renderer walks the space.
+
+This completes two open arcs at once:
+- the ECS begun in =stdlib/3d= (entities × data components × driver systems),
+- retiring the pre-sigil naming style (=@scroll hero { … }= — name after macro).
+
+* Sigil discipline (per data-and-rendering.md §2 — no new meanings)
+
+| Surface | Sigil | Why it's the right one |
+|---------+-------+------------------------|
+| scene / clip identity | =&intro= | pointer w/ scoped purity: same ref → same span+subtree. =&intro <-= illegal (can't rebind identity); contents mutate reactively. |
+| transport / playhead | =$film.t=, =$film.playing=, =$film.duration= | frame-immutable signals; seek/play are reactive rebinding via =<-=. |
+| score edge | =->= | existing meaning "transition / step" lifted from value-paths (=opacity: 0 -> 1=) to scene-paths (=&a -> &b=). Same meaning, one level up. |
+| coordinates | named params =at / for / after / during: X to Y= | prepositions, reusing the existing =to= range word. |
+| type vs value | space introduces type, =:= introduces value, === default | unchanged. |
+
+Transport-as-signals is the load-bearing decision: the Studio scrubber becomes
+=input.range { $film.t <- $value * $film.duration }= — the whole NLE transport
+is signal wiring, zero custom JS (AGENTS decisionmaking rule holds).
+
+* The construct triad
+
+** =@timeline &name(driver, …opts)=
+
+Declares a coordinate space + entity scope. Yields namespaced transport
+signals =$name.t / $name.progress / $name.playing / $name.duration=.
+
+Driver table (all existing drivers in
+=stdlib/primitives/animation/drivers.st= gain a measure type):
+
+| driver | measure | rate? | example |
+|--------+---------+-------+---------|
+| =time(fps: 30)= | seconds | yes | launch video |
+| =scroll(scope)= | progress 0..1 | no | scrollytelling |
+| =mouse(axis)= | progress 0..1 | no | cursor-reactive scene |
+| =media(&el)= | seconds (of media) | yes | music video, karaoke |
+| =steps(n?)= | ordinal | no | deck / slideshow |
+| =event(trigger)= | one-shot 0→1 | yes | entrance choreography |
+
+Opts: =size: WxH= (render viewport; also drives responsive variants 9:16 etc.),
+=loop=, =fps= only meaningful under rated drivers.
+
+** =@scene &name(duration?) { body }=
+
+Content declaration — a component with a span-shaped calling convention.
+Body is ordinary Spacetime markup. Clip-local signal scope inside:
+
+| signal | meaning |
+|--------+---------|
+| =$t= | clip-local measure (0 at scene start) |
+| =$progress= | clip progress 0..1 |
+| =$phase= | ="before" / "in" / "active" / "out" / "after"= |
+
+Enter/exit ride the existing =:entering/:exiting= states; =@in fade-up(400ms)=
+/ =@out fade(200ms)= are presets over them. Any existing driver-based
+animation works unchanged inside a scene — the clip time signal is just
+another driver upstream. NO seek-safety doctrine needed (contrast:
+HyperFrames needs a whole skill for it).
+
+Scenes are reusable: parameterized like any component (capture-types params),
+importable from the catalog, nestable (a scene may contain a =@timeline= —
+sub-compositions).
+
+** =@score { lines }=
+
+Arrangement. THE persist-back target for Studio timeline edits.
+
+Line grammar — *one line = one track*, like staves in sheet music; source
+structure carries parallelism, no track-index bookkeeping:
+
+#+begin_src spacetime
+@score {
+  &intro -> whip-pan(300ms) -> &features -> fade(400ms) -> &outro   // track 0
+  &callout(2s, at: 4s)                                              // track 1
+  &bgm(gain: 0.6, duck: &voice, during: &intro to &outro)           // audio
+  &voice(at: 1s)
+}
+#+end_src
+
+- =&a -> &b= — sequence (b at a.end)
+- =&a -> trans(300ms) -> &b= — transition rides the edge; steals a 300ms
+  overlap window centered on the cut; both scenes mounted during it; the
+  transition primitive receives window-=$progress= + both subtrees (or GPU
+  snapshots for shader transitions via stdlib/3d =@post= rail /
+  gl-transitions vendor).
+- =gap(500ms)= — rest.
+- placement params: =at:= absolute, =after: &x= relative, =for:= duration
+  override, =during: &x to &y= span (reuses =to=).
+- vertical order of lines = z-order (higher line renders in front),
+  matching the HyperFrames convention authors already know.
+
+* Unit typing (compile-time coordinate algebra)
+
+The driver types the measure; literals are checked:
+- =3s= valid under rated drivers (time, media, event); E-code under scroll
+  ("scroll timelines have no seconds — use %").
+- =20%= valid everywhere: fraction of parent span.
+- ordinals under =steps=.
+Span resolution (=after= graph, =during= refs) is a compile-time topological
+pass. HyperFrames string-matches =data-start="intro"= at runtime; we
+type-check the score.
+
+* ECS completion
+
+| ECS | Spacetime |
+|-----+-----------|
+| Entity | =&scene=, =&bgm= clip, 3d =@object=, any spanned element |
+| Component (data) | span(track, start, dur) · keyframes · transition-edge · audio(gain, duck, src) · pose-stops |
+| System | drivers (advance measure) · appliers (=animate-property=, media-seek, =three-pose=) · encoder (CDP frame walk) |
+| Storage | compile: registries · runtime: =ST.timelines= + rAF coordinator |
+
+Concretely: =@object= entities accept spans → one score choreographs DOM + 3D
++ audio. =@pose-track='s stops become score-addressable (=at: &reveal.start=),
+and its =objectIndex= footgun (PLAN-062 W5) dies — the score names entities.
+
+* Media ownership
+
+=&audio/&voice/&video= clips inside a score are framework-owned: the clip
+time signal seeks them (extends media.st / video-visibility.st family);
+never free-running. Live page: seek-follow. Render: audio is NOT captured —
+score compiles an audio manifest (src, span, gain, duck edges) that the
+encoder mixes via ffmpeg. Deterministic by construction.
+
+* Built BY the metasystem
+
+Score grammar as =%capture_type= (same engine as match-block.st; zero Rust):
+
+#+begin_src spacetime
+%capture_type clip_call   { $scene:element ( "(" $args:balanced(')') ")" )? }
+%capture_type score_step  { ( $trans:transition_call ) | ( $gap:gap_call ) | ( $clip:clip_call ) }
+%capture_type score_line  { $head:score_step ( "->" $next:score_step )* ";"? }
+%capture_type score_block { "@score" "{" ( $lines:score_line )* "}" }
+#+end_src
+
+=@timeline= / =@scene= are =%macro=s binding a =timeline-driver= primitive
+(join of existing drivers + =ST.timelines= registration) and span components.
+
+Elegance-bar audit (AGENTS.md):
+1. extension of existing grammar/registry ✓ (capture-types + %binds + drivers)
+2. variants are DATA ✓ (drivers, transitions, presets = registry entries)
+3. DELETES ✓ — post-macro naming (=@scroll hero=), predecessor-string =@after=
+   chaining (waapi/after-animate), pose-track =objectIndex=
+4. testable by same machinery ✓ — =@clock= + =@timeline= claims unchanged;
+   =@clock advance= now also means virtual scroll / virtual steps.
+
+* Testing & render (inherited, not built)
+
+- =@clock install/advance/sample/run-to-end= works for every driver — a
+  scrollytelling page gets deterministic curve tests for free.
+- Golden-frame: seek =$film.t=, capture on =paint= rung (CDP backend),
+  diff. Refuses honestly on =--headless= per FIDELITY_LADDER.
+- Render verb: for k in 0..N { =$film.t <- k/fps=; settle barrier (fonts
+  ready, media =seeked=, driver quiescent); CDP screenshot } → ffmpeg.
+  =--data= → template/batch rendering via capture-type params.
+
+* Migration
+
+- =@scroll hero { keyframes }= → =@timeline &hero(scroll(cover)) { … }= for
+  the compositional case; simple single-element scrub keeps the light
+  =@scroll= form (it stays as sugar; its *name-after-macro* timeline naming
+  deprecates in favor of =&=-naming). Deprecation lint + rewrite suggestion.
+- =@after name= chaining → score edges.
+
+* Open questions
+
+1. =$phase= as string vs variant type — prefer a real variant (match-render
+   rail exists).
+2. Transition snapshot mechanics for DOM (non-3d) scenes: CSS-only cross-fade
+   tier vs GPU snapshot tier — fidelity-ladder the transitions themselves.
+3. =steps= driver + =@when= branching (deck hotspots): does branching live in
+   the score (arrows with guards?) or in scene bodies (=@when=)? Leaning:
+   scene bodies; score stays a DAG.
+4. Nested timeline transport: does =$outer.playing= gate =$inner=? Default
+   yes (clock parenting), opt-out param.
+5. Score persist-back: Studio move/trim rewrites score lines — needs the
+   editable-surface affordance for directive-arg writes; design as a proper
+   metasystem feature when Studio wave lands (AGENTS rule).
+
+* Phasing delta vs stdlib-video-hyperframes-study.org
+
+W1 becomes: measure-typed drivers + =@timeline/@scene= + span components +
+=score_block= capture-type + live playback. Everything downstream (render,
+catalog, studio) unchanged but now driver-generic — the scrolly/deck cases
+fall out of W1 instead of being separate features.

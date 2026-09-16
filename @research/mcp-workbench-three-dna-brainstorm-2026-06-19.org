@@ -1,0 +1,234 @@
+#+TITLE: MCP Workbench — the Three-DNA Brainstorm (Spacetime × Squarespace × Figma/Framer)
+#+CUSTOM_ID: mcp-workbench-three-dna-brainstorm-2026-06-19
+#+LAYER: mcp
+
+* Premise
+Round 1 closed the LIVE LOOP (BUG-111 stage composition, FEAT-124 hot-swap +
+contract compat, FEAT-133 diagnostics). The workbench now BREATHES: compose a
+function onto the stage, re-put, it hot-swaps in place. That made it *live*. This
+brainstorm is about making it *a studio* — the three DNAs the north star names:
+
+- *Spacetime* — everything live, composable, self-describing. (Have it now.)
+- *Squarespace* — beautiful defaults, inline editing, zero blank-canvas anxiety.
+- *Figma/Framer* — a canvas, direct manipulation, select → inspect → edit.
+
+The decisive realization from the recon: *we are not building these from
+scratch.* Two of the three DNAs already exist, fully, elsewhere in stdlib. The
+work is COMPOSITION — pointing the workbench's region pipeline at machinery
+that's already shipped — not invention.
+
+* The prior art (what already exists)
+** Squarespace DNA lives in =stdlib/__admin__= — and it is the gold standard.
+The CMS admin is a FULLY-DECLARATIVE meta-renderer: *zero =%emit js=*, built
+entirely from platform constructs (=@data= / =@each= / =@template= / =@view= /
+=@portal= / =@match= / =@effect= / =:= / =<-=) across the =app/= tree.
+- =app/app.st= — rail · center · drawer shell (the SAME topology as the workbench!).
+- =app/list.st= — collection list; =app/media.st= — media library via =@portal=.
+- =app/tools.st= — brand / motion / palette editors. =app/graph.st= — relation graph.
+- Fetches a server contract at runtime (=site.json= + =types.json=), DERIVES its
+  collection list, renders rail/center/drawer from the contract — knows no types
+  at compile time. A meta-renderer, exactly like the workbench is for functions.
+- =@editable= + =@editable-mark= / =@editable-block= (=stdlib/macros/editable.st=,
+  =stdlib/editable/=): inline rich-text where *a mark IS a template*; the
+  editable-surface holds the doc AST, re-projects on every edit, and exposes
+  =$doc / $sel / $activeMarks / $blockType= as ordinary SIGNALS. A toolbar is
+  plain =@on click { $doc.apply("bold") }=.
+
+*Takeaway*: the workbench and the admin are the SAME SHAPE (rail/center/drawer,
+contract-driven meta-render). The Squarespace DNA is a sibling we can converge
+with, not a feature to build.
+
+** Figma/Framer DNA lives in =stdlib/__dev__= — but as imperative overlay.
+The select → inspect → edit loop is PROVEN here, but it is =%emit js= + shadow
+DOM (a debug-mode overlay), not the declarative model:
+- =dev-selector= — hover/click an element → overlay highlight + tooltip;
+  =getSpacetimeInfo(el)= reads tag/classes/localeKey/bound-signals off a node.
+- =dev-inspect= — polls =__ST_DEBUG__= for timelines/errors/dataSources.
+- =st-properties= — inline-editable properties → =EditAst= patches over the dev WS.
+- =dev-data-editor=, =dev-collection-crud=, =dev-media-picker=, =dev-content-tree=.
+- Scene macros (=stdlib/macros/scene/=: camera/distort/morph-to/pulse/react-to/
+  time-loop/scene-2d/3d) — transform + animation primitives.
+
+*Takeaway*: the select→inspect→edit CONCEPT is shipped and battle-tested. But its
+IMPLEMENTATION (shadow-DOM overlay, %emit js) is the WRONG model for the
+workbench, whose law is pure-Spacetime/no-custom-JS (AGENTS.md). We borrow the
+*concept* and re-express it declaratively (a =$selected= signal + a reactive
+inspector bind), the way =__admin__= re-expressed the old 1349-line JS admin.
+
+* The core design thesis
+Three concerns, ONE convergence. The workbench, the CMS admin, and the dev
+inspector are three views of the SAME machine: a contract-driven meta-renderer
+with a rail/center/drawer shell that composes self-describing Spacetime bundles
+into regions. Today they are three separate trees. The studio is what you get
+when the workbench ABSORBS the admin's declarative editing and the dev tools'
+select→inspect — over the region pipeline we just finished.
+
+* Design moves (ordered by leverage; each names its prior)
+** M1. House style for newborn content (Squarespace defaults) — reuse =__admin__= surfaces
+*Observed gap (round 1)*: a composed guest renders top-left, unstyled black text
+(see wb-09/wb-10). A studio never lets newborn content look like a 1995 browser.
+- The region root is layout-neutral BY DESIGN (so mounted content owns its
+  layout) — correct. But "neutral" currently means "ugly default."
+- Move: ship a warm baseline bundle the stage applies to guests that don't opt
+  out — typography, spacing, a couple of button/heading defaults — sourced from
+  the admin's editorial identity tokens (it already defines white-surface/
+  near-black-text/scarlet-accent; the workbench has the warm-dark palette).
+- Self-describing: the baseline is itself a bundle, origin-tagged, swappable.
+- Decision needed: opt-IN (guest asks for house style) vs opt-OUT (house style
+  unless the guest declares its own). Squarespace = opt-out (beautiful by
+  default). Lean opt-out with a one-line escape.
+
+** M2. Stage empty-state → living gallery (Squarespace "start from a template")
+*Observed gap*: the empty-state's three ghost-pills (=from env…=, =agent-sent…=,
+=kit…=) are INERT — they look clickable, do nothing.
+- Move: make them real, and make them a GALLERY of live thumbnails — each a
+  registered function / env tab / kit fragment mounted at small scale (the
+  bundle rendered tiny, not a screenshot — self-describing). Click → compose to
+  the stage full-size (the =st_mount host region=stage= path we just built).
+- Reuse: =__admin__/app/list.st= is already a contract-driven list renderer with
+  search; the gallery is that list, themed warm, with each row a mini-region.
+- This is the single highest-DELIGHT move: it turns "Begin here" from a dead end
+  into a curated front door.
+
+** M3. Stage as a selectable canvas (the Figma turn) — declarative =$selected=
+*Observed gap*: one region (stage), no canvas, no selection.
+- The region MODEL already supports N regions (drawers are regions; isolation is
+  proven). Surface it: the stage hosts a SET of frames, each a region.
+- Selection is a SIGNAL, not an overlay: =$selected= (region id). Click a frame
+  ⇒ =$selected <- "frame-3"=; a reactive class =.is-selected: $selected ==
+  "frame-3"= draws the Figma selection ring. Pure Spacetime — the same pattern
+  as =$drawer= we already ship. NO =__dev__= shadow-DOM overlay needed.
+- Borrow from =dev-selector= only the IDEA (highlight the selected node + show
+  its identity), re-expressed as signal + reactive class + a bound inspector.
+- *Drag/resize is NOT a gap*: =stdlib/macros/drag.st= (=@drag(axis, bounds,
+  threshold, momentum) { dragging {…} on-drop: … }=) is a shipped DECLARATIVE
+  drag primitive, alongside =stdlib/primitives/gesture.st= / =pointer.st= /
+  =magnetic.st= and =stdlib/mobile/macros/gestures/pan.st=. So a movable frame is
+  =@drag= on the frame root + an =on-drop= that writes its position signal — no
+  pointer JS, no =__dev__= overlay. The Figma canvas is =@drag= + =$selected=,
+  both already in stdlib.
+
+** M4. Inspector binds to selection (Figma property panel) — reuse =@editable= + admin rails
+*Observed gap*: the inspector drawer is a static dump, bound to nothing.
+- Move: bind the inspector to =$selected= — it shows the SELECTED frame's
+  contract (FEAT-132 already renders param rows; make them the panel's content).
+- Then make the params EDITABLE (the Framer move): each contract param becomes a
+  control; editing it re-inputs the mounted instance live (we have hot-swap +
+  per-instance input.json). This is exactly =__admin__='s entry-editor drawer
+  (=app/drawer.st= edits a collection entry's typed fields) — reuse that rail.
+- =@editable= gives rich-text fields for string params for free.
+
+** M5. Comms ribbon carries agent affordances (the live agent UX) — reuse the kit
+*Observed gap*: the comms drawer is an empty shell.
+- The kit (picker/form/confirm) already composes as region-mounted bundles over
+  the signal sink (PLAN-043/044, FEAT-131 harmony). Wire =st_await=-delivered
+  affordances INTO the comms drawer as cards whose actions are the kit-* answers.
+- This is the "agent and human co-edit the same studio" story: the agent sends a
+  choice → it appears in comms → the human answers → =st_await= resolves.
+
+** M6. Inline edit of the live page (Squarespace) — reuse =__admin__= edit-mode + dev-ws
+- The admin already has an edit-mode toggle (=html[data-st-edit-mode]=) that
+  flips published content into =@editable= surfaces, persisting via the dev WS
+  bridge (=dev-save.st= / =dev-ws.st= — the ONLY %emit js the admin keeps).
+- For the workbench: a "edit this bundle" mode where the composed guest's text
+  becomes editable in place and edits persist back to the function source. This
+  closes the loop from "mount + inspect" to "mount + EDIT + save" — the full
+  Squarespace promise on live Spacetime content.
+
+* Convergence map (what reuses what)
+| Studio capability        | Prior to reuse                         | New glue (small) |
+|--------------------------+----------------------------------------+------------------|
+| house style defaults     | __admin__ editorial tokens             | 1 baseline bundle |
+| living gallery           | __admin__/app/list.st (contract list)  | mini-region thumbnails |
+| selectable canvas        | region model (N regions) + $drawer ptn | $selected signal |
+| inspector = property panel | FEAT-132 rows + __admin__/app/drawer.st| bind to $selected |
+| editable params          | @editable + editable-surface signals   | param→control map |
+| comms affordances        | kit picker/form/confirm + signal sink  | st_await→comms cards |
+| inline page edit + save  | __admin__ edit-mode + dev-ws bridge    | source write-back |
+
+The pattern: every studio capability is an EXISTING shipped surface +
+a small declarative glue over the region pipeline. No new subsystem.
+
+* The deeper opportunity — one meta-renderer, three faces
+Right now =__mcp__=, =__admin__=, =__dev__= are three trees that rhyme. The
+honest long arc (a PLAN, not this round) is to recognize they are ONE machine
+with three lenses:
+- a contract-driven meta-renderer (admin: data types; workbench: functions;
+  dev: runtime state),
+- a rail/center/drawer shell (all three have it),
+- composing self-describing bundles into regions (the pipeline we just finished),
+- with select→inspect→edit + inline editing as shared verbs.
+Converging them would DELETE duplication (three drawer systems, three list
+renderers, three inspectors) — the AGENTS harmony bar. That is the elegant
+end-state: the workbench is not a fourth tool; it is the admin and the dev
+inspector and the function studio, unified by the region pipeline.
+
+* Sequencing (proposed — for discussion, not committed)
+1. M1 house style + M2 gallery — pure delight, pure reuse, unblocks "it feels
+   like a studio" immediately. Low risk (styling + a contract list).
+2. M3 $selected canvas + M4 inspector-binds-selection — the Figma loop; medium
+   (multi-region stage + reactive bind). Highest "it feels like Framer" payoff.
+3. M5 comms affordances — wires an already-built kit into an already-built drawer.
+4. M6 inline edit + save — the deepest, reuses admin edit-mode; do last, it is
+   the bridge to the "one meta-renderer" convergence.
+
+* Settled decisions (2026-06-19, with the human)
+** D-Q1. House style = OPT-OUT, as a ZERO-SPECIFICITY typography+color baseline.
+Newborn content is readable-by-default on the warm-dark stage; a guest's own CSS
+overrides trivially. Implemented as =:where(.mcp-stage[data-st-region="stage"])
+:where(h1,h2,p,…)= rules: zero specificity, so a direct (even zero-spec) rule on a
+guest element beats the inherited =initial= reset, while ANY guest CSS (normal
+specificity) wins over it — no specificity war.
+- Reconciliation with FEAT-126's deliberate layout-neutral region: we split the
+  conflation. LAYOUT stays neutral (no grid-centering / forced flex — the
+  reviewer's real intent is kept). Only TYPOGRAPHY + COLOR get a baseline, and it
+  is a READABLE NEUTRAL (system-font stack, sensible scale, warm-neutral color),
+  explicitly NOT the chrome identity (Inter/cream). The workbench still does not
+  impose its brand on guests; it just stops rendering them as broken black text.
+- The baseline is itself a swappable, origin-tagged bundle (self-describing).
+
+** D-Q2. Canvas = ONE focused stage + in-stage select→inspect→edit. Multi-frame DEFERRED.
+The Figma FEEL comes from the select→inspect→edit loop on a single composition,
+not from many artboards. The core live-coding loop iterates ONE function at a
+time; that is one stage + the gallery as frame-switcher.
+- In-stage SELECTION is clean (event delegation on the stage root, read the
+  clicked element → =$selected=). DRAG is only meaningful at the FRAME level
+  (moving a whole mounted thing), which only matters in multi-frame mode — so
+  =@drag= + multi-frame are deferred TOGETHER as one coherent later mode.
+- Quarantines the risky parts (pan/zoom, z-order, occlusion, per-frame position
+  persistence, N bundle-polls) into the deferred PLAN; every round-2 move stays
+  shipped-primitive + small glue.
+
+** D-Q3. Convergence = BORROW patterns now; one-meta-renderer is a NORTH STAR, not an epic.
+Converging __mcp__/__admin__/__dev__ now is premature (the shared abstraction's
+shape isn't known yet — the workbench just got its live loop) and high-risk
+(three live consumers/routes). It also fails the elegance bar: a shared mechanism
+earns its place only when a SECOND real consumer makes it DELETE complexity.
+- Round-2 moves IMPORT from admin/dev where clean. A shared primitive is
+  extracted only on the second real consumer (two-consumer rule), not
+  speculatively. The convergence vision is written down so we build COMPATIBLY
+  (same region pipeline, same =$drawer= signal pattern, same contract-fetch
+  shape) — but it stays a north star until the duplication is real and painful.
+
+* Settled round-2 sequence (→ PLAN)
+1. M1 house-style zero-spec baseline — smallest, pure delight, kills the ugliness.
+2. M2 living gallery (empty-state → live thumbnails) — borrow __admin__/app/list.st;
+   doubles as the one-stage frame-switcher.
+3. M3′ in-stage select→inspect: =$selected= signal + reactive selection ring +
+   inspector binds to the selected frame's FEAT-132 contract rows.
+4. M4 editable params: param → control; editing re-inputs the live instance
+   (reuse __admin__/app/drawer.st rail + @editable).
+5. M5 comms affordances: wire the shipped kit (picker/form/confirm) into the
+   comms drawer over the signal sink.
+6. M6 inline edit + save: reuse __admin__ edit-mode + dev-ws write-back; last,
+   it bridges toward the convergence north star.
+Deferred PLAN: multi-frame drag-canvas (=@drag= + N regions + pan/zoom/z-order).
+North-star vision: one meta-renderer, three faces (__mcp__/__admin__/__dev__).
+
+* Artifacts
+Round-1 proof: scratch/wb-09-composed-guest.png (compose), wb-10-hotswap.png (hot-swap).
+Priors: stdlib/__admin__/ (Squarespace DNA, declarative), stdlib/__dev__/ (Figma DNA,
+imperative overlay), stdlib/editable/ + stdlib/macros/editable.st (@editable),
+stdlib/macros/scene/ (transforms). Region pipeline: stdlib/__mcp__/primitives/bundle.st.
+Design doc: @research/mcp-design-language-organic-birthplace.org.
+Round-1 review: @research/mcp-workbench-review-2026-06-19.org.

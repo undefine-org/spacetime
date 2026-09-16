@@ -1,0 +1,227 @@
+#+TITLE: @score as the assembly cut of a full NLE algebra — cases from linear & non-linear editing
+#+DATE: 2026-07-18
+#+STATUS: design v4 — extends v3 (currying model stands). Answers: which linear/NLE operations must the syntax close over, and what each means in ST.
+
+* The discipline, distilled
+
+Linear editing (tape-to-tape): assemble in sequence, insert edits DESTROY
+downstream. Non-linear editing (Avid/Premiere/Resolve/FCP): eight named
+operations over a timeline; every cut is non-destructive, everything
+ripple-able, everything keyframe-able. The eight, with their exact demands:
+
+1. **Ripple / roll / slip / slide** — the four trim operations. Ripple: move a
+   cut, re-time everything after. Roll: shift the cut BETWEEN two clips,
+   total preserved. Slip: shift a clip's CONTENT window, span fixed. Slide:
+   move the clip, neighbors absorb, total preserved.
+2. **L-cut / J-cut / split edit** — audio and video cut at different points.
+3. **Speed: retime / ramp / reverse / freeze / hold** — variable rate along
+   the clip.
+4. **Composite: layer / transform / keyframe / mask / crop / fit** — stacking
+   with pixel-level geometry control.
+5. **Multicam & nested sequences** — switch takes over a shared timebase;
+   embed a whole timeline as a clip.
+6. **Adjustment layers** — a span that affects everything VISUALLY BELOW it.
+7. **Markers & snapping** — cuts land on beats/cues, not guesses.
+8. **Batch / template / personalization** — one master cut, N data-driven
+   renders.
+
+* v3 inventory: what the currying score already closes over
+
+The v3 model — score lines = tracks, steps = curried template invocations,
+placement by postfix words (=at/for/after/during=), =->= edges ride
+region-templates — turns out to be exactly the NLE *assembly cut*:
+
+| NLE case | v3 already has | How |
+|----------+----------------+-----|
+| Assemble, ripple, roll | ✓ by construction | =->= chains re-time automatically; ripple & roll are the DEFAULT because arrangement is computed from decls, not baked frames |
+| L/J-cut, split edit | ✓ | separate stave lines: =&voice during &intro to &features= + =&broll during &voice= — audio cuts independent of video cuts |
+| Speed ramp/reverse | ✓ | =->= is already a variable-rate path in keyframes (easing + multi-stop); the SAME operator is the transport's rate curve |
+| Freeze/hold | ✓ | =hold(until:)= rests |
+| Layer/stack, PiP | ✓ | stave order = z-order; transform/fit = @play keyframes |
+| Nested sequence | ✓ | currying: a timeline is a template ∴ scores inside scores; transport parents by default |
+| Batch/personalize | ✓ | =@each= in score + =--data= renders |
+| Snapping | ✓ structurally | =during A to B= / =at beat(n)= are snap targets |
+| Markers | ✓ (score-side) | =@score= gains =mark name= line-end words = NAMED spans (see below) |
+
+* What v3 could NOT express — the NLE gap
+
+The gap is **source-level control**: trimming INTO material, masking, and
+span-references. Three cases v3 had no honest answer for:
+
+**Case A — cut-points.** Trim a b-roll to its 4s→9s window; keep only the
+spoken sentence from VO. Templates are wholes; NLE cuts are WINDOWS into
+sources.
+
+**Case B — geometry.** Crop to the speaker; mask an oval PiP; punch-in. These
+are SPAN-WIDE CONTINUOUS facts, not time-keyframed motion — different from
+=range:= (within-clip sub-spans over keyframes).
+
+**Case C — reference.** Captions track VO; an overlay is on-screen "while
+chapter 2 plays"; music ducks under dialogue. Arrangement must REFERENCE
+spans, not only place them.
+
+∴ v4 adds three things, each an EXTENSION of an existing affordance, none a
+new namespace:
+
+* v4-1 — =in:/out:= are SOURCE TRIM words, not clip-keyframe words
+
+Spacetime ALREADY has the exact concept at one level down: keyframes.st §
+"Repeating + clip" — =clip: 2= and =clip: 2 to 3= mean "use only cycles 2..3
+of a repeating keyframe path, retimed to the clip's span". Cycle-clip is a
+window into a repeating path; source-trim is a window into a MEDIA SOURCE.
+Same operation, one level up. ∴ the score adopts the SAME words, lifted:
+
+#+begin_src spacetime
+&broll(src: "assets/city.mp4") in 4s out 9s        // window into the source
+&voice(src: "assets/vo.mp3")  in 12s out 30s
+#+end_src
+
+=in m= / =out m= sit beside =at/for/during= as placement words — but they are
+SOURCE-LEVEL (content window), where =at/for= are TIMELINE-LEVEL (arrangement).
+The distinction is load-bearing for slip vs slide:
+- **slip** = change =in/out=, span fixed  (content slides under the window)
+- **slide** = change =at=, neighbors absorb  (window moves, content fixed)
+- **ripple** = move a =->= cut            (default, free)
+- **roll** = rebalance two neighbors' =in/out= around their shared cut
+
+All four trim operations are now expressible as edits to words that already
+exist — no "trim tool" concept, no new syntax shape. (For non-media templates
+=in/out= retime the @play path — exactly like cycle-clip retimes a repeat.)
+
+* v4-2 — geometry is CSS; the score adds only span-level REGION references
+
+Crop / mask / aspect-fit / punch-in need NO score grammar:
+- =object-fit=, =clip-path: inset()/circle()/path()=, =aspect-ratio= are CSS.
+- In Spacetime, CSS animates through keyframes: =clip-path: inset(0 40% 0 0)
+  -> inset(0)= IS the Ken-Burns/reveal; =border-radius: 0 -> 50%= with
+  =overflow: hidden= IS the oval mask. This is the harmony rule at work —
+  the W3C spent a decade making geometry declarative; we ride it.
+- =@play= bodies therefore carry geometry keyframes verbatim; a "mask" is a
+  template with =overflow: hidden= + =border-radius= + region params
+  (=&mask-oval(&content)= — a region-template, edge/pip-applicable).
+
+The ONE thing CSS can't say: "crop to WHERE THE SPEAKER IS." That is a
+span-referenced region — but it is DATA (a track), not syntax: a tracking
+plugin yields =$speaker_box= (x,y,w,h over t); @play consumes it:
+
+#+begin_src spacetime
+@play &talking-head {
+  .frame { clip-path: follow($speaker_box, padding: 8%) }   // data-driven crop
+}
+#+end_src
+
+=follow()= is a value-function over a signal — the signal-handler/value rail,
+not new grammar. Auto-reframe (16:9 → 9:16 tracking the action) = same
+mechanism on the outer frame. This is the "elegance bar" answer to Resolve's
+magic-mask: the FEATURE is a data producer + existing CSS, not a syntax form.
+
+* v4-3 — spans are first-class REFERENCES: markers + named spans
+
+=during &intro to &outro= already references two spans. NLE needs to
+reference spans that AREN'T clips: "the chorus", "chapter 2", a beat drop.
+These are MARKERS — points/segments the score names without mounting content.
+They are rests-with-names — the same stave-slot family as =gap/hold=:
+
+#+begin_src spacetime
+@timeline &film(time) {
+  @score {
+    &intro -> &whip-pan(300ms) -> &features -> &outro   mark chapter1 mark chapter2
+    &voice during &chapter1 to &chapter2
+    &duck-bed(gain: 0.5) during &chapter2
+    &bgm in 0s out 60s at 0s
+  }
+}
+#+end_src
+
+=mark name= names the span FROM the running playhead TO the next mark (or end
+of its line) — a named REST segment. Any placement word can then reference
+=&name=. This reuses the stave-slot grammar (gap/hold/mark are the three
+non-content steps) and turns "chapter" from a comment into a compile-checked
+reference. Markers double as snap targets and as the =@chapters= export for
+the player (WebVTT chapters track — standards-compliant).
+
+* The full NLE case table → syntax
+
+| # | NLE operation | Score syntax | New? |
+|---+---------------+--------------+------|
+| 1 | assemble | =&a -> &b -> &c= | v3 |
+| 2 | ripple | move an item in a =->= chain | free (computed arrangement) |
+| 3 | roll | rebalance two neighbors' =in/out= at their cut | v4 words, existing shape |
+| 4 | slip | change =in/out=, span fixed | v4 words |
+| 5 | slide | change =at=, =after= preserves link | v3 word |
+| 6 | L/J-cut | audio & video on separate lines, independent =during/at= | v3 |
+| 7 | retime/ramp/reverse | transport =->= path (easing/multi-stop/reverse) | v3 (operator lifted) |
+| 8 | freeze / hold-frame | =hold(until:)= / =gap= | v3 |
+| 9 | transform / fit / crop / mask | CSS in @play: =object-fit=, =clip-path ->=, =border-radius=, region-templates | existing CSS rail |
+| 10 | data-driven crop (speaker track) | =clip-path: follow($signal)= | v4 value-fn (no grammar) |
+| 11 | PiP / layers | stave line order + geometry keyframes | v3 |
+| 12 | multicam | switch-take = a keyed =@play= over =&cam-a/&cam-b= siblings on one line, cuts at =mark= refs | v4 markers |
+| 13 | nested sequence | timeline-as-template (currying), transport parents | v3 |
+| 14 | adjustment layer | =@template &grade(&below)= region-template placed on its own line spanning the range — region param binds "visually below" via z-stave order | v3 region shape |
+| 15 | markers / chapters | =mark name= line-end, =&name= referenceable | v4 |
+| 16 | snapping | =at/during= to =&mark= / =beat(n)= | v3+v4 |
+| 17 | captions track | =@captions= template family, =follow: &voice=, VTT compile | v3 |
+| 18 | ducking | =duck: &voice= param (entity-ref) | v3 |
+| 19 | batch / personalize | =@each= + =--data= | v3 |
+| 20 | export chapters/markers | =mark= → WebVTT chapters + EDL/JSON sidecar | v4 emit |
+
+* What this means for the syntax — the three honest additions
+
+1. =in m= / =out m= placement words (source trim) — the keyframes =clip:=
+   concept lifted from cycle-window to source-window. One idea, two levels.
+2. =mark name= score step — named rest segment; placement words and player
+   chapters both consume it.
+3. =follow($signal)=-style value functions — geometry from tracked data,
+   zero grammar (signal-handler rail).
+
+Everything else the NLE needs was ALREADY in the currying model — because the
+currying model *is* the NLE insight: arrangement is a computed function over
+typed, referenceable, re-appliable clips, not baked frames.
+
+* Multicam worked example (the hardest case, to prove the grammar bends)
+
+#+begin_src spacetime
+@template &cam-a { <video src="assets/a.mp4" class="cam"></video> }
+@template &cam-b { <video src="assets/b.mp4" class="cam"></video> }
+
+@play &interview(60s) {
+  // takes switch at marks: only one cam visible at a time
+  &cam-a { opacity: 1 -> 1 at &take1; 0 -> 0 at &take2; 1 -> 1 at &take3 }
+  &cam-b { opacity: 0 -> 0 at &take1; 1 -> 1 at &take2; 0 -> 0 at &take3 }
+}
+
+@timeline &show(time) {
+  @score {
+    &interview for 60s   mark take1 mark take2 mark take3
+    &audio-master during &interview
+  }
+}
+#+end_src
+
+Wait — =-> at &mark= mixes keyframe placement with mark refs; the cleaner
+form keeps marks on the score line and lets a plain =@when=/$phase state
+machine in the scene body pick the take. Resolved in §Open-1: marks as
+keyframe-anchors is v4 candidate; state-machine-in-body works TODAY with no
+new grammar. Prefer the latter until proven.
+
+* Elegance-bar receipts
+
+- =in/out=: SAME concept as keyframes =clip:= (window-into-a-source), lifted
+  one level — deletes zero code but adds zero NEW concept; variants are
+  measure data. Pass (extension of existing grammar, same machinery tests it).
+- =mark=: third member of the rest family (gap/hold/mark) — one stave-slot
+  grammar, three kinds-as-data. Deletes "chapters" as a separate feature.
+- geometry: ZERO new grammar — CSS + region-templates + signal values.
+  Deletes "mask tool"/"crop tool"/"motion tracker" as syntax.
+- markers→chapters→snap: one =mark= decl feeds three consumers.
+
+* Open
+
+1. Multicam take-switch: state-machine-in-scene-body (works today) vs marks as
+   keyframe anchors (needs =-> at &mark= grammar). Defer; use the former.
+2. =in/out= on non-media templates = retime of the @play path — confirm the
+   cycle-clip retime semantics generalize (impl-time, keyframes.st §clip).
+3. Adjustment-layer "below" binding: z-stave order vs explicit =&below=
+   region param — explicit param is honest; order-inference is magic. Lean explicit.
+4. EDL/JSON export shape for round-trip with desktop NLEs (FCPXML/OTIO) —
+   emit target, =@render= concern not grammar.

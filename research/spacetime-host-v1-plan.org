@@ -1,0 +1,640 @@
+#+TITLE: SPACETIME_HOST_V1_IMPLEMENTATION_PLAN
+#+STATE: DRAFT
+#+CUSTOM_ID: RESEARCH-spacetime-host-v1-plan
+
+* Purpose
+
+Concrete, gated, wave-by-wave v1 build plan for Spacetime Host, superseding
+the conceptual sketch in =research/spacetime-host-architecture.org= §D/§F
+with implementation specifics grounded in DIRECT reads of both source repos
+this session (6 parallel explore agents — 3 on =~/code/ora/push-website=,
+3 on this repo). Every claim below is either verified-in-source (cited
+file:line) or explicitly marked as an open design decision.
+
+Two corrections from user input drove this revision (see companion note in
+=research/spacetime-host-architecture.org= §D0 changelog):
+1. push-online-server is NOT a wholesale fork target — most of it is dead
+   weight once R2+Worker+KV serves traffic (§D0). Only a thin slice reuses.
+2. Media (images AND video) routes through Cloudflare Images / Cloudflare
+   Stream, not R2 — eliminates the "images only, no video" v1 constraint.
+
+* 0. Ground-truth corrections vs the conceptual doc
+
+These are FACTS discovered this session that change prior assumptions:
+
+** push-online has NO login/signup system
+
+=crates/push-online/src/cli/commands/push.rs:75-85= reads a single static
+=PUSH_ONLINE_API_KEY= env var, Bearer-auth'd against ONE shared secret
+checked by =require_auth= middleware (=crates/push-online-server/src/
+routes/mod.rs=). No accounts table, no per-user token issuance, no
+device-code/OAuth flow, no token persisted on disk by the CLI. This is an
+agency-internal tool (one operator, many client sites), NOT a self-serve
+multi-tenant SaaS. **Item A ("sign-up, log in") has zero prior art — fully
+greenfield for v1.**
+
+** push-online-server's Cloudflare integration is a stub
+
+=crates/push-online-core/src/cloudflare.rs= (per this session's read, lines
+1-260) contains only TYPES (=SslStatus= enum, =CreateCustomHostnameRequest=
+struct) — no HTTP-calling function was found in that file, and
+=crates/push-online-server/src/handlers/domains.rs= is explicitly annotated
+by the research agent as "Cloudflare integration is stubbed (no real API
+calls made)". push-online's actual production custom-domain TLS uses
+CADDY'S OWN on-demand-TLS DCV flow (=verify_domain= endpoint, checked
+against Caddy's ask), NOT a working Cloudflare-for-SaaS API client. **We
+must write the actual Cloudflare-for-SaaS API calls ourselves** — the types
+are reusable scaffolding, the integration is not done.
+
+** No preview/production slot concept exists anywhere in push-online
+
+Confirmed via direct schema read (=storage/metadata.rs:47-101=) and
+=project.rs=/=project_resolver.rs=: each deploy fully deletes and
+re-extracts =projects_dir/{project_id}/= in place
+(=storage/files.rs::extract_archive=, "Clears existing files" then
+re-extracts). No content hash, no pointer/symlink flip, no versioning
+field in the schema. **§D0's content-addressed hash + KV pointer-flip
+design has ZERO prior art to fork — it is entirely new logic**, informed
+by but not copied from push-online.
+
+** What's actually reusable, precisely
+
+| Component | push-online source (verified) | Reuse verdict |
+|---|---|---|
+| ~Project~/~Domain~ structs | =push-online-core/src/project.rs:13-83= | Reuse shape, trim DCV fields |
+| Tar-entry validation (path traversal/symlink rejection) | =push-online-server/src/storage/files.rs:38-130= (=extract_archive=) | Reuse the VALIDATION LOOP verbatim; replace the write target (local =fs::write= → R2 =PUT=) |
+| SQLite schema shape (~projects~/~domains~ tables) | =push-online-server/src/storage/metadata.rs:47-101= | Reuse table shape, drop DCV columns (=dcv_http_url=, =dcv_http_body=), drop =integrations_config= column |
+| ~SslStatus~ enum, ~CreateCustomHostnameRequest~ struct | =push-online-core/src/cloudflare.rs= | Reuse the TYPES only |
+| CLI subcommand skeleton pattern (clap Subcommand enum shape) | =push-online/src/cli/mod.rs:15-91= | Reuse as a STYLE reference, not literal code (different product surface) |
+| =serve.rs=, =host_router.rs=, ~DomainCache~ | =push-online-server/src/{handlers/serve.rs,middleware/host_router.rs}= | **DROP** — dead once R2+Worker+KV serves (§D0) |
+| Local-disk =extract_archive= write path | =push-online-server/src/storage/files.rs= | **DROP** the write target, reuse the validation |
+| Cloudflare API calling code | (not found — stub) | **BUILD NET-NEW** |
+| Accounts/API-token system | (does not exist) | **BUILD NET-NEW** |
+| Preview/production pointer flip | (does not exist) | **BUILD NET-NEW** (already designed in §D0) |
+| Image optimization (oxipng/mozjpeg/webp) | =push-online-core= (referenced, not re-read this session) | **DROP** — replaced by Cloudflare Images |
+| =integrations.rs= (forms/webhooks/Shopify) | =push-online-core/src/integrations.rs= | **DROP** — unrelated product surface, v1 scope |
+
+* 1. Storage architecture (final, two lanes)
+
+** Lane A — site bytes (HTML/CSS/JS) → Cloudflare R2
+
+Unchanged from =research/spacetime-host-architecture.org= §D0: content-hash
+keyed objects (=`{project_id}/{deploy_hash}/...`=), KV pointer table
+(=preview=/=production= aliases), =spacetime-host-edge= Worker (Rust via
+=workers-rs=) serves via Cache API → R2 fallback.
+
+** Lane B — media (images, video) → Cloudflare Images / Cloudflare Stream
+
+NEW this session, replaces the original "images only, raw upload, no
+video" constraint entirely.
+
+*** Images
+
+- Verified pricing: $5/100K images stored/mo, $1/100K images delivered/mo,
+  first 5,000 remote-origin transforms/mo free then $0.50/1,000. Up to 100
+  named variants (e.g. =thumbnail=, =hero=), generated on first request,
+  cached globally after.
+- Flow: at =spacetime host push= build time, the orchestrator scans
+  =dist/= for image references (png/jpg/jpeg/webp/gif — svg stays a raw R2
+  object, Images doesn't transform vector formats), uploads each ONE TIME
+  via Cloudflare Images' upload API, receives back an image ID + delivery
+  URL template (=https://imagedelivery.net/{account_hash}/{image_id}/
+  {variant}=), rewrites the corresponding =<img src>=/CSS =background-image=
+  reference in the built HTML/CSS to the delivery URL before it's uploaded
+  to R2. Re-pushing an unchanged image (same content hash) is a no-op
+  (skip re-upload) — dedup keyed by a content hash we compute client-side,
+  since Images doesn't offer content-addressing itself.
+- This DELETES =push-online-core='s oxipng/mozjpeg/webp optimization
+  dependency from our fork entirely — Cloudflare owns format
+  conversion/resizing/quality now, we own zero image-processing code.
+
+*** Video (v1, NOT deferred — the free-ingress economics removes the actual blocker)
+
+- Verified pricing: ingress + encoding FREE always; storage $5/1,000 min
+  stored/mo (a 60-min 4K source can transcode to ~240-300 stored minutes
+  across ABR renditions — a real cost driver to surface to customers, not
+  a blocker); delivery $1/1,000 min delivered/mo, bandwidth INCLUDED (zero
+  separate egress).
+- Flow: orchestrator requests a Direct Creator Upload URL from Stream's API
+  (pre-signed, single-use, scoped to one video UID — our API token never
+  leaves the server), CLI/build step PUTs the video bytes to that URL
+  (TUS/resumable protocol required over 200MB, 30GB cap), orchestrator
+  registers ONE webhook subscription (Cloudflare allows exactly one per
+  account — verified) at =/api/webhooks/stream= to learn when transcoding
+  finishes (HMAC-SHA256 =Webhook-Signature= header, verify before trusting
+  the payload), then rewrites the built =<video>= reference to the Stream
+  HLS manifest / player-embed URL.
+- The routing Worker (Lane A) NEVER proxies media of either kind — full
+  offload to Cloudflare's specialized CDNs. Cleaner separation of concerns
+  than one origin serving everything, and removes media entirely from our
+  own bandwidth/serving-logic surface area.
+- Open question (folded into §8 below): is video a v1 launch feature or a
+  fast-follow within v1.x? Recommend LAUNCH FEATURE — free ingress/encoding
+  removes the actual cost/complexity blocker that justified deferring it
+  originally; the only new work is the Stream API client + webhook
+  handler, both thin.
+
+* 2. Accounts & auth — REVISED: WorkOS AuthKit (identity) + thin local API tokens (CLI)
+
+#+begin_quote
+DECISION (this session, superseding the original §2 draft below the
+changelog note): identity is delegated ENTIRELY to WorkOS AuthKit — we
+own zero passwords, zero email-sending, zero magic-link token-expiry
+logic. Considered three paths (hand-rolled Rust, Elixir+Ash+
+AshAuthentication, managed provider) — full tradeoff writeup is in this
+session's chat, condensed rationale here:
+- Hand-rolled Rust (Argon2 + our own magic-link table): small but real
+  ongoing security surface (token revocation, login rate-limiting,
+  timing-safe comparison, email deliverability) we'd own forever.
+- Elixir + Ash + AshAuthentication: =elixir/spacetime_lv= is a BARE
+  Phoenix LiveView app today (verified via =mix.exs= — zero Ash
+  dependency currently), so this path means introducing a SECOND
+  deployed runtime (BEAM) a full product-cycle earlier than PLAN-073's
+  own v2/v3 sequencing calls for (Elixir was slotted for v3
+  live-collaboration only). Either a second network-hop service or a
+  full rewrite of the already-scaffolded, =cargo metadata=-verified
+  5-crate Rust workspace — more infra, not less.
+- WorkOS AuthKit: verified free tier is 1M MAU (this product will not
+  approach that ceiling for years), passwordless/magic-link is a
+  first-class supported flow, and — discovered this session — WorkOS
+  ships an OFFICIAL Rust SDK (=cargo add workos=, crate =workos=,
+  =reqwest=-based, typed per-resource client: =client.user_management()=,
+  =client.sso()=, etc., =Result<_, workos::Error>= throughout) AND a
+  purpose-built CLI device-flow endpoint (=/authorize/device=) that IS
+  the =gh auth login=-style browser/CLI handoff §2 was going to hand-roll
+  — WorkOS gives us that mechanism natively instead. Only pay for
+  enterprise SSO/SCIM connections later ($125→$50/ea at volume) — a
+  natural extension path for v2's agency/institutional accounts (§F of
+  the conceptual doc), not a rearchitecture.
+
+This is the SAME philosophy already applied to storage/media/domains in
+this plan: let a specialized service own a specialized problem, we stay
+an orchestrator. Stays 100% Rust, stays in the single already-scaffolded
+workspace, zero new runtime.
+#+end_quote
+
+** What WorkOS owns vs. what we still build
+
+No identity provider removes the CLI-token layer — a CLI needs a
+long-lived bearer credential, not a browser session cookie, regardless of
+identity provider. So even with WorkOS:
+
+| Owned by WorkOS | Owned by us (thin) |
+|---|---|
+| Human signup/login (magic-link, later SSO) | =accounts= table: maps =workos_user_id= → our internal =account_id= |
+| Device-flow browser/CLI handoff (=/authorize/device=) | =api_tokens= table: our OWN scoped, revocable bearer token, minted AFTER a WorkOS-verified login |
+| Email delivery (magic links) | Nothing — WorkOS sends the email |
+| Session/token verification on the WorkOS side | Our own token verification on OUR api calls (SHA-256 lookup, same as before — CLI calls hit OUR server, not WorkOS, per-request) |
+| (v2) Enterprise SSO/SCIM | (v2) Org/seat model built on top of =accounts= |
+
+#+begin_src text
+accounts(
+  id                     TEXT PRIMARY KEY,      -- nanoid, e.g. "acct_V1StGXR8"
+  workos_user_id         TEXT NOT NULL UNIQUE,  -- WorkOS's own user ID, source of truth for identity
+  email                  TEXT NOT NULL UNIQUE,  -- cached from WorkOS at login time, for display/lookup only
+  created_at             INTEGER NOT NULL,
+  stripe_customer_id     TEXT,                  -- NEW (this session, §9): set on first Checkout
+  plan                   TEXT DEFAULT 'free',    -- NEW: Stripe Price/Product id or a local plan slug
+  subscription_status    TEXT                   -- NEW: mirrors Stripe subscription status
+                                                 --   (active/past_due/canceled/...), updated by webhook
+)
+
+api_tokens(
+  token_hash    TEXT PRIMARY KEY,      -- SHA-256 of the raw token; raw token shown ONCE at creation
+  account_id    TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  created_at    INTEGER NOT NULL,
+  last_used_at  INTEGER
+)
+#+end_src
+
+** Login flow (v1, revised)
+
+1. =spacetime host login= → orchestrator calls WorkOS's =/authorize/device=
+   endpoint (via the =workos= crate's device-authorization helper) to get a
+   =user_code= + =verification_uri= + =device_code=. CLI prints the code and
+   URL to the terminal (exactly =gh auth login='s UX) and opens the
+   browser automatically if possible.
+2. User completes login/signup entirely on WorkOS's hosted AuthKit page
+   (magic-link email, or later SSO) — WorkOS handles the email send, the
+   token, the expiry, all of it.
+3. CLI polls WorkOS's token endpoint (per the device-flow spec, via the
+   SDK) until the user completes step 2, receiving a WorkOS-issued token
+   plus the =workos_user_id=.
+4. Orchestrator's =auth::exchange= endpoint: given a valid WorkOS token,
+   upserts an =accounts= row keyed by =workos_user_id= (create on first
+   login), mints a NEW local =api_tokens= row scoped to that account,
+   returns the raw token ONCE. CLI writes it to
+   =$XDG_DATA_DIR/spacetime-host/credentials= (0600 permissions).
+5. Every subsequent CLI call sends =Authorization: Bearer {our_token}= to
+   OUR server (not WorkOS) — server looks up =SHA256(token)= in
+   =api_tokens=, joins to =accounts=, then to =projects.account_id= for
+   authorization. Identical to the original design from here on; only
+   step 1-4 (how the token gets minted) changed.
+
+This DELETES the original design's email-integration open question
+entirely (§8 below) — WorkOS sends the email, we never touch SMTP/a
+transactional-email API. Net LESS work than the original hand-rolled
+design, not equivalent work moved around.
+
+* 3. Trimmed DB schema (v1, full)
+
+#+begin_src sql
+-- accounts, api_tokens: see REVISED §2 above (WorkOS-backed identity,
+-- accounts.workos_user_id is the join key, not a locally-owned password)
+
+CREATE TABLE projects (
+  id                TEXT PRIMARY KEY,      -- nanoid "proj_V1StGXR8", same shape as push-online
+  account_id        TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,  -- NEW FK, not in push-online (single-tenant there)
+  name              TEXT NOT NULL,
+  created_at        INTEGER NOT NULL,
+  updated_at        INTEGER NOT NULL,
+  preview_hash      TEXT,                  -- NEW: content hash R2 pointer (nullable until first push)
+  production_hash   TEXT                   -- NEW: content hash R2 pointer (nullable until first publish)
+  -- DROPPED vs push-online: file_count, total_size_bytes (R2/KV don't need us to track this;
+  --   recomputable on demand from R2 list if ever needed for billing/UI display)
+  -- DROPPED: integrations_config (forms/webhooks — out of v1 scope)
+);
+
+CREATE TABLE domains (
+  domain                TEXT PRIMARY KEY,
+  project_id             TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  created_at              INTEGER NOT NULL,
+  is_primary              INTEGER DEFAULT 0,
+  cloudflare_hostname_id  TEXT,             -- renamed from cloudflare_id for clarity (Cloudflare for SaaS custom hostname ID)
+  ssl_status              TEXT DEFAULT 'pending_validation'  -- reuse push-online-core's SslStatus enum values
+  -- DROPPED vs push-online: dcv_http_url, dcv_http_body (Caddy-specific DCV — we don't run Caddy, §D0/§E)
+  -- ssl_validation_errors DROPPED for v1 simplicity; add back if Cloudflare for SaaS errors need surfacing to users
+);
+
+CREATE INDEX idx_domains_project_id ON domains(project_id);
+CREATE INDEX idx_projects_account_id ON projects(account_id);
+#+end_src
+
+Storage engine: reuse push-online-server's exact SQLite setup — r2d2 pool
+(max 10 connections), WAL mode, =PRAGMA foreign_keys = ON=
+(=push-online-server/src/storage/metadata.rs:35-95= as the literal
+reference implementation to copy the pool-construction code from).
+
+* 4. Crate-by-crate v1 scope (=commercial/host=)
+
+Building on the already-scaffolded 6-crate workspace (5 Rust + 1 standalone
+edge crate, committed this session).
+
+** spacetime-host-core
+
+- =r2.rs= (NEW): S3-compatible PUT/GET/list client against R2's endpoint
+  (=aws-sdk-s3=-shaped, per §D0). Functions: =put_object(bucket, key,
+  bytes)=, =object_exists(bucket, key) -> bool= (for push dedup).
+- =kv.rs= (NEW): Cloudflare KV REST API write client (server-side pointer
+  writes use the REST API, not a Worker binding — the orchestrator is a
+  plain Rust process, not itself a Worker). Functions:
+  =write_pointer(namespace_id, hostname, project_id, hash)=.
+- =cloudflare.rs= (REUSE types + BUILD calling code): keep =SslStatus=,
+  =CreateCustomHostnameRequest= from push-online-core; ADD the actual HTTP
+  client (=create_custom_hostname=, =get_hostname_status=) since push-
+  online's version is stub-only (§0 above) — this is real, not-yet-done
+  work, size it accordingly in the wave estimate.
+- =auth.rs= (NEW, REVISED §2): thin wrapper around the =workos= crate's
+  device-authorization + token-exchange calls, plus our OWN
+  =mint_api_token(account_id) -> raw_token= and
+  =verify_api_token(token) -> Option<account_id>=. NOT a WorkOS wrapper
+  for our own API calls — those stay our own Bearer-token check, per
+  §2's table.
+- =images.rs= (NEW): Cloudflare Images upload client + delivery-URL
+  builder.
+- =stream.rs= (NEW): Cloudflare Stream direct-creator-upload client +
+  webhook signature verification (HMAC-SHA256 per §1).
+- =billing.rs= (NEW, §9, this session): Stripe Checkout/Portal session
+  creation via plain =reqwest=, webhook verification via the
+  =async-stripe-webhook= crate. See §9 for full detail.
+- =project.rs= (REUSE, trimmed): =Project=/=Domain= structs per §3's
+  schema (drop DCV fields, add =account_id=/=preview_hash=/
+  =production_hash=).
+- =archive.rs= (REUSE the validation loop from push-online-server's
+  =files.rs::extract_archive=, RETARGET the write): same tar-entry
+  path-traversal/symlink checks, but instead of =std::fs::create_dir_all=
+  + =entry.unpack(&dest)=, stream each validated entry's bytes to
+  =r2.rs::put_object= keyed by =`{project_id}/{content_hash}/{entry_path}`=.
+- Dormant v3 module (per the conceptual doc, unchanged): fork
+  push-online-core's analytics/injection code here, =#[allow(dead_code)]=,
+  not deleted.
+
+** spacetime-host-server (Axum orchestrator)
+
+Routes (mirrors push-online-server's shape where it makes sense, diverges
+where §0's corrections apply):
+
+| Method | Path | Handler | Notes |
+|---|---|---|---|
+| POST | =/auth/device= | =auth::start_device_flow= | REVISED §2: proxies to WorkOS's device-authorization endpoint via the =workos= crate |
+| POST | =/auth/exchange= | =auth::exchange= | REVISED §2: CLI polls with the device code; on WorkOS confirmation, upserts =accounts=, mints + returns a local =api_tokens= row |
+| POST | =/api/projects= | =projects::create= | reuse push-online's shape, add =account_id= from auth context |
+| GET | =/api/projects= | =projects::list= | scoped to the authed account |
+| GET | =/api/projects/{id}= | =projects::get= | |
+| DELETE | =/api/projects/{id}= | =projects::delete= | also deletes R2 objects + KV pointers (NEW — push-online's delete only touched local disk) |
+| POST | =/api/v1/projects/{name}/push= | =deploy::push= | NEW body: streams tar to =archive.rs=, writes R2 objects, repoints =preview= KV alias |
+| POST | =/api/v1/projects/{name}/publish= | =deploy::publish= | NEW: repoints =production= KV alias to whatever =preview= currently points at — no bytes move |
+| POST | =/api/projects/{id}/domains= | =domains::bind= | reuse shape, calls NEW =cloudflare.rs= client |
+| DELETE | =/api/projects/{id}/domains/{domain}= | =domains::unbind= | reuse shape |
+| GET | =/api/projects/{id}/domains/{domain}/status= | =domains::status= | reuse shape, real CF status now (not push-online's Caddy-DCV shape) |
+| POST | =/api/media/images= | =media::upload_image= | NEW, Cloudflare Images client |
+| POST | =/api/media/videos= | =media::request_video_upload= | NEW, returns a Stream direct-upload URL |
+| POST | =/api/webhooks/stream= | =media::stream_webhook= | NEW, HMAC verify then flip video status |
+
+Explicitly NOT ported: =serve.rs=, =host_router.rs=, =DomainCache=,
+=/p/{project_id}/{*path}= public serving routes, the Caddy-facing
+=verify_domain= endpoint — all dead per §0/§D0.
+
+** spacetime-host-client (SDK, used by the CLI)
+
+Thin wrapper matching the server routes above: =login(email)=,
+=push(dir)=, =publish()=, =domains_add/remove/status(...)=,
+=upload_image(path)=, =upload_video(path)=. Mirrors push-online CLI's
+=reqwest::Client= + Bearer-header pattern
+(=push-online/src/cli/commands/push.rs:825-870= is the literal reference
+for the HTTP-call shape, swap the URL/auth-source).
+
+** spacetime-host-cli
+
+Subcommands (clap =Subcommand= enum, styled after
+=push-online/src/cli/mod.rs:15-91= but a distinct product surface, not a
+literal fork): =Login{email}=, =Push{directory?}=, =Publish=,
+=Domains{Add,Remove,Status}=, =Status= (drives the =__host__= widget's
+JSON, §5), =Whoami=.
+
+** spacetime-host-edge
+
+Unchanged from prior session's commit (Rust via =workers-rs=, standalone
+crate, empty =[workspace]= table) — implement the KV-lookup → R2-get →
+Cache-API body per §D0's design; currently a 501 stub.
+
+* 5. OSS-side (=verse=) concrete edit targets
+
+Grounded in this session's direct reads of =src/main.rs= and =src/server.rs=.
+
+** CLI shim — =src/main.rs=
+
+- Extend the =Command= enum (currently 15 variants,
+  =src/main.rs:69-384=) with ONE new variant:
+  #+begin_src rust
+  Host { args: Vec<String> },
+  #+end_src
+- Dispatch (mirrors the =run_tauri_dev= external-process pattern at
+  =src/main.rs:1896-2035= — literal reference implementation to copy):
+  =which::which("spacetime-host")= → if found,
+  =tokio::process::Command::new("spacetime-host").args(args).stdout(Stdio
+  ::inherit()).stderr(Stdio::inherit()).status().await=, propagate exit
+  code; if not found, print an install hint and exit 1. Simpler than
+  =run_tauri_dev='s async stdout/stderr line-forwarding since we can just
+  inherit the child's stdio directly (no need to interleave with our own
+  output) — a smaller version of that pattern, cite it as the reference
+  for the SHAPE (spawn + wait + propagate exit code), not size.
+
+** =@deploy= macro — =stdlib/macros/deploy.st= (NEW file)
+
+Anatomy confirmed against BOTH existing macros this session
+(=stdlib/macros/host.st=, =stdlib/__admin__/cms-hint.st=) plus the
+compiler's own =MacroScope=/=order= semantics
+(=src/parser/meta_ast.rs:573-630=):
+
+#+begin_src spacetime
+%macro deploy {
+  %scope file
+  %order 55          // right after cms (51), well before host (250) —
+                      // config declarations should resolve early, before
+                      // anything that might read $deploy's registered facts
+
+  %form {
+    @deploy {
+      $config:properties
+    }
+  }
+
+  %binds {
+    deploy-register(config: $config)
+  }
+
+  %registers deploy() {
+    $config
+  }
+}
+#+end_src
+
+=%scope file= is REQUIRED (confirmed: =MacroScope= enum is only
+=File | Selector=, no other values exist — a top-level account/project
+config directive must be file-scope, matching both existing examples).
+=deploy-register= is a pure display/config primitive (no =%emit js=, same
+as =cms-hint.st='s pattern — zero runtime JS emitted).
+
+** =__host__= status widget — =stdlib/__host__/= (NEW directory)
+
+Confirmed compile pattern to replicate: =compile_admin()=
+(=src/server.rs:1944-1961=) compiles =stdlib/__admin__/index.st= PER
+REQUEST (not cached at startup) via =Compiler::from_file(...).
+cache_stdlib(state.cache_stdlib).with_cache(&state.compile_cache).
+compile()=, returning =(js, css, html)=. Three handlers
+(=admin_page_handler=, =admin_runtime_js_handler=,
+=admin_styles_css_handler=, =src/server.rs:1962-2068=) each independently
+gate on =matches!(&state.mode, AppMode::Dev { debug, .. } if *debug)=.
+
+=stdlib/__host__/= follows this EXACT pattern (a separate compiled entry
+point), NOT =__dev__='s "inline primitive call in an always-loaded file"
+pattern (confirmed: dev-indicator is NOT a separate entry, it's a
+primitive invoked inline in =stdlib/__dev__/index.st='s own file scope) —
+separate entry point is the right choice here since the widget's presence
+is CONDITIONAL on a =@deploy{}= directive existing in the compiled site
+(per the original conceptual doc §C), unlike dev-indicator which is
+unconditional in dev mode.
+
+New =src/server.rs= additions (copy the route-registration pattern
+literally from =src/server.rs:153-161=):
+#+begin_src rust
+fn compile_host_widget(state: &AppState) -> Result<(String, String, String), String> {
+    let host_st_path = PathBuf::from("stdlib/__host__/index.st");
+    if !host_st_path.exists() {
+        return Err("host widget .st not found".to_string());
+    }
+    let compiler = Compiler::from_file(&host_st_path, Path::new("."))
+        .map_err(|e| e.to_string())?;
+    let compiled = compiler
+        .cache_stdlib(state.cache_stdlib)
+        .with_cache(&state.compile_cache)
+        .compile();
+    Ok((compiled.js, compiled.css, compiled.html))
+}
+// ... plus host_status_json_handler / host_promote_handler, gated the
+// SAME way admin's handlers are gated, registered at
+// /__spacetime/host/{status.json,promote}
+#+end_src
+
+The widget's own presence gate (does the compiled site declare
+=@deploy{}=?) is a SECOND condition on top of the existing debug-gate —
+read the =deploy()= registry fact (via the same registry-introspection
+machinery =Inspect=/=ExportSpellProfile= already use, per the original
+conceptual doc §B) inside =compile_host_widget= before compiling the
+widget in.
+
+* 6. API contract summary (concrete, v1)
+
+See §4's server route table — that IS the contract. CLI ↔ server auth:
+=Authorization: Bearer {api_token}=, looked up via
+=SHA256(token) -> api_tokens.token_hash -> account_id=. No API-key-in-env
+pattern like push-online's =PUSH_ONLINE_API_KEY= — tokens are per-account,
+minted via the login flow (§2), stored in
+=$XDG_DATA_DIR/spacetime-host/credentials= by the CLI.
+
+* 7. Wave-by-wave v1 build order (revised, supersedes the conceptual doc's waves)
+
+Renumbered/re-scoped against the corrected reuse picture (§0) — smaller
+individual waves than the original draft since so much of push-online-
+server's surface is now correctly excluded.
+
+1. *Wave 0 — scaffold* [DONE, prior session]: =commercial/host= workspace,
+   6 crates, committed.
+2. *Wave 0.5 — storage/edge plumbing* [next]: R2 bucket + KV namespace
+   provisioned, =spacetime-host-edge= Worker's routing logic implemented
+   (currently 501 stub), =r2.rs=/=kv.rs= clients in =spacetime-host-core=.
+   Acceptance: a manually-PUT R2 object is served correctly through the
+   Worker via a KV pointer, verified end-to-end against a real Cloudflare
+   account.
+3. *Wave 1 — accounts + auth* (REVISED, smaller than originally sized:
+   WorkOS AuthKit owns identity/email/magic-link entirely, §2): a WorkOS
+   account + AuthKit environment configured (dashboard setup, no code),
+   =workos= crate wired into =spacetime-host-core::auth.rs= (device-flow
+   start + token exchange), =accounts=/=api_tokens= tables, CLI
+   =login=/credential-storage at
+   =$XDG_DATA_DIR/spacetime-host/credentials=. Acceptance:
+   =spacetime-host login= opens a browser, completes a WorkOS-hosted
+   magic-link login, and round-trips to a stored, working local Bearer
+   token — zero email-sending code written by us.
+4. *Wave 2 — push/publish core*: =archive.rs= (tar validation + R2 write,
+   retargeted from push-online-server's =files.rs= pattern), =deploy::push=
+   / =deploy::publish= handlers, KV pointer-flip logic. Acceptance:
+   =spacetime-host push= from a real =.st= project's =dist/= lands objects
+   in R2 and the preview URL (via the Wave-0.5 Worker) serves the
+   pushed site.
+5. *Wave 3 — CLI shim + =@deploy= macro + billing* (billing added this
+   session, user has an existing Stripe account): =verse='s
+   =Command::Host= PATH shim (src/main.rs), =stdlib/macros/deploy.st=,
+   PLUS =spacetime-host-core::billing.rs= (Stripe Checkout Session +
+   Customer Portal Session creation via plain =reqwest= — both are simple
+   documented REST calls, NOT the still-alpha =async-stripe= core crate),
+   =billing::checkout=/=billing::portal=/=billing::stripe_webhook=
+   handlers using the near-stable =async-stripe-webhook= crate (rc.5) for
+   signature verification only. =accounts= gains
+   =stripe_customer_id=/=plan=/=subscription_status= columns. Acceptance
+   (CLI shim, unchanged): =cargo run -- host push= from within a =.st=
+   project directory that declares =@deploy{project:"..."}= successfully
+   pushes via the shim. Acceptance (billing, NEW): a test-mode Stripe
+   Checkout completes and the webhook correctly flips
+   =accounts.subscription_status= to active; the Customer Portal session
+   correctly opens Stripe's hosted plan-management page for that account
+   (zero custom billing UI built by us).
+6. *Wave 4 — domains (real Cloudflare-for-SaaS integration, not a stub)*:
+   the =cloudflare.rs= calling code (§4 — this is REAL new work, push-
+   online's version doesn't exist per §0), =domains::bind/unbind/status=
+   handlers. Acceptance: a real custom domain reaches
+   =pending_validation -> active= against a live Cloudflare account.
+7. *Wave 5 — media*: Cloudflare Images client + upload-time HTML
+   rewriting; Cloudflare Stream client + webhook handler + upload-time
+   =<video>= rewriting. Acceptance: a =.st= site with an =<img>= and a
+   =<video>= tag pushes successfully and both render from Cloudflare's
+   delivery URLs, not R2.
+8. *Wave 6 — =__host__= status widget*: =stdlib/__host__/= tree,
+   =compile_host_widget()= + debug-gated dev-server routes, EditAst
+   promote-writeback into =@deploy{}='s config block. Acceptance: the
+   bottom-right button appears only on a =@deploy{}=-bearing site in dev
+   mode, shows correct green/orange/turquoise state, and "promote to
+   production" round-trips through EditAst.
+9. *Wave 7 (v2, REVISED — see conceptual doc's stack-split section)*:
+   stand up =ash=/=ash_postgres= in the ALREADY-EXISTING
+   =elixir/spacetime_lv=, =organizations=/=groups=/=group_permissions=
+   Ash resources + =Ash.Policy.Authorizer= policies for agency↔client
+   RBAC, hosted =__admin__= served as a LiveView. Auth verifies the SAME
+   Rust-minted =api_tokens= bearer token (WorkOS minting stays exclusively
+   Rust-side — its Elixir SDK is marked experimental on hex.pm, verified
+   this session, not used for anything production-critical).
+10. *Wave 8 (v2, REVISED)*: Phoenix Channels/Presence for live
+    multi-user hosted-admin editing (pulled forward from v3 — now a v2
+    feature per this session's decision) + GitHub commit integration
+    (OAuth app, Contents API replay, PR flow).
+11. *Wave 9 (v3, unchanged)*: =@experiment=/=@track= macros.
+
+* 8. Open questions (v1-specific, additive to the conceptual doc's list)
+
+1. Video: v1 launch feature (recommended, §1) or explicit v1.x fast-follow?
+   Either way the Stream client work is the same size — this is a
+   sequencing/marketing decision, not a technical one.
+2. [RESOLVED, this session] Login delivery mechanism: WorkOS AuthKit
+   sends magic-link emails natively — no transactional-email provider
+   decision needed, no SMTP/API client to build (§2). Remaining action
+   item: create the WorkOS account + AuthKit environment (dashboard
+   configuration only, not a code decision) before Wave 1 starts.
+3. Cloudflare for SaaS plan tier: the "for SaaS for All" free tier
+   (mentioned in this session's research, gives every account SaaS
+   custom-hostname support) vs. a paid Cloudflare for SaaS subscription —
+   confirm the account tier before Wave 4 to avoid a surprise gate.
+4. Image content-hash dedup (§1): compute the hash client-side (CLI, before
+   upload) or server-side (orchestrator, after receiving bytes)? Client-side
+   avoids a wasted upload on an unchanged image; server-side is simpler
+   code. Recommend client-side (CLI already reads the file to upload it,
+   hashing is nearly free at that point).
+
+* 9. Billing — Stripe Checkout + Customer Portal (NEW this session)
+
+User has an existing Stripe account, wants payments in v1 (not deferred).
+Same philosophy as storage/media/domains/identity throughout this plan:
+let Stripe's hosted pages own the UI, we orchestrate.
+
+** Crate choice (verified this session)
+
+=async-stripe= (the core Rust crate) is still PRE-1.0: =async-stripe-core=
+is at alpha.9, "a few breaking changes still expected before RC" per its
+own crates.io notice. =async-stripe-webhook= is materially more mature
+(rc.5, released ~1 month before this session). Pragmatic split:
+- =async-stripe-webhook= (rc.5) for signature verification + event-type
+  parsing on incoming webhooks — worth the dependency, near-stable.
+- Plain =reqwest= (already a workspace dependency) for the two OUTBOUND
+  calls we need (create a Checkout Session, create a Portal Session) —
+  both are simple, well-documented POST-with-form-body REST calls, not
+  worth pulling in the still-alpha core crate for a 2-endpoint surface.
+  If =async-stripe-core= reaches RC/stable before Wave 3 starts, revisit
+  — no strong objection to switching, just not worth the alpha risk now.
+
+** Endpoints
+
+| Method | Path | Handler | Notes |
+|---|---|---|---|
+| POST | =/api/billing/checkout= | =billing::checkout= | creates a Stripe Checkout Session (reqwest POST to Stripe's API), redirects the browser there — Stripe owns the entire payment UI |
+| POST | =/api/billing/portal= | =billing::portal= | creates a Customer Portal Session, redirects — Stripe owns the ENTIRE plan-change/cancel/payment-method UI, we build none of it |
+| POST | =/api/webhooks/stripe= | =billing::stripe_webhook= | =async-stripe-webhook= verifies the signature, then handles =checkout.session.completed= (set =stripe_customer_id=, =plan=), =customer.subscription.updated=/=.deleted= (update =subscription_status=) |
+
+** =spacetime-host-core::billing.rs= (NEW)
+
+Functions: =create_checkout_session(price_id, account_id) -> checkout_url=,
+=create_portal_session(stripe_customer_id) -> portal_url=,
+=verify_and_parse_webhook(body, signature_header) -> StripeEvent= (thin
+wrapper around =async-stripe-webhook=).
+
+** Dependencies (=commercial/host/Cargo.toml=)
+
+#+begin_src toml
+# Billing (§9) — async-stripe-webhook is near-stable (rc.5); the core
+# async-stripe crate is still alpha, so outbound Checkout/Portal calls
+# use plain reqwest instead (see §9 rationale).
+async-stripe-webhook = "1.0.0-rc.5"
+#+end_src
+
+** Acceptance (folds into Wave 3, §7)
+
+A test-mode Stripe Checkout completes and the webhook correctly flips
+=accounts.subscription_status= to =active=; the Customer Portal session
+correctly opens Stripe's hosted plan-management page for that account.
+
+** Explicitly out of scope this session
+
+Plan/pricing tier DESIGN (free/pro/agency tiers, price points) — that's a
+business decision made in the Stripe dashboard (Products/Prices), not a
+code decision, and doesn't block Wave 3's technical implementation. See
+conceptual doc's open question #8.
+

@@ -1,0 +1,886 @@
+#+TITLE: SIP-001 — Timelines: Drivers, Forms in Motion, and @score
+#+DATE: 2026-07-26
+#+STATUS: DRAFT v6 — W4 @score rulings settled (R1 domain-is-the-driver's, R2 groups are fragments, R3 window-map IR, R4 projections not sub-types)
+#+SIP: 001
+
+* Header
+
+| Field | Value |
+|-------+-------|
+| SIP | 001 |
+| Title | Timelines: Drivers, Forms in Motion, and @score |
+| Status | Draft v5 |
+| Depends on | SIP-001c (forms / the =--= sigil) |
+| Companion | SIP-001b (render, studio, interchange, catalog) |
+| Supersedes | v3 (in-tree), v2 (committed e01a020d) |
+
+* v5 → v6 delta
+
+| Change | Why |
+|--------+-----|
+| =@score= time domain comes from the DRIVER (=domain:= registry column) | a score that declares its own duration needs a SECOND rule for =&.clip=, which has nothing to declare — the thesis forbids a second mechanism. Also buys E-MEASURE-DOMAIN (pressure test C2) as registry data |
+| Grouping is =@form score --name=, NOT =@scene= | the fragment kind already exists and =score_step= already accepts it. =@scene= collides with =@scene/camera= module refs and reintroduces the string registry this SIP deletes |
+| Score IR is a WINDOW MAP (=parentProgress -> childProgress=), not a scheduler | one evaluator, two callers (rAF live, frame /n/ render) — the structural fix for 001b §8.6's live/render divergence. Makes =rate= the map's derivative and C4 seekability automatic |
+| =&.clip=/=&.visible= stay PROJECTIONS, sub-typing rejected | fragments are already projection-agnostic (the driver is supplied at the head); sub-types add ceremony to recover polymorphism we have by omission, and fork the two poles into two grammars |
+| B1 (sticky-scroll) + B8 (interruption) worked examples landed | they were the two ⚠ rows owed from the pressure round |
+
+* v4 → v5 delta
+
+| Change | Why |
+|--------+-----|
+| Form sigil =%= → =--= | =%= is the METASYSTEM layer, wrong for author code. =--= is CSS's own convention for the same concept (css-mixins-1: =@function --double=, =@mixin --my-mixin=). VERIFIED: =extract_prefix()= takes =chars().next()= → ='-'= bucket, zero registry change; =--x= lexes as ONE ident |
+| =@on= arms use =on_pat=, NOT a new =match_pat= branch | SPIKE FINDING: the arm family shares a SHAPE (=pat => consequence;=), not a pattern type. =recv_pat= already forked from =match_pat= to add numbers. ∴ =@on= forks too → ZERO blast radius on =@match=/=receive=/=handle=/=derive= |
+| Transition patterns are =(from -> to)= INSIDE the pattern | ==>= keeps ONE meaning (pattern ⟹ consequence); =->= keeps ONE meaning (a step between values). Bare pattern = final state (the 90% case) |
+| =@effect= SUBSUMED into =@on $signal= | it existed only because =@on= could not take a signal; same runtime path (=effect-runner= → =ST.runMutations(host, body)=), same scope rule |
+
+* v3 → v4 delta
+
+| Change | Why |
+|--------+-----|
+| =@anim= DELETED → motion is a =--form= (SIP-001c) | =&reveal= was neither fn nor elem-ref because it was a THIRD category; sigil, not construct |
+| =&ease-*= → =--ease-*= | same category error, shipped (SIP-001c M2) |
+| Score placement back to TRAILING WORDS | rule: parens = what the FUNCTION owns; trailing words = what the LANGUAGE owns |
+| =rate= is a keyframeable PROPERTY, not a placement word | closes speed-ramp (A5) AND freeze (A6) with zero new vocabulary |
+| =@on= gains MATCH-ARM + ==>= (fat-arrow) signal drivers | closes state-driven motion (B5) and view transitions (B4); multicam (A10) stops being deferred |
+| =as &name= names the live timeline | replaces v3's "declare-inline-and-apply" special case |
+| Pressure-test tables + craft section folded in | they ARE the design rationale |
+| "$holes in keyframes = new capability" | CORRECTED — keyframes.st captures values as =$values:balanced(';')=; holes already pass. Only substitution-at-expansion is new |
+
+* Design principles
+
+P1. **Three sigils, three categories** (SIP-001c): =&= identity · =$= data ·
+    =%= form. Every name in a timeline declaration answers exactly one of
+    /which one?/ · /what value?/ · /what shape?/
+P2. **Drivers are typed projections of refs.** Registry is DATA.
+P3. **Params sit with their owner.** Driver params on the driver, form
+    params on the form, template params on the template.
+P4. **Parens vs words**: =(...)= = what the function is responsible for;
+    trailing words = what the language itself owns (placement, naming).
+P5. **Two arrows, two meanings**: =->= motion through values over time;
+    ==>= discrete state transition.
+P6. **Behavior attaches by selector**; markup stays pure.
+P7. **Choreography (=@on=) ≠ arrangement (=@score=)** — one driver grammar
+    beneath both.
+P8. **Errors are a feature.** Every registry (projections, forms, kinds)
+    exists partly to make did-you-mean populations mechanical, because an
+    agent's authoring loop is error → repair.
+
+* Ontology — the type map
+
+** 1. Refs, kinds, and =&.=
+
+| Ref | Kind | Meaning |
+|-----+------+---------|
+| =&.= | Elem | the selector host (THE self-ref; no bare driver words) |
+| =&el= | Elem | element instance (template root, DOM node) |
+| =&media= | Media <: Elem | audio/video entity instance |
+| =&tl= | Timeline | a named =@on= result, a Clip, a named score |
+| =&T= | TemplateFn | unapplied template — NO projections |
+
+=&.= is self in EXPRESSION position; =& {…}= is self in SELECTOR position.
+Forms (=--x=) have no kind here — they are not things in the world (SIP-001c).
+
+** 2. Projections — how a ref acquires temporal sense
+
+A projection reads a ref's relationship to its own world and yields a
+**driver**. Registry data (kinds-as-data):
+
+| Projection | On kinds | Params (defaults) | Yields | Measures |
+|------------+----------+-------------------+--------+----------|
+| =.visible= | Elem | threshold: 0.1, delay: 0ms, immediate: false | gate + progress | — |
+| =.hover .click .focus= | Elem | target: sel?, prevent: false | event (reversible) | — |
+| =.submit= | Elem(Form) | prevent: true | event | — |
+| =.key= | Elem | key (positional) | event | — |
+| =.scroll= | Elem | scope: cover, start: 0, end: 1, scrub: true, axis, distance | progress | %, vh, px |
+| =.mouse .pointer= | Elem | axis: both, invert: false | progress (2D) | % |
+| =.time= | Elem | duration | transport | ms, s |
+| =.loop= | Elem | duration | transport (repeating) | ms, s |
+| =.load= | Elem | delay, threshold | event (once) | — |
+| =.clip= | Clip-hosts | — | transport (enclosing span) | inherited |
+| =.playback= | Media | — | transport (currentTime) | ms, s, beat |
+| =.steps= | Elem | advance: event-expr | transport (ordinal) | counts |
+| =.done= | Timeline | — | gate | — |
+
+**Driver value-types** (resolves v3's asserted-not-derived composition):
+
+| Type | Semantics | Composition role |
+|------+-----------+------------------|
+| Progress | continuous 0..1 | DRIVES the motion |
+| Transport | seekable progress + play/pause/rate | DRIVES; render-safe |
+| Gate | boolean window | MASKS a driver |
+| Event | discrete occurrence | TRIGGERS; latches |
+
+=&&= = mask (Gate ∧ driver → driver active only inside the gate; two
+Progress sources → min). =\vert= = fallback/either (first AVAILABLE drives;
+for Events, either fires). Availability for =.clip= is STATIC (scored or
+not) — so =(&.clip \vert &.time(3s))= resolves at compile time, while
+=(&.click \vert &.key(" "))= resolves at runtime. Same operator, two
+evaluation times, documented (v3 open q C3, resolved by declaring it).
+
+** 3. Timeline facets (signals, not drivers)
+
+=&tl.t= · =.duration= · =.progress= · =.playing= · =.rate= — readable and
+writable: =&film.t <- 4.2s=, =&film.playing <- false=.
+
+** 4. Compile-time resolution & errors
+
+| Case | Diagnostic |
+|------+------------|
+| =&intro.playback= (&intro : TemplateFn) | E-DRIVER-KIND: "&intro is a template, not media — media in scope: &voice, &bgm" |
+| =&tl.visible= | E-DRIVER-KIND + Timeline projections (=.done=) |
+| =&.clip= with no enclosing score | E-DRIVER-CONTEXT: "no enclosing score; add =\vert &.time(d)= fallback" |
+| =@score &.clip= | E-DRIVER-CYCLE |
+| =&header.visible= where =.header= matches N elements | E-DRIVER-AMBIGUOUS (=&.= for per-element fan-out) |
+| =for 3s= under a scroll score | E-MEASURE-DOMAIN → suggests =%= |
+| =.visibel= | E-UNKNOWN-PROJECTION + did-you-mean |
+| motion form in a markup hole | E-FORM-KIND (SIP-001c) |
+
+Measure domains nest: an inner score's domain comes from ITS driver, not
+the parent's (v3 open q C2, resolved). =%= inside a =&.time= score nested
+in a =&.scroll= score is legal — the inner span is time-domain.
+
+* Proposal
+
+** 1. =@on= — driver × form
+
+#+begin_src spacetime
+// anonymous inline — the common case, unchanged in spirit
+.header {
+  @on &.visible {
+    .header-title { opacity: 0 -> 1; translate-y: -20px -> 0; easing: --ease-out-expo; }
+    .add-button   { scale: 0.8 -> 1; easing: --ease-out-back; range: 0.3 to 1; }
+  }
+}
+
+// splice a declared motion form; driver params on the driver, form params on the form
+.header  { @on &.visible(threshold: 0.5) --reveal; }
+.sidebar { @on &header-reveal.done --fade-in(300ms); }
+.card    { @on &.hover --lift(300ms); }
+
+// name the LIVE timeline with `as` (identity is a & thing)
+.header  { @on &.visible --reveal(600ms) as &header-reveal; }
+
+// mutations — same head, no form slot
+.counter      { @on &.click { $count <- $count + 1; } }
+.variant-grid { @on &.click(target: "[data-option-id]") { $sel <- $.dataset.optionId; } }
+form          { @on &.submit(prevent: true) { $formData <- new FormData($); } }
+#+end_src
+
+#+begin_src spacetime
+%form {
+  @on $driver:driver_expr ( $form:form_application )? ( "as" $name:element )? {
+    $body:on_actions
+  }
+}
+// VERIFIED 2026-07-26 (PLAN-121 W1): both surfaces parse, and the malformed
+// cases are rejected. The SUBJECT is optional (`&.visible` = self, the most
+// common form and the launch article's first example); the MEMBER is required,
+// since that is what makes it a driver rather than a bare reference. An earlier
+// spike required the subject and so would have REJECTED `&.visible`.
+// Rejected: `&card` (no member) · `card.visible` (no `&`) · `&card.` · `&.`
+%capture_type driver_expr { "&" $subject:ident? "." $member:ident ( $params:params )? }
+
+%capture_type form_application { $form:dashed_ident ( $params:params )? }
+// IMPLEMENTED 2026-07-26 (PLAN-121 W1.3). This was written `{ "--" $form:ident … }`,
+// which can NEVER match: `--rise` lexes as ONE `IDENT` via the RawToken::Minus
+// ladder, so there is no separate `--` token for the literal to consume (BUG-242).
+//
+// `dashed_ident` now exists as a capture type and is verified to accept `--rise`,
+// `--rise(distance: 12px)`, `--ease-out-expo` while REJECTING a bare `rise` and
+// `-webkit-thing`. That rejection is the whole point: with `$form:ident` the sigil
+// would be omittable, i.e. decoration rather than meaning.
+//
+// NB it is an EXTRACTOR-level discrimination, not a new SyntaxKind. The lexer keeps
+// emitting one IDENT (which CSS compatibility requires); only the capture type asks
+// whether this slot demands the sigil. A `DASHED_IDENT` token kind would have changed
+// what 348 `SyntaxKind::IDENT` sites see for `--custom-prop` — a large blast radius
+// for a distinction only capture types need. SIP-001c's "one lexer change" is
+// therefore ZERO lexer changes; the cost landed lower than estimated.
+#+end_src
+
+** 2. Signal drivers — arms with =@on='s own pattern type
+
+*** Spike finding (verified against stdlib)
+
+The arm family shares an ARM SHAPE, not a pattern type:
+
+| Host | Pattern capture | Leaves |
+|------+-----------------+--------|
+| =@match= / =@view= | =match_pat= | variant_pattern \vert string \vert ident |
+| =receive= (decode) | =recv_pat= | number \vert ident \vert string — /"mirrors match_pat + numbers"/ |
+| =handle= | =handle_arm= (inlined) | ctor + optional payload binding |
+| =@data derive= | =match_value_arm= | reuses =match_pat= |
+
+∴ =@on= declares ITS OWN pattern type (as =recv_pat= already did), rather
+than adding a branch to =match_pat=. Transitions therefore never leak into
+=@match=/=derive=/=receive=/=handle=, where a from-state is meaningless —
+**zero blast radius on existing hosts, and no kind-rejection rule needed.**
+
+#+begin_src spacetime
+%capture_type on_leaf {
+    ( $variant:variant_pattern )    // shared leaf, REUSED not forked
+  | ( $lit:string )                 // bare idents land here (FUP-079)
+  | ( $wild:ident )                 // only `_` reaches it
+}
+%capture_type on_transition { $from:on_leaf "->" $to:on_leaf }
+%capture_type on_pat {
+    ( $transition:on_transition )   // FIRST — discriminated by the INFIX "->"
+  | ( $leaf:on_leaf )
+}
+%capture_type on_arm { $pat:on_pat "=>" $form:form_application ";"? }
+#+end_src
+
+**Discrimination is on =->=, not on parentheses.** Parens are noise on a
+pattern that is already unambiguous: an arm either contains =->= before
+its ==>= (transition) or it does not (final state). Consequences:
+
+- surface is =a -> b => --cut;=, NOT =(a -> b) => --cut;= — one less
+  bracket pair per arm, and no "why do I need parens here" question;
+- =on_leaf= is a SEPARATE capture type from =on_pat= (not recursive), so
+  the transition branch cannot nest transitions — =a -> b -> c= is a parse
+  error, which is correct: a transition has exactly two ends;
+- branch order still follows the =match-arms.st= hazard (first-match-wins,
+  no backtracking): =on_transition= is tried first, and fails cleanly on
+  any arm without an =->= before its ==>=.
+
+This also keeps the door open for =receive=/=handle= to adopt transition
+patterns later (§Open q9) — a paren-free pattern composes into their
+existing arm shapes without re-bracketing.
+
+*** Surface
+
+#+begin_src spacetime
+// single arm — bare pattern = FINAL STATE (the 90% case)
+.cart  { @on $cart.open true => --slide-in(300ms); }
+.panel { @on $tab "billing" => --cross-fade(200ms); }
+.stage { @on $route "/pricing" => --whip-pan(300ms); }        // view transitions
+
+// arms — subject hoisted; PURE HOIST of the single form
+.drawer {
+  @on $cart.open {
+    true  => --slide-in(300ms);
+    false => --slide-out(200ms);
+  }
+}
+
+// guarded transition when the SOURCE matters (multicam)
+.show {
+  @on $take {
+    a -> b => --cut;
+    b      => --dissolve(6f);
+    _      => --cut;
+  }
+}
+
+// Gate vs Event — a window, not a moment
+.nav { @on ($tab == "billing") --highlight; }
+#+end_src
+
+**The rule that keeps the two shapes un-confusable**: if the head is a bare
+signal subject (no pattern, no comparison), the braces hold ARMS; anything
+else and the braces hold a BODY. And arms are a pure hoist of the single
+form — same tokens, same order, subject factored out:
+
+#+begin_src spacetime
+@on $take { a -> b => --cut; }   ≡   @on $take a -> b => --cut;
+#+end_src
+
+Semantics: bare pattern = "arrived at this state, from anywhere";
+=from -> to= = "arrived at =to= FROM =from=" (the combinatorial matrix is
+OPT-IN, never required — N states do not force N² arms).
+=$sig -> value= as a driver HEAD is REJECTED: the pattern belongs in the
+pattern position, after the subject.
+
+=->= = a step between values (keyframes AND transitions). ==>= = pattern ⟹
+consequence (every arm host). Each keeps one meaning.
+
+*** Gate vs Event on signals
+
+| Spelling | Driver type | Semantics |
+|----------+-------------+-----------|
+| =@on $tab "billing" => --x= | Event | fires at the MOMENT it becomes billing |
+| =@on ($tab == "billing") --x= | Gate | holds WHILE it is billing |
+
+Naming the distinction is what prevents the classic "why does my animation
+replay" bug.
+
+*** =@effect= is subsumed
+
+=@effect= exists (its own docs) because /"only animation drivers reacted to
+signals"/ — i.e. because =@on= could not take a signal. Now it can:
+
+| =@effect= | =@on= |
+|-----------+-------|
+| =on: $rows= | the driver: =@on $rows= |
+| =debounce: 600ms= | driver param: =@on $rows(debounce: 600ms)= |
+| =immediate: true= | driver param: =@on $rows(immediate: true)= |
+| body =mutation_actions= | same body, unchanged |
+
+#+begin_src spacetime
+// today
+.app { @effect(on: $rows, debounce: 600ms) { $previewNonce <- $previewNonce + 1; } }
+// after
+.app { @on $rows(debounce: 600ms) { $previewNonce <- $previewNonce + 1; } }
+#+end_src
+
+**Scope semantics are UNCHANGED** — this is a true subsume, not a merge:
+- WHAT IS WATCHED: =@effect= captures =$signal:binding= and does NOT read
+  the value (its own note: dotted paths like =$wrap.count= subscribe BY
+  PATH — BUG-155 class). =@on $rows= = subscribe to that path. Bare
+  subject = any change; a pattern narrows it.
+- WHERE MUTATIONS RESOLVE: =%binds { effect-runner(&self, …) }= runs the
+  body via =ST.runMutations(host, body)= — the SAME runtime path =@on='s
+  mutation bodies already use. =$= in the body means the host, identically.
+
+Cost, stated: =@effect='s name announced "side effect" at the callsite.
+Mitigation: =debounce:=/=immediate:= stay visible driver params, and docs
+name =@on $sig { mutations }= as the effect form.
+
+** 3. Motion is a form (SIP-001c)
+
+#+begin_src spacetime
+@form --reveal($distance = 20px, $duration = 600ms) {
+  --fade-in;
+  translate-y: $distance -> 0;
+  easing: --ease-out-expo;
+}
+
+@form --life($duration = 4.8s) {
+  .lt-kicker   { translate-y: -40px -> 0; easing: --ease-out-back; range: 0 to 12%; }
+  .lt-name     { opacity: 0 -> 1; translate-y: 34px -> 0; range: 7% to 18%; }
+  .lt-baseline { scale-x: 0 -> 1; range: 10% to 22%; scale-x: 1 -> 0; range: 86% to 93%; }
+}
+#+end_src
+
+=$duration= convention: the form's natural span; a score's =for= or a clip
+span overrides. =$param= holes in values need NO capture-type change —
+=keyframes.st= already captures values as =$values:balanced(';')=; only
+substitution-at-expansion is new.
+
+** 4. =@score= — arrangement, same driver grammar
+
+#+begin_src spacetime
+.film {
+  @score &.time(60s) as &film {
+    &intro as &opening -> --whip-pan(300ms) -> &features(items: $items) -> --fade(400ms) -> &outro;
+    &lower-third(name: "Ada Lovelace", role: "Analyst") at 2s for 3s;
+    &broll(src: "assets/city.mp4") in 4s out 9s during &opening;
+    &bgm(gain: 0.6, duck: &voice) during &opening to &outro;
+    &voice at 1s;
+    mark &chapter1;
+  }
+}
+
+.story { @score &.scroll(cover) {                      // scrollytelling
+  &fact-income for 30% -> &fact-mobility for 40% -> &fact-map;
+  &chart-race during &fact-income to &fact-mobility;
+} }
+
+.deck  { @score &.steps(advance: &.click | &.key(" ")) { &title -> &problem -> &close; } }
+.mv    { @score &voice.playback { &cover for beat(16) -> &verse for beat(32); } }
+#+end_src
+
+P4 applied: =(...)= carries the clip's OWN params; trailing words
+(=at for in out during after as=) are the language's placement vocabulary.
+Transitions on edges are FORMS (=--whip-pan=) — they have no identity.
+
+#+begin_src spacetime
+%capture_type placement  { ( "at" $at:measure ) | ( "for" $for:measure )
+                         | ( "in" $in:measure ) | ( "out" $out:measure )
+                         | ( "after" $after:element )
+                         | ( "during" $from:element ( "to" $to:element )? )
+                         | ( "as" $alias:element ) }
+%capture_type score_step { ( $inv:template_invocation | $form:form_application )
+                           ( $place:placement )* }
+%capture_type score_line { $head:score_step ( "->" $next:score_step )* ";"? }
+%capture_type score_mark { "mark" $name:element ";"? }
+%capture_type score_rest { ( "gap(" $d:measure ")" ) | ( "hold(until:" $cond:expr ")" ) }
+%capture_type score_block{ "@score" $driver:driver_expr ( "as" $name:element )?
+                           "{" ( $lines:(score_line|score_mark|score_rest) )* "}" }
+#+end_src
+
+*** W4 rulings (design conversation 2026-07-31)
+
+Four questions were open on =@score=. All four are now settled. The through
+line: **=@score= adds no runtime concept.** It reuses the driver pipeline
+(every driver =%yield=s ONE 0..1 progress signal) and the form registry.
+
+**R1 — the DRIVER owns the time domain; a score never declares one.**
+
+A score inherits the domain of whatever drives it, exactly as =@on
+&.time(600ms)= already does. New registry column =domain:=, four values:
+
+| driver | =domain:= | the domain is | placements read |
+|--------+-----------+---------------+-----------------|
+| =time= =loop= | =declared= | the driver's own param | =at 2s for 3s= |
+| =scroll= =visible= =mouse= | =normalized= | 0..1 | =for 30%= |
+| =clip= | =inherited= | the span the parent assigned | either, from parent |
+| =steps= | =derived= | count of score lines | =at step 3= |
+| =playback= | =inherited= | the media element's duration | =at 2s= |
+
+Rejected: (a) always-declared — =&.clip= has nothing to declare, so the video
+pole needs a second rule, which the thesis forbids; (b) always-derived —
+meaningless for =scroll=, whose progress is inherently 0..1; (c)
+declared-with-derived-default — two code paths, per-driver conditionals return.
+
+This buys a compile-time check as a side effect, which is pressure test C2
+(measure domains across nesting) satisfied by DATA rather than by a rule an
+author must remember:
+
+#+begin_src spacetime
+@score &.scroll(cover) { &x at 2s; }
+// E-MEASURE-DOMAIN: scroll's domain is normalized; use a percentage.
+//                   did you mean `at 20%`?
+#+end_src
+
+**R2 — grouping is a score FRAGMENT. No scene keyword.**
+
+=@form score --name { … }= already exists (form.st, the sixth kind marker) and
+=score_step= already accepts =$form:form_application=. A group is therefore a
+fragment — parameterized, reusable, projection-agnostic:
+
+#+begin_src spacetime
+@form score --opening { &title -> &subtitle -> &tagline; }
+@form score --closing($cta = "Start") { &logo -> --fade(200ms) -> &cta-button; }
+
+@score &.time(60s) as &film {
+  --opening at 0s for 10s -> --whip-pan(300ms) -> --closing(cta: "Try it");
+}
+#+end_src
+
+Rejected: =@scene "intro" { … }= — it collides with =@scene/camera=
+(path-qualified module references, docs/language/module-system.md), and
+string-keyed scenes reintroduce exactly the string registry this SIP deletes.
+Also rejected: inline anonymous nesting — a second way to say the same thing,
+and A7 already routes nested sequences through templates. A scene you cannot
+reuse is not worth a keyword.
+
+**R3 — the IR is a WINDOW MAP, not a scheduler.**
+
+A score emits no scheduler object. Each clip's progress is a pure function of
+its parent's progress:
+
+#+begin_src spacetime
+&lower-third at 2s for 3s        // inside @score &.time(60s)
+#+end_src
+#+begin_src js
+$lower_third_progress <- clamp01(($film_progress * 60000 - 2000) / 3000)
+#+end_src
+
+Everything in the score body is a shape of that one map:
+
+| surface | is |
+|---------+----|
+| =at 2s for 3s= | an affine window — offset + scale |
+| =during &opening to &outro= | a window resolved from two named spans |
+| =--whip-pan(300ms)= on an edge | a form applied over the OVERLAP window |
+| =&.clip= | the clip driver reads the window its parent assigned — which is why its domain is =inherited= |
+| =rate:= | the point where the map stops being affine |
+
+That last row is the payoff: =rate= is the DERIVATIVE of the window map.
+=rate: 1 -> 2= makes the map the integral of a ramp; =rate: 0= makes it
+constant (freeze); =rate: -1= gives it negative slope (reverse). Retiming,
+freezing and reversing are not three features bolted onto a scheduler — they
+are three shapes of one function.
+
+And because the map is a PURE FUNCTION of parent progress, a score is seekable
+by construction: pressure test C4 (render determinism) falls out instead of
+being enforced. The IR is a list of ={child, map}=. Live evaluates it on rAF;
+render evaluates it at frame /n/. ONE evaluator, two callers — which is the
+structural answer to 001b §8.6's warning that live and rendered films diverge.
+
+**R4 — projections stay; =&.clip=/=&.visible= do NOT become sub-types.**
+
+The same score, both models. Projection-member (today):
+
+#+begin_src spacetime
+@form score --story { &title -> --dissolve(600ms) -> &demo; }
+.film { @score &.time(12s) as &film { --story; } }   // website pole
+.clip { @score &.clip       as &shot { --story; } }   // video pole
+#+end_src
+
+Sub-typed:
+
+#+begin_src spacetime
+@form score --story<P: Transport> { &title -> --dissolve(600ms) -> &demo; }
+.film { @score &film<Time(12s)> { --story<Time>; } }
+.clip { @score &shot<Clip>      { --story<Clip>; } }
+#+end_src
+
+The fragment in model 1 never mentions the projection — the driver is supplied
+at the =@score= head — so fragments are ALREADY projection-agnostic. Model 2
+makes authors WRITE a type parameter to recover polymorphism model 1 has by
+omission. On the four axes: syntax quality worse (ceremony at every call
+site); type cost higher (elem-ref becomes a family, while the driver registry
+already rejects unknown members at compile time — W3.2's gate); parametricity
+payoff nil (nothing consumes a distinction =value_type= + =on_kinds= do not
+already carry); and it forks the website and video surfaces into two grammars.
+Sub-typing answers a question no pressure test has asked.
+
+** 5. =rate= is a property (closes ramps AND freeze)
+
+#+begin_src spacetime
+.broll { @on &.clip { rate: 1 -> 2; easing: --ease-in-out-quad; } }   // speed ramp
+.hero  { @on &.clip { rate: 0; range: 40% to 60%; } }                // freeze frame
+.rewind{ @on &.clip { rate: -1; } }                                  // reverse
+#+end_src
+
+=rate= joins the property namespace: keyframeable, easable, range-able.
+DISTINCT from =hold(until:)=, which pauses the whole TRANSPORT (interactive
+gate). Freeze = one clip stops while the timeline runs; hold = the playhead
+stops. Two operations, two spellings, zero new vocabulary.
+
+** 6. Transitions, VFX, 3d
+
+#+begin_src spacetime
+@form --fade(&from, &to, $duration = 400ms) {
+  &from { opacity: 1 -> 0; easing: --ease-in-out-quad; }
+  &to   { opacity: 0 -> 1; easing: --ease-in-out-quad; }
+}
+
+.stage { @stage { @object &phone gltf("assets/phone.glb") } }
+@on &.clip --spin(4s) { &phone { pose: flat() -> tumble(0,0,1,60deg); range: 10% to 90%; } }
+#+end_src
+
+Region params (=&from/&to=) are elem-refs into the host — the transition
+itself has no identity, so it is a form. =@pose-track objectIndex= deleted.
+
+* Pressure tests
+
+Grading: ✓ covered · ⚠ expressible but ugly · ✗ gap.
+
+** Group A — montage must-haves (research/stdlib-video-nle-cases.org)
+
+| # | Test | v4 | How |
+|---+------+----+-----|
+| A1 | Assemble / ripple / roll | ✓ | arrangement computed from decls, not baked frames |
+| A2 | Slip / slide | ✓ | =in/out= vs =at= — the four trims are edits to existing words |
+| A3 | L/J-cut (split edit) | ✓ | separate lines, independent =during/at= |
+| A4 | Retime / reverse | ✓ | =rate: 2= / =rate: -1= |
+| A5 | **Speed ramp** | ✓ NEW | =rate: 1 -> 2= — rate as keyframeable property |
+| A6 | **Freeze frame** | ✓ NEW | =rate: 0= on the clip (≠ =hold=, which gates transport) |
+| A7 | Nested sequence | ✓ | template hosting a score; transport parents |
+| A8 | Adjustment layer | ⚠ | explicit region param — verbose but honest (order-inference rejected as magic) |
+| A9 | Markers / snapping | ✓ | =mark &name=; =during/at= reference marks |
+| A10 | **Multicam** | ✓ NEW | =@on $take { a => b --cut; }= — match arms, no state-machine workaround |
+| A11 | Batch / personalize | ✓ | =@each= in score + =--data= |
+| A12 | Captions / ducking | ✓ | entity refs (=follow: &voice=, =duck: &voice=) |
+| A13 | Data-driven crop | ✓ | =clip-path: follow($speaker_box)= — value fn, zero grammar |
+
+** Group B — website must-haves (the harder half)
+
+| # | Test | v4 | How |
+|---+------+----+-----|
+| B1 | Sticky-scroll section | ✓ | worked example below — CSS owns the pinning, the score owns the mapping, no JS |
+| B2 | Staggered reveal-on-visible | ✓ | =@on &.visible --reveal= + =stagger= |
+| B3 | Reversible hover micro-interaction | ✓ | Event drivers are reversible (registry data) |
+| B4 | **Route / view transition** | ✓ NEW | =@on $route => "/pricing" --whip-pan(300ms)= — a route change IS a score edge |
+| B5 | **State-driven motion** | ✓ NEW | =@on $cart.open { false => true --slide-in; }= |
+| B6 | Responsive re-choreography | ⚠ | =@when= around =@on= blocks — verify nesting at impl |
+| B7 | **Reduced motion / a11y** | ✗→✓ | driver-level policy: =prefers-reduced-motion= collapses Progress drivers to end-state; Transport drivers keep seek. MUST be registry data, not per-author opt-in |
+| B8 | Interruptible motion | ✓ | =interrupt:= registry column, four policies — worked example below |
+| B9 | Agent authoring | ✓ | see §Craft |
+
+** B1 and B8 worked (2026-07-31, the two owed examples)
+
+*B1 — sticky-scroll.* The likeliest place an author reaches for JS. They do
+not have to: CSS already owns pinning, and the score only maps scroll progress
+onto spans.
+
+#+begin_src spacetime
+.chapter {
+  position: sticky; top: 0; height: 300vh;
+  @score &.scroll(cover) {
+    &stat-a for 30% -> &stat-b for 30% -> &stat-c for 40%;
+    &backdrop during &stat-a to &stat-c;
+  }
+}
+#+end_src
+
+Note the placements are percentages, not seconds — =scroll='s =domain:= is
+=normalized= (R1), so =at 2s= here is a compile error with a did-you-mean.
+
+*B8 — interruption.* What happens when a gate closes mid-run is a POLICY, and
+policies are registry data on the same rail as =reduced_motion= — never a
+per-driver branch (BUG-253 is what per-driver branching costs).
+
+#+begin_src spacetime
+@on &.visible --reveal;                     // reverse  (default for Event/Gate)
+@on &.visible(interrupt: hold)   --reveal;   // freeze where it is
+@on &.visible(interrupt: settle) --reveal;   // run on to the nearest rest state
+@on &.visible(interrupt: cut)    --reveal;   // jump to rest
+#+end_src
+
+New =interrupt:= column; the default is derived from =value_type= (Event and
+Gate reverse — which is what hover-away already does today — while Transport
+holds, because a transport has a playhead an interruption should not rewind).
+
+** Group C — semantic integrity
+
+| # | Test | v4 |
+|---+------+----|
+| C1 | Composition semantics derived, not asserted | ✓ driver value-types (Progress/Transport/Gate/Event) make =&&= mask-vs-min derivable |
+| C2 | Measure domains across nesting | ✓ inner score's domain from ITS driver |
+| C3 | =\vert= static vs runtime resolution | ✓ declared: =.clip= availability is static; events runtime |
+| C4 | **Render determinism** | ✓ policy: only Transport drivers are seekable. Interactive-driven motion renders at its REST state; =render= warns per clip. Progress-from-scroll is seekable (scroll position is a coordinate) |
+
+* Code as art & craft
+
+** What is delightful, and why (the reasons generalize)
+
+1. **=\vert= as fallback.** =@on (&.clip \vert &.time($duration)) --life= — a
+   catalog block that plays standalone AND obeys a film's transport when
+   scored: no conditional, no mode flag, no "preview mode". A special case
+   became an operator, and the operator generalized. High-water mark.
+2. **=&.= for self.** Completes a family (=& {}= selector · =&.= expression)
+   and the common case pays 2 characters. Compare =&self.visible=: correct,
+   joyless.
+3. **Motion as a form.** 40 near-identical HyperFrames blocks → one template
+   + one form + theme values. Not a syntax win — a SCALE win: it changes
+   what one person can maintain.
+4. **Three sigils answering three questions.** =&= which one · =$= what value
+   · =%= what shape. A reader parses a dense line by sigil before parsing it
+   by grammar.
+
+** What is un-delightful (kept honest)
+
+1. **Sigil density.** =@on (&hdr.visible && &hdr.scroll(distance: 40px))
+   --reveal(600ms) as &r;= is legal and near-unreadable. The READABLE SUBSET
+   must be the default: lint composition depth (≥ 3 terms) and encourage
+   naming intermediate timelines.
+2. **=%= vs =30%=.** Defensible (unit suffix vs sigil) but real. Watch for
+   author confusion in the first cohort.
+3. **=@score= is a heavy metaphor for a light web job.** Decision: lean IN.
+   One strong metaphor (tracks, playhead, marks) beats two weak ones, and
+   the NLE framing is the differentiator. Teach it; don't dilute it.
+4. **Bare =& {}= inside a form loses its subject.** Mitigation: forms may
+   declare region params (=@form --reveal(&target)=) — the same mechanism
+   transitions use.
+
+** The UX we are designing for
+
+*Human, video*: a =.st= file beside a preview that scrubs. Every clip
+highlights its source line as the playhead crosses it; dragging a clip edge
+REWRITES the =in=/=out= words in the file. The studio is not a GUI over the
+language — it is a bidirectional projection of it, which is only possible
+because arrangement is declarative words, not baked frames. (SIP-001b.)
+
+*Human, website*: never meets =@score= on day one. Writes
+=@on &.visible { }=; it works. Meets the score when two sections must share
+a playhead — and the score they learn then is the SAME one a film uses.
+
+*Agent*: the type system earns its keep in the ERROR path, not the happy
+path. =@on &intro.playback= must answer /"&intro is a template, not media —
+media in scope: &voice, &bgm"/. Every registry (projections, forms, kinds)
+makes did-you-mean populations mechanical. An agent's loop is error →
+repair; **a design that makes good errors cheap is an agent-friendly
+design** — the real argument for kinds-as-data over macro heads.
+
+* Use-case catalog — current → v4
+
+| # | Today | v4 |
+|---+-------+----|
+| 1 | =@on visible reveal(800ms, threshold: 0.3) {…}= | =@on &.visible(threshold: 0.3) --reveal(800ms)= |
+| 2 | =@on hover lift(300ms) {…}= | =@on &.hover --lift(300ms)= |
+| 3 | =@scroll parallax(scope: cover) {…}= | =@on &.scroll(scope: cover) --parallax= |
+| 4 | =@scroll x(trigger: ".other")= | =@on &other.visible --x= |
+| 5 | =@loop spin(2s)= / =@time tick(1s)= / =@load intro(1s)= | =@on &.loop(2s) --spin= / =@on &.time(1s) --tick= / =@on &.load --intro= |
+| 6 | =@after intro sub(300ms)= | =@on &intro.done --sub(300ms)= |
+| 7 | =@on click { … }= / =@on click [sel] { … }= | =@on &.click { … }= / =@on &.click(target: "[sel]") { … }= |
+| 8 | =@on submit.prevent { … }= | =@on &.submit(prevent: true) { … }= |
+| 9 | =@on intersect n(start:, end:)= | =@on &.scroll(start:, end:) --n= |
+| 10 | =@mouse tilt(axis: "both")= | =@on &.mouse(axis: "both") --tilt= |
+| 11 | =easing: &ease-out-expo= | =easing: --ease-out-expo= (SIP-001c) |
+| 12 | (none — signal motion had no home) | =@on $cart.open { false => true --slide-in(300ms); }= |
+| 13 | (none — route transitions had no home) | =@on $route => "/pricing" --whip-pan(300ms)= |
+| 14 | (none) | =.lt { @on (&.clip \vert &.time($duration)) --life }= — scored or standalone |
+| 15 | (none) | =@score &.time(60s) as &film { … }= + scroll/steps/playback scores |
+| 16 | (none) | =&broll(src: …) in 4s out 9s during &opening= |
+| 17 | (none) | =rate: 1 -> 2= ramp · =rate: 0= freeze · =rate: -1= reverse |
+| 18 | =@pose-track(objectIndex: -1)= | =@on &.clip --spin { &phone { pose: … } }= |
+
+* Blast radius
+
+** Meta-compiler (src/)
+| Area | Files | Change |
+|------+-------+--------|
+| Parsing | ONE token kind (=DASHED_IDENT=) | driver_expr / score_block / on_arm are =%capture_type= DATA; =form_application= needs the token kind (BUG-242), and statement-position splice needs a =%form= (BUG-241) |
+| Sigil | src/parser (lexer) | =--name= at author level (SIP-001c) — the ONE lexer change |
+| Entity kinds | src/pipeline/resolve.rs | + Media, Clip/Timeline instances; forms live in the form registry, not the entity table |
+| Registries | src/metasystem/registry.rs | projection registry + form registry (migrations rail). **MEASURED 2026-07-26 (W2.1): the DECLARATION half exists (=%registers <cat>($key) {…}=, verified with a =@driver= spike) but there is NO generic compile-time READ-BACK — only =registers_category()= (a name lookup). =@preset=, the closest analogue, resolves through a CLOSED Rust enum =PresetType {Easing,Scroll,Animation,Load}= (ast.rs:229), which is the "closed enum the runtime doesn't enforce" AGENTS.md calls rot. "Adding a driver requires zero Rust" is therefore NOT yet true; it needs =entries_of(category)= built first. See FUP-153.** |
+| Validation | src/metasystem/validate.rs | kind×projection, form-kind×splice-site, clip-context, cycle, measure-domain, ambiguity |
+| Diagnostics | src/diagnostics/codes.rs | E-DRIVER-{KIND,CONTEXT,CYCLE,AMBIGUOUS}, E-MEASURE-DOMAIN, E-UNKNOWN-{PROJECTION,FORM}, E-FORM-{KIND,CYCLE,PURITY} |
+
+** Runtime (stdlib, all =.st=)
+| Area | Files | Change |
+|------+-------+--------|
+| Drivers | stdlib/primitives/animation/drivers.st | + clip / playback / steps / done / key / signal-transition primitives |
+| Application | apply-animations.st | + form-param substitution; + =rate= as an animatable property |
+| Native rails | waapi/*.st | clip→WAAPI timeline; playback→media timebase; =rate=→=playbackRate= |
+| Easings | public/runtime/easing.js | 28 curves re-exposed as =%= forms; author-defined springs become possible |
+| Registries | stdlib/runtime/registries.st | ST.timelines → entity-backed with facets |
+| Testing | stdlib/testing/assertions/timeline.st | virtual drivers for =.time/.clip/.scroll/.steps= |
+
+** Stdlib surface
+| Change | Detail |
+|--------+--------|
+| RETIRE | macros/on-event.st · timeline.st · loop.st — 9 heads + dispatchers |
+| NEW | macros/on.st · macros/score.st · macros/form.st · capture-types/{driver-expr,score-block,form-application}.st · projections/ · forms/easings/ |
+| 3d | three-pose-track.st → entity pose keyframes |
+| Migrations | entries/2026-07-26-*.st — the wave |
+
+Site counts (tracked): =@on= 417 (stdlib 125, tests 165, examples 102,
+demos 25) — 99 ident-named, 111 mutation, 29 delegated; =@scroll= 106,
+=@loop= 32, =@after= 25, =@time= 6; plus every =&ease-*= use. ~570+ sites,
+all mechanical except =trigger:= strings and pose-track (manual =%hint=).
+
+* Migration — wave 2026-07-26 (the CAPSULE model)
+
+Verified against =src/parser/meta_ast.rs= + the one real entry
+(=stdlib/migrations/entries/2026-06-09-reactive-surface.st=). The shape is a
+CAPSULE, not a bare rewrite list:
+
+#+begin_src spacetime
+%migration <id> {
+  %date YYYY-MM-DD
+  %docs "…"
+  %macro <old> { … }                              // retired defs VERBATIM (grammar + %binds)
+  %rewrite <rule> { %match { … } %into { … } }    // mechanical rewrites
+  %hint for @directive "…"                        // manual guidance
+}
+#+end_src
+
+Load-bearing properties (from the real entry's own header):
+- The capsule owns EVERYTHING about the retired syntax — /"stdlib proper
+  carries only current syntax; deleting this file deletes the old syntax
+  from existence."/
+- While a project's =@version= predates the wave: mechanical shapes are
+  auto-rewritten IN MEMORY (W0715) and persisted by =spacetime migrate= or
+  the dev-dock pill; retired forms still COMPILE via the embedded =%binds=.
+  Once =@version= reaches the wave date, lingering use is E0911.
+- =%into= holes are backtick-quoted (=`$x`=) and splice the RAW SOURCE SLICE
+  — formatting and expressions survive verbatim. A bare =$x= is literal text.
+
+** Representative rules
+
+#+begin_src spacetime
+%migration timeline-drivers {
+  %date 2026-07-26
+  %docs "SIP-001 v5: driver projections + forms replace the driver macro family."
+
+  %macro on-event { … }        // retired defs verbatim, recovered from git
+  %macro scroll { … }
+  %macro loop { … }
+  %macro after { … }
+
+  %rewrite on-visible {
+    %match { @on visible $name:ident($duration:time) { $body:keyframes } }
+    %into  { @on &.visible --`$name`(`$duration`) { `$body` } }
+  }
+
+  %rewrite after-to-done {
+    %match { @after $pred:ident $name:ident($duration:time) { $body:keyframes } }
+    %into  { @on &`$pred`.done --`$name`(`$duration`) { `$body` } }
+  }
+
+  %rewrite mutation-self-ref {
+    %match { @on $event:ident { $body:mutation_actions } }
+    %into  { @on &.`$event` { `$body` } }
+  }
+
+  %hint for @scroll "trigger: \"…\" is a string ref — retype as a projection: @on &other.visible --name."
+}
+#+end_src
+
+** The hoisting question (RESOLVED — no hoisting needed)
+
+v4 flagged: does the named-timeline rewrite need =%into= to emit a SIBLING
+top-level =@form= declaration? Answer: **no, and it must not.**
+
+=--`$name`(`$duration`)= splices the OLD BODY inline at the call site, so
+the rewrite is local — exactly what =%into= does natively. Extracting a
+shared =@form= is a REFACTOR (a human judgement about which motions are
+worth naming), not a migration. Migrations preserve semantics; they do not
+invent abstractions.
+
+∴ the wave rewrites every site to an inline-bodied =@on=; authors extract
+=@form=s afterward, where they see repetition. This removes v4's blocking
+unknown entirely.
+
+* Elegance-bar check (AGENTS.md)
+
+1. Extension of existing grammar/registry — ✓ (=%= already the metasystem's
+   sigil; =@stage= directive shape; capture-types; migrations rail).
+2. Variants as DATA — ✓ (projections, form kinds, placements, transitions,
+   easings, migration entries).
+3. DELETES special cases — ✓ (9 heads, =@after=, trigger strings, ident
+   registry, bare driver words, =@anim=, =&ease-*=, clip-degrade,
+   freeze/ramp/reverse as concepts, multicam workaround, objectIndex).
+4. Same-machinery testable — ✓ (capture-type RED→GREEN, kind-error tests,
+   =@clock= virtual drivers, migration tests, golden frames).
+
+* Spike record — =on_arm= grammar (2026-07-26)
+
+**Status: INCONCLUSIVE, not verified.** Recorded honestly because the
+distinction matters for what may be built on it.
+
+What was run: the =on_leaf= / =on_transition= / =on_pat= / =on_arm= chain
+above, declared in a real =.st= with a =%macro= consuming =( $arms:on_arm )+=,
+compiled with =cargo run -- check=.
+
+| Case | Result | Meaning |
+|------+--------+---------|
+| Well-formed arms (=a -> b => cut; b => dissolve;=) | ✓ passes | consistent with the grammar working |
+| MALFORMED arms (=a -> -> b => ; => cut=) | ✓ ALSO passes | **the green is a false positive** |
+
+=inspect --layer expansion= shows the body captured as RAW TEXT, not
+parsed by =on_arm=. ∴ =check= does not gate on capture-type failure inside
+directive bodies — filed as **BUG-229** (same class as BUG-216, which
+fixed this hazard on the =@test=-body path: /"a body that fails to parse
+is indistinguishable from a body that legitimately emits nothing"/).
+
+**Consequence for this SIP**: the arm grammar is DESIGNED and
+source-grounded (it follows =recv_pat='s precedent exactly), but it is NOT
+proven to parse. It cannot be marked verified until BUG-229 is fixed and
+the negative case FAILS. Any implementation wave must re-run this spike as
+its first gate.
+
+Also filed: **BUG-230** (=inspect= resolves imports file-relative while
+=check= resolves workspace-relative — blocks multi-file grammar debugging).
+
+* Open questions
+
+1. =%rewrite= hoisting (see Migration NB) — blocks the named-timeline
+   migration path.
+2. =@when= × =@on= nesting for responsive re-choreography (B6).
+3. RESOLVED (2026-07-31) — sticky-scroll worked example landed, §Pressure/B1.
+4. RESOLVED (2026-07-31) — interruption is an =interrupt:= registry column
+   with four policies and a =value_type=-derived default, §Pressure/B8. The
+   =&&=/=\vert= composition case still needs a test at implementation.
+5. Adjustment-layer region binding — explicit param confirmed over
+   z-order inference; validate against catalog family E.
+6. =@post= shader-pass internal form (stdlib-internal).
+7. Reduced-motion policy placement: registry-level default vs per-form
+   opt-out (B7).
+7b. RESOLVED (2026-07-31), W4 conversation: score duration (R1 — the driver
+   owns the domain), scene ownership (R2 — groups are score fragments, no new
+   keyword), the score IR (R3 — a window map, one evaluator two callers), and
+   the clip/visible sub-typing evaluation (R4 — projections stay). See
+   §Proposal/4/W4 rulings for the rejected alternatives and why.
+8. RESOLVED 2026-07-26 (0d437e5b, 44da039b) — =check= NOW gates on
+   capture-type failure inside directive bodies; the =on_arm= spike is
+   validatable and =tests/bug_229_capture_type_failure_gate_test.rs= holds the
+   line with a positive AND a negative case. NB for grammar authors: a body
+   written as a GROUP (="{" ( $arms:x )+ "}"=) compiles against STDLIB capture
+   types only, so a same-file =%capture_type= is invisible there and the
+   directive never matches; write it as a direct repeated body capture
+   (={ $arms:x+ }=) to resolve through the augmented registry.
+9. **Should =receive=/=handle= adopt transition patterns?** Open question
+   raised in review. Today their arms match a SINGLE discriminator (a
+   status class, a variant ctor). A transition pattern (=Pending -> Failed=)
+   would let a handler match a STATE CHANGE of the response sum rather than
+   its final variant — genuinely useful for retry/backoff logic. The
+   paren-free =from -> to= shape composes into =recv_arm= / =handle_arm=
+   without re-bracketing, so this is additive. NOT decided here: it needs
+   its own case list (does a decode ever HAVE a prior state?), and it must
+   not be adopted just because it is now cheap.

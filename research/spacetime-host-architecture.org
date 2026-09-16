@@ -1,0 +1,816 @@
+#+TITLE: SPACETIME_HOST_ARCHITECTURE
+#+STATE: DRAFT
+#+CUSTOM_ID: RESEARCH-spacetime-host-architecture
+
+* Why this exists
+
+Spacetime Host is a commercial side-product: sign up, deploy, preview, and
+publish a `.st` site to the internet, directly from the compiler CLI and from
+the running dev site itself (a bottom-right status button). Lives at
+=commercial/host/= inside this repo (=commercial/= gitignored from `verse`,
+`commercial/host` becomes its own nested git repo, mirroring the existing
+=/projects/= pattern). This doc is the architecture conceptualization: what
+gets built, in what layer, reusing what prior art, across v1 → v2 → v3.
+
+Session goal: CONCEPTUALIZE ONLY. No implementation this session — this doc +
+the companion PLAN item are the deliverable.
+
+* Prior art inventory (verified this session)
+
+** =~/code/ora/push-website= (crates =push-online*=) — the reusable v1 backend
+
+Already a complete, production Rust/Axum "push a static site, get a
+preview/prod URL, manage custom domains" platform. Deployed today on
+Northflank + a Hetzner NixOS box (=agentmaker.co=). Crates:
+
+- =push-online= — CLI (=init / push / check / serve=). Reads
+  =.shared/push-online.yaml=, uploads a tarball, prints preview/prod URLs.
+- =push-online-server= — Axum API + static-file server + analytics.
+  =src/handlers/{upload,domains,serve,projects,forms,analytics,acme}.rs=,
+  =src/middleware/host_router.rs= (multi-tenant host-based routing),
+  =src/storage/{files,metadata,forms,analytics}.rs= (SQLite via rusqlite).
+- =push-online-core= — shared logic: =project.rs= (project resolution),
+  =cloudflare.rs= (Cloudflare for SaaS custom-hostname + SSL provisioning),
+  =injection.rs= (analytics-tracker script injection into served HTML),
+  =integrations.rs=, =forms.rs=, =analytics.rs=.
+- =push-online-dom= — canonical DOM attribute contract (shared vocabulary
+  between tracker JS and server).
+- Domain/TLS: Cloudflare for SaaS custom-hostname API (zone SSL edit token) +
+  webhook for cert status (=pending_validation → pending_issuance →
+  pending_deployment → active=), OR Northflank's own wildcard-domain
+  certs. Both documented in =docs/DEPLOYMENT.md=.
+- Infra: NixOS module (=infrastructure/configuration.nix=) — Caddy
+  on-demand-TLS reverse proxy → systemd-socket-activated Rust binary,
+  persistent Hetzner volume, restic offsite encrypted backups (daily, 30/4/12
+  retention).
+- markade-server crates additionally show an OAuth handler pattern
+  (=crates/markade-server/src/handlers/oauth.rs=) — reusable skeleton for
+  GitHub OAuth in v2.
+
+*Reuse verdict*: fork+leanify =push-online-server= + =push-online-core= as the
+Host v1 backend. Drop analytics/forms (out of scope for v1; v3 territory, see
+below). Keep: upload, domains, Cloudflare SaaS, serve/host-router, ACME/TLS
+glue, NixOS deploy recipe. This eliminates ~80% of v1 backend design work —
+it's operating in production today under a different name.
+
+** verse-side prior art (this repo)
+
+*** CLI shape — =src/main.rs= (single-crate root, clap derive, 15 subcommands)
+
+No workspace; one binary. =Command= enum:
+=Check|Inspect|Serve|Profile|Build|Script|Test|Lsp|Mcp|Workbench|Init|GenerateGrammar|ExportSpellProfile|Vendor|Doctor=.
+No existing auth/hosting/OAuth deps in `Cargo.toml`. A new =Host= subcommand
+(or a wrapping =host= sub-binary, see Architecture §A below) follows the same
+clap-derive pattern; =run_host(...)= dispatch fn beside =run_serve=.
+
+*** =stdlib/__admin__/= — the debug-only meta-renderer CMS (model for the status button's *content*, not its trigger)
+
+Zero hand-written JS surface (declarative =@data/@each/@template/@on/@effect/
+@portal=). Gated by =AppMode::Dev { debug: bool }= at =src/server.rs=
+(=/__spacetime/admin/= route only registered when =debug=true=). Compiled as
+a *separate* =.st= entry point (=compile_admin()= compiles
+=stdlib/__admin__/index.st= independent of the user's site). Persistence
+bridge: =window.__stDevWs= (established by =stdlib/__dev__/primitives/
+dev-ws.st=) carries `EditAst`/`EditJson` ops to the dev server.
+
+This is the direct architectural precedent for the "hosting status button":
+a small always-on-in-dev widget (=stdlib/__dev__= already has a bottom-right
+"ST Dev" badge — =dev-indicator= primitive) that's declarative Spacetime, not
+custom JS, and persists state changes back to the =.st= source via the same
+EditAst channel content-editing already uses.
+
+*** =@cms(Type){...}= macro — the model for a NEW config macro (e.g. host account binding)
+
+`stdlib/__admin__/cms-hint.st`. 3-layer macro anatomy every new directive
+follows:
+1. *Surface* (=%form=): =@cms($type:ident) { $hints:properties }= — file-scope,
+   =%order 51=.
+2. *Codegen* (=%binds=): binds to a primitive, here a pure display-hint
+   registration (no JS emitted).
+3. *Registry* (=%registers cms($type) { $hints }=): metasystem fact, read at
+   runtime by a dev-server contract endpoint (=/__spacetime/dev/types.json=).
+
+=stdlib/macros/host.st= (existing =@host= macro — transport binding
+=http|ws|live= for =@data signal/stream=) is the closer structural sibling:
+kind-word dispatch (multiple =%macro host-http/host-ws/host-live= sharing one
+directive name via literal-token specificity), =%registers host($name){...}=
+carrying transport+config facts consumed downstream by the signal/stream
+primitives.
+
+*IMPORTANT naming collision*: =@host= is TAKEN (transport binding, unrelated
+domain). The Spacetime Host *deploy config* macro **MUST** use a different
+name — proposal: =@deploy= (see Architecture §B).
+
+*** EditAst — the write channel a hosting status button would use
+
+Protocol (=src/sync/protocol.rs=):
+=ClientMessage::EditAst{file,selector,patch,op_id}=. Two patch shapes:
+directive/property patch (=patch: {key: value}=, selector =`<css-selector>
+@<directive>`=) and content patch (=patch: {"__content": html}=). Server-side
+dispatcher =handle_edit_ast_inner= (=src/sync/handlers.rs=) resolves the CSS
+scope + directive name in the parsed AST, then =apply_text_patch= does a
+depth-aware, quote/bracket-safe in-place text replacement — NOT a full AST
+serialize/rewrite, so unrelated formatting in the file is untouched. Response
+=Ack{op_id}= / =Reject{op_id,reason}= round-trips over the same =dev-ws=
+WebSocket the admin and dev-editable already share.
+
+This is EXACTLY the channel the hosting button needs for "click 'update
+production' → patch the =@deploy= directive's =$lastPublished= /
+=$productionCommit= metadata back into the =.st= source" — no new persistence
+mechanism required, reuse verbatim.
+
+* Architecture
+
+** Naming: two products, one macro-suffix convention
+
+- *Spacetime Host* — the commercial product (accounts, deploy pipeline,
+  domains, billing). Lives entirely in =commercial/host/= (separate repo).
+- The *open-source* side is a thin client surface inside `verse` itself: (1)
+  a CLI subcommand, (2) an author-facing macro, (3) a stdlib
+  =__host_status__= status-widget module. These three ship in the OSS
+  `verse` repo (same way =@cms= + =__admin__= are OSS even though a paid CMS
+  backend could exist); the *commercial server* they talk to is closed.
+
+** A — CLI: `spacetime host <...>`
+
+Two viable shapes; recommend the SECOND:
+
+1. Extend =src/main.rs='s `Command` enum with `Host { #[command(subcommand)]
+   action: HostAction }` (`HostAction::{Login,Logout,Whoami,Init,Push,
+   Preview,Publish,Domains,Status}`) directly in the OSS `verse` binary. Con:
+   couples the compiler binary to a commercial backend's wire protocol/SDK —
+   violates "commercial/ is a separate repo" boundary; every OSS build would
+   link against Host API client code even if unused.
+2. **Recommended**: a standalone `spacetime-host` binary living in
+   `commercial/host/crates/spacetime-host-cli`, installed alongside the main
+   `spacetime` binary (same install script pattern as `push-online`'s
+   `scripts/install.sh`). `cargo run -- host <...>` in the OSS repo becomes a
+   **thin shim**: `src/main.rs` gets ONE new subcommand, `Host { args:
+   Vec<String> }`, whose handler `exec`s the `spacetime-host` binary if
+   present on `$PATH` (`which spacetime-host`), else prints "install with:
+   curl .../install.sh". Zero commercial code enters the OSS crate; the CLI
+   ergonomics (`spacetime host push`) still work.
+
+The CLI wraps the open-source SDK crate mentioned in the prompt (an
+SDK-wrapping crate for the OSS Spacetime — likely `push-online`'s client
+pattern generalized, i.e., `spacetime-host-client`: signup/login (device-code
+OAuth-style flow, no password field to keep it simple — see markade-server's
+`handlers/oauth.rs` for the token-exchange skeleton), `push`, `promote`
+(preview → prod), `domains add/status/remove`.
+
+** B — the `@deploy` macro (author-facing v1 config surface)
+
+Follows the `@host` 3-layer anatomy exactly, distinct directive name to avoid
+the transport-binding collision:
+
+#+begin_src spacetime
+// index.st (file-scope, top of the entry file)
+@deploy {
+  project: "acme-landing";       // maps to Host's project slug
+  team: "acme-ventures";         // optional; defaults to the logged-in user
+}
+#+end_src
+
+#+begin_src spacetime
+%macro deploy {
+  %scope file
+  %order 10                 // early: other directives may want $deployProject
+
+  %form {
+    @deploy {
+      $config:properties
+    }
+  }
+
+  %binds {
+    deploy-register(config: $config)
+  }
+
+  %registers deploy() {
+    $config
+  }
+}
+#+end_src
+
+`deploy-register` is a *display/config*-only primitive — like `@cms`, it
+emits NO runtime JS. It is read by (1) the `spacetime-host` CLI at push time
+(`cargo run -- inspect --layer registry` style introspection, or a small
+`--emit-manifest` compiler flag that dumps the `deploy()` registry fact as
+JSON — reuses the existing `ExportSpellProfile`/`Inspect` machinery rather
+than inventing a new manifest format) and (2) the v1 status-widget (`§C`
+below) to know which project this build maps to.
+
+*Secrets*: the Host account's API token/session is NEVER embedded in the
+`.st` source (mirrors `@cms`'s "secrets are external, only display/config
+travel through the macro" rule). It lives in `$XDG_DATA_DIR/host/credentials` (or cache dir?)
+(CLI-managed, like a `.netrc`) or project-local `.env` (`SPACETIME_HOST_TOKEN`),
+loaded the same way `push-online` loads `.env.production`/`.env.local`.
+
+** C — `stdlib/__host__/` — the bottom-right status button
+
+Directly modeled on `stdlib/__admin__/` + the existing `dev-indicator`
+badge (`stdlib/__dev__/index.st`), NOT a new mechanism:
+
+- Compiled as its own entry point the same way `compile_admin()` does:
+  `compile_host_widget()` compiles `stdlib/__host__/index.st` and injects its
+  markup+runtime into every page IF (a) `AppMode::Dev` (any dev server run,
+  debug or not — the button is useful even outside `--debug`, unlike the
+  full CMS admin) AND (b) the compiled site has a `@deploy{}` directive
+  present (no directive → no button; a plain OSS user who never touches Host
+  sees nothing extra — zero footprint).
+- Visual states (color = truth about what's live, no custom JS — pure
+  `@data fetch` + reactive class binding):
+  - *green*: `$devPreviewUpdated == $lastPushedHash` (latest local build has
+    a matching remote dev-preview deploy)
+  - *orange*: local build hash differs from the last-pushed dev preview
+    (edits not yet pushed)
+  - *turquoise*: `$viewingProduction == true` (what's currently shown IS the
+    published production build — relevant when the CLI's `spacetime host
+    preview --open` opens a prod-mirrored local view)
+- Click → tooltip/popover (a `@portal`, exactly like the admin's drawer):
+  - link to the latest dev-preview URL (share link)
+  - "Promote to production" button (date-stamped: "last updated 3 days
+    ago") → `@on click` fires a fetch to the LOCAL dev server
+    (`/__spacetime/host/promote`, a new dev-server route, debug-gated) which
+    shells out to the `spacetime-host` CLI/binary server-side (the browser
+    never talks to the commercial API directly — keeps the API token
+    server-side only) and on success sends an **EditAst** patch back into
+    `@deploy{}`'s config block (`lastPublished: "<iso8601>"`,
+    `productionCommit: "<hash>"`) — reusing the EXACT existing property-patch
+    channel documented in `docs/CONTENT_EDITING.md` §8 (PLAN-034 pattern:
+    `@deploy{}` is a *singleton*, `EditAst`-edited, just like the `Brand`
+    token singleton).
+- `dev_server.rs` gets 2-3 new debug-gated routes: `/__spacetime/host/
+  status.json` (proxies `spacetime-host status` → JSON), `/__spacetime/host/
+  promote` (proxies `spacetime-host publish`), mirroring the existing
+  `/__spacetime/dev/*.json` contract-endpoint pattern used by the admin.
+
+** D0 — storage/serving architecture: Host server as pure orchestrator (revised, this session)
+
+*Problem with the draft above as first written*: original §D had
+=spacetime-host-server= storing uploaded builds under =/data/projects/{id}/
+deploys/{deploy_id}/= on the Hetzner persistent volume, AND serving them
+directly (same shape as =push-online-server= today) — the origin box is both
+upload receiver and edge server. Every visitor request, from anywhere in the
+world, round-trips to one Hetzner box in one region. No CDN pull, no global
+edge distribution, single point of failure for ALL customer sites at once.
+Does not meet: "served globally and well, without hosting the actual files
+on the server." Fixing this now.
+
+*** Options evaluated (verified pricing, this session)
+
+| Option | Storage | Egress | Custom domains | Verdict |
+|---|---|---|---|---|
+| **Cloudflare R2 + one routing Worker** | $0.015/GB-mo | *$0* zero egress, any volume | Cloudflare for SaaS: first 100 free, then $0.10/domain/mo (dropped from $2 in 2026) | *Recommended* — zero egress decisive at scale; ALREADY reusing Cloudflare for SaaS (§E) for TLS, so this adds zero new vendors, just two more API surfaces on an account already held |
+| Cloudflare Workers for Platforms | $25/mo base + isolate metering | same R2 terms | same | Overkill — WfP buys per-tenant *code execution* isolation (Durable Objects, per-tenant Workers). We don't run customer code, only serve static bytes. |
+| Bunny.net (Storage Zone + Pull Zone / "Bunny for Platforms") | $0.01/GB-mo (2 regions) | $0.005-0.01/GB (NA/EU), volume tier to $0.005/GB | Free Let's Encrypt per hostname; "Bunny for Platforms" removes 500-pull-zone cap, flat per-domain pricing at scale | Viable, cheaper at very high bandwidth, but a SECOND vendor integration (no prior art in `push-online-core`). Documented Alt, not the v1 pick. |
+| Serve straight from Hetzner volume (original draft) | included in box cost | egress-billed via Hetzner/Northflank, one region only | works, single-region | Superseded by this revision — kept only as an emergency fallback path if R2/Worker has an outage |
+
+*Why R2 wins for v1*: (1) zero egress removes the single biggest unknown
+cost in a hosting product — bandwidth scales with success, Cloudflare
+charges nothing for it; (2) already integrating Cloudflare for SaaS for
+TLS/custom-hostname in §E — R2 + a Worker adds zero new vendor
+relationships; (3) `push-online-core::cloudflare.rs` becomes the template
+for an analogous `r2.rs` module (same crate, same account, same auth token
+scoping).
+
+*** Concrete design: one shared Worker + R2 + KV pointer table
+
+NOT one Worker per customer project (that's Workers-for-Platforms shaped
+and unneeded — see table). ONE Worker script, shared across every Spacetime
+Host project, doing host-based routing:
+
+#+begin_src text
+Request -> Cloudflare edge (330+ PoPs)
+  -> spacetime-host-edge Worker (single script, all tenants)
+    1. hostname = request Host header
+    2. (project_id, active_slot) = KV.get(hostname)   // slot in {preview, production}
+       -- KV is eventually-consistent but READ-heavy/WRITE-rare here (a slot
+          flips only on `spacetime host publish`), exactly KV's sweet spot;
+          propagates globally in seconds, cached at each PoP after first read
+    3. object_key = project_id/active_slot/url.pathname
+       (falls back to /index.html per normal static-site rules)
+    4. cache = caches.default; cached = await cache.match(request)
+       -> HIT: serve from Cloudflare's edge cache, R2 never touched
+       -> MISS: obj = await R2_BUCKET.get(object_key); cache.put(request, obj.clone());
+                serve obj, Cache-Control driven by asset type (long-TTL
+                hashed JS/CSS, short-TTL html)
+    5. 404 -> project-level custom 404 page (same R2 prefix) or Host-branded default
+#+end_src
+
+This makes the Cache API the actual CDN layer (Cloudflare's edge cache, the
+same mechanism Pages/Workers-static-assets uses under the hood) — R2 is the
+durable origin, hit only on cache misses (cold PoP, or right after a publish
+changes the cached object key). Practically: R2 Class B (read) ops stay low
+because most traffic is cache-served; R2 is paid mainly for storage + the
+Class A (write) ops from `spacetime host push`.
+
+*Pointer-table flip = the entire publish operation*. §D's "no deploy
+history, current pointer only" model maps directly: `push` writes objects
+under `{project_id}/{deploy_hash}/...` (content-addressed, not a mutable
+`preview/` prefix — this is the key design choice), the `preview` KV alias
+repoints to the new hash on every push, and `publish` doesn't move bytes at
+all — it's a single `KV.put(hostname, {project_id, hash})` repointing
+`production` to the hash `preview` currently points at. This ALSO gives
+free instant rollback as a natural v1.x follow-up (repoint to a prior hash)
+without contradicting "no history storage": only the current hash's objects
+need retaining past a short grace window unless/until we explicitly add a
+rollback feature with real retention.
+
+*Origin fallback for custom (non-`*.host.spacetime.dev`) domains*:
+Cloudflare for SaaS custom-hostname fallback origin is set to the Worker's
+route (not the Axum box) — TLS/cert provisioning flow in §E is UNCHANGED,
+only the fallback origin target changes from "Axum static-file server" to
+"the routing Worker."
+
+*** What =spacetime-host-server= (the Axum orchestrator) now actually does
+
+Confirms the requested framing directly — the origin box becomes
+orchestration-only, never in the request path for a single visitor pageview:
+
+1. Auth (login/session/API tokens).
+2. Receives the `push` upload (tarball over HTTP from the CLI), validates it
+   (size caps, path traversal checks, image-only asset policy per §D),
+   computes its content hash.
+3. Streams/PUTs the extracted tree into R2 under `{project_id}/{hash}/...`
+   (S3-compatible API — R2 is API-compatible with the AWS S3 SDK, so this is
+   an `aws-sdk-s3`-shaped client pointed at R2's endpoint, not a bespoke
+   protocol).
+4. Writes/updates the KV pointer entries (`preview` moves on every push;
+   `production` moves only on `publish`).
+5. Talks to Cloudflare for SaaS for custom-hostname provisioning (existing
+   `cloudflare.rs` logic, unchanged).
+6. Serves CLI/API/dashboard JSON responses, metadata store (SQLite ->
+   Postgres later if v2 org scale needs it), billing hooks.
+
+It holds ZERO customer-facing static bytes at rest beyond the brief window
+of an in-flight upload streaming to R2. A Hetzner-box outage now degrades
+SIGNUP/PUSH/PUBLISH only — every already-deployed site keeps serving from
+Cloudflare's edge, unaffected. Materially better availability than the
+original single-origin draft.
+
+*** Revised open question (folded into the final open-questions list below)
+
+- R2 bucket topology: one shared bucket, `{project_id}/...`-prefixed
+  (simpler IAM, one bucket to manage) vs. one bucket per project (harder to
+  manage at scale, cleaner per-tenant storage-class/lifecycle policy later —
+  e.g. a paid tier moving cold preview deploys to Infrequent Access).
+  *Recommendation*: single shared bucket for v1; revisit per-project buckets
+  only if a specific tenant needs isolated storage billing/compliance in v2.
+
+** D — build/upload contract (v1)
+
+On `spacetime host push`:
+1. CLI shells `cargo run -- build <site>` (existing `Build` command, already
+   emits JS/CSS/HTML to `dist/`) — Host NEVER receives raw `.st` source,
+   only the compiled artifact tree. This matches the prompt's requirement
+   ("sends the built website, not the .st") and is a hard privacy/IP
+   boundary worth keeping even post-v1.
+2. tars `dist/` (mirrors `push-online`'s tar+gzip upload), images only (no
+   video transcoding in v1 — explicitly deferred; `push-online-core` already
+   has `oxipng`/`mozjpeg`/`webp` optimization code that CAN be reused
+   verbatim when video support lands, so this isn't a rewrite later, just a
+   feature flag turned on).
+3. `POST /api/projects/{id}/deploys` (reuse `push-online-server`'s
+   `handlers/upload.rs` shape for validation/parsing) → server streams the
+   extracted tree into **Cloudflare R2** under `{project_id}/{deploy_hash}/`
+   (see §D0 above — NOT the local Hetzner disk as originally drafted) and
+   repoints the `preview` KV alias to the new hash. **No deploy history
+   retention in v1** (prompt: "no storage of previous versions"): only the
+   hash a KV alias currently points at is considered live; an old hash's R2
+   objects are eligible for cleanup once no alias references them (a simple
+   sweep job, not a retention/versioning feature). Production publish is a
+   separate pointer-flip (`production` KV alias → the hash `preview`
+   currently points at), so a bad push to preview never touches prod until
+   explicitly promoted — this is the minimum safety net even without
+   version history, now implemented as a KV write instead of a file move.
+4. Response: `{ preview_url, deploy_id }`. CLI prints it; status widget
+   polls/fetches it.
+
+** E — domains (v1, C2 in the prompt)
+
+*Answering the inline question (Cloudflare for SaaS vs. our own Caddy/LB on
+the NixOS host)*: with §D0's redesign this is no longer really a choice
+between two TLS-termination strategies for the SAME traffic — they now
+terminate DIFFERENT traffic. Customer-site visitor TLS terminates at
+Cloudflare's edge (R2 + Worker path, §D0) unconditionally; that traffic
+never reaches the NixOS box at all, so "our own Caddy" was never actually a
+competing option for it. The NixOS/Caddy question only applies to
+=spacetime-host-server='s OWN api/orchestration endpoint (CLI
+login/push/publish calls) — and Cloudflare-fronting that too (proxy the
+orchestration API through the same zone, Cloudflare terminates TLS, Caddy
+drops out entirely) is simpler and cheaper than running Caddy's on-demand
+ACME ourselves: one less moving part, one less cert-renewal failure mode to
+operate. *Recommendation*: Cloudflare-proxy the orchestration API too;
+NixOS box runs plain HTTP behind Cloudflare, no Caddy, no self-managed TLS
+anywhere in v1.
+
+Reuse `push-online-core::cloudflare.rs` wholesale for CUSTOM DOMAIN
+provisioning specifically: Cloudflare for SaaS custom-hostname API,
+`pending_validation → pending_issuance → pending_deployment → active`
+status machine, webhook for async cert events. Two paths, both already
+proven in `push-website`:
+- *Assigned subdomain*: every project gets `{project-slug}.host.spacetime.dev`
+  (or whatever the final domain is) for free — wildcard cert on the Host
+  zone, zero customer DNS action, served directly by the routing Worker
+  (§D0) since it's already on our own zone (no Cloudflare for SaaS
+  custom-hostname step needed for OUR OWN wildcard subdomain, only for
+  customer-owned domains).
+- *Custom domain*: customer points a CNAME at the fallback origin —
+  **the fallback origin is the routing Worker's route, not the NixOS box**
+  (revised from the original draft per §D0); Host calls Cloudflare for SaaS
+  to provision a cert for their hostname. Exactly `push-online`'s "Customer
+  DNS Setup" flow in `docs/DEPLOYMENT.md`, target retargeted.
+
+** F — infra (v1)
+
+*Scope narrows materially post-§D0*: the NixOS/Hetzner box now runs ONLY
+=spacetime-host-server= (auth, upload receive+relay-to-R2, KV/domain
+orchestration, metadata DB) — it is never in a visitor's request path
+(§D0). Fork `infrastructure/configuration.nix` from `push-website`, but
+drop the Caddy on-demand-TLS layer entirely (per §E's resolved NOTE):
+Cloudflare-proxy `spacetime-host-server`'s own API/orchestration endpoint
+(orange-clouded DNS record, Cloudflare terminates TLS, box speaks plain
+HTTP on a private/firewalled port) → systemd-socket-activated binary →
+Hetzner volume (now holding only the SQLite/Postgres metadata store, no
+site bytes) + restic backups of that DB. Smaller blast radius, fewer moving
+parts than the original draft: no Caddy config, no on-demand ACME, no
+large-volume site-asset backups (R2 is Cloudflare's own durability domain,
+not ours to back up).
+
+* v2 — accounts, `commit`, GitHub, multi-tenant orgs
+
+** G — hosted admin with auth
+
+NOTE: You can connect the website repo to a git repo and the req to only push static websites
+is still true but is irrelevant now bc in any case the website sees the .st
+
+`stdlib/__admin__/` today is unauthenticated-by-design (dev-mode-only, no
+network exposure assumed). v2 needs the SAME admin UI served over the
+internet, gated by real auth. Two sub-decisions:
+
+1. *Auth mechanism*: OAuth device-code or session-cookie login against the
+   Host account system (v1's login already exists for the CLI — v2 reuses
+   the identical account backend, just adds a browser-facing session
+   cookie flow). `markade-server/src/handlers/oauth.rs` is the closest
+   in-repo skeleton (token exchange handler shape) — read, don't copy
+   verbatim (it's WhatsApp/Backdesk-specific), but the state-machine
+   (authorize → callback → token → session) transfers directly.
+2. *Serving path*: the ALREADY-DEPLOYED static site (built by v1's push
+   pipeline) needs an admin overlay added AFTER build, since the commercial
+   server doesn't have the `.st` source (§D's privacy boundary). This means
+   v2's `spacetime host push` must ALSO upload a small manifest of `@type`
+   schemas + `@cms()` hints (the `types.json`/`site.json` *contracts* the
+   admin already fetches at `/__spacetime/dev/*.json` in dev mode) so the
+   Host-hosted admin can render the identical meta-renderer UI against
+   deployed content, without ever seeing `.st` source. Concretely: `spacetime
+   host push` emits `manifest.json` (schemas + `@deploy{}` config +
+   `@cms()` hints, NOT raw source) alongside the `dist/` tarball; the
+   commercial server serves `stdlib/__admin__` (vendored, same OSS files)
+   against that manifest at `https://{project}.host.spacetime.dev/__admin__/`
+   authenticated by the v2 session. Content edits round-trip through a
+   HOSTED variant of EditAst — same wire shape, but writing to the deployed
+   artifact tree (HTML/JSON data files) server-side instead of `.st` source
+   (there is no `.st` source on the server — content singletons/collections
+   deployed as build-time JSON, editable post-deploy, exactly the
+   PLAN-034 cardinality-keyed model already documented in
+   `docs/CONTENT_EDITING.md` §8, just re-targeted at deployed JSON instead of
+   in-repo `.st`).
+
+** H — "commit" button + GitHub integration
+
+New status-button affordance beyond promote-to-prod: a *commit* action that
+takes hosted-admin content edits and turns them into a real git commit
+against the customer's repo (so branding-agency clients get durable,
+reviewable history instead of edits trapped in Host's database).
+- Requires GitHub OAuth App (standard `octocrab`-style Rust GitHub client;
+  no prior art in this repo, net-new — but well-trodden: OAuth app → repo
+  scope → create branch → commit file changes via Contents API or a
+  git-tree/commit/ref triple for multi-file changes → optionally open a PR
+  for branding-agency review workflows).
+- Content edits captured as `EditAst`-shaped patches server-side (same
+  patch objects v1/v2 already produce) get REPLAYED against the actual
+  `.st`/data-file source in the linked GitHub repo via the Contents API —
+  i.e., the hosted admin's edits are eventually-consistent with the source
+  repo, closing the "no `.st` on server" gap from §G without ever storing
+  the customer's full source at rest.
+- Two user classes (per prompt): *institution members* (multi-project access
+  within an org, GitHub org-level integration) and *domain-rights holders*
+  (may not have repo/content access but own DNS/domain assignment) — this is
+  an RBAC model: `Organization → Members (roles: editor/publisher/domain-admin)
+  → Projects → Domains`. Domain-admin role can reassign a domain to a
+  different project without touching content; editor role can push/preview
+  but not promote; publisher can promote to production.
+
+*** REVISED (this session): agency↔client RBAC is NOT SSO/SCIM, and it's what actually motivates Elixir
+
+An earlier pass of this doc conflated "v2 needs multi-tenant orgs" with
+"v2 needs enterprise SSO/SCIM" (WorkOS's paid connection tier). User
+correctly called this out: SSO/SCIM answers a DIFFERENT question (how does
+an enterprise customer's own employees authenticate against THEIR
+identity provider) than what's actually needed here (an agency manages
+many client sites; client users see only their own site/domain; rights
+are separated per agency↔client relationship). That's an INTERNAL
+authorization/permissions model, orthogonal to which identity provider
+verifies a login — WorkOS's free tier (magic-link/device-flow, §2 of the
+v1 plan) was never blocking this; the RBAC layer was simply undesigned.
+
+Checked =Ash.Policy.Authorizer= directly (Ash Framework's authorization
+extension) as the concrete mechanism: policies are boolean-SAT-solved
+per-action, and Ash supports attribute-based multi-tenancy (an
+=organization_id=-strategy attribute on tenant-scoped resources). The
+documented pattern for exactly this shape — agency staff spanning
+multiple client tenants, each tenant with its own roles — is FOUR
+resources: =Permission= (actions a role can do), =Group= (a role tied to
+a specific tenant, e.g. "Client X Editors"), =GroupPermission= (links
+groups to permissions), =UserGroup= (a user can belong to MULTIPLE
+groups across MULTIPLE tenants — this is exactly the agency-staff-across-
+many-clients shape). Read actions are policy-FILTERED (unauthorized rows
+simply don't appear, not an error) — closes the enumeration-attack gap a
+hand-rolled Rust RBAC table would need bespoke code for.
+
+*Revised schema* (extends, doesn't replace, the RBAC table sketched
+above): =organizations=, =organization_members= (join table,
+=role= FK to a per-org =groups= table rather than a fixed enum — matches
+Ash's Group/Permission pattern so an agency can define custom roles per
+client relationship, not just the three fixed roles originally sketched),
+=group_permissions=, =projects.organization_id=, =domains= unchanged.
+Lives in the NEW Elixir/Ash service (see stack-split section below), not
+Rust — Ash.Policy.Authorizer is the reason this moved.
+
+** v1/v2 stack split — REVISED this session: Elixir DOES enter at v2, for two specific reasons
+
+*v1 stays Rust-only, unchanged*: forked `push-online*` crates + new
+`spacetime-host-cli`/`spacetime-host-server` crates + the OSS `.st` stdlib
+surface `@deploy`/`__host__`. Nothing in v1 has a concurrent-multi-user
+surface (one operator, one CLI, one site at a time) — REST + static
+hosting, squarely Axum's domain. WorkOS via its official Rust SDK (v1
+plan §2) is unaffected by anything below.
+
+*Prior recommendation ("v2 stays Rust-only too") is REVERSED* — an
+earlier pass of this doc argued Elixir should wait for a v3 live-
+collaboration feature that might never get prioritized. User pushed back
+with two concrete v2-shaped needs that argue for introducing it NOW, at
+v2, not deferring it — checked both directly this session rather than
+taking the claim on faith:
+
+1. *Agency↔client RBAC* (§H above, revised): =Ash.Policy.Authorizer='s
+   Group/Permission/GroupPermission/UserGroup pattern is a verified,
+   documented, production-ready fit for "agency staff spanning multiple
+   client tenants, each with its own roles." This is NOT something
+   WorkOS's SSO/SCIM tier would have solved (different problem — identity
+   vs. authorization) and building the equivalent boolean-policy-solved,
+   read-filtering authorization layer by hand in Rust is genuinely more
+   code than adopting Ash's existing primitive for it.
+2. *Hosted admin's live multi-user editing* (§G above): checked Phoenix's
+   actual primitives, not assumed — Channels are supervised PER-CONNECTION
+   processes (one editor's session crashing doesn't affect others),
+   Presence is a CRDT out of the box (auto-syncs across nodes), and
+   Channels+Presence+a CRDT merge library (=DeltaCrdt= for structured
+   data, or Operational Transform for text) is a well-trodden, verified-
+   in-production pattern for exactly this feature (multiple people live-
+   editing the same hosted site concurrently). Hand-rolling fault-isolated
+   per-session state + presence tracking + conflict-free merge in Rust
+   means re-deriving what OTP provides natively — MORE work in Rust for
+   this specific feature, not less.
+
+*Concrete v2 architecture*: extend the ALREADY-SCAFFOLDED
+=elixir/spacetime_lv= (verified via =mix.exs= this session: bare Phoenix
+1.8 + LiveView 1.1 today, zero Ash dependency yet — so this is "add Ash
+to an existing app whose conventions/AGENTS.md already exist", not
+standing up a new stack from nothing) with =ash= + =ash_postgres= +
+=Ash.Policy.Authorizer=. This new Elixir service owns:
+- the =organizations=/=organization_members=/=groups=/=group_permissions=
+  RBAC tables and their policy enforcement (§H, revised)
+- the hosted admin's LiveView UI + Phoenix Channels/Presence for live
+  multi-user editing
+
+=spacetime-host-server= (Rust) stays the system-of-record for
+projects/deploys/R2/domains/media/billing — the Elixir app is a CLIENT of
+it (calls its REST API), not a replacement for it. v1's whole surface is
+unaffected.
+
+*Cost, stated plainly*: this is genuinely TWO runtimes in v2 (two
+deploys, two log/monitoring surfaces, a network boundary between them,
+two dependency ecosystems to keep current) — more ops surface than one
+process, and that tradeoff is real, not hand-waved away. The
+justification is narrow and specific to these two features, not a
+blanket "Elixir is better": if v2 shipped WITHOUT live collaborative
+editing and WITHOUT agency-spanning-multiple-clients RBAC, Rust-only
+would still be the right call per the elegance-bar test (no special case
+to delete). Both conditions are now true for v2 as scoped, so the
+second runtime earns its place.
+
+*One integration gap found, worth flagging*: WorkOS's Elixir SDK is
+official but explicitly marked EXPERIMENTAL on hex.pm — "breaking changes
+may occur... not recommended for production use" (verified directly,
+not inferred), unlike the stable Rust SDK v1 already commits to. *Design
+consequence*: WorkOS token MINTING stays exclusively on the Rust side
+(v1 plan §2, unchanged) — the Elixir service does NOT call WorkOS
+directly. When the Elixir app needs to know who's logged in, it verifies
+the SAME =api_tokens= bearer token Rust already mints (hash + lookup
+against a shared Postgres table, or a thin internal Rust endpoint the
+Elixir app calls) — trivial in either language, and avoids depending on
+an experimental SDK for anything production-critical.
+
+* v3 — marketing/analytics/A-B via Spacetime macros (per your addendum)
+
+Your point is right and changes the v1 boundary in one respect: if
+analytics/A-B/marketing macros are coming, the "push-online has analytics,
+we're dropping it for v1" call in §Prior-art needs a caveat — DON'T delete
+`push-online-core::analytics.rs`/`injection.rs`/the DOM contract crate,
+*fork them into a dormant v3 crate* now (rename, don't discard) so v3 isn't
+a rewrite. Concretely:
+
+- `push-online-dom` (canonical DOM attribute contract) → becomes the target
+  vocabulary for a NEW `@analytics`/`@track`/`@experiment` macro family,
+  same 3-layer anatomy (`%form`/`%binds`/`%registers`), authored ENTIRELY in
+  `.st` (per this repo's hard rule: "Spacetime websites should NOT have
+  custom javascript" — the tracker-injection script `push-online`
+  hand-writes today (`assets/js/tracker.js`) is exactly the kind of
+  hand-rolled JS this repo's AGENTS.md forbids going forward; v3 should
+  compile tracking/A-B logic FROM `.st` macros, emitting the equivalent JS
+  via the compiler's existing `%emit`/`%binds` primitive pipeline, not ship
+  a static vendored script).
+- Sketch (not a commitment, illustrative only):
+  #+begin_src spacetime
+  @experiment "hero-cta" {
+    variants: ["control", "bold-red", "urgency-copy"];
+    weights: [34, 33, 33];
+    goal: click(".cta-button");
+  }
+  @track "cta-click" on: click(".cta-button");
+  #+end_src
+  `%registers experiment(...)`/`track(...)` facts, consumed at deploy time by
+  the Host server to (a) inject a *compiler-emitted* (not hand-written)
+  variant-assignment + event-beacon primitive, (b) aggregate results,
+  surfaced back through the `__host__` status widget or a `__host_analytics__`
+  companion dashboard module (same declarative-meta-renderer pattern as
+  `__admin__`).
+- This is explicitly a FOLLOW-UP research item, not v1/v2 scope — flagging it
+  in the PLAN as a tracked v3 pillar so the `push-online-core` analytics
+  crates get preserved/renamed rather than deleted during the v1 fork.
+
+* File/repo layout (concrete)
+
+#+begin_src text
+verse/                                  (OSS, this repo)
+  .gitignore                            + /commercial/  (new entry)
+  src/main.rs                           + Command::Host { args: Vec<String> } shim
+  src/dev_server.rs                     + /__spacetime/host/{status.json,promote} debug routes
+  stdlib/macros/deploy.st               NEW — @deploy macro (3-layer: form/binds/registers)
+  stdlib/__host__/                      NEW — status-widget module tree (mirrors __admin__)
+    index.st
+    widget/{app.st, popover.st, styles.st}
+  docs/HOST_INTEGRATION.md              NEW — wire contract (mirrors CONTENT_EDITING.md)
+
+commercial/                             (gitignored from verse; own git repo)
+  host/                                 `commercial/host` — the product
+    Cargo.toml                          workspace
+    crates/
+      spacetime-host-cli/               binary: `spacetime-host` (installed via install.sh)
+      spacetime-host-client/            SDK crate — signup/login/push/promote/domains
+      spacetime-host-server/            forked from push-online-server (leanified)
+      spacetime-host-core/              forked from push-online-core (project/domains/cloudflare)
+                                         + r2.rs NEW (R2 PUT/list client, §D0)
+                                         + DORMANT analytics/injection modules (v3, not deleted)
+      spacetime-host-dom/               forked from push-online-dom (v3 target vocabulary)
+      spacetime-host-edge/              NEW — Cloudflare Worker, RUST via `workers-rs` (§D0,
+                                         open-Q6, revised): KV pointer lookup + R2 GET + Cache
+                                         API, own `wrangler.toml` + empty `[workspace]` table
+                                         (opts OUT of the outer Cargo workspace — different build
+                                         target, wasm32-unknown-unknown via `worker-build`),
+                                         deployed via `wrangler deploy`
+    infrastructure/configuration.nix    forked from push-website, Cloudflare-fronted, no Caddy (§E/§F)
+    docs/DEPLOYMENT.md                  forked + adapted
+
+elixir/                                 (OSS, this repo — EXTENDED not replaced, v2)
+  spacetime_lv/                         already exists (bare Phoenix 1.8 + LiveView 1.1 today)
+    mix.exs                             + ash, ash_postgres, ash_authentication? (NO — WorkOS
+                                         stays Rust-side only, Elixir SDK is experimental per
+                                         hex.pm, verified this session; add ash_postgres for
+                                         RBAC storage instead)
+    lib/spacetime_host_admin/           NEW (v2) — organizations/groups/permissions Ash
+                                         resources (§H, revised) + hosted-admin LiveViews +
+                                         Phoenix Channels/Presence for live multi-user editing
+                                         (§G). Calls =spacetime-host-server='s REST API as a
+                                         client; does NOT own projects/deploys/R2/domains/
+                                         media/billing (Rust stays system-of-record for those).
+#+end_src
+
+* Build order (waves)
+
+1. *Wave 0 — scaffold*: `.gitignore` += `/commercial/`; `git init` at
+   `commercial/host`; vendor-copy (not `git submodule`, per this repo's own
+   `/projects/` convention: plain gitignored nested repo) leanified forks of
+   `push-online-server`/`push-online-core` into
+   `commercial/host/crates/spacetime-host-{server,core}`; strip forms/
+   analytics/injection into a `#[allow(dead_code)]`-flagged dormant module
+   (v3 preservation, §v3 above), keep upload/domains/cloudflare/serve live.
+   *[DONE, this session]* — 5-crate workspace scaffolded and committed in
+   `commercial/host`'s own git repo; source bodies are all still stubs
+   (see § note below — `spacetime-host-edge` crate dir not yet added, next
+   scaffold pass).
+2. *Wave 0.5 — storage/edge plumbing (§D0, new this session)*: R2 bucket +
+   KV namespace provisioned on the Cloudflare account; `spacetime-host-edge`
+   Worker (routing script above) written + `wrangler.toml` committed;
+   `spacetime-host-core::r2.rs` (S3-compatible PUT client against R2's
+   endpoint) + KV-write client added to the orchestrator. This is now a
+   PREREQUISITE for Wave 1 (push has nowhere to land without it) — sequence
+   corrected from the original draft, which implicitly assumed local-disk
+   storage needed no separate provisioning step.
+3. *Wave 1 — CLI shim + SDK + billing*: `spacetime-host-client` (login/
+   push/promote/domains against `spacetime-host-server`), `spacetime-host-
+   cli` binary, `verse`'s `Command::Host` PATH-shim. Billing (NEW this
+   session, user has an existing Stripe account): Stripe Checkout Session
+   + Customer Portal Session endpoints (hosted pages, zero custom billing
+   UI to build) + a webhook handler for `checkout.session.completed`/
+   `customer.subscription.updated`/`.deleted` updating
+   `accounts.stripe_customer_id`/plan/status. Uses the mature
+   `async-stripe-webhook` crate for signature verification (near-stable,
+   rc.5) + plain `reqwest` for the two outbound calls (Checkout/Portal
+   session creation are simple documented REST calls) rather than the
+   still-alpha `async-stripe` core crate for a 2-endpoint surface.
+4. *Wave 2 — `@deploy` macro*: `stdlib/macros/deploy.st`, manifest-emit via
+   existing `Inspect`/`ExportSpellProfile` introspection machinery (no new
+   manifest format invented).
+5. *Wave 3 — `__host__` status widget*: dev-server debug routes + declarative
+   `.st` widget tree + EditAst promote-writeback, proven against a real
+   `@deploy{}`-bearing test fixture site.
+6. *Wave 4 — domains + infra*: Cloudflare for SaaS wiring (custom domains
+   only — wildcard subdomain already lives on the Worker route from Wave
+   0.5), NixOS deploy of the now-traffic-light orchestrator box, smoke-test
+   a real subdomain + one custom domain end to end (verify: pageview never
+   touches the NixOS box, only KV+R2+Worker — a concrete, checkable
+   acceptance criterion for §D0's design goal).
+7. *Wave 5 (v2) — Elixir/Ash service stood up*: REVISED this session —
+   `ash`/`ash_postgres` added to the already-existing `elixir/spacetime_lv`
+   (not a new stack); `organizations`/`groups`/`group_permissions` Ash
+   resources + `Ash.Policy.Authorizer` policies (§H, revised); manifest-
+   driven hosted `__admin__` served as a LiveView; auth verifies the SAME
+   Rust-minted `api_tokens` bearer token (WorkOS minting stays Rust-only,
+   §2 of the v1 plan — WorkOS's Elixir SDK is experimental, not used here).
+8. *Wave 6 (v2) — live collaborative editing + GitHub commit*: Phoenix
+   Channels/Presence for concurrent multi-user hosted-admin editing (§G,
+   revised — pulled forward from v3 since it's now a v2 feature); GitHub
+   OAuth app, Contents API replay, PR flow (§H).
+9. *Wave 7 (v3, tracked separately) — `@experiment`/`@track` macros*: own
+   PLAN, own PRD; depends on Wave 0's dormant-crate preservation holding.
+
+* Open questions (for user decision before implementation PLAN is written)
+
+1. Final product domain (`*.host.spacetime.dev` vs a different brand)?
+2. [RESOLVED this session] Billing: v1 launch feature, not deferred to v2
+   — user has an existing Stripe account. Stripe Checkout + Customer
+   Portal (both hosted, zero custom billing UI), see Wave 1 above.
+3. `spacetime-host` binary distribution: same `install.sh`-curl pattern as
+   `push-online`, or bundled into the main `spacetime` installer?
+4. Is the existing `agentmaker.co` Hetzner box reused for Host v1 (shared
+   infra with push-online) or does Host get its own box from day one
+   (cleaner security boundary, since Host will hold OTHER customers'
+   compiled sites)? *Narrower stakes now*: post-§D0 this box holds ONLY
+   orchestration + metadata, never site bytes, so the isolation argument
+   for a separate box is weaker than in the original draft — sharing
+   `agentmaker.co` is more defensible now. Still recommend separate for
+   blast-radius/ops-independence reasons (a push-online incident shouldn't
+   be able to take down Host's auth/API), but it's a lower-stakes call than
+   before.
+5. *(new, §D0)* R2 bucket topology — single shared bucket vs. per-project
+   buckets (recommendation: single shared bucket for v1, see §D0).
+6. *(new, §D0, RESOLVED this session)* Edge Worker implementation language
+   — originally recommended plain TypeScript here (thin router, Cloudflare's
+   default tooling target). REVISED after checking `workers-rs` directly:
+   Cloudflare's own official Rust SDK has full R2/KV/Cache-API binding
+   support (verified via crate docs, not assumed), is Cloudflare-maintained
+   and documented as production-ready, and the one real Rust-on-Workers
+   caveat — gzipped Wasm binaries over ~1024 KiB degrade cold-start latency
+   — does not bite a router this small (KV get → R2 get → cache put/get, no
+   framework weight; mitigated further via `opt-level = "z"` + `lto` +
+   `strip` in the crate's release profile). *Final*: Rust via `workers-rs`,
+   NOT TypeScript. Keeps the entire Spacetime Host stack (cli/client/
+   server/core/dom/edge) in one language — no second toolchain, no
+   TypeScript in the product at all. `spacetime-host-edge` is its own
+   standalone crate (empty `[workspace]` table opts it out of the outer
+   Cargo workspace — it targets `wasm32-unknown-unknown` via
+   `worker-build`/`wrangler deploy`, a different build graph than
+   `cargo build` at the repo root), `wrangler.toml` lives alongside its
+   `Cargo.toml` per `workers-rs` convention (not in a shared
+   `infrastructure/` dir). (Scope note, unchanged: this repo's "Spacetime
+   websites should NOT have custom javascript" rule, AGENTS.md, governs
+   COMPILED `.st` OUTPUT — a customer's site — not Spacetime Host's own
+   platform tooling; moot now anyway since the Worker is Rust, not JS.)
+
+7. *(new, this session)* RBAC role granularity: fully custom per-agency
+   roles (Ash's Group/Permission pattern supports arbitrary group names
+   per tenant) vs. a fixed set of roles (editor/publisher/domain-admin, as
+   originally sketched in §H) that ships faster but is less flexible for
+   agencies with unusual internal structures. Recommend starting with the
+   fixed set for Wave 5 (matches Ash's pattern underneath either way — the
+   schema doesn't foreclose custom roles later, only the initial UI does).
+8. *(new, this session)* Billing plan tiers/pricing: not designed this
+   session (out of scope — this doc covers the INTEGRATION mechanism,
+   Stripe Checkout/Portal, not the pricing model itself). Needs a separate
+   pass once plan tiers (free/pro/agency?) are decided — Stripe Products/
+   Prices are configured in the Stripe dashboard, not code, so this is a
+   business decision that doesn't block Wave 1's technical implementation.
+

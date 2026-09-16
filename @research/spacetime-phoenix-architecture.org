@@ -1,0 +1,325 @@
+#+TITLE: Spacetime ⇄ Phoenix LiveView — the application architecture
+#+CUSTOM_ID: spacetime-phoenix-architecture
+#+DATE: 2026-06-21
+#+STATUS: design (north star for execution) — settled in the 2026-06-21 dialogue
+#+BUILDS_ON: @research/spacetime-phoenix-liveview-bridge.org (the `live(...)` transport design)
+#+PARENT: FEAT-136 (Wave C, DONE) — this is the architecture the remaining FEATs assemble
+#+EXECUTES: FEAT-138, FEAT-139, FEAT-137, FUP-095, FUP-096 (ordering in §7)
+
+* 0. Purpose
+
+The bridge design doc (=spacetime-phoenix-liveview-bridge.org=) specifies the
+=live(...)= TRANSPORT — the wire grammar. THIS doc specifies the APPLICATION
+ARCHITECTURE: how a real Phoenix+Spacetime app is organised, where every file
+lives, how the contract is generated and checked both ways, and where the
+compiler lives in dev vs prod. It is the north star we execute the remaining
+FEATs/FUPs against. Everything here is grounded in the SHIPPED Wave-C code
+(=elixir/spacetime_lv/=, =src/analysis/liveview_contract.rs=) and the REAL Djinn
+Spark DSL (=~/code/ora/monorepo/packages/djinn/lib/djinn/live_view/=), not fiction.
+
+* 1. The one-sentence thesis
+
+  *The host is config. The page is the program.*
+
+The LiveView owns the SOCKET, STATE, and EFFECTS (Elixir's strength). Spacetime
+owns the ENTIRE view — rendering, reactivity, animation (its strength). They meet
+at ONE introspected contract and exchange DATA DIFFS, never template fragments.
+The `.st` page is byte-identical across hosts; flipping one =@host= line
+(=ws("/ws")= ⇄ =live("MyAppWeb.BoardLive")=) re-targets it with no other change.
+That invariance IS the proof the abstraction is right.
+
+* 2. The load-bearing move — "diff data, never templates"
+
+This is WHY the integration is worth doing, and it dictates the file layout.
+Grounded in =deps/phoenix_live_view/lib/phoenix_live_view/diff.ex= (bridge §8).
+
+A normal LiveView ships an IODATA DIFF TREE over the socket: Phoenix fingerprints
+a HEEx template every render to recover which holes changed, ships a positional
+={0:.., 1:..}= map, and the client (=rendered.js=) RECONSTRUCTS DOM from that
+tree. That whole subsystem exists because the view is a string template the
+server diffs at RUNTIME.
+
+Spacetime knows the static/dynamic split at COMPILE time (every `$x` hole is
+wired to a signal by =buildTemplateFactory=). So the server ships a CHANGED-ASSIGN
+map (={count: 3}=) and the client patches a NAMED signal (=ST.set(root,"count",3)=)
+— no morphdom, no HTML re-parse. An entire Phoenix subsystem is DELETED by moving
+its job to compile time.
+
+| Phoenix runtime mechanism            | Spacetime compile-time equivalent          |
+|--------------------------------------+--------------------------------------------|
+| HEEx fingerprint tree, ={0:..}= diff | changed-assign map keyed by signal name     |
+| client DOM reconstruction (rendered) | =ST.set(root, name, v)= on pre-wired DOM    |
+| keyed comprehension =:k=/=:kc=        | =@each … key: $t.id=                         |
+| reply =:r=                            | =receive to <Sum>=                           |
+| =phx-update="ignore"= on ST subtree   | the mechanism keeping morphdom OUT          |
+
+The SHIPPED seam (=lib/spacetime/live_view.ex::render_host=): the ST subtree
+carries =phx-update="ignore"=; the bridge writes =window.SpacetimeLocal[name]=v=
+on each =st-set= push_event. That ~20-line bridge is the legitimate glue.
+
+* 3. The two-plane split (the boundary that governs every file)
+
+#+begin_src
+  PLANE 1 — SERVER (Elixir / Phoenix)        PLANE 2 — VIEW (Spacetime / .st)
+  ──────────────────────────────────        ────────────────────────────────
+  socket lifecycle (mount/terminate)         markup (the DOM)
+  state (assigns, the source of truth)       style (CSS, scoped)
+  effects (handle_event, PubSub, jobs)       animation/motion
+  the three DECLARED sections (§4)           reactivity (signals, @each, @data)
+  domain logic (pure Elixir contexts)        the @host binding (the ONLY line
+                                              that knows which host backs it)
+  ── declares WHAT data flows ──             ── declares HOW it looks/reacts ──
+#+end_src
+
+Rule: the server module contains ZERO HEEx in the view subtree — its generated
+=render/1= emits only the host element + bundle =<script>= + bridge boot. It
+CANNOT express view concerns (honours the AGENTS rule at the architecture level).
+The `.st` contains ZERO server/transport logic beyond the one =@host= line.
+
+* 4. The data model — three typed sections, symmetric wire
+
+Every direction collapses to THREE sections (bridge §10.1-10.2), each mapping to
+exactly ONE Spacetime =@data= construct. Types ENCODE LIFECYCLE, not just shape —
+that is what makes whole classes of bug unrepresentable (bridge §11).
+
+#+begin_src
+         SERVER (Spark DSL)                WIRE                  PAGE (.st)
+  ┌──────────────────────────┐                          ┌────────────────────────┐
+  │ assigns do               │  durable state           │ @data subscribe         │
+  │   eager :columns,         │  (last-wins, replayed    │   $cards from $board    │
+  │     type: {:list, Card}   │   on reconnect)       ──▶ │ (`$board.columns`)      │
+  ├──────────────────────────┤                          ├────────────────────────┤
+  │ events do                │ ◀─ client intent ─────── │ @data signal $move()    │
+  │   handle "move",          │  (phx event), correlated │  { send emit "move"     │
+  │     reply: MoveResult     │  {:reply}             ──▶ │    receive to MoveResult}│
+  ├──────────────────────────┤                          ├────────────────────────┤
+  │ pushes do                │  transient effect        │ @data stream $fx        │
+  │   push "flash", FlashMsg  │  (fire-once, NOT       ──▶ │   { receive to Effect } │
+  │ end                      │   replayed)              │ @handle $fx             │
+  └──────────────────────────┘                          └────────────────────────┘
+#+end_src
+
+Why three, not "just assigns": =assigns= are idempotent STATE; =pushes= are
+non-idempotent EVENTS. Modelling a toast as an assign re-fires it on reconnect
+(the classic bug). A push CANNOT be replayed — wrong-by-type. (bridge §11 #5-6.)
+
+* 5. The self-aware contract — generated AND checked (FEAT-139)
+
+The "self-aware" property = page and server agree on the wire, checked at compile
+time, NEITHER side hand-maintaining the agreement.
+
+** 5.1 What ships today (Wave B, FEAT-135 DONE) — HALF the loop
+
+=src/analysis/liveview_contract.rs= at =cargo run -- check=:
+  - =collect_live_hosts= → =$counter → DemoWeb.CounterLive=
+  - =collect_page_intents= → the page fires =inc=, =dec=
+  - =load_contracts= → reads every =*.contract.json= sidecar into
+    =ServerContract { module, events, pushes, fingerprint }=
+  - =compare= → page intent's event ∉ =event_names()= ⟹ *E0928 compile error*
+
+The lie: =CounterLive.contract.json= is HAND-WRITTEN. Nothing forces it to match
+=counter_live.ex=. Rename the server handler, forget the JSON → green build,
+runtime explosion. Self-aware is FAKE on the server side.
+
+** 5.2 What FEAT-139 does — the server EMITS its own contract
+
+A =Spacetime.LiveView= Spark DSL (mirroring Djinn's =assigns/events/pushes=
+sections) + a transformer that walks the schema → emits the contract. The
+=.contract.json= becomes a BUILD ARTIFACT of the Elixir compile (or, better, a
+module function read at macro-time via the FEAT-138 NIF), never hand-typed.
+
+** 5.3 The field mapping (the heart of FEAT-139)
+
+The realization: *Djinn ALREADY did the introspection layer.* FEAT-139 is a
+PROJECTION FUNCTION =%Schema{} → contract=, not new introspection.
+
+Verse side — what =liveview_contract.rs= deserializes (=src/analysis/...rs:14-50=):
+#+begin_src rust
+  struct ServerContract { module, events: Vec<ContractEvent>,
+                          pushes: Vec<ContractPush>, fingerprint }
+  struct ContractEvent { name }    // TODAY name-only
+  struct ContractPush  { name }    // TODAY name-only
+  // richer convergence shape (src/mcp/state.rs:584):
+  struct ParamSpec { name, kind, optional, type_ref: Option, default: Option }
+#+end_src
+
+Elixir side — Djinn =Info= accessors (=packages/djinn/lib/djinn/live_view/info.ex=,
+verified live):
+#+begin_src elixir
+  Djinn.LiveView.Info.schema(mod)         # %Schema{}
+    .assigns      → [%Assign{name, kind, type, default, required}]  # kind ∈ eager|param|derived|ui
+    Info.events(mod) → [%EventHandler{event, params, returns, optimistic, pending}]  # flat, groups expanded
+    .data_sources → [%DataSource{name, stream, default}]
+    .subscriptions→ [%Subscription{}]
+#+end_src
+
+The projection:
+
+| ServerContract JSON      | Djinn Info source                       | rule                                                    |
+|--------------------------+-----------------------------------------+---------------------------------------------------------|
+| =module=                  | =mod= (atom)                             | =inspect(mod)= → ="DemoWeb.CounterLive"=                 |
+| =events[].name=           | =Info.events= → =%EventHandler{event}=    | =event= already a string; direct copy                   |
+| =events[].params= (new)   | =%EventHandler{params:[{name,type}]}=     | ={step_id,:string}=→={name,kind:"string",optional:false}= — footgun #3 payload-shape check |
+| =events[].reply= (new)    | =%EventHandler{returns}= (=:reply= ∈)     | emit reply sum name the page's =receive to <Sum>= ⊆ — footgun #4 |
+| =pushes[].name=           | =events= w/ =:push_event= ∈ returns, OR a new =pushes= section | FEAT-139 adds an EXPLICIT =pushes= section so they're named+typed, not a capability flag |
+| =pushes[].payload= (new)  | the push's declared type                | same =ParamSpec= projection                              |
+| =assigns[]= (new section) | =Info.assigns= → =%Assign{name,type,kind}=| drives =@data subscribe= checks — footgun #1 (=$board.colmns= typo) |
+| =fingerprint=             | =:erlang.phash2= over projected rows     | schema change shifts it → =Compatibility::Breaking= — footgun #14 |
+
+** 5.4 The Assign.kind → wire-role filter (the subtle part)
+
+Djinn's =%Assign{kind}= is a 4-way enum (=schema/assign.ex=) encoding LIFECYCLE.
+The projection is NOT "dump all assigns" — it FILTERS by kind:
+
+#+begin_src
+  eager   → durable server state   → page @data subscribe (replayed on reconnect)
+  param   → URL-synced             → page reads; reconnect from URL not socket
+  derived → memoized computation   → page @data subscribe (read-only; no write-back)
+  ui      → ephemeral              → NOT crossed to the page (stays server-local)
+#+end_src
+
+∴ =ui= assigns never enter the contract, so the page CANNOT subscribe to them —
+that is WHY footgun #13 (leaking every assign over the wire) is structurally
+prevented, not linted.
+
+** 5.5 Where the projection runs (the FEAT-138 coupling)
+
+#+begin_src
+                    ┌─ Spark transformer at `mix compile` ─┐
+  %Schema{} ──────▶ │  walk Info.{assigns,events}/1 → JSON │
+                    └──────────────┬───────────────────────┘
+       MODE 1 (no NIF):            │       MODE 2 (with FEAT-138 NIF):
+       write <page>.contract.json  │       nif.introspect(schema_json) → contract
+       → `cargo check` reads it    │       → compare vs .st intents AT mix compile
+       → E0928 at a SEPARATE step  │       → E0928 is an ELIXIR build error (red mix)
+#+end_src
+
+Mode 2 is the target: rename =handle_event("inc")=→="increment"= and =mix compile=
+itself goes red — transformer regenerates the contract, NIF comparator catches
+the =.st= still firing ="inc"=. No =cargo check=, no sidecar, no human. That is
+why FEAT-139 sequences with/after FEAT-138.
+
+** 5.6 Verse-side change FEAT-139 needs (small)
+
+=ContractEvent{name}=/=ContractPush{name}= are name-only — can't express the
+param/reply/payload shapes for footguns #3/#4. Widen them toward =ParamSpec=
+(add =params=, =reply=, =payload=) as =#[serde(default)]= extensions
+(backward-compatible: today's =\{name\}=-only JSON still deserializes), so it
+lands without breaking the Wave-B fixture.
+
+* 6. Folder architecture (FUP-096 — DECISION: Option A)
+
+** 6.1 The problem today (=elixir/spacetime_lv/=)
+
+THREE locations per page, build output interleaved with source:
+#+begin_src
+  priv/spacetime/counter/index.st        ← SOURCE
+  priv/spacetime/counter/dist/*.{js,css} ← BUILD OUTPUT colocated with source ✗✗✗
+  priv/static/spacetime/counter.{js,css} ← SERVED COPY (3rd loc, manual cp)   ✗
+#+end_src
++ =priv/= ("private app files," an Elixir-ism) is an unintuitive home for the VIEW.
+
+** 6.2 The convention (Option A — assets/spacetime/)
+
+Reuses Phoenix's EXISTING =assets/ → priv/static/= rail (the esbuild/tailwind
+model). The =:spacetime= mix compiler (FEAT-138) slots beside esbuild. Zero new
+concepts.
+
+#+begin_src
+  my_app/
+  ├── assets/
+  │   ├── js/app.js                  ← liveSocket boot + SpacetimeBridge hook (the ONLY custom JS)
+  │   └── spacetime/                 ← ✦ SOURCE (TRACKED)
+  │       └── board/index.st         ←   @host $board : live("MyAppWeb.BoardLive")
+  ├── lib/
+  │   ├── my_app/board.ex            ← domain logic (pure Elixir; knows nothing of ST)
+  │   └── my_app_web/live/board_live.ex  ← the HOST: assigns/events/pushes + handlers; NO HEEx
+  ├── priv/static/spacetime/         ← ✦ OUTPUT (GITIGNORED, served at / by Plug.Static)
+  │   ├── board.js · board.css
+  │   └── board.contract.json        ← transitional; → __spacetime_contract__/0 (FEAT-139), then deleted
+  └── mix.exs                        ← :compilers: [:spacetime] ++ Mix.compilers()
+                                         deps: {:spacetime, ...} (BUILD-TIME only)
+#+end_src
+
+** 6.3 Output routing by host mode — the public/ question
+
+ONE source tree, TWO deploy modes with different served roots:
+#+begin_src
+        ┌──────────── assets/spacetime/<page>/index.st (ONE source) ────────────┐
+   MODE 1: LiveView-hosted                       MODE 2: standalone SSG
+   driver: mix :spacetime (FEAT-138)             driver: `spacetime build` (no Phoenix)
+        ▼                                              ▼
+   priv/static/spacetime/<page>.{js,css}         public/ (or dist/) at project root
+   ── served by Plug.Static at "/"               ── full static export: bundles +
+   ── NO separate public/:                          SSG-unrolled HTML shells + assets
+      priv/static IS Phoenix's web root          ── the ONLY mode with a public/ dir
+#+end_src
+
+Decisive point: there is NO separate =public/= in the LiveView case — Phoenix's
+=priv/static/= IS the public web root. A =public/= only materialises for
+standalone SSG (no Phoenix to serve =priv/static/=). The SAME `.st` source
+compiles to either target, selected by the BUILD DRIVER, never by editing the
+page (matches the byte-identical thesis).
+
+** 6.4 gitignore
+
+| dir / file                       | tracked? | rationale                                          |
+|----------------------------------+----------+----------------------------------------------------|
+| =assets/spacetime/= (source)      | ✓        | it's the program                                   |
+| =priv/static/spacetime/= (output) | ✗        | build artifact — like =priv/static/assets/= already|
+| =public/= (SSG output)            | ✗        | build artifact                                     |
+| =*.contract.json=                 | ✗ → DELETED end-state | becomes a module function (FEAT-139)  |
+
+* 7. The dev / prod boundary (bridge §5 — compiler out of prod)
+
+#+begin_src
+  dev:    .st ──spacetime_nif (live)──▶ bundle ──socket hot-swap──▶ running LV   (FEAT-138)
+  build:  .st ──mix spacetime.build──▶ priv/static/spacetime/*.{js,css} + contract.json
+  prod:   release = prebuilt bundles + tiny ST runtime shim (~KB) + data-channel glue
+                    ⟵ NO compiler, NO NIF, NO verse
+#+end_src
+
+  - DEV: the NIF recompiles =.st= on save, pushes the new bundle over the live
+    socket; host-composition hot-swaps with no page reload. Edit =.st= → view
+    restyles live; edit the LiveView → contract re-checks + page hot-swaps.
+  - PROD: =mix spacetime.build= AOT-compiles every =page:= to static bundles +
+    bakes each contract. Release ships ONLY the emitted artefact + the
+    demand-injected ST runtime shim + the data-channel glue in
+    =Spacetime.LiveView=. The LANGUAGE is gone; only its output remains.
+
+* 8. Execution ordering (the plan)
+
+Settled sequence — bare thing first, then ergonomics, then the folder cleanup:
+
+  0. *The bare thing* — port the board to Phoenix: author =MyAppWeb.KanbanLive=
+     (the three sections), flip =index.st='s =@host= to =live(...)=, confirm the
+     SAME =@drive= test passes unchanged. (Today this leans on the phx-click shim
+     + hand-written contract; steps below retire each crutch.)
+  1. *FUP-095* — auto-diff =push_view= (push only CHANGED assigns; the §2 "server
+     diffs DATA" story made automatic) + document the =text: $sig= vs backtick-hole
+     binding rule for host-supplied DOM. (Small ergonomics on the bare thing.)
+  2. *FEAT-138* — =spacetime_nif= (Rustler) + =:spacetime= mix compiler: compile
+     =.st= from =mix=, auto-stage to =priv/static/=, dev hot-reload. Removes the
+     manual cargo+cp dance; gives FEAT-139 its macro-time =introspect()= entry.
+  3. *FEAT-139* — =__spacetime_contract__/0= Spark transformer (§5): server emits
+     its contract; kills the hand-written sidecar; self-aware loop true BOTH ends.
+  4. *FEAT-137* — native =live= transport: the =.st='s own =send emit= drives the
+     LV socket + correlates ={:reply}=; retires the phx-click shim. The page (not
+     Phoenix controls) drives the wire, contract-checked end to end.
+  5. *FUP-096* — migrate to the Option-A folder convention (§6): no =dist/= beside
+     any =.st=; =assets/spacetime/= source; =mix compile= emits to =priv/static/=.
+
+Rationale: prove the THESIS first (board on Phoenix, byte-identical page), then
+remove crutches in dependency order (NIF unblocks the macro-time check; the
+contract transformer unblocks true self-awareness; native transport retires the
+last shim; folder cleanup last, once the page count justifies it).
+
+* 9. Cross-references
+  - =@research/spacetime-phoenix-liveview-bridge.org= — the =live(...)= transport
+    grammar, the §8 optimisation thesis, the §11 footgun table, the §14
+    one-of-a-kind board experience.
+  - =src/analysis/liveview_contract.rs= — the SHIPPED Wave-B comparator (E0928).
+  - =elixir/spacetime_lv/= — the SHIPPED Wave-C counter vertical (the bare slice).
+  - =~/code/ora/monorepo/packages/djinn/lib/djinn/live_view/= — the REAL Spark DSL
+    (Info, schema/{assign,event_group,data_source}, dsl/{assigns,events}) FEAT-139
+    projects from.

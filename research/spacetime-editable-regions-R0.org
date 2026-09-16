@@ -1,0 +1,200 @@
+#+TITLE: FUP-042 R0 — Regions: the recursive document primitive (design)
+#+STATE: DESIGN
+#+CUSTOM_ID: FUP-042-R0-region-model-design
+#+PARENT: PLAN-031
+
+* Why this doc
+FUP-042 deferred the "hard part" of `@editable` (PLAN-031 round 3): list nesting
+(=ul>li=) and multi-region blocks (=columns=, editable =figure= caption). Both need
+the document model to go RECURSIVE. The position model IS the document's type, and
+five consumers are written against it — so this is a re-type, not a patch, and it
+earns a written design round (R0) before code (R1+). User-directed: design doc first.
+
+* The flat model today (the degenerate case)
+Grounded in =public/runtime/editable.js=:
+
+#+begin_src
+doc      = { type:'doc', content: Block[] }
+Block    = { type, attrs, content: Inline[] }
+Inline   = { type:'text', text, marks[] } | { type:'atom-name', attrs }
+
+inlineSize(n)        = n.type==='text' ? text.length : 1           // atom = 1
+blockContentSize(b)  = Σ inlineSize(b.content)
+docSize(doc)         = Σ (1 + blockContentSize(b) + 1)            // open+content+close
+resolve(doc,pos)     → { blockIndex, offset }                     // ONE level deep
+#+end_src
+
+ProseMirror-style integer positions: each block contributes =1 (open) + content + 1
+(close)=. =resolve= walks blocks accumulating that cost and returns a flat
+=(blockIndex, offset)=. This covers paragraphs, headings, blockquote, code blocks,
+=figure= (single nested caption treated as the block's inline content) + ALL inline
+mark nesting — the 90% case. It shipped clean + fuzz-proven (60-op sequences).
+
+What it CANNOT express:
+1. LIST nesting: a =li= whose content is itself BLOCKS (=ul>li>p=, nested =ul=).
+   =Block.content= is =Inline[]=, one level only.
+2. MULTI-REGION blocks: =&columns(&left, &right)= — one block, TWO independent
+   editable sub-spaces. The schema invertibility check (=src/editable/schema.rs=
+   =count_sel_holes != 1=) already FORBIDS >1 =&sel=.
+
+* The primitive: a REGION
+A *region* is a named, ordered editable sub-space. The insight that makes lists and
+columns ONE concept instead of two special-cases:
+
+#+begin_src
+Region = { kind: 'inline' | 'block', content: Node[] }
+         // kind='inline' → content is Inline[]  (a paragraph's run)
+         // kind='block'  → content is Block[]   (a list item's blocks)
+
+Block  = { type, attrs, regions: { [name]: Region } }
+Doc    = the ROOT region (kind:'block')
+#+end_src
+
+The flat model is the degenerate case: every flat block has exactly ONE region named
+(say) =content= of kind =inline=. =doc= is one region of kind =block=. Nothing else
+changes shape for the 90% that already works.
+
+Instances fall out of the one primitive:
+| construct        | regions                                            |
+|------------------+----------------------------------------------------|
+| paragraph =p=    | { content: Region(inline) }          ← flat case   |
+| heading =h2=     | { content: Region(inline) }                        |
+| list item =li=   | { content: Region(block) }           ← homogeneous |
+| list =ul=        | { items:   Region(block of li) }                   |
+| figure           | { caption: Region(inline) } + static =img= attr    |
+| columns          | { left: Region, right: Region }      ← parallel    |
+
+* Regions ARE the `&hole`, generalized (ties to the existing surface)
+No new author syntax. A region is just a NAMED selection hole. The editable schema
+ALREADY records a =SelPosition= per node (=src/editable/schema.rs=); regions extend
+that to =regions: { name: { kind, holeCount } }=. Author surface (unchanged grammar):
+
+#+begin_src spacetime
+# ONE region (today)
+@editable-block &figure(&sel, $src url, $alt string = "") {
+  <figure><img src="`$src`" alt="`$alt`"><figcaption>`&sel`</figcaption></figure>
+}
+# TWO regions — &left / &right are named editable sub-spaces
+@editable-block &columns(&left, &right) {
+  <div class="cols"><div class="col">`&left`</div><div class="col">`&right`</div></div>
+}
+# Recursive — &items is a BLOCK-region (holds <li> blocks)
+@editable-block &ul(&items) { <ul>`&items`</ul> }
+@editable-block &li(&sel)   { <li>`&sel`</li> }
+#+end_src
+
+The compiler-side invertibility rule generalizes EXACTLY:
+=count_sel_holes == 1=  →  =each region has exactly one hole=.
+Multi-region enters the compiler at the same seam single-region lives at today —
+symmetric change.
+
+* Positions go recursive (the re-type)
+Integer positions stay, but the cost walk descends the region tree. Each region
+contributes =1 (open) + Σ children + 1 (close)=; a block with N regions contributes
+the sum of its regions' costs (+ the block's own open/close).
+
+#+begin_src
+size(region) = 1 + Σ size_or_inlineSize(child) + 1     // recursive
+resolve(doc, pos) → PATH: [ {regionName, index}* , offset ]
+                    // not flat (blockIndex, offset) — a path down the tree
+#+end_src
+
+=resolve= returns a PATH (the chain of region→block→region descents) ending in a
+leaf inline run + char offset. The flat case yields a length-1 path = today's
+=(blockIndex, offset)=, so the 90% is a strict generalization.
+
+* The five consumers move in lockstep (the real cost)
+The position model is the document's type; FIVE things are written against it and
+must move together:
+1. =resolve= / =docSize= (editable.js)          → recurse over the region tree
+2. ops insertText/deleteRange/splitBlock/toggleMark/setBlockType → operate on a PATH
+3. DOM bridge =posFromDOM= / =domFromPos=        → map a DOM point to (path, offset)
+4. =liftHtml= (paste, FEAT-101)                  → descend named regions on lift
+5. =validate_richtext_ast= (Rust, server)        → learn the recursive content-model
+
+(1)-(4) are =public/runtime/editable.js=; (5) is =src/editable/validate.rs=. Client
+and server MUST agree on the recursive shape or paste-lift over-/under-accepts. This
+cross-language lockstep is the expense — the fuzz corpus is the guarantee.
+
+* Two sub-problems, ranked
+** Lists = homogeneous recursion (do first)
+=li.content= is =Block[]= — same machinery one level down. =resolve= descends,
+=size= sums recursively, boundaries nest. Mechanically pervasive (every op recurses)
+but conceptually clean. Content-model: =li= only inside =ul=/=ol=; a =ul= region
+holds only =li=.
+** Multi-region = heterogeneous parallel regions (do second)
+=&columns(&left,&right)= is NOT deeper nesting — it's two parallel sub-spaces in one
+block. Harder than lists because the DOM bridge must map a DOM point to
+=(region, offset)=, not just =offset=, and paste/lift must choose which region
+receives content. The =count_sel_holes== generalization to per-region is where it
+enters the compiler.
+
+* Invariants to fuzz (the proof)
+@property over NESTED op-sequences (insert/delete/split/lift inside arbitrary region
+trees), each step asserting:
+- positions stay MONOTONE across the whole tree (no overlap, no gap)
+- every region honors its schema content-model (block-region rejects loose inlines;
+  inline-region rejects blocks)
+- client AST ≡ server-validated AST at EVERY tree depth (the lockstep guarantee)
+Same fuzz rail as FEAT-101 (50-seed HTML soup), deeper tree.
+
+* Fit with the wider Spacetime ecosystem
+1. A region IS the existing =&sel= element-hole, given a name + a block-kind option.
+   No new concept — the =&= sigil (element/selection hole) already carries it; the
+   sigil ledger (Cluster A) stays clean.
+2. Region paths are deterministic structure → the headless *logic* rung asserts
+   region containment + position monotonicity; selection CROSSING regions (caret
+   left↔right column) needs the *CDP* rung. Same fidelity-ladder split as today.
+3. Long-term harmony: "a block with named regions" is structurally a =@template= with
+   named SLOTS. An =@editable-block= region and a template slot could unify (a slot =
+   a region authored rather than edited). Regions OPEN this; not in scope, but the
+   reason regions are the systemically-correct primitive over a list-specific hack.
+
+* Execution arc (R1+ — after this R0 is accepted)
+| step | scope |
+|------+-------|
+| R1   | Region/path types; recursive resolve/docSize/posFromDOM/domFromPos; ops recurse; flat = one-region degenerate (ALL 20 existing editable-model tests pass UNCHANGED before any list lands — the regression floor) |
+| R2   | liftHtml descends regions; invertibility = per-region one-hole; validate.rs learns the recursive content-model (client≡server lockstep) |
+| R3   | show-pieces: &ul/&li nesting, &columns; @property fuzz over nested trees |
+| gate | nested op-sequences keep positions monotone + client≡server valid at every depth |
+
+* AS-BUILT (R1–R3 shipped, 2026-06-10)
+The design below was implemented across four waves + two review-driven hardening
+cuts. Final shape, with the decisions the design left open now resolved:
+
+- *Position encoding* (the R1 open question): chose the PATH array
+  =[{blockIndex},{region},{blockIndex},…,{region,offset}]= over a flat integer.
+  =E.resolvePath= returns it; =E.resolve= keeps the flat =(blockIndex,offset)= view
+  byte-identical for flat docs. (R1, commit cd71ced5.)
+- *Region kind signal*: an author marks a BLOCK region with the =[]= collection
+  marker on the element param — =&items[]= (block) vs bare =&caption= (inline). This
+  reuses the existing =[ ]= collection sigil rather than inventing syntax; parsed by
+  a new =collmark= group in =param_list=, carried as =TemplateParamDef.collection=.
+  (R3, commit c7b51d01.)
+- *Region host tag*: derived as the element directly wrapping the region's =&name=
+  hole in the projection body (=region_host_tag=); =&list(&items[]) { <ul>`&items`</ul> }=
+  yields host =ul= == the block tag, which project/lift handle cleanly.
+- *Invertibility invariant generalized* exactly as designed: flat block needs one
+  =&sel=; a region block needs zero =&sel= + exactly one hole per declared region
+  (=SchemaError::RegionHoleCount=). (R3.)
+- *Lockstep* (R2, commit 32330cdf): client =projectBlock=/=liftBlock= descend region
+  hosts (=data-st-region=); server =validate_block= validates each declared region by
+  kind, drops undeclared regions fail-closed. A review-found divergence — the kernel
+  keyed flat-vs-region off the AST =.regions= key while lift+server keyed off the
+  SCHEMA — was fixed so all paths consult the schema (BUG-089, commit a54e28d3).
+- *Fuzz gate* (R3 + hardening 9bea9c5c): a @property over nested region trees proves
+  position totality + NON-DECREASING monotonicity (distinct positions legitimately
+  clamp to a shared boundary leaf) + docSize==ΣblockSize + DEEP project→lift
+  round-trip (region structure + leaf text at every depth), 60 seeds.
+
+Deferred beyond this arc (filed): selection CROSSING regions (caret left↔right
+ column) needs the CDP rung — the headless logic rung asserts the structural
+ invariants only. Edit OPS (insertText/splitBlock/…) still operate on the flat
+ resolve view; routing them through PATHs for in-region editing is the next wave
+ when the live surface needs it (the AST model + lens are ready).
+
+* Open question for R1
+Position encoding: a PATH array =[{region,index},…,offset]= (explicit, debuggable)
+vs a single FLAT integer over a pre-order walk of the region tree (compact, matches
+ProseMirror, but opaque). Lean PATH for the recursive model's clarity + fuzz
+assertions; revisit if the DOM bridge wants flat integers for selection mapping.

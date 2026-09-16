@@ -1,0 +1,186 @@
+#+TITLE: SIP-001 family — preliminary work (what must exist BEFORE W1)
+#+DATE: 2026-07-26
+#+STATUS: Draft v1 — the gate list between "designed" and "implementable"
+
+* Why this document
+
+The SIPs describe a destination. This lists what must be TRUE before the
+first implementation wave can start, in dependency order, with the
+evidence for each claim. Everything here is either (a) verified against
+source and marked so, or (b) explicitly an unknown with a named spike.
+
+Rule applied throughout: **a spike is not done until its NEGATIVE case
+fails.** This was learned the expensive way — see P0 below.
+
+* P0 — BLOCKING: =check= must gate on capture-type failure (BUG-229)
+
+**Status: broken. Nothing else can be verified until this is fixed.**
+
+Evidence (2026-07-26): a =%macro= consuming =( $arms:on_arm )+= accepts
+BOTH a well-formed body and a deliberately malformed one
+(=a -> -> b => ; => cut=). =inspect --layer expansion= shows the body
+captured as RAW TEXT, never parsed by =on_arm=.
+
+Same class as BUG-216 (=tests/bug_216_silent_directive_drop_test.rs=),
+whose header states the hazard exactly: /"a body that fails to parse is
+indistinguishable from a body that legitimately emits nothing, so the
+failure is invisible to a green suite."/ BUG-216 fixed the =@test=-body
+path; this is the custom-capture-type-in-directive-body path.
+
+Why it is P0 and not "a bug we will hit later": EVERY grammar in this
+family (=driver_expr=, =on_pat=, =score_block=, =form_application=) is a
+capture type consumed in a directive body. Without the gate, a wave could
+ship grammars that never match and a green suite would not notice.
+
+Acceptance: malformed body → non-zero exit + diagnostic naming the capture
+type and span; well-formed unchanged; regression test beside bug_216.
+
+* P1 — Re-run the grammar spikes, with negatives that FAIL
+
+Once P0 lands, re-run and record BOTH cases for each:
+
+| Spike | Positive | Negative that must FAIL |
+|-------+----------+-------------------------|
+| =on_pat= / =on_transition= / =on_arm= | =a -> b => --cut; b => --x;= | =a -> -> b => ;= · =a -> b -> c => --x;= (nesting must be rejected) |
+| =driver_expr= | =&.visible(threshold: 0.5)= · =&voice.playback= · =(&.clip \vert &.time(3s))= | =&.= alone · =&x.= alone · unbalanced compositor |
+| =score_block= | full film/story/deck/mv examples | =at= with no measure · =during &a to= (dangling) |
+| =form_application= | =--reveal(600ms)= in statement position | =--reveal= where a template is required |
+
+Deliverable: a =tests/= file per grammar, RED before the capture types
+exist, GREEN after — the AGENTS.md "same machinery that it generalizes"
+rule.
+
+* P2 — The =--x(…)= position rule (SIP-001c open q1)
+
+**Unknown, not yet spiked.** The rule: statement position ⇒ form splice;
+value position ⇒ CSS custom function (=width: --double(20px)=).
+
+What must be confirmed: that the parser's value/statement distinction is
+AVAILABLE at the point =--x(…)= is encountered. Evidence that it plausibly
+is: =src/syntax/cst/parser.rs= already carries value-position logic (the
+spaced-=/= qualifier case at :638, and the preset-ref reroute note at
+:801). Evidence is suggestive, NOT sufficient.
+
+Spike: three files — a splice statement, a CSS custom function call, and
+both in one selector block — each with a negative. If the distinction is
+NOT available, fall back to requiring a leading marker in statement
+position and re-open the surface question BEFORE committing to =--=.
+
+* P3 — =DASHED_IDENT= token kind
+
+Small and mechanical, but ordered here because P2's implementation may
+depend on it.
+
+1. Lexer: the =RawToken::Minus= ladder's =-- + Ident= arm emits
+   =SyntaxKind::DASHED_IDENT= instead of =IDENT= (text unchanged).
+   Vendor prefixes (=-webkit-*=, ONE dash) stay =IDENT=.
+2. Update =css_custom_property_tests= (5 tests) to expect the new kind.
+3. Parser dispatches on the kind, never =text.starts_with("--")=.
+4. =extract_prefix()= unchanged — already returns ='-'= correctly.
+
+Verified precondition: =--my-var= ALREADY lexes as one token
+(=lexer.rs=, =css_custom_property_tests=), and =-- foo= (spaced) already
+does not merge. So this is a labelling change, not a lexing change.
+
+* P4 — Retire =~= (PRESET_REF) safely
+
+**Verified constraint**: =TILDE= is load-bearing for CSS general-sibling
+selectors — =parse_selector= has =SyntaxKind::TILDE => { bump;
+parse_selector_part() }= beside =GT= (child) and =PLUS= (adjacent).
+
+∴ retirement removes ONLY: =parse_preset_ref()=, the =PresetRef= AST node,
+and the three PREFIX dispatch sites (parser.rs:952, 1132, 1439). It must
+NOT touch the infix selector path.
+
+Gate: a test asserting =.a ~ .b= still parses, landed BEFORE the deletion.
+Also update ARCHITECTURE.md's prefix table (=~= → =--=), which currently
+advertises =~= as live.
+
+* P5 — Projection registry as data
+
+The driver table (=.visible .scroll .clip .playback .done .steps .time
+.loop .load .hover .click .focus .submit .key .mouse .pointer=) must load
+from stdlib as registry entries, on the same rail as migrations
+(=src/metasystem/registry.rs=), NOT as a Rust match.
+
+Each entry declares: name · applicable ref kinds · param signature with
+defaults · value type (Progress/Transport/Gate/Event) · measure domain ·
+reversibility · reduced-motion behavior.
+
+This is what makes the error messages mechanical (did-you-mean
+populations) and the a11y policy declarative rather than per-author.
+
+* P6 — Entity-kind extension
+
+=src/pipeline/resolve.rs= tracks template entities today. It must also
+track: Media (=&voice=), Clip/Timeline instances (=as &opening=), and
+form kinds. Needed by every kind×projection error in SIP-001 §Ontology.4.
+
+Open sub-question: whether Clip identity survives macro expansion well
+enough for =during &opening to &outro= to resolve. Spike alongside P5.
+
+* P7 — Migration capsule authoring
+
+**Corrected understanding (verified against =src/parser/meta_ast.rs= + the
+one real entry)**: the shape is a CAPSULE —
+
+#+begin_src spacetime
+%migration <id> {
+  %date YYYY-MM-DD
+  %docs "…"
+  %macro <old> { … }                            // retired defs VERBATIM
+  %rewrite <rule> { %match { … } %into { … } }  // mechanical rewrites
+  %hint for @directive "…"                      // manual guidance
+}
+#+end_src
+
+Properties that shape the work (from the real entry's header): the capsule
+owns the retired syntax entirely (/"deleting this file deletes the old
+syntax from existence"/); retired forms KEEP COMPILING via embedded
+=%binds= while a project's =@version= predates the wave; =%into= holes are
+backtick-quoted and splice RAW SOURCE SLICES.
+
+Work: recover the 9 retired macro definitions VERBATIM from git history
+(=stdlib/macros/{on-event,timeline,loop}.st=), embed them, write the
+rewrite rules, write =%hint=s for the two manual cases (=trigger:= strings,
+=@pose-track=).
+
+RESOLVED (was a v4 blocker): **no hoisting needed.** Rewrites splice the
+old body inline at the call site; extracting shared =@form=s is a REFACTOR
+authors do afterward, not something a migration should invent.
+
+* P8 — Scale check
+
+~570 tracked call sites: =@on= 417 (stdlib 125, tests 165, examples 102,
+demos 25 — of which 99 ident-named, 111 mutation, 29 delegated), =@scroll=
+106, =@loop= 32, =@after= 25, =@time= 6, plus every =&ease-*= use.
+projects/ is a separate repo and migrates via the same wave.
+
+Gate before starting: migration idempotence (running twice = running once)
+and compiled-output equivalence (before/after emit identical modulo
+warnings) — both as tests in =stdlib/migrations/tests/=, which is EMPTY
+today. This wave is its first real client.
+
+* Dependency order
+
+#+begin_src
+P0 (BUG-229) ─┬─→ P1 (grammar spikes) ─┬─→ W1
+              └─→ P2 (position rule) ──┤
+P3 (DASHED_IDENT) ──────────────────────┤
+P4 (retire ~) ──────────────────────────┤
+P5 (projection registry) ─┬─────────────┤
+P6 (entity kinds) ────────┘             │
+P7 (capsule authoring) ─┬───────────────┘
+P8 (scale gates) ───────┘
+#+end_src
+
+P0 gates everything. P3/P4 are independent and can run in parallel. P5/P6
+are the substance of W1 and can start on paper immediately. P7/P8 gate the
+cutover, not the design.
+
+* Also filed
+
+- **BUG-230** — =inspect= resolves imports file-relative while =check=
+  resolves workspace-relative; blocks multi-file grammar debugging.
+- **FUP-145** — CSS =@mixin=/=@function=/=@apply= parity for =@form=,
+  deliberately deferred until =@form= has been exercised.

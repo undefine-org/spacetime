@@ -1,0 +1,78 @@
+#+TITLE: EverSwap Clone — Deep Investigation
+#+DATE: 2026-06-22
+#+STATUS: investigation complete, planning next
+
+* Goal
+Replicate https://everswap.com/ as a Spacetime demo at =projects/everswap-clone=
+(its own git repo, NOT a submodule), using the =stdlib/3d= module. Extend the 3d
+module syntax where needed. Produce a "motion design language" that modularizes
+every effect.
+
+* Live site — observed architecture (via puppeteer)
+- three.js *r148*, WebGL2, single-page scroll-driven narrative.
+- Virtual scroll (wheel-driven, eased; window.scrollY stays ~0; total virtual
+  length ~15936px ≈ 20.75 viewports).
+- DOM = thin overlay (=#ui=). The =.title= H1 elements are =visibility:hidden=:
+  the visible wordmark "EverSwap" is *rendered into the WebGL canvas as a
+  texture and distorted by a ripple shader* (the in-text ripple is NOT CSS).
+- Assets: hand-painted *texture planes* (not GLTF). No .glb, no wasm.
+  - scene1: SC_01_RIDGE, MOUNTAIN, BACKGROUND_MOUNTAINS, fog, fog_flow, clouds 1-3, birds (alpha)
+  - scene2: SC_02_P1..P6 (parallax valley layers), FLOW, TRAILS, SMOKE (the glowing river)
+  - scene3: SC_03_LAKE, waterNormal
+  - post: SMAA (smaa-search/area textures)
+- Logos (everblade/evernet/relayers) are per-section 2D canvases.
+
+* Design system (CSS custom props)
+- Palette: white #fbfff4, black #333338, dark-green #203727, light-green #e0ffab,
+  light-green2 #bccca2, dark-link #516e5a / #62866d.
+- Fonts: header "Feature Display" (thin serif, weight 200), body "Britti Sans".
+- Type scale: h1 ~200u, h2 ~110u, h3 ~80u, sub1 22u, sub2 18u, body1 20u, body2 16u
+  (u = content-unit = viewport-relative). 16-column grid.
+
+* Scroll narrative — 7 sections
+1. home-hero      "EverSwap" / "DeFi at Peak." / "Scroll to start" — painterly peaks, sky, parallax clouds + birds, camera slowly dollies toward summit. Wordmark ripple.
+2. home-everblade "One Pool" + "Swap. Lend. Borrow." + logo. Camera flies up & over the summit.
+3. home-evernet   "Where liquidity Flows" + evernet logo. Transition into aerial.
+4. home-everyone  "Made for EVERyone" — LPs + Borrowers cards, aerial river valley w/ glowing blue liquidity stream (FLOW/TRAILS).
+5. home-relayers  "ReDeFined" + relayers logo over valley.
+6. home-pool      "One Pool, Everyone..." big type, lake scene.
+7. home-join      "Climb with EverSwap" + Telegram / Twitter buttons (footer).
+
+* Per-section text reveal effects (DOM overlay, scroll-scrubbed)
+- line-split + per-line: opacity 0→1 + blur(0.25em)→0, staggered.
+- char-split (everyone/pool titles): per-character opacity+blur stagger.
+- word "explode/assemble": everblade "One"/"Pool" spans translate ±110% then settle.
+- title clip-reveal: =overflow:hidden= + inner span translateY(175%)→0 ("Flows").
+- kicker translate3d slide-in; logos fade via =--opacity= var.
+- join buttons: scale(0.5)→1 + per-button translateY(20%)→0.
+- scroll indicator bar (right), section dots (left, 5 diamonds, active fills).
+
+* 3d module current surface (stdlib/3d)
+Macros: @stage @object @light @orbit @parallax @scroll-3d @env @post @gltf @particles
+- @object shapes: icosahedron sphere box torus torusknot cone cylinder plane
+- materials: standard physical glass basic (PBR + transmission/iridescence)
+- @scroll-3d drive: dollyZ | camY | spinY | morph (ONE drive at a time)
+- @post: UnrealBloom + RGBShift only
+- Engine boundary: canvas._stThree = {THREE, scene, camera, renderer, clock, registerFrame, setRender, onResize, size}
+
+* Gaps vs. what EverSwap needs (→ module work)
+1. *Textured plane layers* (painterly art on geometry) — no texture/map param on @object today.
+2. *Parallax depth layers* driven by scroll (the SC_02_P1..P6 stack).
+3. *Multi-keyframe camera path* along scroll (hero→over-summit→aerial→lake), not single dollyZ.
+4. *Text-to-3D as a textured/extruded mesh* + *ripple/displacement shader* (the wordmark effect).
+5. *Animated flow shader* (the glowing river: scrolling UV / additive trail).
+6. *Sky gradient + fog* environment, animated clouds, sprite birds.
+7. *DOM text-reveal motion language* (blur+stagger, char/word/line split) — pairs with stdlib/text.
+8. Coordinated *scroll timeline* with named keyframes shared across many targets (vs one drive).
+
+* Ripple-on-text — feasibility (answer to user Q)
+YES, three.js does this easily; two implementation tiers:
+- A. *Mesh + vertex displacement*: render text to a CanvasTexture (or use TextGeometry
+  via 3d↔text dependency), map onto a subdivided PlaneGeometry, displace vertices in a
+  vertex shader by sin(x*freq + t*speed) → travelling ripple. Cheapest, crisp.
+- B. *Post/displacement on a layer*: feDisplacement-style — sample a noise/normal map,
+  offset UVs in fragment shader (the "heat-haze / water" look). Matches EverSwap's subtle wobble.
+- Interface fits existing grammar: a new @text3d macro (depends on stdlib/text for glyph
+  geometry/atlas) + a @ripple child directive (amplitude, frequency, speed, axis).
+  Lives as a primitive shader behind the macro (vendoring discipline: shader is the escape
+  hatch, surfaced as data params — not author-written GLSL).

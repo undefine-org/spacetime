@@ -1,0 +1,220 @@
+#+TITLE: SIP-001b — The Future: Render, Studio, Interchange, Catalog
+#+DATE: 2026-07-26
+#+STATUS: DRAFT v1 — the vision SIP-001 v4 must be able to carry
+#+SIP: 001b
+
+* Header
+
+| Field | Value |
+|-------+-------|
+| SIP | 001b |
+| Title | The Future: Render, Studio, Interchange, Catalog |
+| Status | Draft v1 |
+| Depends on | SIP-001 v5 (timelines), SIP-001c (forms) |
+| Purpose | Everything DOWNSTREAM of the language. Different reviewers, different risk, different shipping cadence — so it does not belong in SIP-001 |
+
+* Why this document exists
+
+SIP-001 answers /how do you write it?/ This one answers /what does it become?/
+The split matters because the language must be frozen before the tooling can
+be built, but the language is only CORRECT if the tooling is possible. So
+this document's real job is to state the demands that the language must be
+able to satisfy — and to say plainly which ones it cannot yet.
+
+**The thesis under test**: a website and a video differ only in which
+projection drives the score. If that holds, everything below is one system.
+
+* 1. Render — the verb
+
+** 1.1 Shape
+
+#+begin_src sh
+spacetime render projects/launch/ --out film.mp4
+spacetime render projects/launch/ --data reps.json --out renders/   # batch
+spacetime render projects/launch/ --aspect 9:16 --out vertical.mp4  # re-frame
+#+end_src
+
+- Frames come from seeking the score's Transport driver and capturing on the
+  CDP **paint** rung (docs/testing/FIDELITY_LADDER.md) — the same rung
+  =@capture screenshot= already uses.
+- Encoding: ffmpeg as an EXTERNAL PROCESS (vendor-and-own rail; never a
+  hand-rolled encoder).
+- =fps= is a RENDER parameter, never a timeline property. Live playback is
+  rAF; capture rate is the encoder's business.
+- Design size is host CSS — one responsive composition renders 16:9 AND
+  9:16 (HyperFrames comps are fixed-dimension; this is a real edge).
+
+** 1.2 Determinism policy (SIP-001 v4 §C4, stated here in full)
+
+| Driver value-type | Seekable? | Render behavior |
+|-------------------+-----------+-----------------|
+| Transport (=.time .clip .playback .loop .steps=) | ✓ | seek + capture, frame-exact |
+| Progress from a coordinate (=.scroll .mouse=) | ✓ | coordinate is a seek axis; drive it synthetically |
+| Event (=.click .hover .focus .key=, signal ==>=) | ✗ | clip renders at its REST state; =render= emits a per-clip WARNING naming the driver |
+| Gate (=.visible .done=) | ✓ | resolved from the score's own timing |
+
+∴ **a film that renders identically every time is one whose drivers are all
+Transport/Progress.** The renderer tells you when you left that set. This is
+a language-visible property, not a runtime surprise.
+
+** 1.3 Holds under render
+
+=hold(until: expr)= has no meaning to a renderer. Policy flag:
+=--holds collapse= (default — zero duration) or =--holds duration=2s=.
+
+* 2. Studio — a bidirectional projection, not a GUI
+
+The studio is a Spacetime SITE (AGENTS.md: no custom JS; it is built from
+the same primitives it edits).
+
+** 2.1 The premise
+
+Arrangement is DECLARATIVE WORDS, not baked frames. ∴ the timeline UI and
+the source file are two projections of one truth, and edits can flow both
+ways:
+
+| Studio gesture | Source rewrite |
+|----------------+----------------|
+| drag a clip's left edge | =in 4s= → =in 5.2s= |
+| drag the clip body | =at 2s= → =at 3.4s= |
+| drop a transition on a cut | inserts =-> --fade(400ms) ->= |
+| drag a marker | moves =mark &chapter1= |
+| scrub | sets =&film.t= (no file write) |
+| change speed ramp handle | =rate: 1 -> 2= keyframe edit |
+
+Nothing here is a special editor feature: each gesture maps to ONE word in
+the score line. That is the payoff of P4 (parens = function's, words =
+language's) — the words are exactly the draggable surface.
+
+** 2.2 Playhead ⇄ source highlighting
+
+As the playhead crosses a span, the studio highlights the source line that
+declares it. This requires the compiler to keep a span→source-range map for
+score lines. **Demand on SIP-001**: score steps must carry source spans
+through expansion (verify at impl; it is the same machinery LSP hover uses).
+
+** 2.3 Agent parity
+
+Everything the studio can do, an agent can do by editing the same words —
+because the studio's action set IS the word set. No hidden project state,
+no binary session file. (This is why the timeline must never be stored
+anywhere but the =.st=.)
+
+* 3. Interchange — in and out
+
+** 3.1 Export
+
+| Target | From | Note |
+|--------+------+------|
+| MP4 / WebM | render | primary |
+| WebVTT chapters | =mark &name= | one decl, three consumers (snap, =during= refs, chapters) |
+| EDL / OTIO / FCPXML | score model | round-trip to desktop NLEs |
+| Poster / thumbnail sheet | seek + capture | free from the render rail |
+
+** 3.2 Import (the under-credited half)
+
+Import is the MIGRATION PATH for people with existing edits. An OTIO/FCPXML
+timeline maps onto score lines mechanically (SIP-001 v4 §NLE mapping):
+tracks→lines, clips→invocations, source ranges→=in/out=, transitions→edge
+forms, markers→=mark=, lanes→=during/after= anchors.
+
+∴ =spacetime import cut.fcpxml= should emit a =.st= score. Media references
+become =@video/@audio= entities; unknown effects become =%hint= comments
+rather than silent drops. **This is how a studio's back catalog arrives.**
+
+* 4. Catalog — the proof of scale
+
+From research/stdlib-video-catalog-rewrite.org: 134 HyperFrames blocks
+(~400 lines each of GSAP + hand-rolled WebGL + a ~60-line DOM rasterizer)
+collapse to **6 families**:
+
+| Family | Count | Spacetime shape |
+|--------+-------+-----------------|
+| A — lower thirds | ~14 | template + =--life= motion form, driver-independent via =range: %= |
+| B — transitions | ~25 | region forms =--fade(&from, &to)=; vendored gl-transitions GLSL as DATA |
+| C — code snippets | ~40 | ONE template + theme as a form param (=theme: --dracula=) |
+| D — maps | ~8 | =@geo= macro over a vendored d3-geo data rail |
+| E — VFX | ~25 | region forms + =@post= shader passes (stdlib-internal) |
+| F — captions | ~25 | =@captions= + =follow: &voice=, WebVTT native rail |
+
+The collapse is only possible because motion became a FORM (SIP-001c) and
+percentages replaced GSAP absolute offsets (=range: 7% to 18%=), making
+every block driver-independent — the same block plays in a film, on scroll,
+or in a deck.
+
+* 5. Cross-domain payoff — why the video work pays for websites
+
+These are the tests SIP-001 v4 must keep passing, restated as promises:
+
+| Video feature | Website payoff |
+|---------------+----------------|
+| score edges + transition forms | route/view transitions (=@on $route => "/pricing" --whip-pan=) |
+| clip transport | sticky-scroll sections sharing one playhead |
+| =rate:= as property | scroll-velocity-reactive motion |
+| =mark= + =during= | "highlight nav while section 2 is on screen" |
+| render determinism policy | reduced-motion policy uses the SAME driver typing |
+| catalog forms | design-system motion library, not copy-paste |
+
+**If any of these needs a second mechanism, the thesis is wrong** and
+SIP-001 should be reopened rather than patched.
+
+* 6. Accessibility — a first-class driver concern
+
+=prefers-reduced-motion= is not an author opt-in; it is registry data on the
+driver types:
+
+| Type | Reduced-motion behavior |
+|------+-------------------------|
+| Progress / Transport | collapse to end-state (no interpolation); seek still exact |
+| Event | fire immediately; no reversible tween |
+| Gate | unchanged (visibility logic is not motion) |
+
+Escape hatch for motion that CARRIES MEANING (a chart animating its data):
+per-form =@form --x(reduced: keep)=. Default is collapse.
+
+Also owed: focus order must not depend on a timeline; captions are a first-
+class family (F); =mark=-derived chapters are an a11y feature, not a nicety.
+
+* 7. Phasing
+
+#+begin_quote
+*WAVE NUMBERING WARNING (2026-08-02).* The table below is the ORIGINAL
+phasing and is OFF BY ONE against what was actually built. The operative
+numbering is PLAN-121's promise inventory, which the code follows:
+
+| | this table says | actually |
+|---+-----------------+----------|
+| W3 | =@score= + clip + rate | the =@on= cutover |
+| W4 | render verb | =@score= + clip + rate |
+| W5 | media/audio/captions | render verb + audio + aspect |
+
+Read PLAN-121 and PLAN-130 (arc status) for the live picture. This table is
+kept because its CONTENT grouping and gates are still right — only the
+numbers drifted.
+#+end_quote
+
+| Wave | Content | Gate |
+|------+---------+------|
+| W1 | SIP-001c forms + =--= sigil + easings migration | forms splice; 28 easings are forms; wave tests green |
+| W2 | SIP-001 v4 drivers: projections registry, =@on= rewrite, migration wave | 570+ sites migrated; compiled output equivalent |
+| W3 | =@score= + clip transport + =rate:= property | scrollytelling + deck demos pass; ramps/freeze work |
+| W4 | render verb + determinism policy + holds | golden frames stable across runs |
+| W5 | media/audio/captions + interchange export | WebVTT + EDL out; music-video demo |
+| W6 | catalog seed (families A–C) | one lower-third, one transition set, one code block, all driver-independent |
+| W7 | studio (bidirectional) + import | drag-edge rewrites source; FCPXML in |
+
+* 8. Open — the honest list
+
+1. **Score span → source range** through macro expansion (studio §2.2).
+2. **=%rewrite= hoisting** (SIP-001 v4) — blocks named-timeline migration.
+3. **Region snapshot cost**: DOM→texture per frame for shader transitions;
+   needs a perf budget before family E is promised.
+4. **Import fidelity**: effect mapping is lossy by nature; the =%hint=
+   convention needs a spec so imports are auditable.
+5. **Batch render concurrency**: =--data= with N rows — process pool sizing,
+   deterministic output naming.
+6. **Audio**: web audio graph for ducking/gain is unspecified; ffmpeg-side
+   mixing may be simpler for render but diverges from live playback. Pick
+   ONE model before W5, or live and rendered films will differ.
+7. **Sticky-scroll worked example** (SIP-001 v4 B1) — the single most likely
+   place an author reaches for JS.

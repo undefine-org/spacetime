@@ -1,0 +1,164 @@
+#+TITLE: MCP Workbench — Review + Design + Brainstorm (2026-06-19)
+#+CUSTOM_ID: mcp-workbench-review-2026-06-19
+#+LAYER: mcp
+
+* Session intent
+Test-drive every Spacetime MCP workbench action; capture expected vs. actual;
+assess the gap to the north-star feel: "Spacetime + Squarespace + Figma/Framer."
+REVIEW + DESIGN + BRAINSTORM. Not an implementation session.
+
+PLAN-041 (the warm-dark "organic interface birthplace") is marked DONE. This
+review pressure-tests that claim against the LIVE server and finds the chrome
+shipped but the LIVENESS did not.
+
+* Part 1 — Action-by-action: expected vs. actual
+All exercised against the live MCP server (v0.1.0, workspace verse) on 2026-06-19.
+
+| # | Action | Expected | Actual | Verdict |
+|---+--------+----------+--------+---------|
+| 1 | st_health | version + workspace | "v0.1.0 healthy. Workspace: …/verse" | ✓ |
+| 2 | st_env_list | discovered + open counts | "42 discovered, 0 open" | ✓ |
+| 3 | st_env_open | attach, return env id | "Environment env-1 → spacetime-docs" | ✓ (tool) but does NOT reflect in workbench input.json |
+| 4 | st_workbench | mount warm-dark studio | inst-1 URL; renders correctly AFTER full load | ✓ visual / ✗ first-paint race (blank until networkidle) |
+| 5 | st_tab_open (inline) | compile + sizes | "compiled with 1 error(s)" — error UNREADABLE via tools | ⚠ (see FEAT-133) |
+| 6 | st_tab_open (bare html) | compile | "css=0B js=0B html=25B" | ✓ |
+| 7 | st_tab_list | count | "1 tab(s)" — but workbench tabList shows 0 | ✗ liveness |
+| 8 | st_fn_put | register + contract | "registered with 1 diagnostic(s)" — diagnostic UNREADABLE | ⚠ |
+| 9 | st_inspect | contract/diag/events/state | one-line summary ONLY | ✗ (FEAT-133) |
+| 10 | st_mount region:stage | compose into host stage | spawned standalone inst-2; host stage unchanged | ✗ (BUG-111) |
+| 11 | UI: open nav drawer | drawer slides open | ✓ ($drawer signal + reactive class work) | ✓ |
+| 12 | UI: Open environment | env opens, list repaints | signal fires, mis-routed to agent queue, no repaint | ✗ (BUG-110) |
+| 13 | st_await | drain agent events | drained the mis-routed nav action as message#2 | ✗ (symptom of BUG-110) |
+| 14 | UI: origin drawer | every loaded fragment + origin chip | only fn-1 (host itself); fn-2 absent | ✗ liveness |
+| 15 | UI: inspector drawer | mounted region contract | static; instList 0 despite 2 instances | ✗ liveness |
+| 16 | UI: comms drawer | agent affordances + events | empty shell; eventList 0 | ✗ liveness |
+
+* Part 2 — Root-cause clustering
+Three defects explain ~every ✗, all downstream of ONE architectural truth:
+
+** The workbench is a STATIC SNAPSHOT, not a live view.
+`input.json` for inst-1 is frozen at workbench-mount time:
+=open:0, tabs:0, functions:1 (itself), instances:0, events:0= — despite a full
+session of opens/puts/mounts via MCP tools. `data.st` faithfully polls
+=@mcp-input(refresh:1000)=, but the server never mutates that file post-mount.
+
+*** BUG-110 — UI nav actions mis-routed to the agent queue.
+The designed server-audience loop (button → /__mcp/signal → sink resolves
+synchronously → input.json repaints) is broken: the sink tags =st_env_open= as
+=audience:"agent", action:null= and queues it for st_await. Nav never repaints.
+The CLIENT half (signal POST + poll) works; the SINK classifier is the break.
+
+*** BUG-111 — st_mount can't compose into the host stage.
+=region:"stage"= spawns a standalone page (inst-2), unstyled, instead of
+registerBundle-ing into inst-1's stage. No host/target param exists. The
+keystone "live content on the stage" is unreachable via the tool surface.
+
+*** FEAT-133 — st_inspect hides the contract + diagnostics.
+Computed (present in input.json.functions[].compile.diagnostics) but never
+surfaced as text. Forces blind guess-and-check coding. Biggest DX wound.
+
+** What genuinely WORKS (credit where due)
+- Warm-dark chrome is real and on-spec: espresso bg #1c1714, ember accent,
+  serif wordmark, edge summon glyphs, soft radii, scrim. Matches the design doc.
+- Pure-Spacetime drawer model: $drawer string signal + @on click + reactive
+  .is-open class. No custom JS. Genuinely elegant; on-philosophy.
+- Compile gating: a function with errors REFUSES to mount (correct).
+- Bundle transport endpoint (/bundles) exists and serves scoped CSS + templates.
+- Origin chips render (Stdlib teal) with provenance + compile sizes.
+
+* Part 3 — The FEEL gap: why it isn't Spacetime+Squarespace+Figma/Framer yet
+Even with BUG-110/111/FEAT-133 fixed (→ a working live dev tool), it would feel
+like a DEV INSPECTOR, not a CREATIVE STUDIO. The reference trio implies:
+
+** Squarespace = "beautiful defaults, zero blank-canvas anxiety"
+- ✗ The stage empty-state is "Begin here" + 3 inert dashed ghost-pills
+  (=from env…=, =agent-sent…=, =kit…=) that look clickable but DO NOTHING.
+  Squarespace shows you a gallery of gorgeous templates you can start from.
+- ✗ Mounted content inherits NO design system (greeter = unstyled white). A
+  studio gives newborn content house-styling so it's never ugly by default.
+- → NEED: a real template/kit GALLERY on the stage; mounted content adopts a
+  warm baseline stylesheet unless it opts out.
+
+** Figma/Framer = "direct manipulation + a canvas, not a form"
+- ✗ Everything is buttons + lists in drawers. There is no CANVAS notion:
+  no drag, no arranging multiple mounted bundles, no resize, no zoom/pan,
+  no selection → inspector binding (Figma's core loop: select object ⇒ its
+  properties appear in the right panel).
+- ✗ The inspector drawer is a static dump, not bound to a SELECTED region.
+  Figma's inspector reflects the current selection. Ours reflects nothing.
+- ✗ Only ONE region (stage). Figma/Framer = many frames on an infinite canvas.
+  The region MODEL supports N regions; the workbench surfaces one.
+- → NEED: stage-as-canvas with multiple mountable frames; click-to-select a
+  frame ⇒ inspector binds to it; (later) drag/resize via Spacetime gestures.
+
+** Spacetime = "everything is live, composable, self-describing"
+- ✓ philosophy present; ✗ not yet felt because liveness is broken (Part 2).
+- The promise: edit a function → it hot-swaps on the stage in place. Today a
+  re-put bumps a revision but nothing on screen changes (no live binding).
+- → NEED: the live loop closed (BUG-110/111), THEN hot-swap-in-place so the
+  studio breathes.
+
+* Part 4 — Design brainstorm (north-star moves, not a build plan)
+Ordered by leverage. Each is a DIRECTION; most decompose into FEAT children of
+FEAT-124. Numbers are discussion anchors, not estimates.
+
+** D1. Close the live loop (prerequisite for ALL feel) — BUG-110 + BUG-111
+Without this nothing else reads as "live." This is the floor.
+
+** D2. Stage = selectable multi-frame canvas (the Figma turn)
+- Promote the region model's N-region capability to the surface: the stage
+  hosts a set of FRAMES (each a region), not a single mount.
+- Click a frame ⇒ it becomes =$selected=; inspector drawer binds to =$selected=
+  (pure signal, same pattern as $drawer). This is the Figma select→inspect loop
+  in pure Spacetime — no new subsystem, just a second signal + reactive bind.
+- Later: Spacetime gesture macros for drag/resize (research if they exist;
+  if not, that's a legit missing-primitive PLAN, per AGENTS.md).
+
+** D3. Stage empty-state → living template gallery (the Squarespace turn)
+- Replace the 3 inert ghost-pills with a real, warm, browsable gallery:
+  kit functions + env tabs + agent-sent, each a live THUMBNAIL (mounted at
+  small scale) you click to mount full. Self-describing: thumbnails are the
+  actual bundles rendered tiny, not screenshots.
+- "Beautiful defaults": ship a handful of gorgeous starter bundles in the kit.
+
+** D4. House style for newborn content (Squarespace defaults)
+- Mounted bundles inherit a warm baseline stylesheet (typography, spacing,
+  buttons) via the region's scoped CSS context — so a bare greeter looks
+  intentional, not browser-default white. Opt-out for full-control bundles.
+
+** D5. Inspector as a true property panel (Figma)
+- Bind to =$selected=; show the bundle's contract params as EDITABLE controls
+  (FEAT-132 rendered them read-only). Editing a param ⇒ re-input the mounted
+  instance live. This is "Framer properties panel" in Spacetime terms and
+  reuses the @editable / form-signature rails already shipped.
+
+** D6. Comms ribbon that actually carries agent affordances (the live agent UX)
+- The comms drawer is the place agent-sent interactive kits (picker/form/
+  confirm) surface. Today empty. Wire st_await affordances → comms cards with
+  the kit-* answer actions. This is the "agent and human co-edit" story.
+
+** D7. Hot-swap-in-place (the Spacetime breath)
+- Re-put of a mounted function ⇒ the on-stage frame updates in place with the
+  gentle fade/scale the design doc specifies. Closes the NREPL loop visibly.
+
+** D8. First-paint polish
+- Workbench renders blank until networkidle (mount race). Server-render the
+  shell or show a warm skeleton so it never flashes empty. Small but it's the
+  first impression — Squarespace/Framer never flash blank.
+
+* Part 5 — Honest verdict
+PLAN-041 shipped the SKIN (warm-dark chrome, drawer model, origin chips, bundle
+transport, harmony gate) — and that skin is genuinely on-spec and tasteful. It
+did NOT ship the LIVENESS: the three concerns (C1 nav / C2 comms / C3 content)
+are present as static furniture but do not yet nest in a live, reactive way. The
+workbench currently FEELS like a beautifully-dressed inspector that's stuck on a
+snapshot. The distance to "Spacetime+Squarespace+Figma/Framer" is:
+1. floor: close the live loop (BUG-110, BUG-111, FEAT-133) — make it LIVE.
+2. studio: canvas + select→inspect + gallery + house-style (D2–D5) — make it CREATIVE.
+3. breath: hot-swap + comms affordances + first-paint (D6–D8) — make it ALIVE.
+
+* Artifacts
+Screenshots: scratch/wb-02-loaded.png (stage), wb-04-nav-open.png (nav drawer),
+wb-06-origin.png (origin), wb-07-comms.png (comms), wb-05-greeter.png (standalone mount).
+Filed: BUG-110 (nav misroute), BUG-111 (stage compose), FEAT-133 (inspect surfacing).
+Parent epic: FEAT-124. Prior epic: PLAN-041 (DONE). Design doc: mcp-design-language-organic-birthplace.org.

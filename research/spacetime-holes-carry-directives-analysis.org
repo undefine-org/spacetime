@@ -1,0 +1,143 @@
+#+TITLE: Can holes carry in-element directives? + is nested @each the same class? (deep dive)
+#+DATE: 2026-06-12
+#+STATUS: ANALYSIS (answering two design questions; refines PLAN-039)
+
+* The two questions
+1. "Can't holes hold in-element directives? Then you balance the ` (if needed, an
+   alternative `{` or something else to easily balance them)."
+2. "The nested @each bug — can it be solved in this pass, and is it the same category?"
+
+* Q1 — YES. Holes are the RIGHT mechanism. The instinct is architecturally correct.
+The reactive builder (src/emit/html_reactive.rs) ALREADY has a hole abstraction with THREE
+modes, and one of them ALREADY produces a live DOM subtree at a mount point. A directive hole
+is a natural FOURTH mode on the SAME rail — no segmenter change, no new "in-element" path.
+
+** What a hole already is (the machinery, verified)
+- normalize_bare_holes (line 52) scans the body HTML and turns every `` `expr` `` backtick
+  hole — in TEXT or QUOTED-ATTRIBUTE position, tag-structure-aware — into a sentinel
+  `\uE000<idx>\uE001`, collecting the ordered hole sources. Backtick is THE one hole delimiter
+  (FUP-041); `$x`/`&x` bare are literal text.
+- parse_html_skeleton builds HtmlExpr with `Hole(JsExpr::Raw(src))` nodes where the sentinels were.
+- emit_node lowers `Hole(Raw(src))` (line 315) by INSPECTING THE SOURCE:
+    · empty `` `` `` → empty text node;
+    · `&param`     → emit_element_hole(param): a node-producing hole;
+    · else          → emit_text_hole(src): a reactive text node.
+- emit_element_hole (the precedent that matters): emits a COMMENT ANCHOR + a reactive
+  `applyEl()` that reads the signal, and — if the value is a Node — `insertBefore(node, anchor)`
+  (else parses an HTML string into a fragment and inserts its children). So a hole ALREADY:
+  (a) reserves a position in the built DOM via a comment anchor, (b) mounts live node(s) there,
+  (c) re-runs reactively. THIS IS A MOUNT POINT. A directive is just a different thing to mount.
+
+** ∴ a directive hole = a 4th source-shape on the SAME Hole rail
+Author writes the directive INSIDE the element as a hole:
+    @template &fld-richtext($f) {
+      <div class="ad-richtext" data-widget="richtext">
+        `@editable(bind: $f.value, marks: ["bold","italic","link"], blocks: ["p","h2"])`
+      </div>
+    }
+Lowering: emit_node sees `Hole(Raw("@editable(…)"))`, the source starts with `@` →
+emit_directive_hole(name, args): emit a comment anchor + a deferred mount that invokes the
+nested macro's expanded primitive (editable-surface) against the anchor's parent, holes
+($f.value) bound from the instance scope (ST.get(__el,'f')…), reactively if needed. SAME shape
+as emit_element_hole — anchor + apply — just mounting a primitive instead of a signal value.
+
+** The balancing point the user raised (the ` vs alternative delimiter)
+The hole scanner (scan_backtick_hole) must balance the backtick around an `@editable(...)`
+whose ARGS contain backtick holes themselves (`bind:`$f.value``) and commas/brackets. Two
+clean options:
+  (a) NESTED-AWARE backtick scan: teach scan_backtick_hole that inside a directive hole, an
+      inner `` `…` `` is a sub-hole (depth-aware), and balance `()`/`[]`/`{}` so the args run is
+      captured whole. The hole's INNER args then go through the normal hole machinery for their
+      own `$f.value` sub-holes — recursion, not a special case. Cleanest; the hole grammar
+      becomes genuinely recursive.
+  (b) ALTERNATIVE DELIMITER for the directive-hole form (the user's "alternative {"): introduce
+      a distinct hole bracket for a MOUNT hole, e.g. `` `{ @editable(...) }` `` or a sigil like
+      `@{ … }`, so the outer delimiter never collides with the inner backtick args. Lower-risk
+      to scan (the outer delimiter is unambiguous), at the cost of a second hole spelling.
+  RECOMMENDATION: (a). One hole form, made recursive, keeps "one sigil one meaning" (AGENTS
+  harmony rule) — backtick is THE hole everywhere, now including a hole that mounts a directive
+  whose args may themselves contain holes. (b) is the fallback if recursive backtick scanning
+  proves error-prone (e.g. regex/template-literal args — cf. FUP-046 lexer gap).
+
+** Why this is BETTER than the earlier "two-part (grammar arm + builder)" framing
+The PLAN-039 draft said: grammar arm for TOP-LEVEL directives + builder lowering for IN-ELEMENT
+ones — two code paths. The hole insight COLLAPSES them: a directive is ALWAYS authored as a
+hole (`` `@editable(…)` ``), so it is ALWAYS lowered by the builder's hole path, whether it sits
+between elements or inside one. The segmenter never needs to split it; the `component_item`
+grammar never needs a cb_directive arm for the in-element case. ONE mechanism (the recursive
+hole), not two. This is the structurally soundest version — it removes the "placement matters"
+subtlety the prototype exposed.
+   (Top-level directives — between elements, not inside any tag — can ALSO be written as holes
+    in a text run, so even they need no grammar arm. The grammar arm becomes optional sugar at
+    most; the hole is the universal carrier.)
+
+* Q2 — nested @each: SAME CLASS, and YES solvable in this pass.
+@each in a @template body (BUG-085) is the IDENTICAL root cause as @editable (BUG-103): a
+nested selector-scope construct that the body pipeline doesn't lower, so it survives as literal
+text (`@each([object Object] as ) {…}`). It is squarely in this category.
+
+** Why it's the same
+- @editable and @each are both SELECTOR-SCOPE macros. On a page (`.sel { @each(…){…} }`) both
+  compile via the normal pipeline. In a @template body, neither is lowered — same gap.
+- The fix is identical: author the @each as a (block) hole inside the body; the builder's hole
+  path lowers it to a mount point that runs the each-inline primitive per instance, item-holes
+  bound to the row data. @each's body (`{ <span>…</span> }`) is the hole's payload — the same
+  recursive-hole machinery that carries @editable's args carries @each's body.
+
+** The bonus: it lets us DELETE a hand-rolled parser (the real prize)
+src/html/ssg_unroll.rs has find_nested_each / expand_nested_each — a HAND-WRITTEN @each
+string-parser for SSG (the exact AGENTS-forbidden pattern). Once @each lowers via the unified
+hole path, ssg_unroll's bespoke parser is redundant: SSG renders the same lowered construct.
+So solving @each in this pass CONVERGES three things onto one rail (the builder hole) AND
+removes a forbidden hand-roll. That is the class-level win the user is asking for.
+
+** Caveat (honest): @each needs a BLOCK hole (payload is `{ … }`, not just `(args)`)
+@editable is `@name(args)` (paren args). @each is `@each(header) { body }` (a block payload).
+The recursive hole must therefore admit BOTH shapes: `@name(args)` and `@name(args){ body }`.
+The block form is where the user's "alternative `{`" suggestion is most apt — the `{ body }` is
+already brace-delimited, so the hole scanner balances `{}` for the payload and `()` for the
+header. This is a modest extension of the recursive-hole scanner, not a new mechanism.
+
+* Revised architecture (supersedes PLAN-039's two-part A/B → ONE recursive hole)
+1. HOLE SCANNER (recursive): scan_backtick_hole becomes depth-aware over `` ` ``, `()`, `[]`,
+   `{}` so a directive hole `` `@name(args)` `` / `` `@name(args){ body }` `` is captured whole,
+   inner `$f.value` sub-holes preserved for their own lowering. (src/syntax/cst hole scan +
+   normalize_bare_holes.) The user's balancing concern lives here.
+2. IR: HtmlExpr::Hole(JsExpr::Raw(src)) is UNCHANGED — the directive source rides the existing
+   variant; emit_node dispatches on the `@`-prefix (a 4th arm beside empty/&param/text).
+3. EMIT: emit_directive_hole(name, args, body?) — anchor + deferred mount, mirroring
+   emit_element_hole. Mounts the nested macro's expanded primitive against the anchor parent.
+4. EXPANSION (two-phase, unchanged from PLAN-039): reify/build records the directive hole;
+   a pipeline pass (registry live) re-expands `@name(args)` to its %binds primitive, holes
+   bound per-instance. (pipeline/mod.rs, the register-template ref-scan precedent.)
+5. RUNTIME: the factory's existing per-instance build runs the directive hole's mount; no new
+   forEach needed if the mount is emitted inline in the builder (the anchor+apply IS the mount).
+6. CONVERGE + DELETE: @each lowers via the same path → delete ssg_unroll's hand-rolled
+   find/expand_nested_each + the cb_nested_each special-case; remove the reify silent-drop
+   fallthrough (→E0900 for a genuinely-unknown directive that ISN'T a registered macro).
+
+* Waves (revised)
+  W1  Recursive hole scanner (step 1) + the `@`-dispatch arm in emit_node as a RECORD-only stub
+      (emit an anchor + a TODO mount, no expansion yet). Floor: every existing @template /
+      file-scope body byte-identical (no directive holes present → scanner unchanged for them);
+      a directive hole no longer leaks as literal text (becomes an anchor). Corpus + v8 green.
+  W2  Two-phase expansion (step 4) + emit_directive_hole mount (step 3), @editable/@richtext
+      FIRST. GATE: cms-testbed admin Post `body` richtext editor mounts + persists (BUG-103).
+  W3  @each block-hole shape + lowering via the same rail; CONVERGE + DELETE ssg_unroll
+      hand-roll + cb_nested_each (BUG-085 closed; a hand-rolled parser removed).
+  W4  Remove the reify silent-drop fallthrough → E0900 for unknown directives. Audit all
+      @templates. Close the BUG-063 family.
+
+* Verdict
+- Q1: YES — holes are exactly the right carrier; make the backtick hole RECURSIVE (or add a
+  block-hole spelling for the `{ body }` payload). This is SOUNDER than the grammar-arm+builder
+  two-path design: one mechanism, no "placement matters" subtlety.
+- Q2: YES — nested @each is the SAME class and SHOULD be solved in this pass; doing so lets us
+  delete a hand-rolled @each string parser (ssg_unroll), which is the AGENTS-aligned prize.
+Both fold into a single recursive-hole architecture. PLAN-039 to be updated: its two-part A/B
+collapses into "one recursive hole carries any nested directive (incl. @each's block body)".
+
+* Provenance
+Verified this session: src/emit/html_reactive.rs (normalize_bare_holes, emit_node Hole arms,
+emit_element_hole anchor+apply mount), src/ir/code.rs (HtmlExpr::Hole(JsExpr)), the FUP-041
+"backtick is the one hole" rule, src/html/ssg_unroll.rs (hand-rolled @each), BUG-085/BUG-103.

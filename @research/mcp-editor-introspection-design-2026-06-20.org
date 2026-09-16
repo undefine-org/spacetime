@@ -1,0 +1,496 @@
+#+TITLE: @editor — introspection-generated editors + stdlib/generate (full design, for posterity)
+#+CUSTOM_ID: mcp-editor-introspection-design-2026-06-20
+#+DATE: 2026-06-20
+#+LAYER: mcp
+
+* Why this doc
+The MCP builder view (PLAN-051) renders a page frame-in-frame with sidebars
+AUTO-GENERATED FROM CODE INTROSPECTION. This doc specifies the deepest layer of
+that idea, at the decision owner's explicit request to "lay out all that you're
+imagining, for posterity": the editors are generated from the SAME registries
+the compiler already exposes (the macro/form registry, the template/fn registry,
+the type registry), edits route through the EXISTING EditAst/EditJson protocol
+keyed by =data-st-origin= (correct-by-design, no magic values), and a single
+=stdlib/generate= module powers both property-testing and design-variation.
+
+Companion docs:
+- @research/mcp-builder-view-and-convergence-2026-06-20.org (the builder + the
+  __mcp__/__admin__/__dev__ convergence ladder; PARTS I/II/III).
+- This doc = the AST-level editor vision (the "@cms-analog that touches the AST").
+
+Locked decisions (owner, 2026-06-20):
+- ONE =@editor(<ref>)= macro, target picked by SIGIL (=@macro= · =&template= ·
+  =Type=); SUBSUMES the implemented =@cms= display role + the proposed
+  =@inspect=/=@layers=/=@affords=. Port =@cms= with NO regressions.
+- =@editor= may declare CUSTOM controls not 1:1 with a parsed form param (param
+  fusion, multi-param presets, derived controls). The DEFAULT controls are
+  THEMSELVES built this way (dogfooded — the CaptureType→widget mapping is
+  @editor data in stdlib, not a Rust match).
+- EditAst patches are GENERATED FROM INTROSPECTION: the edit address = the form
+  walk + =data-st-origin=, never hand-typed. Structurally correct by design.
+- =stdlib/generate= is the shared base NOW; =stdlib/testing= becomes a CONSUMER.
+- v1 = the auto-derived editor (CaptureType→widget + EditAst) — FUNCTIONAL. The
+  @editor REFINEMENT vocabulary + @vary/generate are FUPs, fully designed here.
+
+* Source-verified substrate (read this session; guess-gate clean)
+- =src/metasystem/signature.rs= : =form_signature_tokens(form) -> Vec<SigToken{
+  text, role}>= walks a =%form='s =FormClause= into role-tagged tokens
+  (Directive/Binding/Type/Literal/Punct/Param/Delim). =format_form_signature= is
+  DEFINED as those tokens joined — they cannot drift. This is the exact machine-
+  readable per-param schema demos/spacetime-docs renders as colored chips.
+- =src/parser/meta_ast.rs= : =FormClause { directive_name, inline_elements,
+  params: Vec<FormParam>, post_arg_inline, body_capture, body_params, body_groups
+  }=. =FormParam { name, elements, default }=. =FormCapture { var_name,
+  capture_type: CaptureType, modifier, alias_capture }=. =CaptureModifier=
+  ∈ {Required, Optional(?), ZeroOrMore(*), OneOrMore(+)}.
+- =CaptureType= enum (the WIDGET VOCABULARY): Ident, String, Number, Bool, Time,
+  Length, Duration, Easing, Typeref, Binding, Event, Expr, Properties, Fields,
+  Params, States, Transitions, Keyframes, Selector, Element, Color, Preset,
+  MutationActions, Template, ParamList, HtmlBlock, ComponentBody, JsBlock,
+  TemplateInvocation, Union(opts), Balanced(c), PatternMatch{variant}, Custom(s).
+- =@data dispatch $macros= (demos/spacetime-docs/reference.st) already hands @each
+  every %form-carrying macro as { directive, name, signature, tokens[{text,role}],
+  doc, kind, scopes, binds, overloads }. "Add a %macro → a card appears next
+  build; cannot drift from the language." We extend the SAME projection from
+  read-only chips to editable widgets.
+- EditAst protocol (stdlib/__dev__/primitives/dev-save.st + dev-ws.st):
+  · =EditAst { file, selector, patch }= — routes by =data-st-origin="file::sel"=
+    (injected on every rendered element); server patches the .st AST; hot-reload.
+  · =EditJson { file, path, value }= — data edit by JSON path.
+  · =EditJsonArray { file, path, op: Insert|Delete|Reorder }= — array structure.
+  · =InspectElement { selector }= — server-side context for a clicked element.
+  · dev-ws = the WebSocket singleton (=window.__stDevWs=) with onAck/onReject and
+    op_id correlation. dev-selector already discovers data-st-bind/source/origin/t
+    from any element + walks ancestors.
+- =@type Name { fields }= / =@type Name { A(T)|B }= (stdlib/macros/type-data.st),
+  =@cms(Type){ title:f; thumbnail:f; chips:f }= (stdlib/__admin__/cms-hint.st):
+  registry-data display hints (NO JS, NO Rust dispatch), merged with convention
+  inference into /__spacetime/dev/types.json by the server (the ONLY implemented
+  analog today — the port target). =TypeRegistry::from_form_matches= +
+  =server.rs= filtering =m.macro_name == "cms"=.
+- Generator runtime (public/runtime/generative.js): =window.__stGen= (spec→value,
+  seeded), =__stProperty= (samples + predicate + shrink), =__stFuzz= (adversarial
+  + crash + budget), =__stParseBinding= ("name: spec" → {name, spec}). Spec
+  grammar: =number | number A..B | int | int A..B | bool | string | string ~
+  corpus | scalar[]=. Consumed today ONLY by stdlib/testing/generative.st
+  (@property / @fuzz). This is the engine @vary/@sample reuse.
+- 3D macros (stdlib/3d/macros/{object,light,...}.st): rich flat-scalar forms —
+  =@object(shape:string, size:number, color:color, roughness:number, posX/Y/Z:
+  number, spinX/Y/Z:number, material:string, ...)=. The form ALREADY carries
+  every type + default. Harmony nit: =material:string = "standard"= SHOULD be
+  =material:("standard"|"physical"|"glass"|"basic")= so it renders as a validated
+  dropdown for free (FUP-088 below).
+
+* PART A — The CaptureType → widget table (the "free" core; v1)
+The heart of v1. A pure lookup from each param's =CaptureType= to a default
+editor widget, applied by walking the selected construct's =%form= (macro/fn) or
+param list (template) — the SAME walk as =form_signature_tokens=, projected to
+widgets instead of chips. This table is DOGFOODED: each row is expressible as an
+=@editor= default (PART C), not a Rust match-arm.
+
+| CaptureType            | Default widget                          | Edit op (routed)          |
+|------------------------+-----------------------------------------+---------------------------|
+| Color                  | color picker + hex field                | EditAst patch {param}     |
+| Union(["a","b",...])   | segmented (≤3) / dropdown (≥4)           | EditAst patch {param}     |
+| Bool                   | toggle                                  | EditAst patch {param}     |
+| Number                 | number field (slider if @editor range)  | EditAst patch {param}     |
+| Length/Duration/Time   | number + unit selector                  | EditAst patch {param}     |
+| Easing                 | easing-curve editor (cubic-bezier UI)   | EditAst patch {param}     |
+| Preset (~name)         | preset picker (from preset registry)    | EditAst patch {param}     |
+| String                 | text field                              | EditAst patch {param}     |
+| Ident                  | identifier field (validated)            | EditAst patch {param}     |
+| Typeref                | type picker (from type registry)        | EditAst patch {param}     |
+| Binding ($x)           | data-source picker (ST._dataRegistry)   | EditAst (binding expr)    |
+| Selector               | element picker (dev-selector activate)  | EditAst patch {param}     |
+| Element (&child)       | SLOT / drop-target (a layers child)     | EditJsonArray on children |
+| Keyframes              | timeline editor (@clock-style)          | EditAst body patch        |
+| States/Transitions     | state-machine mini-editor               | EditAst body patch        |
+| Properties/Fields      | key→value rows (recursive widgets)      | EditAst body patch        |
+| ParamList              | nested param editors (recurse)          | EditAst patch (args)      |
+| TemplateInvocation     | nested template editor (recurse)        | EditAst patch (call)      |
+| Expr / JsBlock         | expression escape-hatch (code field)    | EditAst patch {param}     |
+| HtmlBlock/ComponentBody| rich-text / structural (drill-in)       | EditAst {__content}       |
+| Custom(s)              | resolve s in capture-type registry;     | per resolved kind         |
+|                        | else expression escape-hatch            |                           |
+
+Modifiers refine the control: =?= → clearable/with-default-affordance; =*=/=+=
+→ a repeatable LIST control (add/remove rows, =+= requires ≥1) routed through
+EditJsonArray. =default= → the field's initial/placeholder value. =Union= opts →
+the exact choices. The =///= doc comment above the macro/param → field help text.
+The =%binds= exports ($added/$connected/...) → live READOUTS beside the editor.
+
+Coverage: ~22 rows cover the ENTIRE stdlib surface. Adding a CaptureType to the
+grammar = adding one row (or an @editor default) — never a per-macro inspector.
+
+* PART B — EditAst correct-by-design (the routing; v1)
+The owner constraint: patches are GENERATED FROM INTROSPECTION, never hand-typed.
+
+** Address derivation (no magic values) — CORRECTED to verified injection scope
+VERIFIED (src/syntax/form_match.rs:1317, src/sync/handlers.rs:485-600):
+- EditAst selector form = "<css-selector> §<directive>" and the patch is a JSON
+  object mapping PROPERTY NAMES -> new values (parse_ast_selector + handle_edit_ast).
+  So param-level editing of a directive call is a SHIPPED path, NOT new plumbing.
+- =data-st-origin= = "file::scope §macro tag" is injected on TEXT-BEARING tags
+  ONLY (h1-6,p,span,li,td,th,a,label,button,figcaption,blockquote,cite,dt,dd,
+  summary), in DEBUG builds only. It is NOT on every element; a non-text macro
+  call (e.g. @object, a structural <div>) has NO data-st-origin.
+∴ the address is SHARED BY DERIVATION (same "<css> §<macro>" token), not by one
+universal DOM attribute. Two address sources, one EditAst key:
+  (a) CONTENT/text node: read data-st-origin off the clicked DOM element.
+  (b) STRUCTURAL/param node: read the address from the SERVER STRUCTURE
+      PROJECTION (PART A / builder W3), which knows every node's css-scope +
+      §macro + param list from the bundle — independent of DOM provenance.
+Then for a param P of node N to value V:
+  EditAst { file: addr(N).file, selector: addr(N).css + " §" + addr(N).macro,
+            patch: { P: V } }
+The patch KEY P = the param NAME from the form walk (=FormParam.name=); V = the
+widget output coerced to P's CaptureType (Color->hex, Number->number, Union->opt,
+Bool->bool). A widget cannot emit outside its CaptureType, so the patch is
+well-typed by construction. NO magic values: address from projection/provenance,
+key from the form, value type-bounded.
+
+UNVERIFIED v1 risk (promote to a build task): handle_edit_ast today is exercised
+for content (__content) + known directives (e.g. @scroll). That it accepts a
+param-keyed patch for ARBITRARY macro/template calls (e.g. @object roughness, a
+&template arg) is the v1 SERVER work to confirm + extend. If a macro's AST node
+does not expose a writable prop slot for a param, EditAst must learn to patch the
+call's arg list. This is the single biggest v1 unknown.
+
+** Two tiers (both reuse shipped paths; no new store)
+1. EPHEMERAL live-preview: the region-mount param override (region_mount_input)
+   updates instantly for a tactile preview (no agent wake, no source write). This
+   is the mockup-41 "type → frame updates live".
+2. PERSISTENT source commit: the SAME edit emits EditAst over dev-ws → the server
+   patches the .st AST → hot-reload re-renders from source ("● saved to source").
+   This is the dev-save round-trip, REUSED. The bespoke =mcp_param= store is
+   REMOVED (its job is now EditAst + the ephemeral tier).
+Optimistic + reconciled: the ephemeral preview shows immediately; the EditAst Ack
+confirms the source write (green flash); a Reject reverts + toasts (dev-save
+already implements Ack/Reject/revert).
+
+** Structure edits
+Reorder a layers child / insert / delete → EditJsonArray {Insert|Delete|Reorder}
+(shipped: saveArrayInsert/Delete/Reorder in dev-save). The navigator's drag-
+reorder (a FUP) routes here — no new protocol.
+
+* PART C — @editor(<ref>): ONE macro, sigil-typed target (v1 auto-derive; refinement = FUP)
+=@editor= is the @cms-analog that reaches the AST. ONE macro; the TARGET SIGIL
+selects the registry (one sigil, one meaning — harmony):
+  =@editor(@object) { ... }=  → a MACRO call's editor (@ = directive/macro)
+  =@editor(&card)   { ... }=  → a TEMPLATE's editor   (& = template ref)
+  =@editor(Talent)  { ... }=  → a TYPE/data editor     (bare ident = type)
+The Type target SUBSUMES =@cms= (title/subtitle/thumbnail/chips become =tree=
+presentation hints) and the proposed =@inspect= (panel/groups/widgets). The
+=&template= target is the KEY extension the owner asked for: editors apply to
+author templates, not just stdlib macros — a =&hero($title, $accent color)=
+template gets an editor from its PARAM LIST exactly as a macro does from its form.
+
+** Registration (registry-data, not Rust)
+=@editor= registers via =%registers editor(<ref>) { ... }= — like =@cms=
+=%registers cms($type)=. The server reads these FormMatches (filter
+=macro_name == "editor"=, mirroring the =="cms"= filter) and merges them with the
+AUTO-DERIVED editor (PART A) into the introspection projection the builder binds.
+NO Rust per-construct logic; a new construct needs ZERO Rust.
+
+** Default = full auto-derive (no @editor needed)
+With NO =@editor= for a construct, the builder derives the complete editor from
+PART A: walk the form/param-list, map each CaptureType→widget, lay out flat,
+group "General". Every macro/template/type is editable for free. =@editor= only
+REFINES.
+
+** The refinement vocabulary (FULL design — FUP, see FUP-085)
+Optional sub-blocks inside =@editor=; every one optional; each overrides a slice
+of the auto-derived editor. Designed in full so posterity has the complete map:
+
+*** tree { } — navigator presentation (subsumes @layers)
+  icon "cube"            // glyph for this node in the structure tree
+  label shape            // which param/field supplies the row label
+  slot                   // this node accepts children (drop-target; EditJsonArray)
+  hidden                 // omit from the tree (internal nodes)
+  muted                  // de-emphasize (structural, rarely edited)
+  collapsed              // default-collapsed in the tree
+  badge origin           // show a chip (origin/type) on the row
+
+*** panel { } — the inspector (subsumes @inspect)
+  group "Name" { paramA; paramB }         // groups decided at Spacetime-level (NO magic names)
+  paramA: slider(0..1)                     // RANGE refinement over a :number
+  paramA: slider(0..64 step 4) unit "px"   // stepped + unit
+  spacing: vec3(posX, posY, posZ)          // PARAM FUSION: N scalars → 1 widget
+  rotation: vec3(spinX, spinY, spinZ)
+  color: swatch                            // force a widget (override the default)
+  body: richtext                           // force rich-text over a String
+  align: segmented                         // force segmented over a Union dropdown
+  label paramA "Roughness"                 // relabel
+  help paramA "0 = mirror, 1 = matte"      // field help (else from /// doc)
+  hide paramA                              // omit a param from the panel
+  order [shape, size, material, color]     // explicit param order
+  // CUSTOM controls (owner: full freedom; this is how defaults are built too):
+  "Finish": preset {                       // a derived control writing MANY params
+    matte  -> { roughness: 0.9, metalness: 0 }
+    chrome -> { roughness: 0.05, metalness: 1 }
+    glass  -> { material: "glass", transmission: 1, ior: 1.5 }
+  }
+  "Aspect": compute(w, h) -> ratio         // a derived read-only readout
+  presets from examples                    // doc @example blocks → one-click starter presets
+
+*** actions { } — node affordances (subsumes @affords)
+  duplicate                                // → EditJsonArray Insert (clone)
+  delete                                   // → EditJsonArray Delete
+  "Reset" -> reset                         // named action → a registered op
+  "Bind to data" -> bind($source)          // → EditAst (replace value with binding)
+  reorderable                              // enable drag-reorder among siblings
+
+*** when { } — conditional editor (progressive disclosure)
+  show transmission when material == "glass"   // reveal params by another param's value
+  show ior, thickness when material == "glass"
+
+NB on custom controls (owner-confirmed): a control may reference params that
+don't 1:1 exist as scalars (fusion) or write multiple params (presets) or derive
+a read-only value (compute). VALIDATION: a custom control declares which params
+it WRITES (the =-> { param: value }= map or the =vec3(a,b,c)= arg list); the
+server checks those params exist in the form and the values fit their
+CaptureTypes — so even a custom control emits a correct-by-design EditAst patch.
+The =compute= readout writes NOTHING (display only). This keeps "arbitrary
+shaping" while preserving "no magic values."
+
+* PART D — stdlib/generate (the shared base; refactor NOW, @vary/@sample = FUP)
+Owner: extend, don't repoint. =stdlib/generate= owns spec→value; =stdlib/testing=
+becomes a CONSUMER; the builder's design-variation is a SECOND consumer. The
+test runtime's =__stGen=/=__stProperty=/=__stFuzz=/=__stParseBinding= move to a
+=generate= primitive; testing imports it (no behavior change — a re-home), the
+builder imports it for @vary/@sample.
+
+#+begin_example
+stdlib/generate            spec → samples engine
+  gen(spec, seed) -> value           one value
+  samples(spec, n, seed) -> value[]  n distinct values
+  shrink(spec, value, pred) -> value minimal failing/edge value
+  parseSpec("name: spec") -> {name, spec}
+   ├── stdlib/testing  @property = samples + predicate + shrink
+   │                   @fuzz     = adversarial samples + crash + budget
+   └── builder         @vary(node, n)  = samples of a node's PARAM spec → variations
+                       @sample(coll)   = samples of a @type → fill an empty state
+#+end_example
+
+** @vary / @sample (FULL design — FUP, see FUP-086)
+  @vary(&hero, 8)            // 8 generated value-sets for &hero's typed params
+                            // → a "variations" strip (mockup 58); pick one → EditAst commit
+  @vary(@object, 8)         // same for a macro call (the 3D "vary ×8")
+  @sample($collection, 12)  // fill an empty collection with 12 generated @type rows
+  @sample(&card)            // one generated instance of a template (placeholder content)
+Each variation = a full param map from =samples()=; previewing uses the EPHEMERAL
+tier (region_mount_input); committing a pick uses EditAst (PART B). Design-
+exploration powered by the SAME generator + shrinker as property tests
+("generate 8, shrink to the favorite").
+
+The spec for a node's params is DERIVED from the form's CaptureTypes (Color →
+a color spec, Number A..B → numeric range, Union → pick-one, String → corpus) —
+so @vary needs NO author annotation; it reads the same introspection PART A does.
+=@editor= MAY refine the vary spec (e.g. =accent: vary(brand-palette)=), a FUP.
+
+* The dogfooding loop (why this is minimal-debt)
+The PART A default widgets are DEFINED as stdlib =@editor= entries over the
+capture-type registry — e.g. an =@editor(:color)= mapping the Color CaptureType
+to the swatch control. So:
+  - the editor system is built FROM @editor (no privileged Rust widget table),
+  - adding a CaptureType + its @editor default = a new widget everywhere,
+  - the builder's own chrome (its panels/controls) are Spacetime, editable by
+    the builder itself (the convergence endgame: the studio edits the studio).
+This is the elegance bar discharged: =@editor= DELETES the hand-built inspector,
+the hand-built navigator (@layers folds in), the bespoke node toolbar (@affords
+folds in), the =mcp_param= store (EditAst replaces it), AND the separate-owner
+generator (stdlib/generate). Net constructs DOWN, capability UP.
+
+* Build order / scope
+- v1 (PLAN-051, FUNCTIONAL): PART A (CaptureType→widget auto-derive) + PART B
+  (EditAst correct-by-design routing, remove mcp_param) + the =@editor(<ref>)=
+  SHELL that auto-derives with no refinement yet + the =stdlib/generate= refactor
+  (PART D base; testing cut over, no regressions). A real, working,
+  introspection-generated inspector that edits source.
+- FUP-085: =@editor= refinement vocabulary (PART C) — tree/panel/actions/when,
+  param fusion, multi-param presets, derived controls, examples-as-presets.
+- FUP-086: =@vary= / =@sample= (PART D consumers) + the variations strip UI.
+- FUP-087: port =@cms='s title/subtitle/thumbnail/chips into =@editor(Type){tree
+  {...}}= with NO regressions (admin keeps rendering); then retire =@cms= or alias
+  it to =@editor=.
+- FUP-088: stdlib harmony pass — turn stringly-typed enum params (e.g. 3d
+  =material:string=) into =Union= so they render as validated dropdowns for free.
+
+* Honesty ledger
+- VERIFIED shipped: form_signature_tokens + CaptureType enum (the widget vocab),
+  @data dispatch macro projection, EditAst/EditJson/EditJsonArray + dev-ws Ack/
+  Reject, dev-selector origin discovery, @type/@cms + types.json merge, the
+  __stGen/__stProperty/__stFuzz generator, the rich 3d/testing forms.
+- DESIGN TARGET (this doc): the CaptureType→widget table as @editor defaults, the
+  @editor(<ref>) macro + its refinement sub-blocks, EditAst-from-introspection
+  routing in the builder, the region-mount ephemeral preview tier, stdlib/generate
+  as the shared base, @vary/@sample.
+- NOT yet validated: that EVERY CaptureType has a clean widget (some — JsBlock,
+  ComponentBody — fall back to an escape-hatch; acceptable). That the .st AST
+  patcher accepts a param-level patch for ALL macro forms (EditAst today patches
+  content/__st_id; param-keyed patches for arbitrary macro calls is the v1 server
+  work to verify). That region_mount_input can seed EVERY widget's output type
+  (string-coercible today; richer types are v1 work).
+
+* PART E — In-place / WYSIWYG editing is PART OF @editor, not separate
+The owner flagged the cms-editable demo + its direct-text-edit macro (the
+@editable / @richtext family + @editable-mark/@editable-block vocabulary, FEAT-097
+shipped; FEAT-117 @cms-editable spec DEFERRED until the meta-compiler is clean).
+Verdict: SAME VISION, two registers of one idea — and @editor is the unifier.
+
+** Source-verified (read this session)
+- stdlib/macros/editable.st: @editable-mark &bold(&sel){<strong>`&sel`</strong>},
+  @editable-block &h2(&sel){...} — "a mark IS a template"; registered via
+  %registers editable-mark/block, so the allowlist + editable-schema.json FALL
+  OUT of registered constructs (never a Rust enum). @editable(bind,marks,blocks)
+  = always-on surface; @richtext(...) = the SAME surface EDIT-MODE-GATED (reads as
+  a blog, upgrades to editor only while html[data-st-edit-mode], via @edit-toggle).
+  Persists via EditJson (doc AST) / EditAst {__content}, routed by
+  data-st-editable provenance.
+- stdlib/editable/builtins.st: open model PROVEN — &highlight(&sel,$color) ("any
+  inline span with a typed attr is a mark, zero engine changes"); RECURSIVE
+  regions &list(&items[]) / &columns(&left,&right) (document model recursive from
+  one primitive: non-&sel element param = region, [] = block region);
+  invertibility / paste-lift (projection is a LENS); typed attrs validated
+  ($href url => javascript: is a server-side type error).
+- src/editable/schema.rs extract_editable_schema -> editable-schema.json;
+  src/editable/validate.rs enforces it.
+
+** The two modalities are ONE spectrum
+| axis      | in-place / WYSIWYG                 | inspector / panel             |
+| edits     | content INSIDE the frame          | params/props BESIDE the frame |
+| surface   | @richtext/@editable (gated)       | @editor-derived widgets       |
+| vocabulary| @editable-mark/@editable-block    | CaptureType->widget           |
+| persists  | EditJson(docAST)/EditAst{__content}| EditAst{param}/EditJson      |
+| routed by | data-st-editable provenance       | data-st-origin                |
+Both REGISTRY-GENERATED (not hand-built), both route through the SAME
+dev-ws/EditAst/EditJson protocol by reading element provenance. Not two systems.
+
+** @editor SUBSUMES in-place editing (delegates, never reimplements)
+Two CaptureType->widget rows delegate to the SHIPPED surfaces:
+- HtmlBlock / ComponentBody / a String refined `richtext` -> MOUNT @richtext
+  in-frame (WYSIWYG), with the marks/blocks the construct allows. The inspector
+  shows an "edit in place >" affordance that toggles data-st-edit-mode; it does
+  NOT duplicate a rich-text editor in the side panel.
+- A directly-editable text node -> inline-edit in the frame (contenteditable via
+  the editable surface); inspector row = a jump-to affordance.
+So @editor's "body" widget IS @richtext; @editable-mark is the answer to "give me
+a custom inline control." Better than a panel textarea: one rich-text engine,
+reused; the panel orchestrates, the frame edits.
+
+** @cms-editable (FEAT-117) folds into @editor(Type)
+FEAT-117's deferred @cms{ editable:inline; richtext(marks); number; toggle;
+select(options) } is the FIELD-EDIT face of the same @editor(Type) that carries
+@cms's DISPLAY face (title/thumbnail/chips -> tree{}). One @editor(Type) =
+display(tree) + edit(panel) hints over a @type. When FEAT-117 un-defers it lands
+AS @editor(Type){ panel{...} }, not a parallel macro. Honor FEAT-117's deferral.
+
+** Build-order impact
+- v1 inspector "body" row delegates to @richtext for rich content (reuse FEAT-097).
+- FUP-087 (port @cms) EXPANDS to: port @cms display + reconcile with FEAT-117 edit
+  spec under one @editor(Type), honoring FEAT-117's deferral.
+- The control catalog (PART F) treats @editable-mark/block as the EXTENSIBILITY
+  rail for inline/structural custom controls.
+
+
+* PART F — The control catalog: every widget, smart component, rich subtype (for posterity)
+The complete catalog the @editor system can generate or host. Organized by tier.
+Each entry: the trigger (what introspection produces it), the control, the route
+(how its edit persists), and — crucially — the BEYOND-THE-NORM use case that
+Spacetime's design unlocks but Webflow/Framer/Figma cannot do today. The thesis:
+because every control is registry-data over a typed grammar with a reactive
+runtime and a source-of-truth AST, controls compose, react, validate, and
+round-trip in ways a property-panel-over-CSS never can.
+
+** Tier 1 — SCALAR widgets (one param, one CaptureType; v1 auto-derived)
+| trigger (CaptureType)      | control                          | beyond-the-norm use case |
+|----------------------------+----------------------------------+--------------------------|
+| Color                      | swatch + hex + eyedropper        | bind the swatch to a TOKEN ($brand) not a literal — editing the token reflows every node that references it, live, because it is a reactive signal (not find/replace) |
+| Union([..])                | segmented / dropdown             | the choices ARE the grammar — add a variant to the macro form and the option appears; impossible to pick an invalid value |
+| Bool                       | toggle                           | the toggle can DRIVE @when disclosure of other params (material==glass reveals ior) — the panel restructures itself reactively |
+| Number                     | field; slider w/ range refine    | a slider whose range is itself a signal/token (max = $container.width) — bounds that track the design |
+| Length/Duration/Time       | number + unit menu               | unit-aware: switch px<->rem rescales the value; duration feeds a LIVE motion preview (scrub it) |
+| Easing                     | cubic-bezier curve editor        | drag the curve and the element ANIMATES live with it (the runtime IS the preview) — not a static curve thumbnail |
+| Preset (~name)             | preset picker (preset registry)  | presets are project-defined (~brand-bounce) — the picker shows the SITE's motion language, not generic eases |
+| String                     | text field                       | a String refined `richtext` becomes in-frame WYSIWYG (PART E) — same param, escalated control |
+| Ident                      | validated identifier field       | autocompletes from the relevant registry (a binding name, a template name) |
+| Typeref                    | type picker (type registry)      | pick a @type and the dependent editor REGENERATES for that type — editors compose by type |
+| Binding ($x)               | data-source picker               | bind a prop to LIVE data (a collection field) — the node becomes data-driven from the panel, no code |
+| Selector                   | element picker (dev-selector)    | click the canvas to fill the param (bounds:, target:) — spatial params set spatially |
+
+** Tier 2 — FUSED / spatial widgets (N params -> 1 control; @editor refinement, FUP-085)
+| fusion                     | control                          | beyond-the-norm use case |
+|----------------------------+----------------------------------+--------------------------|
+| vec3(x,y,z)                | xyz gizmo w/ axis colors         | 3D transform editing in the SAME panel grammar as a CSS prop — @object posX/Y/Z (mockup 58); drag in the viewport updates all three |
+| vec2(x,y)                  | 2D pad / joystick                | position/anchor as a draggable pad; background-position, transform-origin |
+| box(top,right,bot,left)    | box-model editor (padding ring)  | the Figma/CSS box control, but the four params come from the FORM, not hardcoded CSS |
+| rangePair(min,max)         | dual-thumb range                 | a min..max pair (price filter, viewport range) as one control |
+| color+stops               | gradient editor                  | fuse a color list + positions into a gradient stop editor; writes the param array |
+| aspect(w,h)                | aspect-ratio lock control        | linked w/h with a lock toggle; derived ratio readout (compute) |
+
+** Tier 3 — STRUCTURAL / recursive widgets (body captures + regions; FUP-085)
+| trigger                    | control                          | beyond-the-norm use case |
+|----------------------------+----------------------------------+--------------------------|
+| Element (&child)           | SLOT / drop-target               | the layers drop-zone; drag a component in -> EditJsonArray Insert. The slot is declared by the FORM (&children*), not a hardcoded container |
+| Keyframes (body)           | timeline editor (@clock scrub)   | author motion on a real timeline with virtual-clock scrubbing (the testing @clock is the SAME engine) — design + test share the scrubber |
+| States/Transitions         | state-machine mini-graph         | edit a component's states/transitions as a node graph; the live element FOLLOWS the active state as you click |
+| Properties/Fields (body)   | recursive key->value rows        | nested object editing; each value recurses into its own Tier-1 widget by type |
+| ParamList / TemplateInvocation | nested template editor       | edit a &card($p) call's args inline; recurse into the called template's OWN editor — editors nest as components nest |
+| &list(&items[]) (region)   | repeatable block list            | add/remove/reorder child blocks (EditJsonArray); the recursive document model (builtins.st) — lists, columns fall out of ONE primitive |
+| &columns(&left,&right)     | multi-region layout editor       | parallel editable sub-spaces; a two-column block edited as two independent regions |
+
+** Tier 4 — INLINE / WYSIWYG marks (the @editable-mark vocabulary; FEAT-097 shipped)
+| trigger (@editable-mark)   | control                          | beyond-the-norm use case |
+|----------------------------+----------------------------------+--------------------------|
+| &bold/&italic/&code        | inline format toolbar            | the toolbar is GENERATED from registered marks (editable-schema.json) — add @editable-mark &spoiler, a toolbar button appears |
+| &link(&sel,$href url)      | inline href editor + validation  | typed attr: javascript: is a TYPE ERROR server-side, not a sniff; pasted <a> LIFTS back to a link mark (invertible lens) |
+| &highlight(&sel,$color)    | inline color-attr mark           | "any inline span with a typed attr is a mark, zero engine changes" — custom inline controls are one-line declarations |
+| custom mark (author)       | author-defined inline widget     | a project declares &citation(&sel,$source) -> a citation control no other tool has, in one line, schema-validated, paste-liftable |
+
+** Tier 5 — SMART / generative components (stdlib/generate; FUP-086)
+| component                  | control                          | beyond-the-norm use case |
+|----------------------------+----------------------------------+--------------------------|
+| @vary(node, n)             | variations strip (mockup 58)     | "generate 8 hero variations" from the node's TYPED params + shrink to the favorite — design exploration powered by the property-test generator |
+| @sample(collection, n)     | fill-with-realistic-data         | populate an empty list from its @type (string~unicode, number A..B) — no lorem ipsum, type-faithful placeholder data |
+| @sample(&card)             | one generated instance           | a starter instance of a template for layout preview |
+| presets from @example      | one-click starter presets        | a macro's /// @example blocks BECOME preset buttons (@object's "metallic torusknot" / "refractive glass") — docs are starting points |
+| live readouts (%binds)     | non-editable state display        | show a construct's exports ($added/$connected/$empty) beside its editor — the panel shows the node's LIVE state, not just its config |
+
+** Tier 6 — DERIVED / composed controls (@editor custom controls; FUP-085)
+| control                    | declaration                      | beyond-the-norm use case |
+|----------------------------+----------------------------------+--------------------------|
+| multi-param preset         | "Finish": preset{ matte -> {...} }| one click writes MANY params at once (matte/chrome/glass) — a designer's mental model ("finish"), not the engine's params |
+| compute readout            | "Aspect": compute(w,h)->ratio     | a derived, read-only value shown in the panel (no write) |
+| conditional group          | @when material==glass            | progressive disclosure: reveal advanced params only when relevant — the panel adapts to the node's state |
+| bound control              | max = $container.width            | a control parameter that is itself reactive — the editor tracks the design system live |
+
+** The cross-cutting superpowers (WHY this is beyond Webflow/Framer/Figma)
+1. REACTIVE controls: a control's range/options/visibility can be a SIGNAL or
+   token — the panel restructures itself as the design changes (no other tool's
+   property panel reacts to the document).
+2. CORRECT-BY-DESIGN edits: every widget emits a value within its CaptureType,
+   routed to the exact data-st-origin address — you CANNOT produce an invalid
+   document. The grammar is the guardrail.
+3. SOURCE ROUND-TRIP: every edit lands in the .st AST (EditAst) and re-renders
+   from source — the design IS the code, bidirectionally. Paste-lift (marks) is
+   the same lens backward.
+4. COMPOSABILITY: editors NEST as components nest (a template's editor contains
+   its children's editors); generators, timelines, state-graphs are the SAME
+   engines the test/animation systems use — one toolchain, many faces.
+5. EXTENSIBILITY WITHOUT THE ENGINE: a new control = a new @editable-mark, a new
+   CaptureType + its @editor default, or a new @editor refinement — all
+   registry-data. A project invents controls no other tool has, in a few lines,
+   schema-validated and persistent. The studio's capability is OPEN.
+6. DESIGN == TEST == DOCS: @vary shares the generator with @property; the
+   timeline editor shares @clock with animation tests; @example blocks are both
+   docs and presets. One substrate, no parallel tooling.
+
+** Catalog -> build mapping
+- v1 (PLAN-051): Tier 1 (all scalar widgets) + Tier 4 delegation to shipped
+  @richtext + Tier 5 live readouts. The "free" inspector, functional.
+- FUP-085 (@editor refinement): Tier 2 (fusion), Tier 3 (structural), Tier 6
+  (derived/custom/conditional).
+- FUP-086 (@vary/generate): Tier 5 generative (@vary/@sample/presets).
+- FEAT-097 (shipped): Tier 4 marks already exist — v1 reuses them.
+- FUP-088 (harmony): widen stringly enums to Union so Tier-1 dropdowns appear free.
+

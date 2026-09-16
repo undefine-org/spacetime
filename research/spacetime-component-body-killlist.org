@@ -1,0 +1,126 @@
+#+TITLE: PLAN-039 clean-break kill-list — no dead/zombie code (executable spec)
+#+DATE: 2026-06-12
+#+STATUS: SPEC (the exhaustive cutover map; clean break, single cutover, zero residue)
+
+* Mandate (user)
+"Clean break is better. Make sure no dead or zombie code remains."
+∴ this doc is the COMPLETE inventory of what dies, what is repointed, and the verification
+that nothing dangles. The refactor is NOT done until every DELETE below is gone and `grep`
+for the dead symbols returns ZERO (outside this doc).
+
+* The one-line shape of the break
+A `&name($p){ … }` body STOPS being an opaque `$body:component_body` capture re-parsed by a
+parallel construct grammar, and BECOMES a scope (like `.sel{}`): the ONE whole-file matcher
+finds its nested constructs, span-containment assigns them, the reactive builder lowers its
+HTML + mounts its nested matches. Everything that existed ONLY to serve the parallel parser
+dies. The IR shrinks to what the builder + editable-schema actually need (HTML + holes +
+scope-matches); the construct-classification fields die.
+
+* DELETE — the parallel construct parser (must be GONE; grep ⇒ 0)
+** Rust — the reifier + its helpers (src/syntax/events/form_compiler.rs)
+   - fn reify_component_body  (the segment/classify/reify loop + the silent-drop fallthrough)
+   - fn reify_state, reify_exports, reify_self_prop, reify_inject, reify_toggle, reify_match,
+     reify_selector_ref, reify_block, reify_block_item, parse_template_ref, parse_on_event_block
+     — every reify_* helper that exists ONLY for component-body construct classification
+     (audit each: a helper reused by the scope path or events stays; one used ONLY by reify dies)
+   - fn has_component_body_sections, segment_component_body, classify_named_item,
+     component_item_extractor — the segmenter + grammar-classifier plumbing for the body
+   - the test-only parse_component_body shims (form_compiler.rs:4085, :5388, :5640) + their tests
+   - the CaptureType::ComponentBody match arm at form_compiler.rs:1354 (capture eval)
+** Rust — the IR construct fields (src/syntax/form_match.rs)
+   - enum ComponentDirective (OnEvent/ClassToggle/ContentBinding) — IF the scope path emits
+     these as normal FormMatches/primitives instead (it does: @on, class toggle, content
+     binding are already selector-scope constructs the matcher handles). DELETE the enum.
+   - struct ComponentStateDecl, ContentInjection, ExportDecl-as-body-field, ComponentMatch,
+     TemplateRef, SelectorRef AS COMPONENTBODY FIELDS — audit: those that have a scope-path
+     equivalent (state decls, refs, matches via the matcher) lose their ComponentBodyDef field.
+   - fn component_body_to_js / component_body_to_js_with_params / directive_to_js — the
+     serializer of the construct IR to the factory payload. DELETE; the builder + scope-matches
+     produce the factory payload instead.
+   - ComponentBodyDef: SHRINK to the minimum the survivors need (see KEEP). If nothing needs
+     the struct, DELETE it; if editable-schema needs `.html`, it becomes a 1-field view or is
+     replaced by passing HtmlExpr/the scope directly.
+** Rust — capture-type plumbing
+   - CaptureType::ComponentBody variant (src/parser/meta_ast.rs:469) + every match arm:
+     parser/mod.rs:4506 (string→variant), lsp/{completion,hover,form_registry}.rs,
+     metasystem/validate.rs, treesitter_gen/capture_map.rs, syntax/events/extractors/{blocks,mod}.rs
+     — DELETE the variant; each arm is a compile error that MUST be removed (the compiler is the
+     kill-list enforcer here — `cargo build` fails until every arm is gone = zero zombies).
+** Rust — the hand-rolled @each (src/html/ssg_unroll.rs)
+   - fn find_nested_each, expand_nested_each, struct NestedEach, match_delim (if unused elsewhere)
+   — @each in a body lowers via the unified scope/builder path; SSG renders the lowered form.
+   DELETE; if ssg_unroll has nothing left, delete the file + its mod declaration.
+** stdlib — the parallel grammar
+   - stdlib/capture-types/component-body.st  (cb_state/cb_exports/cb_self_prop/cb_inject/
+     cb_toggle/cb_root_on/cb_selector_ref/cb_collection/cb_nested_each/cb_block/cb_template_ref/
+     cb_content_bind/cb_block_item/component_item) — the WHOLE file. DELETE.
+   - its EmbeddedFile entry in src/stdlib_embedded.rs + any include in stdlib/index.st
+   - match-block.st: KEEP if @match is a normal selector-scope construct the matcher handles;
+     DELETE its component-body coupling. (Audit: match_block may be reused at selector scope.)
+** Tests / snapshots that exist ONLY for the dead path
+   - src/syntax/events/component_body_corpus.rs (the 43+25 differential harness) — its PURPOSE
+     was to gate reify against the deleted parse_component_body. After the break it tests a dead
+     fn. DELETE (or REPURPOSE: re-point the corpus at the SCOPE path as the new golden — decide
+     at W1: a corpus that proves the scope path renders the 68 bodies correctly is VALUABLE; a
+     corpus that tests reify is dead. Prefer repurpose → it becomes the clean-break proof.)
+   - src/syntax/events/snapshots/component_body__*.snap (60+ files) — golden outputs of reify.
+     DELETE the ones asserting reify internals; REGENERATE under the scope path the ones that
+     assert end-to-end render. (Each snap: is it "reify produced this IR" (DELETE) or "this body
+     renders to this DOM/JS" (REGEN under scope path)?)
+
+* KEEP / REPOINT — survivors (must still work, repointed to the scope path)
+** The reactive builder (src/emit/html_reactive.rs) — KEEP, it's the renderer.
+   component_html_to_exprs / emit_builder_root_scoped / emit_element_hole stay. They now consume
+   the body SCOPE's HTML + its assigned nested matches (mount each at its span anchor) instead of
+   a ComponentBodyDef. The hole machinery is unchanged (holes = expressions, already correct).
+** The template factory (stdlib/primitives/template.st) — KEEP, repoint its payload.
+   It consumes { html, states, directives, injections, exports, css_rules, refs, matches,
+   selector_refs, builder }. After the break the payload is produced from the body SCOPE
+   (states/refs/matches/etc. become scope-matches the existing pipeline already serializes for
+   .sel{} scopes). The factory's forEach mounts stay; their INPUT changes source. Audit each
+   field: it must come from the scope path or its consumer dies too.
+** register-template / invoke-template primitives — KEEP; body arg becomes scope-derived.
+** editable/schema.rs (FEAT-099) — KEEP; it needs only body `.html` (the projection). Repoint to
+   read HtmlExpr/the scope's HTML directly; drop the ComponentBodyDef dependency.
+** pipeline/scope.rs build_scope_tree — KEEP + EXTEND: a template body is a new scope kind in
+   the tree (param environment per template-component-model.org's compile-time resolution).
+** match_block.st / @match, @on, class-toggle, content-injection, @each, template refs — KEEP as
+   NORMAL selector/template-scope constructs; they were ALWAYS real constructs, only DUPLICATED
+   inside component_body. The break removes the duplication, not the construct.
+
+* VERIFICATION — the "zero zombie" gate (run at the end of the cutover)
+1. `rg 'component_body|ComponentBody|reify_component_body|component_item|cb_(state|exports|...)|
+    find_nested_each|expand_nested_each|component_body_to_js' src/ stdlib/` ⇒ ZERO hits
+    (outside research/ docs). This is the literal acceptance test.
+2. `cargo build` ⇒ clean (every deleted CaptureType arm removed — the compiler enforces it).
+3. No `#[allow(dead_code)]` / `#[cfg(test)]`-only survivors of the dead path; no commented-out
+   blocks; no "legacy"/"deprecated"/"parity" comments referencing the removed parser.
+4. `cargo test --lib` + v8 template suite + headless + every demo render: green, with the
+   regenerated/ repurposed snapshots reflecting the SCOPE path (not reify).
+5. The BUG gates: cms-testbed admin Post body richtext mounts + persists (BUG-103); a template
+   body with nested @each renders its items (BUG-085); an unknown @foo in a body → normal parse
+   diagnostic, not silent drop (BUG-063 family).
+6. grep the org tracker: BUG-103/085 → DONE; PLAN-039 → DONE; no orphaned FUP referencing
+   component_body.
+
+* Sequencing (clean break — ONE cutover, not staged-alongside)
+Because the user wants a clean break + no zombies, do NOT run both paths in parallel. Instead:
+  S1  Build the SCOPE path complete (template body → scope; param env; builder consumes
+      scope-matches; factory payload from scope) on a branch of the work, WITHOUT deleting
+      reify yet — but wired as the ACTIVE path (the capture becomes a scope; reify becomes
+      unreferenced).
+  S2  In the SAME change, DELETE everything in the kill-list. The compiler (removed CaptureType
+      arms) + grep gate #1 enforce completeness — the build won't pass with a dangling reference,
+      so a zombie literally cannot survive the cutover commit.
+  S3  Regenerate/repurpose snapshots + the corpus against the scope path; run the full gate.
+  (S1 is the bulk; S2 is mechanical once S1 is active; S3 proves it. No "alongside" phase, no
+   feature flag, no dead branch left behind — that is the clean break.)
+
+* Provenance
+Inventory verified this session via grep over src/ + stdlib/: ~30 source files reference the
+machinery, 60+ component_body__*.snap goldens, the stdlib grammar file, ssg_unroll's hand-roll,
+and the LSP/validate/treesitter capture-type arms. The runtime factory consumes 10 payload
+fields (html/states/directives/injections/exports/css_rules/refs/matches/selector_refs/builder)
+— each must be re-sourced from the scope path or its producer+consumer both die. editable/
+schema.rs needs only `.html`. The compiler-enforced CaptureType-arm removals are the strongest
+zombie guard: the build cannot succeed while any consumer of the deleted variant remains.

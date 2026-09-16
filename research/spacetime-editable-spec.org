@@ -1,0 +1,168 @@
+#+TITLE: @editable — Structured Rich-Text Input (Spec)
+#+AUTHOR: Spacetime platform
+#+DATE: 2026-06-06
+#+STARTUP: overview
+#+PARENT: spacetime-app-platform.org (#10)
+
+* Thesis
+
+Rich text is a genuine *missing input primitive*, the analogue of =@input= for
+=<input>=. Today the admin builds it with =contenteditable= + =document.execCommand=
+(deprecated, opaque, unsanitized). The Spacetime version must be:
+
+1. *Declarative* — authored, not hand-wired in =%emit js=.
+2. *Compositional* — marks and blocks are *element-ref functions*
+   (=&bold(&sel)=, =&link(&sel, &href)=), not a fixed enum. Authors define new
+   marks/blocks the same way they define any =&template=.
+3. *AST-true* — the editor edits a constrained document AST, not =innerHTML=.
+   The wire format is the AST; HTML is a *projection*. Server sanitizes against
+   the mark/block allowlist (which is just "the set of registered ref-fns").
+
+The key design move (user-directed): a mark/block is a transform over a DOM
+selection — =&bold(&sel)= wraps the selection; =&link(&sel, &href)= wraps it AND
+takes an extra editable argument (=&href=) surfaced as an inline editing affordance.
+
+* Author surface
+
+#+begin_src spacetime
+@editable(bind: $body) {
+  marks: &bold &italic &code &link(&href);
+  blocks: &h2 &p &quote &list;
+}
+#+end_src
+
+- =bind: $body= — two-way bind to a signal holding the document AST (JSON).
+- =marks:= — inline transforms applied to the current selection.
+- =blocks:= — block-level transforms applied to the current block.
+- Each entry is an *element-ref function* defined elsewhere (stdlib or project).
+
+** A mark is a ref-fn over a selection
+
+#+begin_src spacetime
+// stdlib/editable/marks/bold.st
+@mark &bold(&sel) {
+  // &sel is the live selection range. The mark declares its AST node kind,
+  // its toolbar affordance, and how it projects to HTML.
+  node: "strong";
+  toolbar: <b>B</b>;
+  shortcut: "mod+b";
+  wrap &sel;                 // wrap selection in this node
+}
+#+end_src
+
+** A mark with an extra editable argument
+
+#+begin_src spacetime
+// stdlib/editable/marks/link.st
+@mark &link(&sel, &href) {
+  node: "a";
+  toolbar: 🔗;
+  shortcut: "mod+k";
+  // &href is a SECOND editable surface: when the mark is applied/active, an
+  // inline popover exposes &href for editing. It persists into the AST node's
+  // `href` attribute. This is the "several arguments you can edit" requirement.
+  attr href <- &href;
+  wrap &sel;
+}
+#+end_src
+
+** A block is a ref-fn over the current block
+
+#+begin_src spacetime
+// stdlib/editable/blocks/heading.st
+@block &h2() {
+  node: "h2";
+  toolbar: H;
+  shortcut: "mod+2";
+  set-block;                 // convert current block to this kind
+}
+
+@block &list() {
+  node: "ul";
+  item: "li";
+  toolbar: •;
+  set-block;
+}
+#+end_src
+
+* The document AST (wire format)
+
+#+begin_src json
+{ "type": "doc", "content": [
+  { "type": "h2", "content": [{ "type": "text", "text": "Title" }] },
+  { "type": "p",  "content": [
+      { "type": "text", "text": "hello " },
+      { "type": "text", "text": "world", "marks": [{ "type": "strong" }] },
+      { "type": "text", "text": " ", },
+      { "type": "a", "attrs": { "href": "/x" },
+        "content": [{ "type": "text", "text": "link" }] }
+  ]}
+]}
+#+end_src
+
+- =bind: $body= holds this object. =@effect= / =@data collection= persists it.
+- HTML projection is derived; never the source of truth.
+- Server sanitization = "every node.type ∈ registered marks∪blocks; every attr ∈
+  that node's declared attrs". No allowlist to maintain by hand — the ref-fn set
+  IS the allowlist.
+
+* Phasing (multi-phase project)
+
+** Phase 1 — Primitive + flat marks (MVP)
+- =@editable(bind:)= with a fixed built-in set: =&bold &italic &p=.
+- AST model + contenteditable surface + selection→AST mapping.
+- Replace =execCommand= with =Range=-based AST mutation.
+- Server sanitize against built-in set.
+- *Gate*: admin richtext widget runs on Phase-1 editable, no execCommand.
+
+** Phase 2 — Ref-fn marks/blocks (the real model)
+- =@mark= / =@block= macros: author-defined transforms.
+- =marks:= / =blocks:= lists in =@editable= resolve to registered ref-fns.
+- =node:/toolbar:/shortcut:/wrap/set-block= surface.
+- *Gate*: a project defines a custom =&highlight= mark; it round-trips.
+
+** Phase 3 — Multi-argument marks (=&link(&href)=)
+- Marks with extra editable args + inline popover affordance.
+- =attr x <- &arg= projection into AST node attrs.
+- *Gate*: =&link= edits href inline; persists; sanitizes.
+
+** Phase 4 — Composition & nesting
+- Nested blocks (list>item, quote>p), mark combinations.
+- Paste sanitization (HTML→AST through the allowlist).
+- Collaborative-safe ops (optional: position-stable edits for =via dev-ws=).
+- *Gate*: paste arbitrary HTML → only allowed nodes survive.
+
+* File hierarchy
+
+#+begin_example
+stdlib/editable/
+  MODULE.st                 manifest; public surface = @editable @mark @block
+  index.st                  @import graph
+  primitives/
+    editable-surface.st     %primitive: contenteditable host, selection tracking
+    ast-model.st            %primitive: AST<->DOM projection, Range mutation
+    sanitize.st             %primitive: AST validation against registered set
+  macros/
+    editable.st             @editable(bind:) { marks: …; blocks: … }
+    mark.st                 @mark &name(&sel, …args) { node: …; wrap &sel; }
+    block.st                @block &name() { node: …; set-block; }
+  marks/  bold.st italic.st code.st link.st
+  blocks/ heading.st paragraph.st quote.st list.st
+  tests/  ast-roundtrip.st selection.st sanitize.st link-args.st
+#+end_example
+
+* Why ref-fns (not enums)
+
+An enum (=marks:[bold,italic,link]=) hardcodes the editor's vocabulary in the
+compiler. Ref-fns make the vocabulary *open*: a mark is "a named transform over a
+selection that declares an AST node + a toolbar affordance + a projection." That
+is exactly a =&template= with a selection parameter. So =@editable= composes from
+the same primitive everything else does — no special-case mark registry, and the
+sanitization allowlist falls out of the registered set for free. This is the
+self-describing metasystem discipline (AGENTS.md) applied to rich text.
+
+* Open questions
+- =&sel= type: a first-class =Selection/Range= capture, or sugar over a hidden param?
+- shortcuts: register globally on the editable, or per-mark via a key primitive?
+- =set-block= vs =wrap=: two verbs, or one =apply= that the node kind disambiguates?
+- AST schema: adopt ProseMirror's node/mark shape (proven) or a leaner Spacetime one?

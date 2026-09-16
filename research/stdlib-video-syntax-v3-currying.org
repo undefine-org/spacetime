@@ -1,0 +1,201 @@
+#+TITLE: Score = application pipeline over curried templates — syntax v3 (final draft)
+#+DATE: 2026-07-18
+#+STATUS: supersedes v2 (stdlib-video-syntax-pressure-test.org). Constructs: @template (unchanged) · @play · @timeline/@score. @scene is DELETED.
+
+* The four v2 flaws (user review) and their one shared root
+
+1. ="whip-pan" was floating= — bare ident on a score edge: no sigil, no
+   provenance, no import story. The pre-sigil naming style, regressed.
+2. =@scene &intro($title = "Spacetime", for: 3s)= — a `:` inside a param
+   declaration list. That is E0929 by the operator algebra. Placement config
+   was contaminating a param decl.
+3. =&features= unexplained — referenced in score, declared nowhere.
+4. =@scene= was admitted sugar over =@template= — a parallel construct where
+   an extension of the existing one suffices (harmony rule 2 violation).
+
+Shared root: v2 treated the score as a NEW namespace with its own kinds of
+things (scenes, transitions, audio decls). It isn't. Everything a score
+places is a *template*, and =&name= is already a curried elem-ref function:
+same call → same node, scoped purity. The score is nothing but an
+**application pipeline over curried templates** — its lines finish the
+application by supplying the missing argument: a *span*.
+
+* The currying model
+
+| Expression | Application state | Result |
+|------------+-------------------+--------|
+| =&intro= | unapplied | the template-function itself (a value; passable) |
+| =&intro(title: "x")= | partially applied | curried — still not mounted |
+| =&intro(title: "x")= on a score line | span applied by the line | mounted clip entity |
+| =`&intro(title: "x")`= in markup | mounted statically | today's behavior, unchanged (span = whole life) |
+
+∴ one invocation form everywhere — =template_invocation=, the EXISTING capture
+type (component-body.st, match-block.st; extractor real & tested per
+BUG-001). Score introduces zero new invocation syntax.
+
+Mounting statically vs scoring are the same application with different
+final arguments. No scene/component distinction exists.
+
+* Construct 1: @template — unchanged, plus a signal scope
+
+#+begin_src spacetime
+@import "stdlib/video"                      // brings @play/@timeline/@score
+@import "stdlib/video/transitions"          // brings &whip-pan, &fade, ... (catalog = imports)
+
+@template &intro($title = "Spacetime") {
+  <hgroup class="intro">
+    <span class="intro__kicker">A language for the web's spacetime</span>
+    <h1 class="intro__title">`$title`</h1>
+  </hgroup>
+}
+
+@template &features($items) {
+  <ul class="features">
+    @each($items as $f) { <li class="features__card">`$f.title`</li> }
+  </ul>
+}
+#+end_src
+
+Answers flaw 3: =&features= comes from a =@template= decl or an import,
+compile-time checked — an unknown =&x= on a score line is a compile error
+(templates are compile-time entities; HyperFrames string-matches at runtime).
+
+Span-applied mounts additionally scope =$t / $progress / $phase= to the
+subtree. A template reading clip signals but mounted statically → compile
+diagnostic (E-code: "uses clip signals; mount via a score or give defaults").
+
+* Construct 2: @play — choreography for a template; owns natural duration
+
+#+begin_src spacetime
+@play &intro(3s) {
+  .intro__title  { opacity: 0 -> 1; translate-y: 40px -> 0;
+                   easing: &ease-out-expo; range: 0 to 40% }
+  .intro__kicker { opacity: 0 -> 1; range: 20% to 60% }
+}
+#+end_src
+
+- Head is =&template= (precedent: =@editable-block &name=). Body is the
+  keyframes blocktype VERBATIM from @on (mobile-tasks animations.st shape:
+  selectors, =->= chains, =range: X to Y=, =stagger=, =easing: &ref=).
+- **Natural duration lives here** — fixing flaw 2 for real: duration is a
+  property of MOTION, not of content or of a param list. Real code agrees:
+  mobile-tasks durations all live in animations.st (=@on visible
+  header-reveal(600ms…)=), never in index.st markup. =@play &intro(3s)=
+  mirrors =@on visible name(600ms)= exactly, with the &-head replacing the
+  deprecated post-macro name.
+- Score =for= overrides; a template with no @play and no =for= on its line
+  → compile error ("no duration from any source").
+- =@play= also accepts 3d entity heads (=&phone { pose: … }=) — one
+  choreography language over DOM/3D (kills @pose-track objectIndex).
+- A template may inline =@play { … }= inside its body (self-scoped) for
+  single-file catalog blocks; top-level =@play &name= is the layered idiom.
+
+* Transitions are templates too — the signature IS the kind
+
+Flaw 1 dissolved: =&whip-pan= is imported, and its nature is visible in its
+declaration — it takes two element regions, the EXISTING editable-block
+region shape (=@editable-block &columns(&left, &right)= precedent):
+
+#+begin_src spacetime
+// stdlib/video/transitions/whip-pan.st
+@template &whip-pan(&from, &to, $d duration = 300ms) {
+  <div class="st-whip">`&from``&to`</div>
+}
+@play &whip-pan($d) {
+  &from { translate-x: 0 -> -120%; filter: blur(0) -> blur(12px); range: 0 to 55% }
+  &to   { translate-x: 120% -> 0;  filter: blur(12px) -> blur(0); range: 45% to 100% }
+}
+#+end_src
+
+- On an edge position (=&a -> &whip-pan(300ms) -> &b=) the score curries
+  =&from/&to= with the neighbors automatically; the edge steals an overlap
+  window of the transition's duration; both neighbors stay mounted inside it.
+- **No "transition" kind exists in the compiler.** A template whose first
+  params are two element regions is edge-applicable; one without is a step.
+  Kinds-as-data via signature (AGENTS corollary: registry-keyed reference
+  over closed enum). Misuse (edge-applying a no-region template) = typed
+  compile error.
+- Shader transitions: same signature, body renders regions into the 3d rail
+  (=@stage/@post=, gl-transitions vendor). Swappable freely with DOM ones.
+
+* Construct 3: @timeline + @score — application site
+
+Placement is NOT parenthesized args (that contaminated param lists in v2).
+It rides infix words — the register keyframes already use (=with spring(…)=,
+=in oklch=, =to= ranges, =first= in stagger). Parens stay pure template args.
+
+#+begin_src spacetime
+@template &bgm { <audio src="assets/bgm.mp3"></audio> }     // media = markup, standards-compliant
+@template &voice { <audio src="assets/vo.mp3"></audio> }
+
+@timeline &film(time, size: 1920x1080) {
+  @score {
+    &intro -> &whip-pan(300ms) -> &features($launch_items) -> &fade(400ms) -> &outro
+    &lower-third(name: "Ada Lovelace", role: "Analyst") at 2s for 3s
+    &bgm(gain: 0.6, duck: &voice) during &intro to &outro
+    &voice at 1s
+    &subs
+  }
+}
+
+<section class="hero">`&film`</section>
+#+end_src
+
+Line grammar:
+- step := =template_invocation= placement*   (invocation type reused as-is)
+- placement := =at m= · =for m= · =after &x= · =during &x to &y=
+  (postfix, binds to the preceding step; =to= is the existing range word)
+- =->= := sequence edge (the transition operator lifted one level, unchanged
+  meaning); an edge-applicable invocation between two =->= rides the edge
+- rests/gates := =gap(d)= · =hold(until: expr)= — the only score builtins,
+  they are rests in the stave, not content, ∴ not templates
+- line = track (stave); vertical order = z-order; measures typed by driver
+  (=3s= under scroll → E-code suggesting =%=; =beat(n)= unlocked by
+  =media(&track)= with =bpm=)
+- =duck: &voice= is a normal param taking an entity ref — currying again;
+  media playback is framework-owned (seek-follow live; manifest-mix render)
+
+Capture-type sketch (all reuse):
+#+begin_src spacetime
+%capture_type placement  { ( "at" $at:measure ) | ( "for" $for:measure )
+                         | ( "after" $after:element )
+                         | ( "during" $from:element "to" $to:element ) }
+%capture_type score_step { $inv:template_invocation ( $place:placement )* }
+%capture_type score_line { $head:score_step ( "->" $next:score_step )* ";"? }
+%capture_type score_block{ "@score" "{" ( $lines:score_line )* "}" }
+#+end_src
+
+* Full-anatomy example (the four layers, layered idiom)
+
+- =scenes.st= — =@template &intro/&features/&outro/&lower-third= (+ imports)
+- =motion.st= — =@play &intro(3s) {…}= etc.
+- =film.st= — =@timeline &film(time) { @score { … } }=
+- =index.st= — page markup mounting =`&film`=
+Same anatomy as examples/mobile-tasks (index/animations/states). One-file
+remains legal for catalog blocks.
+
+* What deleted (elegance-bar receipts)
+
+- =@scene= construct — @template extended instead.
+- "transition" as a kind — signature-driven, kinds-as-data.
+- =@audio/@captions= as bespoke decls — media entities are templates wrapping
+  standard elements (=<audio>=, =<track>=/VTT); @captions survives only as a
+  catalog template family (=&subs= style components), not compiler surface.
+- v2's =for:/at:= parenthesized placement — placement words are line grammar.
+- (inherited from v1/v2 kills) post-macro naming, @after predecessor strings,
+  pose-track objectIndex.
+
+New grammar TOTAL: =@play= head, =@timeline= head, =@score= block with
+placement words + =gap/hold=, clip-signal scope, measure typing. Everything
+else — invocation, keyframes, range, stagger, easing, regions, @each,
+=`&x`= mounting — is untouched existing ST.
+
+* Open (carried)
+
+1. DOM transition snapshot tiers (CSS cross-fade vs GPU snapshot) —
+   fidelity-laddered; impl-time.
+2. =$phase= variant type via match-render rail — impl-time.
+3. Edge-window placement default (centered on cut) vs =lead/lag= words —
+   decide with first real transition set.
+4. Whether =gap/hold= should be expressible as (stdlib-private) templates
+   later — only if it deletes score-builtin code; not author-visible either way.

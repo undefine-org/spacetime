@@ -1,0 +1,158 @@
+#+title: Analysis — &template-ref as the blessed encapsulation unit
+#+date: 2026-07-09
+#+author: spell session (ora-ventures rewrite prep)
+
+* Question
+
+Can =@template &name(params) { … }= bodies contain ALL of Spacetime (HTML, CSS,
+macros, state, animations) with scope resolved to the template instance? Or are
+there special cases? Goal: bless "element-ref as function" as THE encapsulation
+mechanism, starting with the ora-ventures.com rewrite.
+
+* Method
+
+Empirical probes: minimal =.st= fixtures under =scratch/tpl-probe/=, compiled with
+=cargo run -- check= / =build=, dist inspected for factory payloads, CSS, runtime JS.
+Cross-referenced against =stdlib/macros/template.st=,
+=stdlib/capture-types/component-body.st=, =src/syntax/events/form_compiler.rs=.
+
+* Architecture (how a template body is compiled)
+
+- A =@template= body is NOT parsed by a special-case Rust parser: the generic
+  =segment_component_body= splitter (construct-agnostic) cuts the body into
+  HTML runs + construct segments, then the stdlib =component_item= ordered
+  Choice (=stdlib/capture-types/component-body.st=) classifies each segment.
+  Grammar lives in stdlib; adding a body construct = one =%capture_type= + one
+  Choice arm. ✓ self-describing metasystem discipline.
+- Body compiles to a factory: =Spacetime.buildTemplateFactory(name, {html,
+  states, exports, refs, builder})=. The =builder= is a DOM-constructing
+  closure; holes compile to =ST.resolve(node, 'param')= + =ST.watchScoped=.
+- Scope: instance-first lexical resolution (=ST.resolvePath= walks
+  containerEl + ancestors, then SpacetimeLocal/global @data). PLAN-039.
+  Verified: two instances of the same counter template have isolated =$count=.
+
+* What WORKS inside a template body (all verified by compile+dist inspection)
+
+| Surface | Status | Evidence |
+|---------+--------+----------|
+| HTML + backtick holes (incl. full exprs =`$price * $qty`=, ternaries) | ✓ | builder JS emits watchScoped per dep |
+| Local state =$open bool: false;= | ✓ | cb_state; isolated per instance |
+| =@on click= mutations in =.sel { }= blocks | ✓ | cb_root_on / cb_block_item |
+| Class toggles =.visible: $open;= | ✓ | cb_toggle |
+| Content bindings =text: $x;=, =text <- $x;=, attr injections | ✓ | cb_inject / cb_content_bind |
+| Named selector refs =&btns[] .bar { @each … }= | ✓ | cb_selector_ref |
+| =@each= (nested, template-invoking or inline HTML) | ✓ | cb_nested_each |
+| =@match $sig { … }= | ✓ | match_block arm |
+| =@data inline= declared inside body | ✓ | compiles to _localState write (NB: registers GLOBALLY, not instance-scoped — acceptable, but name-collision-prone; prefer =$name type: v= instance state) |
+| =@fn= inside body | ✓ | compiles |
+| =@effect= inside body | ✓ | compiles |
+| Plain CSS rules, pseudo-classes/elements (=:hover=, =::after=) | ✓ | emitted to spacetime.css |
+| =@reveal(...)= (+ keyframes body) in a =.sel { }= | ✓ | st-reveal runtime emitted |
+| =@scroll name(scope: cover, scrub: true) { .sel { a -> b } }= | ✓ | timeline runtime emitted |
+| =@fade-in= etc. presets | ✓ (compiles; fade-in itself is a known stdlib TODO stub) |
+| =@portal name($open) { … }= | ✓ | compiles |
+| Nested template invocation (template invoking another template) | ✓ | |
+| =@exports { $count: mut }= + named instance refs (=&c1 &counter();=) | ✓ | cross-instance reads =$c1.count= compile |
+| Inline-hole invocation in page HTML: =`&tpl(args)`= | ✓ | data-st-hole hydration marker |
+| Body-slot invocation =&card("T") { <p>body</p> }= fills first unbound =&param= | ✓ | bodyHtml passed to factory |
+
+* Special cases / gaps found (ranked by impact on the "blessed" story)
+
+** GAP-1 — optional element param =&footer?= is a PARSE ERROR [RESOLVED: BUG-165]
+=@template &card($title, &footer?)= → "expected COLON, found R_PAREN".
+Yet =$title?= (value param) works, and =stdlib/macros/template.st= DOCUMENTS
+=&content?= as supported (its own doc-comment example fails to compile).
+=param_list.st= grammar reads =( $binding | $element ) collmark? typeref? optmark?=
+— the =&element optmark?= path is broken somewhere between grammar and the
+param-list reifier. This kills the composition story (optional slots are the
+bread and butter of card/section components).
+
+** GAP-2 — animation-only =@on visible/hover { & { a -> b } }= rejected (E0906) [RESOLVED: BUG-166]
+=validate_on_action= (form_compiler.rs:3126) requires a =$var <- expr=
+assignment in EVERY =@on= body inside a template. At page level, an
+animation-only =@on visible { & { opacity: 0 -> 1 } }= is legal. Inside a
+template body it errors. Again the stdlib doc-comment's own example
+(=@example with scoped animations= in template.st) fails. Workaround exists
+(=@reveal=/=@scroll=/=@load= macros work), but the asymmetry page-level vs
+template-level violates "template body = all of Spacetime".
+
+** GAP-3 — =@media= inside a template body is silently DROPPED [RESOLVED: BUG-167]
+=@media (max-width: 700px) { .mq { … } }= inside a body: no error, no CSS
+emitted. Page level emits it fine. Silent loss = worst failure mode.
+Responsive component styling must currently live outside the template.
+
+** GAP-4 — template CSS is NOT scoped (global namespace)
+Two templates both styling =.box= → both rules emitted globally, last wins.
+No instance/name scoping (no data-st-id attribute selector prefixing). BEM
+discipline is the de-facto convention (showcases use =showcase-hero-min__*=).
+Acceptable for a curated site; a real gap for a blessed component model.
+
+** GAP-5 — template invocations are not SSG-unrolled [RESOLVED: FEAT-154, v1 scope — literal args only, no transitive nesting]
+=&card("T");= renders client-side only; served HTML has an empty container
+(or =data-st-hole= marker). =unroll_static_each= handles static =@each= but
+not static template invocations with literal args. SEO/no-JS content must
+stay in page-level HTML for now. For ora-ventures: keep headline/copy in
+page HTML, use templates for interactive/repeated widgets.
+
+** Minor
+- =@data inline= inside a body registers in the GLOBAL _localState namespace.
+- =fade-in= macro is a documented stub (%when body TODO) — use =@reveal= instead.
+
+* PLAN-070 outcome (2026-07-09)
+
+All four filed gaps (BUG-165, BUG-166, BUG-167, FEAT-154) resolved and
+verified (CDP/headless/unit test coverage; full regression suites green).
+Two INCIDENTAL bugs surfaced during W5 doc-convergence verification,
+filed separately (different root causes, different code paths, not part
+of the original four):
+
+- BUG-168 — the =template-inline= unlinked-ref DEFINITION form
+  (=&name(params) { body }=, without the =@template= prefix) never builds
+  its World-A scope at all (a construct-recognition gap: the scope-builder
+  loop only walks =Directive= nodes, and this form is an =ElementRefStmt=).
+  Distinct from BUG-165/166/167 (those were about BODY CONTENT of an
+  already-recognized =@template=; this is about a whole ALTERNATE
+  declaration syntax never being recognized).
+- BUG-169 — the =@mount= =.test.st= test HARNESS (not the production
+  compiler/runtime) fails to resolve a BARE template invocation's holes
+  (=&card("x");= with no named ref) while the identical invocation via a
+  named ref (=&inst &card("x");=) works correctly — confirmed NOT present
+  in a real compiled+served site. A test-writing gotcha more than a
+  product bug, but it masked real behavior in at least one pre-existing
+  fixture (=template-factory.test.st=, BUG-105) that only asserted
+  existence, never hole content.
+
+* Verdict
+
+The architecture is genuinely "template body ≈ file scope": same segmenter,
+same stdlib grammar arms, instance-first scope resolution, animations and
+state machinery all flow through. It is ~90% of "all of ST". The remaining
+10% is 3 real bugs (GAP-1 parse, GAP-2 validator asymmetry, GAP-3 silent
+@media drop) + 2 design gaps (CSS scoping, SSG unroll) — not architectural
+limits. All five are fixable inside existing rails (param_list grammar,
+validate_on_action relaxation, media hoisting in body segmenter, selector
+prefixing at emit, extending unroll_static_each).
+
+* Recommended follow-ups (before/while blessing &ref-as-function)
+
+1. BUG: =&name?= optional element param parse failure (param_list vs reifier).
+2. BUG: E0906 wrongly fires on animation-only =@on= bodies in templates —
+   accept =prop: a -> b= keyframe statements as valid action bodies.
+3. BUG: =@media= silently dropped from template bodies — either support
+   (hoist to global CSS) or emit a diagnostic. Silent drop is never OK.
+4. FEAT: opt-in scoped CSS for templates (prefix rules with a per-template
+   attribute) — elegance-bar review needed.
+5. FEAT: SSG-unroll static template invocations (literal args, static body)
+   — extends the existing =unroll_static_each= discipline (=unroll == hydrate=).
+
+* Practical guidance for ora-ventures.com rewrite (given today's compiler)
+
+- Use =@template &ora-*(…)= for every repeated/interactive affordance:
+  section shells, stat counters, case-study cards, tabs, forms.
+- BEM-prefix every class inside a template (=ora-card__*=) — GAP-4.
+- Required element params + body-slot form work; avoid =&slot?= — GAP-1.
+- Animations inside templates: use =@reveal= / =@scroll= / =@load= /
+  class-toggle + CSS transition. Avoid raw animation-only =@on visible= — GAP-2.
+- Keep responsive rules at file scope, adjacent to the template — GAP-3.
+- Keep SEO-critical copy (hero, section headlines) in page-level HTML;
+  templates own the interactive layer — GAP-5.

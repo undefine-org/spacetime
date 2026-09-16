@@ -1,0 +1,157 @@
+#+TITLE: @cms full surface + whole-website editing from the admin
+#+DATE: 2026-06-12
+#+STATUS: DESIGN ANSWER (current reality + proposed W2 extension)
+
+* What the user asked
+"Show me the full @cms declaration, and also how you'd make the whole website editable
+from the admin if you wanted to. I want to test rich text editing and whatnot."
+
+This doc: (1) the @cms surface AS IT EXISTS today, (2) the proposed W2 extension, (3) the
+two editing surfaces (on-page vs admin) and how to make the WHOLE site editable from the
+admin, (4) the rich-text test path + the bug that currently blocks it (BUG-103).
+
+* 1. @cms — the FULL declaration AS IT EXISTS (stdlib/__admin__/cms-hint.st)
+@cms is a file-scope macro taking the target @type as a paren arg. It is PURE METADATA —
+no runtime JS/CSS (no %binds), exactly like @type. The dev server reads the FormMatches
+into /__spacetime/dev/types.json. Two roles exist today:
+
+** (a) DISPLAY hints — how the admin lists a type's entries
+   @type Talent {
+     id: string; slug: string; name: string;
+     headline: string; image: string; categories: string[];
+   }
+   @cms(Talent) {
+     title:     name;          // which field is the row title
+     subtitle:  headline;      // row subtitle
+     thumbnail: image;         // row thumbnail
+     chips:     categories;    // a string[] → category chips
+   }
+   Convention fallback (NO @cms needed): name|title→title, headline|subtitle→subtitle,
+   image|photo|avatar|cover|url→thumbnail, categories|tags→chips. @cms only OVERRIDES.
+
+** (b) EDITABLE singleton — mark a typed @data inline as structurally editable
+   @type Brand { scarlet: color; ink: color; radius: length; reveal: duration; }
+   @data inline $brand Brand : { "scarlet":"#FF0020", "ink":"#0a0a0a", … };
+   @cms(Brand) { editable: inline; }     // ← the admin Brand pane edits this literal
+                                          //   via EditAst (rewrites the .st value)
+   `editable: inline` is read by build_brand_json (server.rs:3372): it finds the
+   @data-inline singleton whose type is so-marked and exposes it to the admin's Brand
+   pane with a widget-annotated schema + current values.
+
+** Grammar (the real macro):
+   %macro cms { %scope file  %order 51
+     %form { @cms($type:ident) { $hints:properties } }
+     %registers cms($type) { $hints }
+   }
+   The `$hints:properties` is a generic role→value map; that's why both `title: name`
+   (display) and `editable: inline` (mode) parse through ONE form. Roles are interpreted
+   by the server (collect_cms_hints + compute_display_roles + build_brand_json).
+
+** Known limit (documented in cms-hint.st): the NESTED form `@type T { @cms { … } … }`
+   does NOT parse (@type captures its whole body as $fields:properties; a nested @cms
+   corrupts it). Tracked: FUP-macro-body-scope + FUP-macro-namespaces. The
+   @cms(TypeName) file-scope-with-arg form is the interim, fully-parsing surface.
+
+* 2. The widget vocabulary (field type → editor), already derived by introspection
+The dev server's widget_for() (server.rs:3180) maps every @type field to a WIDGET from the
+JSON schema — NO @cms needed, pure type introspection:
+  | field shape                         | widget          |
+  |-------------------------------------+-----------------|
+  | richtext                            | richtext (block editor) |
+  | string                              | text            |
+  | (long) string                       | textarea        |
+  | number | integer                    | number          |
+  | boolean                             | toggle          |
+  | "a" | "b" | "c"  (enum/union)        | select          |
+  | url | image | cover | …  (by name)   | media           |
+  | string[]                            | chips           |
+  | id(T)                               | relation        |
+  | id(T)[]                             | relation-multi  |
+  | object                              | fieldset        |
+  | color / length / duration           | color/length/duration token |
+  | slug | id                           | readonly        |
+The admin drawer (drawer.st) has a &fld-<widget> template per kind and dispatches by
+$f.widget. So "editable-everything in the admin" is ALREADY how the admin works — every
+field of every @type collection renders its typed editor in the drawer, persists via
+EditJson over dev-ws. THIS is "the whole website editable from the admin."
+
+* 3. The TWO editing surfaces (and how they relate)
+  (A) ADMIN (/__spacetime/admin/) — the structured back-office. Every @data COLLECTION
+      (Post[], Author[]) + every editable SINGLETON (@cms editable:inline) renders as
+      typed widget forms in a drawer. CRUD, relations, reordering, the Brand/tokens pane.
+      Persists: collections → EditJson to the data file; singletons → EditAst to the .st
+      literal. This is already "whole-site content editing from one place."
+  (B) ON-PAGE (the published site, --debug edit-mode) — WYSIWYG. What we built this arc:
+      @richtext (W1) + plain text fields (W3) + images (W3b) click-to-edit IN PLACE and
+      persist to the SAME data files via the SAME EditJson rail. The page IS the editor.
+Both read the SAME contract (types.json widgets) and write the SAME rail (EditJson/EditAst).
+A→ power editing / new entries / relations / bulk. B→ contextual "edit what you see."
+
+** "Make the WHOLE website editable from the admin" — the recipe (works TODAY):
+   1. Model content as @type + @data collection (or an editable @data-inline singleton):
+        @type Post { id:string; title:string; body:richtext; cover:url; tags:string[];
+                     status:"draft"|"published"; author:id(Author); }
+        @data collection $posts Post[] from "/data/posts.json" via dev-ws { initial: []; }
+   2. (optional) @cms(Post) { title: title; thumbnail: cover; chips: tags; } for nice rows.
+   3. Render the public site from $posts (@each … `$p.title` … @richtext(bind:$p.body)).
+   4. cargo run -- serve <proj> --debug  → /__spacetime/admin/ lists posts; each entry's
+      drawer is a typed form (title=text, body=RICHTEXT block editor, cover=media picker,
+      tags=chips, status=select, author=relation). Edit → persists to /data/posts.json.
+   The admin is GENERATED ENTIRELY from the @type/@data/@cms introspection — no admin code
+   per project. cms-testbed (projects/cms-testbed/) is the live demo of every widget.
+
+* 4. Rich-text testing — and the BUG that currently blocks it (BUG-103, P1)
+To test richtext I made cms-testbed exercise it: `@type Post { … body: richtext; }` and
+`@type Section { … body: richtext; }`. types.json correctly reports widget:"richtext",
+x-st-richtext:true. The admin lists posts (First Light / On Debugging / Draft Notes) and
+opens a drawer with the `body` field.
+
+BUT the richtext editor does NOT mount in the admin. The drawer's &fld-richtext template
+body contains `@editable(bind:`$f.value`, …)`, and that nested @editable is emitted as
+LITERAL TEXT — the admin runtime literally contains the string "@editable(bind: …);" with
+an EMPTY bind. Root cause: a selector-scope macro (@editable) nested inside a @template body
+is NOT expanded by the macro pipeline (the template body is captured as HTML/text). So:
+  - ON A PAGE, @richtext/@editable work (top-level selector macro) — proven this arc (W1).
+  - IN THE ADMIN DRAWER, @editable is inside a @template → never compiles → no editor.
+This is BUG-103 (filed P1). It is THE blocker for admin rich-text. Fix direction:
+  (a) make @template bodies expand nested selector-scope macros (general, right fix; touches
+      pipeline/expand.rs + template-body capture in pipeline/mod.rs) — preferred if blast
+      radius is containable;
+  (b) mount the editable surface imperatively in the admin runtime, keyed on
+      [data-widget="richtext"], reading the bound value (pragmatic unblock, less harmonious).
+
+Meanwhile, the ON-PAGE rich-text editing (editable-blog demo) is fully working + persisting
+— so rich text editing IS testable today on the published-page surface (W1+FUP-047),
+just not yet in the admin drawer (BUG-103).
+
+* 5. Proposed W2 — declarative @cms editable vocabulary (the improver)
+Extend the @cms role map (no new macro; the $hints:properties form already accepts arbitrary
+roles) so authors can TUNE on-page + admin editing per field:
+   @cms(Post) {
+     title: title; thumbnail: cover; chips: tags;   // (existing display roles)
+     editable: inline;                                // whole type editable on-page (existing role, extended to collections)
+     body: richtext(marks: [bold, italic, link], blocks: [p, h2, blockquote, columns]);  // per-field surface config
+     readonly: [slug, id];                            // exclude from editing
+     editable_off: [internalNotes];                   // opt specific fields OUT
+   }
+Server reads these into types.json per-field {editable, readonly, marks, blocks}. Then:
+  - the admin drawer uses them (richtext marks/blocks, readonly fields);
+  - the ON-PAGE inline editors (W3/W3b and a future W3c) read the SAME per-field widget +
+    editability to mount the correct typed control by CONTRACT (not by value-guess).
+W2 is the prerequisite for W3c (number/toggle/select INLINE widgets on the page): without
+the type/widget contract surfaced to the page, on-page inline editing can't know a boolean
+is a toggle vs a number is a stepper vs a union is a select. W2 unblocks W3c.
+
+* Recommended order
+  1. BUG-103 (P1) — make admin rich-text actually mount. Unblocks the user's "test rich
+     text editing" directly. (Fix (a) if containable, else (b).)
+  2. W2 — @cms editable vocabulary (declarative per-field config), the introspection
+     contract both surfaces consume.
+  3. W3c — on-page inline typed widgets (number/toggle/select/chips), reusing the drawer
+     templates, driven by the W2 contract.
+
+* Provenance
+Read this turn: cms-hint.st (full grammar), server.rs (collect_cms_hints/compute_display_
+roles/build_brand_json/widget_for), type_system.rs (richtext→x-st-richtext), drawer.st
+(&fld-* incl. &fld-richtext), admin runtime (confirmed @editable emitted literal). Live:
+cms-testbed admin verified — every widget renders; richtext is the one broken path (BUG-103).

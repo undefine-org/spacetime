@@ -1,0 +1,212 @@
+#+TITLE: ComponentBody & nested macros — the ambitious grammar-driven refactor (BUG-103)
+#+DATE: 2026-06-12
+#+STATUS: DESIGN / INVESTIGATION (no code yet — answering "is ComponentBody deprecated? what's the most ambitious fix?")
+
+* The question
+User: "ComponentBody (and the stuff around it) is probably deprecated code that's still
+called, which is bad. Normally %capture_type should make it unneeded. Consider the most
+ambitious refactored version." And earlier: "I want fix (a) [make @template bodies expand
+nested selector-scope macros] regardless of blast impact — explore it fully."
+
+* TL;DR — the verdict
+ComponentBody is NOT deprecated dead code. It is the LIVE, grammar-driven IR for every
+@template / component / editable-mark / editable-block body. The grammar of its constructs
+ALREADY lives in stdlib (`stdlib/capture-types/component-body.st`, the `component_item`
+Choice) — the metasystem discipline IS in force here. What's MISSING is one arm: the body
+grammar enumerates the KNOWN constructs (state, exports, toggle, @on, @match, selector_ref,
+css block, template_ref) but has NO arm for a GENERIC NESTED MACRO invocation (@editable,
+@richtext, any selector-scope macro). So @editable inside &fld-richtext matches no arm →
+the Rust reifier's `is_directive` branch DROPS it (BUG-103). The bug is a MISSING GRAMMAR
+ARM + a MISSING RUNTIME MOUNT, not rot to delete.
+
+∴ The "ambitious refactor" is NOT "delete ComponentBody and let %capture_type do it" — the
+two are the SAME system (the Rust IR is the typed target the grammar reifies INTO). The
+ambitious move is: make NESTED MACRO INVOCATION a first-class body construct, end to end,
+so the body parser is truly construct-agnostic and the LAST hand-special-cased gap closes.
+
+* How it actually works today (the full pipeline)
+1. PARSE: `$body:component_body` capture (CaptureType::ComponentBody). The matcher hands the
+   raw body inner to `reify_component_body(inner)` (src/syntax/events/form_compiler.rs:2261).
+2. SEGMENT: `segment_component_body` (construct-agnostic Rust infra) splits the body into
+   HTML runs vs CONSTRUCT segments at tag-depth/termination boundaries.
+3. CLASSIFY: each construct segment is matched against the stdlib `component_item` Choice
+   (`component_item_extractor()` → the grammar from capture-types/component-body.st). First
+   arm wins: cb_state | cb_exports | cb_self_prop | cb_inject | cb_toggle | cb_root_on |
+   match_block | cb_selector_ref | cb_block | cb_template_ref.
+4. REIFY: the matched branch + its coarse fields are mapped by a small Rust `reify_*` adapter
+   into the typed `ComponentBodyDef` IR { html, states, directives[], injections[], exports[],
+   css_rules[], refs[], selector_refs[], matches[], diagnostics[] }. (form_match.rs:376)
+5. SERIALIZE: `component_body_to_js_with_params` (form_match.rs:1421) emits the IR as a JS
+   object { html, states, directives, injections, exports, css_rules, refs, selector_refs,
+   matches, builder } passed to `register-template`.
+6. MOUNT: the template factory (stdlib/primitives/template.st) walks each typed array at
+   instantiation: builds the reactive DOM from `builder`/`html`, seeds `states`, wires
+   `directives`, and — crucially — `bodyRefs.forEach(ref => invokeTemplate(...))` (line 457)
+   and `bodyMatches.forEach(...)` (line 521) MOUNT nested template-invocations and @match
+   render constructs per instance.
+
+THE GAP (BUG-103): step 3 has no arm for `@editable(...)`. It hits step 4's `None` branch,
+where `is_directive = ltrim.starts_with('@') && alpha` → `// drop (parity)`. So a nested
+selector-scope macro is recognized-as-a-directive-and-silently-dropped (the admin then shows
+the raw text because the SEGMENTER, for a body whose only construct is @editable wrapped in
+html, may keep it in an HTML run — either way: no editor mounts, bind empty).
+
+Why it works ON A PAGE but not in a TEMPLATE: on a page `@editable`/`@richtext` is a
+top-level SELECTOR-scope macro — the normal macro pipeline expands it into an
+editable-surface primitive invocation bound to its selector. Inside a @template body, the
+body parser OWNS the bytes and never re-enters the macro pipeline for nested directives.
+refs[] and matches[] are the ONLY nested constructs that DO get a runtime mount — because
+someone added explicit grammar arms + IR fields + runtime forEach for them. @editable has
+none. That asymmetry IS the bug.
+
+* Is %capture_type "supposed to make ComponentBody unneeded"? — the nuance
+Partly yes, mostly no:
+- The CLASSIFIER is already grammar (the comment in component-body.st: "This REPLACES the
+  hand-written 11-branch Rust classifier + per-construct token parsers"). FEAT-079/080 did
+  exactly the refactor the user is imagining — for the KNOWN constructs.
+- But a typed IR is STILL needed: the runtime factory consumes typed arrays (states with
+  typed initials, directives with action-kinds, refs with split args). %capture_type yields
+  COARSE string fields; the `reify_*` adapters do the scalar value-semantics (typed initial,
+  action-kind classification, arg split) that turn coarse grammar records into the runtime
+  contract. So ComponentBodyDef is the IR, the grammar is the front-end, the reifiers are a
+  thin adapter. None of it is dead.
+- The HONEST critique the user is pointing at: the `reify_component_body` `None`/`is_directive`
+  "silently drop unknown @directive" branch is a HAND-SPECIAL-CASE that swallows anything the
+  grammar doesn't know — which is exactly the keystone anti-pattern this codebase forbids
+  (BUG-063 fought it elsewhere). THAT is the rot: not ComponentBody itself, but the
+  swallow-the-unknown fallthrough. The ambitious refactor removes that fallthrough by making
+  the grammar COMPLETE (a generic nested-macro arm) so nothing is unknown.
+
+* THE AMBITIOUS REFACTOR — nested macro invocation as a first-class body construct
+Goal: a @template body may contain ANY selector-scope macro invocation (@editable, @richtext,
+@on already-special, future macros), expanded + mounted per-instance, with NO per-macro Rust
+special-casing. Close the swallow-the-unknown branch.
+
+Design (end to end, mirroring refs[]/matches[]):
+
+** (1) GRAMMAR — a generic nested-directive arm (stdlib/capture-types/component-body.st)
+   Add a leaf capturing a `@name(args) ;`-or-block directive invocation, and put it in the
+   `component_item` Choice AFTER the specific arms (so @on/@match/@exports keep priority):
+       %capture_type cb_directive {
+           "@" $name:ident $args:balanced(';') ";"?     // @editable(bind:`$f.value`, …);
+       }
+   plus a block form `@name(args){ … }` if needed. The Choice's last general arm becomes
+   cb_directive (before cb_template_ref, or after — ordering is the design's one subtlety:
+   @-led vs &-led don't collide, so order is free). This is the WHOLE author-facing change:
+   one grammar arm, in stdlib, no Rust classifier edit.
+
+** (2) IR — a typed `NestedDirective` (form_match.rs)
+   Add `directives_macro: Vec<NestedDirective>` (or fold into a richer `directives` enum) where
+       struct NestedDirective { name: String, raw_args: String, /* parsed holes */ }
+   The reifier for the cb_directive branch fills it. It does NOT interpret the macro — it
+   records name+args (the args carry `$f.value` holes that resolve per-instance, exactly like
+   a template-ref's args).
+
+** (3) EXPANSION — resolve the nested macro at compile time (the KEY move)
+   This is where ambition meets blast radius. Two sub-options:
+   (3a) COMPILE-TIME RE-ENTRY [most ambitious, most correct]: when reifying a cb_directive,
+        RE-INVOKE THE MACRO PIPELINE on `@name(args)` as if it were a top-level selector macro,
+        capturing its %binds output (the primitive invocation, e.g. editable-surface(...)) as a
+        NESTED RUNTIME CONSTRUCT attached to the body. The body factory then mounts it per
+        instance with the args' holes ($f.value) bound to the instance data. This makes the
+        body parser truly construct-agnostic: ANY macro works, because expansion is the SAME
+        pipeline, just re-entered for the nested scope. Requires: a reusable "expand one macro
+        invocation in a given scope" entry point (the pipeline already has the machinery; it
+        must be callable from the body reifier — a layering change, since reify runs in the
+        syntax layer and macro expansion in the pipeline layer → likely a two-phase pass:
+        body reify records the raw cb_directive; a later pipeline pass expands recorded
+        directives once the macro registry is available).
+   (3b) RUNTIME DELEGATION [pragmatic, still general]: serialize the cb_directive as
+        { name, args } and at factory mount time call a runtime `ST.mountDirective(el, name,
+        args, instanceData)` that looks up a RUNTIME registry of mountable directives
+        (editable-surface registers itself there). Less pure (the macro→primitive mapping
+        lives partly at runtime) but avoids the syntax/pipeline layering re-entry. Mirrors how
+        refs[] mount via ST.invokeTemplate at runtime.
+
+   PREFER (3a) — it is the harmonious end state (one expansion path, the grammar is the only
+   surface, the runtime has no macro knowledge). (3b) is the fallback if the layering re-entry
+   proves too invasive in one arc.
+
+** (4) RUNTIME MOUNT — `bodyDirectivesMacro.forEach` in the factory (template.st)
+   Parallel to bodyRefs/bodyMatches: for each nested directive's expanded primitive, run its
+   mount against the per-instance root with holes bound. For @editable this means invoking
+   editable-surface(host=the [data-widget=richtext] node, bind=instanceData.f.value, …).
+
+** (5) DELETE the swallow-the-unknown branch (the actual rot removal)
+   With cb_directive in the grammar, `reify_component_body`'s `None`/`is_directive`
+   "// drop (parity)" branch becomes UNREACHABLE for valid macros → replace it with a hard
+   E0900 diagnostic ("unknown directive @foo in component body") for genuinely-unknown names.
+   No more silent swallow. THIS is the deprecated-pattern removal the user senses.
+
+* Blast radius (the user said "regardless", but here it is, eyes open)
+- New grammar arm: stdlib/capture-types/component-body.st (+1 %capture_type, +1 Choice arm).
+- IR: form_match.rs ComponentBodyDef (+1 field + struct), component_body_to_js (+1 serialize),
+  the runtime factory template.st (+1 forEach mount).
+- Reifier: form_compiler.rs reify_component_body (+1 branch; -the silent-drop fallthrough).
+- Expansion (3a): a pipeline pass that expands recorded nested directives — touches
+  pipeline/mod.rs (where register-template bodies are already scanned for refs) + a callable
+  macro-expansion entry. This is the real-risk surface: re-entering macro expansion for a
+  nested scope, binding instance holes. EVERY @template in stdlib + projects re-compiles
+  through this path → the regression surface is "all templates still render identically"
+  (snapshot tests + the cms-testbed admin + every demo). Containable because the change is
+  ADDITIVE (new arm; existing arms untouched) until step 5 flips the fallthrough to an error.
+- Tests: the component-body fuzz/snapshot suite, the v8 template tests, the admin richtext
+  (the target), and a guard that a body with NO nested directive is byte-identical (floor).
+
+* Recommended execution (waves, if approved)
+  W1  Grammar + IR + serialize + a RUNTIME mount (3b) — smallest path that makes admin
+      richtext WORK and proves the end-to-end. Keep the silent-drop branch (don't break others).
+  W2  Replace 3b with 3a (compile-time re-entry) — the harmonious expansion; remove runtime
+      macro knowledge.
+  W3  Delete the swallow-the-unknown fallthrough → E0900 for truly-unknown directives. The rot
+      removal. Audit every @template in stdlib/projects compiles (no accidental reliance on the
+      swallow).
+  Floor each wave: a body with no nested macro serializes byte-identical; all template
+  snapshot/v8 tests green; cms-testbed admin richtext mounts + persists (the BUG-103 gate).
+
+* Honest counter-take (what the user got right and wrong)
+RIGHT: there IS a hand-special-cased Rust branch that swallows unknown directives — that is
+the anti-pattern, and the grammar SHOULD make it unneeded. The instinct points at real rot.
+WRONG (slightly): ComponentBody/the reifiers are not deprecated dead code to delete — they're
+the live typed IR the grammar reifies into; the runtime factory needs them. The ambitious fix
+ADDS the missing grammar arm + expansion + mount and DELETES the swallow, rather than deleting
+the IR. The end state: the body grammar is COMPLETE (nested macros included), the reifier has
+no unknown-swallowing branch, and "editable-everything in the admin" (rich text in the drawer)
+works because @editable in a template body expands like @editable anywhere.
+
+* PROTOTYPE FINDINGS (3a, this session — built, probed, reverted)
+Added a `cb_directive` grammar arm (`"@" $name:ident "(" $args:balanced(')') ")" ";"?`) to
+the component_item Choice + a reifier branch, built clean, probed with a unit test, then
+REVERTED (exploratory; no parallel half-impl left in the tree). Two findings that reshape
+the design:
+  1. A TOP-LEVEL nested directive (`<div></div>\n@editable(…);`) DOES classify via the new
+     arm — the grammar approach works end-to-end, build clean.
+  2. A directive INSIDE an element (`<div>@editable(…)</div>`) STAYS IN THE HTML RUN —
+     segment_component_body never splits a construct that sits inside an HTML element. The
+     drawer's &fld-richtext nests @editable INSIDE `<div class="ad-richtext">`, so a grammar
+     arm ALONE is insufficient for the real admin case.
+∴ the sound design is TWO-PART: (A) the generic grammar arm for TOP-LEVEL body directives,
+AND (B) the reactive builder (component_html_to_exprs) must lower IN-ELEMENT directives the
+same way it lowers `$holes`. This also unifies BUG-085's @each (same in-element placement)
+and lets us delete ssg_unroll.rs's hand-rolled @each string parser.
+
+Also confirmed: reify_component_body runs at PARSE time (form_compiler.rs:1354), BEFORE the
+macro registry exists — so 3a MUST be two-phase (reify/builder RECORD the raw directive; a
+later pipeline pass, registry live, re-expands it). The existing register-template ref-scan
+(pipeline/mod.rs:667) is the precedent for that pass.
+
+* RECORDED AS PLAN-039
+The full design (architecture A–F, waves W1–W4, blast radius, acceptance) is recorded as
+PLAN-039 "Unify nested constructs in component bodies". It fixes the CLASS: BUG-103
+(@editable, P1), BUG-085 (@each), and finishes the BUG-063/064 silent-drop removal. The
+three divergent nested-construct mechanisms (cb_nested_each-in-selector-only, ssg_unroll's
+hand-rolled @each parser, the silent-drop fallthrough) converge onto one grammar + builder +
+expansion path.
+
+* Provenance
+Read this turn: stdlib/macros/template.st, stdlib/primitives/template.st (factory mount of
+states/directives/refs/matches), stdlib/capture-types/component-body.st (the construct
+grammar), stdlib/macros/editable.st (the capture_type interplay comment), src/syntax/
+form_match.rs (ComponentBodyDef IR + ComponentDirective enum + component_body_to_js),
+src/syntax/events/form_compiler.rs (reify_component_body — the segment/classify/reify loop +
+the silent-drop fallthrough), src/pipeline/mod.rs (register-template body ref scanning).

@@ -1,0 +1,807 @@
+#+TITLE: Phoenix LiveView as a Spacetime @host — the `live(...)` transport
+#+CUSTOM_ID: spacetime-phoenix-liveview-bridge
+#+DATE: 2026-06-20
+#+STATUS: design / prototype proposal (for discussion)
+#+SUPERSEDES_DRAFT: the @liveview/@consumes/@emits sketch (rejected — a parallel construct)
+#+BUILDS_ON: research/spacetime-signal-S0.org §S1 (the reactive-I/O FINAL MODEL),
+#+BUILDS_ON: PLAN-038, BUG-104 (matcher+sums), FEAT-110 (@host/@data signal/stream/@handle)
+
+* 0. Correction to the first sketch
+
+The first pass invented =@liveview= + =@consumes= + =@emits= — a brand-new directive
+trio. That is precisely the move S1 forbids: "@signal REJECTED as a top-level
+directive… nothing parallel to @data; @data's own machinery generalized." Phoenix
+LiveView does not need a new construct. *It needs one new value of an existing
+one: a fourth =@host= transport, `live(...)`.* Once `$lv` is a host, the entire
+reactive-I/O grammar already designed in S1 — `from $host`, `to $host`, `send`,
+`receive to <Sum>`, `as Type`, `policy`, `final`, `@handle` — describes the whole
+LiveView wire with nothing added. This doc is that extension and only that.
+
+* 1. The mapping (why `live` is just a host)
+
+S1: "@host declares the wire ENVELOPE type, which types the decode subject `$.`…
+HTTP vs WS differ ONLY in @host + discriminator (status vs type)." Phoenix
+LiveView is a third envelope on the SAME three positions:
+
+| S1 position                          | LiveView wire reality                          |
+|--------------------------------------+------------------------------------------------|
+| =@data subscribe $s from $host=       | an *assign change* (server pushes new state)   |
+| (inbound SOURCE, uncorrelated push)   | — typed by the LiveView's Spark =assigns= schema|
+| =@data stream … from $host= + receive | a *push_event(name, payload)* side-channel      |
+| (inbound, discriminated by name)      | — discriminator = the event name (like ws type)|
+| =@data signal $x(..) to $host= + send | a *client intent* (phx event to the server)     |
+| (outbound request)                    | — `send phx "evt" {payload}`                    |
+| =receive to <Sum>= on that signal      | Phoenix *{:reply, map, socket}* — the           |
+| (the correlated one-shot reply)       | correlated reply to a `pushEvent` callback      |
+
+The envelope types for `live`:
+
+#+begin_src
+  live  inbound state   $. = Assigns  (the Spark schema's assign bag)   discriminator: (none — a SOURCE)
+  live  inbound effect  $. = Push  { event string, payload Json }       discriminator: event
+  live  reply           $. = Reply { reply Json, ok bool }              discriminator: ok / reply tag
+#+end_src
+
+That is the ONLY Rust/stdlib-new surface: register `live` alongside `http`/`ws`/
+`mcp` in the =@host= primitive, with these three envelope shapes. Everything below
+is existing S1 grammar pointed at `$lv`.
+
+* 2. The canonical host — self-aware, zero redeclaration
+
+The LiveView's interface is ALREADY data: =Djinn.LiveView.Info= exposes
+=assigns/1=, =events/1=, =data_sources/1= off the compiled =%Schema{}=. So
+`live("MyAppWeb.CounterLive")` is given a MODULE, reads its schema, and *projects
+it as a typed host object* — assigns become fields, events become callables,
+push_events become a stream. This is the "canonical host that makes the
+integration insanely seamless and self-aware" the brief asks for: the page
+redeclares nothing; the server schema IS the contract.
+
+** Tier 1 — seamless (90% of pages)
+
+#+begin_src spacetime
+@host $counter : live("MyAppWeb.CounterLive")
+
+// `$counter.count` is a live assign (typed `int` from the Spark schema).
+// `$counter.inc()` is the generated callable for the server's `handle "inc"`.
+// Nothing is declared here that the server already declares — the host binding
+// PROJECTS the introspected schema. Unknown assign / unhandled event ⇒ compile error.
+.counter {
+  > .value      { `$counter.count` }
+  > button.inc  { "+" @on click { $counter.inc() } }
+  > button.dec  { "−" @on click { $counter.dec() } }
+}
+#+end_src
+
+`$counter.count` lowers to =@data subscribe $..count from $counter=; `$counter.inc()`
+lowers to =@data signal …{ send phx "inc" }=. The dotted sugar is the only
+ergonomic addition, and it is pure lowering onto S1 constructs — not a new directive.
+
+** Tier 2 — explicit, when a scope wants optimism / rename / a typed reply
+
+Drop to the S1 machinery exactly as written for http/ws. A form that the server
+replies to via `{:reply, map, socket}`:
+
+#+begin_src spacetime
+@host $board : live("MyAppWeb.BoardLive")
+
+// rename + reshape an assign into a local signal
+@data subscribe $cards from $board : columns         // server-push SOURCE, typed by schema
+
+// a client intent WITH a correlated reply (Phoenix {:reply, ...})
+@data signal $move(card Id, to Col) to $board {
+  send phx "move_card" { card: $card, to: $to }
+  receive to MoveResult {                            // <- the reply envelope decodes here
+    ok        => Moved($.reply as Card);
+    "blocked" => Blocked($.reply as Reason);
+    _         => Failed($.reply);
+  }
+  policy latest
+}
+
+.column {
+  @handle $move {
+    optimistic { $cards <- $cards.moveLocal($card, $to); }   // instant UI
+    receive {
+      Moved($c)    => $cards <- $cards.commit($c);           // server confirmed
+      Blocked($r)  => { $cards <- $cards.revert(); $toast <- $r.text; }
+      Failed($m)   => { $cards <- $cards.revert(); $toast <- $m; }
+    }
+    final { $dragging <- null; }
+  }
+}
+#+end_src
+
+This is byte-for-byte the S1 "HTTP mutation" canonical example with `http` swapped
+for `live` and `POST "/url"` swapped for `phx "move_card"`. The optimistic /
+receive / final / policy story — multi-site optimism, rollback, race control —
+transfers with zero new concepts. *That transfer is the proof the abstraction is
+right.*
+
+** Tier 3 — push_event side-channels (server-initiated effects)
+
+Phoenix `push_event(socket, "flash", %{...})` is server->client, uncorrelated,
+discriminated by name — i.e. exactly an =@data stream … from $host= with a
+`receive` over names:
+
+#+begin_src spacetime
+@data stream $fx from $board {
+  receive to Effect {
+    "flash"     => Flash($.payload as FlashMsg);
+    "highlight" => Highlight($.payload as RowRef);
+    "confetti"  => Confetti final;
+  }
+}
+@handle $fx {
+  receive {
+    Flash($f)     => $toast <- $f.text;
+    Highlight($r) => $hot <- $r.id;
+    Confetti      => burst();
+  }
+}
+#+end_src
+
+`to Effect` is the same through-line; `position-decides-role` holds (`from $board`
+= the inbound source on the left of the matcher, `to Effect` = the produced sum on
+the right). Nothing bespoke.
+
+* 3. The Elixir side — `Spacetime.LiveView` (Djinn + a render swap)
+
+The server module is *literally a Djinn.LiveView* — same `assigns` / `data` /
+`subscribe` / `events` / `budget` sections, same =%Response{}= reducer — plus:
+
+1. a `page:` binding naming the .st that renders it,
+2. a generated `render/1` that serves the compiled Spacetime bundle and runs a
+   *data channel* (assigns as JSON diffs, push_events passed through) instead of
+   emitting HEEx — honouring the AGENTS rule that a Spacetime site relies on
+   Spacetime for view/state/animation and the LiveView supplies only data+effects,
+3. `__spacetime_contract__/0`: the Spark schema projected into the SAME row shape
+   verse already uses for a bundle Contract (=name · kind · optional · type=), so
+   the `live(...)` host reads ONE familiar structure.
+
+#+begin_src elixir
+defmodule MyAppWeb.BoardLive do
+  use MyAppWeb, {:spacetime_live_view, page: "priv/st/board.st"}
+
+  # unchanged Djinn sections ----------------------------------------
+  assigns do
+    ui :columns, type: {:list, Card}, default: []
+  end
+
+  data do
+    source :columns, load: &load_board/1, from: [:current_org], stream: true
+  end
+
+  subscribe do
+    on &board_topic/1, handler: &__MODULE__.on_board_changed/2
+  end
+
+  # events the .st page fires via `send phx ...` ---------------------
+  events do
+    # name + payload shape are checked against board.st's `send phx "move_card"`
+    handle "move_card", &__MODULE__.move_card/2, returns: [:reply, :refresh]
+  end
+
+  # A handler may REPLY (the correlated one-shot the page `receive to MoveResult`s),
+  # OR just mutate assigns (the page sees it via `@data subscribe from $board`).
+  def move_card(%{"card" => id, "to" => col}, resp) do
+    case Board.move(id, col) do
+      {:ok, card}    -> Response.reply(resp, card)          # -> Moved($.reply as Card)
+      {:error, :wip} -> Response.reply(resp, %{tag: "blocked", text: "WIP limit"})
+    end
+  end
+end
+#+end_src
+
+One addition to Djinn's =%Response{}=: a =reply/2= builder (Phoenix already
+supports `{:reply, map, socket}` for `pushEvent` callbacks — Djinn just doesn't
+expose it yet; =push_event/3= is the uncorrelated sibling that feeds Tier 3). With
+`reply`, the server's =%Response{}= monad covers BOTH inbound paths the page reads.
+
+*Migration:* an existing Djinn.LiveView becomes Spacetime-rendered by changing
+one line (=:djinn_live_view= -> =:spacetime_live_view= + =page:=) and deleting its
+HEEx `render/1`. The 100+ agentmaker LVs are one-line ports. That is the
+seamlessness — not a rewrite, a render-target swap on an unchanged data substrate.
+
+* 4. Self-aware handshake — one contract, checked both ways
+
+Build reads two artefacts of the SAME shape and unifies them (the comparator is
+the only new check, ~one function):
+
+1. =__spacetime_contract__/0= (Elixir): a Spark transformer walks =Info.assigns/1=
+   + =Info.events/1= and emits rows mechanically identical to verse's
+   =contract_params= (=name · kind · optional · type=) — assigns as inbound fields,
+   events as outbound, push_events as stream variants, plus a =fingerprint=.
+2. The page's host usage (verse): every `$lv.x` / `from $lv : a` / `send phx "e"`
+   resolved against that contract.
+3. Comparator: subscribe-targets ⊆ assigns (name+type); `send phx` names ⊆ handled
+   events (name+payload); `receive`d reply/push variants ⊆ declared replies. A
+   mismatch fails through the EXISTING =format_compile_errors= diagnostic rail —
+   =E: $counter.count: server provides `int`, page reads `string`=.
+
+Runtime: the page mounts as a *host-composition guest* of the LV socket (the
+verse machinery from commit 5ffaa959). A server redeploy shifts =fingerprint= ->
+=Compatibility{compatible -> hot-swap | breaking -> remount}=. The socket is the
+"agent" re-putting the contract — host composition reused verbatim, no new lifecycle.
+
+* 5. NIFs — Spacetime in the Phoenix server (dev) without shipping it (prod)
+
+The brief: "prod should NOT ship Spacetime, only dev for hot reload, or a build
+step integrated in the Phoenix server." Two artefacts, one Rust core:
+
+** `spacetime_nif` (Rustler) — the compiler as a NIF, *dev + build only*
+
+Wraps the verse compiler: =compile(source) -> {bundle, contract, diagnostics}= and
+=introspect(module_schema_json) -> contract=. Used at two moments, never at request
+time in prod:
+
+- *Dev hot reload.* `Spacetime.LiveView` registers the `page:` .st with the
+  Phoenix code reloader. On save, the NIF recompiles, the new bundle is pushed to
+  the live socket, and host composition's compatible-hot-swap re-renders with *no
+  page reload* — the verse loop (=st_fn_put= re-put -> compatible -> ST.set dedupe)
+  driven from Elixir instead of MCP. This is the "insanely seamless" dev story:
+  edit .st, the running LiveView restyles live; edit the LiveView, the contract
+  re-checks and the page hot-swaps.
+- *Macro-time contract check.* The Spark transformer calls the NIF's
+  =introspect= during `mix compile` to diff the page contract against the schema —
+  so a mismatch is a COMPILE error in the Elixir build, not a runtime surprise.
+
+** `mix spacetime.build` — the prod build step, *no NIF/compiler shipped*
+
+A Mix compiler (runs in the `:compilers` chain, or a release step) that AOT-
+compiles every `page:` .st to a static JS/HTML/CSS bundle into `priv/static/st/`
+and bakes each =__spacetime_contract__/0=. The production release contains only:
+(a) the prebuilt bundles, (b) the tiny Spacetime RUNTIME shim (`ST.set`, signal
+wiring — the same demand-injected runtime a served .st page already ships, ~KB),
+(c) the data-channel glue in `Spacetime.LiveView`. The compiler, the NIF, all of
+verse — build-time deps, stripped from the release. Prod LiveView = serve a static
+bundle + push assign diffs over the socket. Spacetime the LANGUAGE is gone; only
+its emitted artefact and its tiny client runtime remain — exactly the boundary the
+brief draws.
+
+#+begin_src
+  dev:    .st --spacetime_nif (live)--> bundle --socket hot-swap--> running LV
+  build:  .st --mix spacetime.build--> priv/static/st/*.{js,html,css} + contract.json
+  prod:   release = bundles + ST runtime shim + data channel   (NO compiler, NO NIF)
+#+end_src
+
+* 6. Smallest provable slice
+
+A vertical that exercises the whole spine in ~200 lines:
+- `CounterLive` (=use :spacetime_live_view, page: "counter.st"=) with =ui :count=,
+  =events handle "inc"/"dec"=, and a =move_card=-style =Response.reply= path.
+- `counter.st`: Tier-1 `@host $c : live("…CounterLive")` + `$c.count` + `$c.inc()`.
+- The build-time comparator FAILS on a deliberate type mismatch (`count` as string),
+  PASSES when aligned (proves self-aware check on the existing diagnostic rail).
+- A =@drive= automation test (docs/testing/AUTOMATION.md) clicks `.inc`, asserts
+  the server-driven `$c.count` re-renders — over a real LV socket + the dev NIF.
+That touches: `live` host envelope, dotted-sugar lowering, contract export +
+comparator, the data channel, =Response.reply=, NIF hot-compile, host-composition
+hot-swap. One thread, the whole architecture.
+
+* 7. Decisions locked (2026-06-20 dialogue)
+
+Q1 render channel -> existing LV socket; reuse Phoenix's optimisations, reproduced
+as pure Spacetime constructs (section 8). Q2 dotted sugar -> yes; final surface
+specified (section 9). Q3 -> re-implement, not vendor; the events/pushes
+distinction + the why-this-beats-Djinn/TEA thesis (section 10). Q4 -> footguns
+impossible by design (section 11). Q5 NIF -> dirty-scheduler compile NIF +
+supervised port fallback (section 5 stands).
+
+
+* 8. The optimisation thesis — why pure-data is STRICTLY simpler than HEEx diffing
+
+The meta-compiler turns Phoenix's hardest subsystem into a non-problem. This is
+the core engineering claim, grounded in deps/phoenix_live_view/lib/phoenix_live_view/diff.ex.
+
+** What Phoenix must do at RUNTIME, and why
+
+HEEx is opaque: at compile time Phoenix splits a template into a static skeleton +
+dynamic holes, but it cannot know which holes CHANGED without rendering. So
+`Phoenix.LiveView.Diff` exists to recover structure HEEx hides, every render:
+  - fingerprints (the `{nil, %{}}` fingerprint tree) to decide static-reuse,
+  - positional dynamic maps `{0 => .., 1 => .., :s => static}` shipped over the wire,
+  - `:c` components, `:k`/`:kc` keyed comprehensions, `:r` reply, `:p` templates,
+    `:stream` — a whole tag vocabulary (diff.ex module attrs @components/@static/
+    @keyed/@reply/@title/@template/@stream),
+  - a CLIENT (rendered.js: modifyRoot, TEMPLATES, KEYED, PHX_SKIP) that REBUILDS
+    DOM from that positional tree, re-parsing HTML strings (`modifyRoot` scans the
+    opening tag char-by-char for the id).
+  - On reconnect it must "disable change-tracking to force a full render"
+    (diff.ex:734) — the client cannot resume from a partial tree.
+
+That machinery is the COST of the view layer being a string template the server
+diffs.
+
+** What Spacetime does instead: diff DATA, never templates
+
+Spacetime's compiler already knows, at compile time, the EXACT set of holes and
+which signal feeds each (public/runtime/templates.js: buildTemplateFactory wires
+every `$x` hole to ST.get/watch on the root; `@each ... as $t, key: $t.id` is the
+keyed primitive). So the static/dynamic split Phoenix pays runtime to discover is
+a COMPILE-TIME ARTEFACT here. Consequences:
+
+  - The server ships a CHANGED-ASSIGNS map (`{count: 5}`), not an iodata tree.
+    Djinn's reconciler already computes changed assigns — we serialise that, full
+    stop. There is no `to_iodata`, no fingerprint state, no positional tree.
+  - The client patches NAMED signals into a pre-wired DOM (ST.set(root, "count", 5)).
+    No HTML re-parse, no tree reconstruction, no PHX_SKIP. The `rendered.js`
+    analogue does not exist.
+  - Reconnect re-pushes the assign SNAPSHOT (data); the client re-seeds signals.
+    No "force full render" — the DOM was never derived from a diff tree.
+
+So every Phoenix optimisation maps to a SIMPLER Spacetime construct, reproduced in
+pure .st + the existing runtime (no custom JS):
+
+| Phoenix runtime mechanism        | Spacetime compile-time equivalent                    |
+|----------------------------------+------------------------------------------------------|
+| static/dynamic fingerprint split | compiler hole-map (known at @template compile)        |
+| dynamic positional diff `{0:..}` | changed-assign map keyed by signal name               |
+| keyed comprehension `:k`/`:kc`   | =@each ... key: $t.id= (DOM-keyed reconciliation)     |
+| `phx-update="stream"` + limit     | =@data stream= + @each key + a window/limit clause    |
+| component tree `:c` (cid reuse)  | =@template= instances (already DOM-stable, signal-fed)|
+| reply `:r`                        | =receive to <Sum>= correlated decode                  |
+| title `:t`                        | a reserved =$.title= assign bound to document.title    |
+| change-tracking (__changed__)    | server diff of assign bag (Djinn reconciler output)   |
+| client DOM patch (morphdom-ish)  | ST.set on named signals (surgical, no morph)          |
+
+*The win is categorical, not incremental:* the entire `Phoenix.LiveView.Diff`
+module + the client tree-reconstruction half of rendered.js have NO analogue. We
+deleted a subsystem by moving its job to compile time. That is exactly "the whole
+point of having a meta-compiler."
+
+** What we must still honour (not free)
+
+  - latency comp / locking: Phoenix's `phx-` attrs (loading classes, disable) —
+    reproduced by `$sig.pending` driving a reactive class (S1 already yields it).
+  - keyed list identity on reorder: =@each key= must emit DOM-stable keys (it does).
+  - large list windowing: a stream `limit:` clause — a window over the keyed @each.
+  - the wire is over the SAME Phoenix channel: we register a Spacetime payload kind
+    on the LV socket (a custom diff message), so presence/uploads/reconnect/
+    heartbeat ride Phoenix's transport unchanged. `Spacetime.LiveView` overrides
+    only the RENDER step (emit a data diff instead of calling the HEEx differ),
+    keeping the rest of the LiveView lifecycle (mount/handle_event/handle_info).
+
+
+* 9. The final sugar surface (Q2 — the syntax to support once S1 ships)
+
+This is the target author experience. It is ALL sugar over S1 (section 2 Tier-2 is
+the desugared truth); the lowering is a resolver rule, no new runtime. Stated now
+so the eventual build has a fixed north star — and so it reads identically whether
+written in a .st file OR (later, out of scope) inside a template fragment.
+
+** 9.1 The host binding — one line, schema-projected
+
+#+begin_src spacetime
+@host $board : live("MyAppWeb.BoardLive")
+#+end_src
+
+Gives `$board` a typed face from =__spacetime_contract__/0=: every assign is a
+readable field, every event is a callable, push_events are a stream. No second
+declaration anywhere on the page.
+
+** 9.2 Reading state — assigns are just signals
+
+#+begin_src spacetime
+`$board.columns`              // a hole; reactive, re-renders on server push
+$board.columns.length         // usable in any expression
+.empty: $board.columns.length == 0;   // reactive class, no server round-trip
+#+end_src
+
+Desugars to =@data subscribe $columns from $board : columns=. Dotted read = the
+subscribe; the compiler de-dups one subscription per assign actually referenced
+(unreferenced assigns are never wired — a bandwidth optimisation the meta-compiler
+gets for free).
+
+** 9.3 Firing intent — events are callables; the reply is inline
+
+Fire-and-forget (server mutates an assign; page sees it via 9.2):
+#+begin_src spacetime
+button.add { "Add" @on click { $board.add_card({ col: "todo" }) } }
+#+end_src
+
+With a correlated reply + optimism, the FULL form is the S1 block (section 2
+Tier-2). The sugar for the common optimistic-commit case is a trailing handler on
+the call site:
+#+begin_src spacetime
+.column {
+  @on drop { $board.move_card({ card: $id, to: $col })
+    & optimistic { $board.columns <- moveLocal($id, $col); }
+    & Moved($c)  => commit($c);
+    & Blocked($r)=> { revert(); $toast <- $r.text; }
+  }
+}
+#+end_src
+The `& clause` chain is sugar that the compiler expands into a scoped =@handle=
+block with optimistic/receive/final — same construct, terser at the call site. A
+page that wants the named, reusable, multi-site form writes the explicit
+=@data signal ... @handle ...= (section 2). Sugar and truth coexist; sugar always
+lowers to truth.
+
+** 9.4 The whole counter, final form
+
+#+begin_src spacetime
+@host $c : live("MyAppWeb.CounterLive")
+.counter {
+  > .value     { `$c.count` }
+  > button.inc { "+" @on click { $c.inc() } }
+  > button.dec { "−" @on click { $c.dec() } }
+  .pending: $c.inc.pending;        // S1 auto-yields .pending on every signal
+}
+#+end_src
+
+That is the entire client. No assigns block, no events block, no render function —
+the server module holds the schema, the page consumes it by name. THIS is the
+"insanely seamless" bar.
+
+** 9.5 Forward-compat with template fragments (noted, NOT in scope)
+
+The same surface must eventually work INSIDE a template fragment authored
+elsewhere (the brief: "write Spacetime both as .st files and within template
+fragments"). The host binding is lexically scoped, so a fragment that closes over
+`$board` reads/fires exactly as above. No syntax changes — only the base wiring
+(this plan) must land first. Recording it so the host-resolution rule is designed
+scope-aware from day one (a fragment resolves `$board` up its lexical chain, like
+@handle's nearest-scope cascade), not retrofitted.
+
+
+* 10. Re-implementing, not vendoring (Q3 — events vs pushes, and the thesis)
+
+We are NOT porting Djinn.LiveView. We are rebuilding the LiveView idea on a
+better substrate and keeping only what is load-bearing. Two things to settle:
+the events/pushes question, and WHY this is better than Djinn and than Elm's TEA.
+
+** 10.1 events vs pushes — they are opposite DIRECTIONS, and that is the point
+
+Djinn has only =events= (client->server). It has no first-class server->client
+channel — push_event exists in raw Phoenix but is undeclared, untyped, invisible
+to introspection. That asymmetry is a wart. The re-implementation makes the wire
+SYMMETRIC and both directions DECLARED:
+
+| section   | direction       | wire reality           | yields / consumes                |
+|-----------+-----------------+------------------------+----------------------------------|
+| =events=  | client -> server| phx event              | a server handler; may =reply=     |
+| =pushes=  | server -> client| push_event(name,..)    | a typed variant the page receives|
+
+  - =events= is the INTENT half: `$lv.move_card(..)` -> handler -> optional reply.
+  - =pushes= is the EFFECT half: server decides something happened OUT OF BAND
+    (another user moved a card, a job finished) and notifies THIS client.
+
+Why not fold pushes into assigns? Because assigns are STATE (idempotent, the
+current value — "columns = [...]"), while a push is an EVENT (a thing that
+HAPPENED, non-idempotent — "confetti", "flash this message once"). Collapsing them
+loses that distinction and re-creates the classic bug of modelling transient
+effects as sticky state (the toast that re-fires on reconnect because it lived in
+an assign). So: three server->client kinds, each with one honest job:
+
+  assigns  = durable state    -> page =@data subscribe= (last-value-wins, replayed on reconnect)
+  pushes   = transient events  -> page =@data stream + receive= (fire-once, NOT replayed)
+  reply    = correlated answer -> page =receive to <Sum>= on the firing signal
+
+That triad is the whole server->client surface, and each maps to exactly one S1
+construct. =pushes= is declared (a section, symmetric with =events=) so it is
+typed + introspectable + checkable — closing the asymmetry that makes raw Phoenix
+push_event a footgun.
+
+** 10.2 The DSL (server side) — the symmetric contract
+
+#+begin_src elixir
+defmodule MyAppWeb.BoardLive do
+  use MyAppWeb, {:spacetime_live_view, page: "priv/st/board.st"}
+
+  assigns do
+    state :columns, type: {:list, Card}, default: []   # durable; client subscribes
+  end
+
+  events do                                            # client -> server (intent)
+    handle "move_card", &move_card/2, reply: MoveResult # reply: names the sum the page decodes
+  end
+
+  pushes do                                            # server -> client (effect)
+    push "flash",     FlashMsg                          # typed transient event
+    push "confetti",  :unit
+  end
+end
+#+end_src
+
+Three sections, three directions, all typed, all introspectable into the ONE
+contract the page checks against. The page's `receive` variants for a reply or a
+push are checked SUBSET of what the server declares — a page cannot decode a
+variant the server never sends, and the server cannot add a push the page silently
+ignores without it showing up in the contract diff.
+
+** 10.3 Why this beats Djinn.LiveView
+
+  1. *Symmetric, typed wire.* Djinn types client->server (events) but leaves
+     server->client as raw assigns + undeclared push_event. Here BOTH directions
+     are declared sections feeding one contract. No invisible channel.
+  2. *The view is data, not a second language.* Djinn still writes HEEx — a whole
+     separate template language with its own diffing. Here the view is .st and the
+     wire is a data diff (section 8): one fewer language, one fewer diff engine.
+  3. *Optimistic UI is a first-class clause, not hand-rolled.* Djinn's optimistic
+     assign helper is a server-side guess; here =optimistic { }= + =receive= +
+     =final= is a client construct with automatic rollback on the typed reply —
+     the rollback is structural, not a remember-to-undo.
+  4. *Self-aware by construction.* The contract is introspected from the schema
+     (Spark Info) AND from the page (Spacetime Contract) and unified at build. The
+     integration validates itself; Djinn has no client to validate against.
+
+** 10.4 Why this beats Elm's TEA (and what we keep from it)
+
+TEA = Model / update(msg, model) / view(model), with Cmd/Sub for I/O. Its great
+idea: ALL change flows through typed messages; the view is a pure function of
+state. Its friction over a websocket: send and receive are SEPARATED — you fire a
+Cmd here, and the response arrives as a DIFFERENT Msg in `update`, correlated only
+by hand (a request-id field you thread yourself). For a chatty live connection
+that is death by a thousand message constructors.
+
+What we KEEP from TEA:
+  - typed messages end-to-end (our sums / variants ARE Msg),
+  - view as a function of state (our holes are pure projections of signals),
+  - explicit effects (our =@data signal/stream=, never a hidden fetch).
+
+What we FIX:
+  - *send and receive are CO-LOCATED.* =@data signal $move(..) { send ...; receive
+    to MoveResult { ... } }= keeps the fire and its typed reply in ONE construct.
+    No manual correlation id (S1: "correlation id is runtime/invisible"). This is
+    the "delightful websocket experience instead of separating send from receive"
+    the brief asks for — the round-trip reads top-to-bottom in one place.
+  - *optimistic + rollback is declarative*, not an extra Msg pair (OptimisticMove /
+    MoveConfirmed / MoveFailed) you wire by hand: =optimistic/receive/final=.
+  - *no giant update/3 match.* TEA funnels every message through one update
+    function; cascade-scoped =@handle= lets each UI region own its responses (the
+    @each-in-space :: @handle-in-time duality), so the page composes instead of
+    centralising.
+
+*Thesis in one line:* TEA proved typed-message UIs; LiveView proved server-driven
+UIs; Djinn proved introspectable LiveView DSLs. The re-implementation keeps all
+three virtues and removes their frictions — by making the view DATA (kills HEEx
+diffing), co-locating send/receive (kills TEA's correlation tax), and declaring
+both directions (kills Djinn's push asymmetry) — on ONE meta-compiled substrate.
+
+
+* 11. Footguns made impossible by design (Q4)
+
+Every classic LiveView/realtime-UI bug, and the design choice that makes it
+UNREPRESENTABLE — not "linted against," but impossible to write. This is the
+specification's safety contract; each row is a compile error or a structural
+guarantee, never a runtime hope.
+
+| # | Classic footgun                              | Eliminated by                                              |
+|---+----------------------------------------------+------------------------------------------------------------|
+| 1 | typo'd assign name in template (renders nil) | =$lv.colmns= unresolved against contract -> COMPILE ERROR  |
+| 2 | fire an event the server doesn't handle      | =$lv.mov_card()= not in =events= -> COMPILE ERROR          |
+| 3 | event payload shape drift (server expects x) | send payload checked vs handler arg type -> COMPILE ERROR  |
+| 4 | decode a reply variant the server never sends| =receive= variants ⊆ declared =reply:= sum -> COMPILE ERROR|
+| 5 | server adds a push the client ignores        | undecoded =pushes= variant -> contract-diff WARNING at build|
+| 6 | transient effect modelled as sticky state    | =pushes= (fire-once) vs =assigns= (durable) are SEPARATE   |
+|   |   (toast re-fires on reconnect)              |   sections; a push CANNOT be replayed — wrong by type      |
+| 7 | optimistic update with no rollback path      | =optimistic= REQUIRES a =receive= in the same =@handle=;   |
+|   |                                              |   a terminal arm without state-restore is flagged          |
+| 8 | forgot the error/timeout branch              | =@handle receive= exhaustiveness: uncovered variant + no   |
+|   |                                              |   =_= -> COMPILE ERROR (S1 rule, inherited)                |
+| 9 | race: stale reply overwrites fresh state      | =policy latest= kills in-flight; default is explicit, not  |
+|   |   (out-of-order search results)              |   silent last-write-wins                                   |
+|10 | double-submit (button mashed)                | =$sig.pending= is auto-yielded; sugar binds disabled/      |
+|   |                                              |   loading from it — the guard exists without being asked   |
+|11 | unkeyed list reorder (DOM identity scramble) | =@each= REQUIRES =key:= for dynamic lists; no key ->       |
+|   |                                              |   COMPILE ERROR (no silent index-keying)                   |
+|12 | XSS via interpolated server string           | holes are TEXT by default (escaped); raw HTML needs an     |
+|   |                                              |   explicit opt-in construct — injection is opt-IN, not -OUT|
+|13 | leaking every assign over the wire           | only assigns the page REFERENCES are subscribed (9.2);     |
+|   |                                              |   unreferenced state never crosses the socket              |
+|14 | breaking schema change silently broke a page | =fingerprint= shift -> =Compatibility::Breaking= -> build  |
+|   |                                              |   FAILS until page + server agree (section 4)              |
+|15 | prod accidentally ships the compiler          | =mix spacetime.build= AOT step; release has bundles only,  |
+|   |                                              |   NIF/compiler are build-time deps (section 5) — structural|
+|16 | two pages on one socket cross-wire events     | host binding is region/instance-scoped (the per-region     |
+|   |                                              |   bridge from FEAT-127), no page-global channel            |
+
+** The two load-bearing principles behind the table
+
+  - *One contract, checked both ways.* Rows 1–5,14 all fall out of ONE mechanism:
+    the build unifies the Spark schema and the Spacetime page against a single
+    contract. There is no "keep them in sync" discipline to forget — disagreement
+    is a build failure.
+  - *Types encode lifecycle, not just shape.* Rows 6,7,9,10 work because the
+    constructs carry TIME semantics: assigns are idempotent state, pushes are
+    fire-once events, signals carry pending, handlers carry terminal/rollback. The
+    distinction that prevents the bug is in the TYPE, so the wrong program does not
+    typecheck rather than mis-behaving at runtime.
+
+NB several rows (1–4,8,11,14) are HARD compile errors; 5 is a build warning (a
+server MAY intentionally emit a push some pages ignore); the rest are structural
+(no syntax exists to express the bug). The aim across the board: the easiest
+thing to write is also the correct thing — the pit of success is the default path.
+
+
+* 12. Ground truth — what S1 actually ships (verified 2026-06-20)
+
+Probed the real compiler + runtime + the dev server, not the org states. Findings:
+
+  - SHIPPED + compiles: =@host http/ws/live=, =@data signal/stream=, =send emit/POST=,
+    =receive to <Sum> { arms }=, =@handle { optimistic/receive/final }=, =policy=,
+    sums via the receive arms. A minimal `@host $b : live("X") + @data signal +
+    @handle` page passes =cargo run -- check=. (I ADDED the `live` transport to
+    stdlib/macros/host.st in this pass — 13 host tests still green.)
+  - WEBSOCKET IS SHIPPED (the doc-comment lied; I corrected it). signal.st actually
+    implements a POOLED per-host ws: `{ type, payload, __corr }` frames, `__corr`
+    reply correlation, message-`type` decode routing, all 4 policies, retry, AND —
+    crucially — an UNCORRELATED inbound frame is `publishReply`'d to any listening
+    signal. That last branch IS the server-push channel I wrongly called missing:
+    a LiveView assign-diff / push_event rides it directly. `@data subscribe` sugar
+    isn't named yet, but its RUNTIME exists (an uncorrelated `@data stream` listener).
+  - DECODE codegen IS landed: `decodeReply`/`armMatches`/`evalPayload` select the
+    variant by status-class (http) or message-type (ws) and carry the `as`-typed
+    payload. (Earlier note was wrong — read the lower half of the primitive.)
+  - VERSE IS ALREADY A MULTIPLAYER SERVER. Its dev-ws (src/sync/protocol.rs) speaks
+    an edit/CRUD protocol (=EditJsonArray= Insert/Delete/Reorder) and BROADCASTS
+    =DataUpdate= to ALL connected clients after a successful op. =@data collection
+    … via dev-ws= already exposes optimistic `.insert/.delete/.reorder` over it.
+    So a card move = a reorder op = broadcast to everyone = real multiplayer with
+    ZERO new server code.
+  - IMPLICATION (corrects §13's old phasing): there is NO "mock server" gap. The
+    server is present from commit 1 — verse's own dev-ws (multiplayer, today) and,
+    in the same vertical, Phoenix LiveView (the integration) — BOTH driving the
+    SAME .st client. A/B/C are WAVES of one vertical, not detachable phases.
+
+* 13. Finalised prototype plan — ONE vertical, three woven waves
+
+The artefact: =demos/liveview-kanban/= — a multiplayer Kanban board whose ENTIRE
+client is one .st page, driven in dev by verse's dev-ws and in the integration by
+a real Phoenix LiveView, with the .st BYTE-IDENTICAL across both. The point the
+prototype proves: the host is swappable, the page is not — "the host is config,
+the page is the program." Each wave ends green (=check= + the stated proof); the
+server is real in every wave (Wave A = verse dev-ws; Wave C = Phoenix).
+
+WHY this fixes the old phasing: a "LiveView feel" demo with a mocked server lies
+about the thing demoed. Here Wave A's server is verse itself (genuinely
+multiplayer), so the optimistic/broadcast/reconcile loop is REAL, not faked — and
+Wave C swaps the backing host to Phoenix without touching the page.
+
+** Wave A — the multiplayer board, pure verse, REAL server (runnable on commit)
+
+Client = =index.st=; server = verse dev-ws (no new server code).
+  - =@host $board : ws("/ws")= today (the demo's honest transport); the SAME page
+    flips to =live("DemoWeb.BoardLive")= in Wave C — one line.
+  - =@data collection $cards Card[] from "data/board.json" via dev-ws= — the live,
+    broadcast-backed array (optimistic CRUD + DataUpdate to all clients).
+  - =@data signal $move(card, to) to $board { send emit "move" {..}; receive to
+    MoveResult { "ok" => Moved(..); "blocked" => Blocked(..); _ => Failed(..) };
+    policy latest }= + scoped =@handle= (optimistic / receive / final): the card
+    moves INSTANTLY, confirms on the broadcast, rolls back on reject.
+  - The cooler-Spacetime experience (§14) lands HERE — it is the show.
+  - PROOF: =serve demos/liveview-kanban/= in TWO browser tabs — a move in one
+    appears in the other (real multiplayer). =@drive= test: drag a card, assert
+    optimistic move + =$move.pending= class + cross-client broadcast. =check= green.
+
+** Wave B — the self-aware contract (introspection, woven in, no Elixir yet)
+
+  - A =board.contract.json= fixture (assigns + events + fingerprint, §4 shape).
+  - A =cargo run -- check= pass resolves every `$board.x` / `send emit "e"` against
+    it; a typo (`$board.colmns`) or unhandled event → a Spacetime diagnostic via
+    the existing =format_compile_errors= rail (RED test) → aligned passes (GREEN).
+  - reference.st renders the macro catalog via =@data dispatch=; extend it to also
+    render the signal's response SUM (variants + carried types) — the interface
+    describing itself (the FEAT-113 rail), shown live on the board page itself.
+  - PROOF: RED+GREEN contract tests; the sum renders in the catalog.
+
+** Wave C — the real Phoenix vertical (swap the host, keep the page)
+
+The page does not change. Only the backing host does — the whole thesis, proven.
+  - `Spacetime.LiveView` (Elixir): =use= macro = Phoenix.LiveView + a generated
+    =render/1= that serves the compiled bundle and OVERRIDES the render step to
+    push an assign-diff JSON message over the EXISTING channel (§8), + =reply/2=
+    for the correlated path. Re-implements Djinn's assigns/events/pushes sections.
+  - =spacetime_nif= (Rustler, dirty scheduler): wraps =cargo compile= so =mix=
+    builds the `page:` .st; dev hot-reload via host-composition swap. Port fallback.
+  - verse side: the `live` transport reuses the SHIPPED ws machinery (it is a ws
+    specialisation — phx message types + `{:reply}` correlation); the assign-diff
+    applier is the existing uncorrelated-`publishReply` branch + =ST.set= per key.
+  - Flip =index.st='s one host line to =live("DemoWeb.KanbanLive")=; the board now
+    runs over a REAL LiveView socket, no HEEx, no custom JS.
+  - PROOF: the SAME =@drive= test from Wave A passes UNCHANGED against the Phoenix
+    backend; dev edit of index.st hot-swaps without reload; two tabs stay in sync
+    via Phoenix PubSub instead of verse broadcast — identical UX.
+
+** Sequencing rationale
+
+One vertical, woven: A makes it REAL + delightful on verse's own multiplayer
+server (no mock). B threads the self-awareness through A's page (no Elixir). C
+swaps the host to Phoenix — and the fact that A's page survives byte-identical IS
+the proof. Risk is front-loaded out: nothing in A/B is throwaway; C only adds a
+host backing, never edits the client.
+
+
+* 14. The one-of-a-kind experience — what only THIS stack can do
+
+The brief: leverage Spacetime as much as possible for a one-of-a-kind Kanban.
+The insight that makes it one-of-a-kind: a normal Kanban (Trello/Linear) is a
+CRUD list with drag-drop. What this stack uniquely has is THREE substrates other
+frameworks don't combine — (i) a reactive signal graph where every value is
+live + derivable, (ii) real multiplayer broadcast in the base server, (iii) a
+self-introspecting compiler. The board should do things that are IMPOSSIBLE or
+absurd to build elsewhere, not just pretty. Below: the thesis, then ranked ideas.
+
+** 14.0 The unifying thesis — "a board that is alive, shared, and self-aware"
+
+Don't build "Trello with animations." Build a board where state is a living
+signal graph you can SEE flowing, where every other cursor is present, and where
+the board can render ITS OWN protocol. Three properties, one per substrate. Pick
+a coherent subset; they compose.
+
+** 14.1 LIVE — the reactive substrate made visible (the signal graph IS the UI)
+
+  - *Derived everything, shown.* WIP counts, column load bars, a "cycle-time"
+    sparkline per card — all =@data derive/fold/query= off the one $cards signal.
+    When a card moves, you SEE the counts + bars + burndown re-flow in one frame,
+    because they are the same signal. No other Kanban's metrics are the board's
+    own reactive truth; they're a separate analytics query.
+  - *Optimistic with PHYSICAL trust.* The S1 =optimistic/receive/final= loop made
+    tactile: on drop the card commits locally and a =$move.pending= ring pulses
+    (=@magnetic-glow=); on the server confirm it snaps solid; on reject it
+    PHYSICALLY springs back to its origin column (=@timeline=/WAAPI), not a toast.
+    The rollback is the animation — latency becomes a material you can feel.
+  - *Time-travel scrubber.* =@data fold= the move-event stream into a history;
+    a slider scrubs $historyIndex and =@view= re-projects the board at that instant.
+    Free, because the board is a pure function of a signal. (Linear can't scrub
+    your teammate's board live.)
+
+** 14.2 SHARED — multiplayer as a first-class material (not a feature bolt-on)
+
+  - *Live presence cursors + card auras.* =@presence(room: "board") as peers= —
+    every collaborator's cursor renders with their color; a card being dragged by
+    someone else gets THEIR aura + a "Sam is moving this" ghost. Throttled,
+    interpolated, zero custom JS (the presence primitive ships).
+  - *Contended-drag tension.* Two people grab the same card -> a visible tug
+    (=@magnetic= pull between the two cursors) until one drops; =policy latest= on
+    the move signal decides the winner, and the LOSER's optimistic move springs
+    back. The race policy you designed becomes a VISIBLE social moment.
+  - *Broadcast ripples.* A remote move doesn't just appear — it arrives as a
+    =@particle-field= ripple from the peer's cursor to the card's new slot, so you
+    perceive WHO did WHAT. Multiplayer you can read at a glance.
+  - This is REAL today (Wave A): verse dev-ws broadcasts =DataUpdate= to all
+    clients; in Wave C the identical UX rides Phoenix PubSub. The page can't tell.
+
+** 14.3 SELF-AWARE — the board renders its own protocol (the unique flex)
+
+  - *The board explains itself.* A side panel renders, via =@data dispatch= +
+    the signal's response SUM (§B), the LIVE contract: "this board speaks =move=,
+    =add=, =archive=; the server replies =Moved | Blocked | Failed=." It is read
+    from the compiler's own registry — it CANNOT drift from the code. No other
+    framework's UI can show you its own wire protocol, accurately, for free.
+  - *Inspect-a-move.* Click any card -> see the exact =@data signal= that fires,
+    its envelope decode arms, and the last raw reply envelope. The board is a
+    living doc of the bridge it demonstrates — perfect for the prototype's purpose.
+  - *Host badge.* A small chip reads the active =@host= transport: "ws://verse"
+    in Wave A, "live://DemoWeb.KanbanLive" in Wave C — same page, the chip is the
+    only visible difference. The thesis ("host swappable, page not") shown literally.
+
+** 14.4 Texture (the finish layer — all stdlib, zero JS)
+
+  - =@each key: $c.id= keyed reconciliation -> reorders animate, never scramble.
+  - =@reveal=/=@fade-in= -> cards + columns stagger in on mount; FLIP-style move.
+  - CSS =@scope= per column -> isolated theming; columns glow on valid drop-target.
+  - =:entering/:exiting= -> add/archive cards grow/dissolve, not pop.
+  - A dark, calm board (reactive-list house style) so the LIVE motion reads clearly.
+
+** 14.5 My recommendation (the coherent cut to build first)
+
+Build the spine that proves all three substrates with the least surface:
+  1. LIVE: optimistic move with physical spring-back + one derived WIP bar (14.1).
+  2. SHARED: presence cursors + remote-move ripple (14.2) — real on verse dev-ws.
+  3. SELF-AWARE: the host badge + the self-rendered contract panel (14.3).
+That trio is unmistakably one-of-a-kind, each piece is a SHIPPED primitive, and it
+is exactly the set Wave C swaps onto Phoenix unchanged — so the demo's wow IS the
+thesis, not decoration on top of it.
+
+** 14.6 Options to weigh together (pick the ambition level)
+
+  - MINIMAL (1 day of build): 14.5 spine. Proves everything, modest visuals.
+  - SIGNATURE (adds ~14.1 time-travel scrubber + 14.2 contended-drag tension):
+    the two ideas no competitor can copy without our substrate — highest "whoa".
+  - MAXIMAL (adds 14.2 particle ripples + 14.3 inspect-a-move + 14.4 full texture):
+    a showpiece; more surface, more polish risk.
+Open question for you: which ambition level, and do the time-travel scrubber and
+contended-drag tension excite you as the signature one-of-a-kind moments — or do
+you have a different "impossible elsewhere" idea you want to chase?
+

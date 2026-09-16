@@ -1,0 +1,83 @@
+#+TITLE: Round-3 review — verification log + corrections (guess-gate)
+#+CUSTOM_ID: mcp-workbench-review-2026-06-19-round3-corrections
+#+LAYER: mcp
+
+* Why this file
+The round-3 review (mcp-workbench-review-2026-06-19-round3.org) was written from
+LIVE observation. Before planning fixes I source-verified every root cause
+(guess-gate). Three claimed defects were DISPROVEN; two new facts emerged. This
+log records the verification so the PLAN builds only real bugs.
+
+* Disproven (were review artifacts, not bugs)
+** ✗ R3-C1a — "file-scope =@param $x= not captured into the contract."
+=@param= is NOT a Spacetime author construct. It appears in the codebase ONLY in
+=///= doc comments (e.g. stdlib/macros/scene/distort.st). My greeter declared
+=@param $name : "world"= — that is meaningless body text; =$name= was never a
+real param, so the empty render ("Hello,") was CORRECT behaviour. No bug.
+
+** ✗ R3-C1b — "multi-param signatures drop all but the first."
+FALSE. The param grammar (stdlib/capture-types/param_list.st) types params by
+SPACE and defaults by =​= ​=, NOT colon:
+  =&main($title string = "Untitled", $count number = 3)=   ✓ two params
+  =&main($title : "Untitled", $count : 3)=                  ✗ invalid (colon = VALUE sigil; harmony rule)
+My R3 tests used the invalid colon form, so only =$title= matched and =$count= was
+correctly rejected. Proof the real grammar extracts N params with types+defaults:
+unit test src/syntax/events/extractors/custom.rs:1306 (14 cases incl.
+=$src url, $alt string=, =$alt string = ""=, union types, collection markers).
+Verified independently: =spacetime check= on the space-form source passes; on the
+colon form it "passes" only because the trailing =$count : 3= is dropped as
+unmatched, not parsed.
+
+** ✗ R3-C1c — "type/default/optional never captured."
+FALSE, same root: =ParamSpec::from= (src/mcp/state.rs:396) copies
+optional/type_ref/default straight from =TemplateParamDef=, and the parser
+populates them for the SPACE+= grammar (custom.rs::reify_param_list, honest
+reifier). My colon-form params simply never reached the reifier with those fields.
+
+*Lesson*: I authored the probe functions with invalid syntax and read the
+(correct) rejection as an extraction bug. The harness was right; the test was
+wrong. Always validate the PROBE against the grammar before blaming the system.
+
+* Confirmed real (source-traced — these are the PLAN's scope)
+** ✓ BUG-113 — st_mount host/region drops the =input= arg.
+src/mcp/tools.rs::st_mount host-branch never passes parsed =input= to
+mount_into_host; src/mcp/live.rs::mount_into_host has no input param and never
+writes region_mount_input. READ side (instance_bundles seeds from
+region_mount_input) is correct; only the mount-time WRITE is missing. mcp_param
+DOES write region_mount_input (live.rs:1232), so inspector edits seed — only the
+initial mount input is lost.
+
+** ✓ BUG-115 — inspector "ALL CONTRACTS" leaks the host's own templates.
+workbench_snapshot (live.rs:320-322) flattens contract_params over ALL functions
+incl. mcp-workbench; the gallery right below (L327-330) DOES self-exclude. Missing
+the same filter.
+
+** ✓ BUG-116 — standalone template-only mount renders blank.
+instance_page emits =function.html=, which is empty for a template-only source
+(file-scope HTML ignored in v1). No region-root/@view on a standalone page to
+invoke =&main()=. Only the host stage wires @mcp-region @view.
+
+** ✓ BUG-114 — source editor self-mutates on hydration.
+=.mcp-source-input { text: $mcpStageSource }= (env.st) sets the textarea value on
+load; =@mcp-action(... on:"change")= (actions.st) fires on that hydration-set
+value → dispatches mcp_source_edit → update_source recompiles + bumps revision.
+Observed: greeter "Hello"→"Heello", rev→2, no user action.
+
+** ✓ BUG-118 (NEW) — /bundles recompiles guest source on every 1s poll.
+instance_bundles (live.rs:1038) calls compile_to_bundle UNCONDITIONALLY per GET
+/bundles?region= ; the region poll runs at 1Hz (bundle.st mcp-region-poll,
+pollBundles ...,1000). Sustained recompilation pinned a core (observed PID
+1258251 at 64-67% CPU, 34min CPU-time) and stalled HTTP until SIGKILL. No
+bundle cache keyed by (function_id, revision).
+
+* The corrected feel-gap (unchanged conclusion, corrected mechanism)
+The round-3 verdict stands — the studio LOOKS the part but doesn't yet behave —
+but the mechanism is tighter than first written: it is NOT a broken param
+contract (that works). It is (1) mount input dropped on compose (BUG-113), (2)
+the host's own internals leaking into the panel (BUG-115), (3) standalone mounts
+blank (BUG-116), (4) the editor self-editing (BUG-114), and (5) a compile-per-poll
+CPU wedge (BUG-118). All five are small, well-scoped seam repairs.
+
+* Artifacts
+Killed wedged server PID 1258251 (2026-06-19). Bugs: BUG-113/114/115/116/118.
+Review: @research/mcp-workbench-review-2026-06-19-round3.org.

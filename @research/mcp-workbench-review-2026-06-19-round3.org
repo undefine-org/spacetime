@@ -1,0 +1,266 @@
+#+TITLE: MCP Workbench — Review + Design + Brainstorm, Round 3 (2026-06-19, post-PLAN-046)
+#+CUSTOM_ID: mcp-workbench-review-2026-06-19-round3
+#+LAYER: mcp
+
+* Session intent
+Re-run the recurring ritual: test-drive EVERY Spacetime MCP workbench action,
+capture expected vs. actual, and judge the gap to the north-star feel —
+"Spacetime + Squarespace + Figma/Framer." REVIEW + DESIGN + BRAINSTORM, not an
+implementation session.
+
+This is the THIRD round. Round 1 (@research/mcp-workbench-review-2026-06-19.org)
+found the chrome shipped but liveness broken (BUG-110 nav misroute, BUG-111 no
+stage compose, FEAT-133 hidden diagnostics). Round 2 (PLAN-046, the 3-DNA
+brainstorm) closed the live loop and shipped six studio moves (M1 house-style,
+M2 gallery, M3' select→inspect, M4 editable params, M5 comms, M6 source edit) —
+all marked DONE, each "live-verified in a real browser." This round
+pressure-tests that DONE claim against the live server.
+
+Verdict in one line: *round 2 shipped the studio CHROME convincingly, but a
+deeper seam regressed — the input→guest SEED path is dead, so the studio still
+behaves like an inspector even though it now LOOKS like a studio.*
+
+* Part 1 — Action-by-action: expected vs. actual
+All exercised against the live MCP server (v0.1.0, workspace verse) 2026-06-19,
+via the MCP tool surface AND a real headless browser driving inst-1.
+
+| #  | Action / surface              | Expected                                  | Actual                                                                 | Verdict |
+|----+-------------------------------+-------------------------------------------+------------------------------------------------------------------------+---------|
+| 1  | st_health                     | version + workspace                       | "v0.1.0 healthy. Workspace: …/verse"                                   | ✓ |
+| 2  | st_env_list                   | discovered + open counts                  | "42 discovered, 0 open"                                                | ✓ |
+| 3  | st_env_open (tool)            | attach, return env id                     | "Environment env-1 → __mcp__"                                          | ✓ |
+| 4  | st_workbench                  | mount warm-dark studio                    | inst-1 URL; renders on-spec AFTER full load                            | ✓ visual / ⚠ first-paint (blank until networkidle — D8 from R1 still open) |
+| 5  | st_fn_put (valid, sig params) | register + contract                       | registered; *contract shows only FIRST param* (`&main($title,$count)` → only `title`) | ✗ contract extraction (NEW) |
+| 6  | st_fn_put (valid, @param)     | register + contract w/ the param          | registered; *contract EMPTY* (`@param $name` at file scope not captured) | ✗ contract extraction (NEW) |
+| 7  | st_fn_put (broken)            | refuse + readable diagnostics             | "NOT mountable"; full miette PARSE errors in tool result               | ✓ (FEAT-133 fixed since R1) |
+| 8  | st_inspect (name)             | contract / diagnostics / state            | one-line "compiles. contract-hash …" — still terse, no param list      | ⚠ (improved over R1 but still thin) |
+| 9  | st_tab_open (inline `<p>`)    | compile + sizes                           | "css=0B js=239777B html=0B" — *0 HTML, 239KB JS for a `<p>`*           | ⚠ (template-only → no html, full runtime js; surprising sizes) |
+| 10 | st_tab_list                   | count                                     | "1 tab(s) in env-1"                                                    | ✓ (tool); not surfaced in workbench nav tab-list (still 0) | ✗ liveness |
+| 11 | st_mount host=inst-1 region=stage | compose guest onto host stage         | composes; stage @view mounts guest as sibling — *the R1/BUG-111 fix holds* | ✓ compose / ✗ see #12 |
+| 12 | …with input:{...}             | guest seeded with the input values        | *guest renders with EMPTY params* (greeter "Hello,"; carded empty title) | ✗ SEED PATH DEAD (NEW, headline) |
+| 13 | st_mount (standalone, agent_control) | render the page + its button        | *empty `<body>`* — only runtime `<script>`; template HTML never mounts | ✗ standalone mount renders blank (NEW) |
+| 14 | st_await (agent-control inst) | drain agent-emitted events                | "No event after 3s" — correct, but the button is unreachable (#13)     | ✓ tool / moot |
+| 15 | st_elicit                     | native client prompt                      | out-of-band (client elicitation; not part of the workbench surface)    | — n/a here |
+| 16 | UI: nav drawer + Open env     | drawer opens; env opens; list repaints    | drawer opens; *env opens AND repaints* (open-envs list grows)          | ✓ (BUG-110 fixed since R1) |
+| 17 | UI: inspector drawer          | mounted region's contract                 | opens; "ALL CONTRACTS" *dumps the workbench's OWN internal card templates* (mcp-env-card …) | ✗ host plumbing leaks into user panel (NEW) |
+| 18 | UI: origin drawer             | every loaded fragment + origin chip       | renders function-list with origin chips                                | ✓ |
+| 19 | UI: comms drawer              | agent affordances + events                | opens; warm empty-state; agent-audience filter correct                 | ✓ chrome / empty (no kit sent this run) |
+| 20 | UI: select frame (M3')        | click guest ⇒ ember ring + inspector binds | *works* — `$selected=stage`, ring, inspector shows the guest name      | ✓ (the Figma loop is real) |
+| 21 | UI: editable param (M4)       | param row is a control; edit ⇒ live guest update | input renders + commits `mcp_param`; *guest NEVER updates* (seed path #12) | ✗ live-edit dead (NEW) |
+| 22 | UI: source editor (M6)        | shows live source; edit ⇒ recompile+hot-swap | source loads correctly; *spurious change events on hydration mutated source* ("Hello"→"Heello", rev→2) without user action | ✗ data corruption on load (NEW) |
+| 23 | UI: gallery (M2)              | clickable tiles of composable fns         | 3 tiles render (greeter / fn-4 / carded); broken fn-3 correctly excluded | ✓ (one tile shows no name — fn-4 anon) |
+
+* Part 2 — Root-cause clustering
+Round 1's three defects (nav misroute, no stage compose, hidden diagnostics) are
+FIXED — credit to round 2. But round 2's "live-verified" moves rest on a seam
+that is broken, and the regression clusters into ONE truth + three leaks.
+
+** R3-C1 (HEADLINE) — the input→guest SEED PATH is dead.
+Everything that should put DATA into a composed guest fails:
+- =st_mount input:{...}= → the guest renders with empty params.
+- =bundles?region=stage= returns =input: {}= (the region seed is never written).
+- M4 editable-param edits commit a =mcp_param= event but the guest never repaints.
+The chrome for all three (mount input arg, param inputs, hot-swap) is present;
+the PIPE from "a value the user/agent supplied" to "the guest's signal" is cut.
+Net effect: a composed guest can only ever show its DEFAULTS. The single most
+studio-defining promise — "change a value, watch it update live" — does not work.
+
+*** R3-C1a — file-scope =@param $x= is not captured as a contract param.
+=greeter= declared =@param $name : "world"= with =&main()= empty → contract
+=[]=. Only template-SIGNATURE params (=&main($x)=) are extracted. So a whole
+idiomatic authoring style yields a guest with no inspectable/editable surface.
+
+*** R3-C1b — multi-param template signatures drop all but the first.
+=&main($title : "Untitled", $count : 3)= → contract has ONLY =title=. =$count=
+silently vanishes. (Verified twice via the live snapshot.) This is a contract
+EXTRACTION bug, upstream of the workbench, in the bundle param-spec collector.
+
+*** R3-C1c — type + default + optionality are never captured.
+Every extracted param is =type:null, default:null, optional:false= even when a
+default was declared (=: "Untitled"=). The inspector therefore can render only a
+bare text box — no number/enum control, no placeholder showing the default, no
+"optional" affordance. The Framer-property-panel feel is gated on this.
+
+** R3-C2 (leak) — host plumbing bleeds into the user's property panel.
+The inspector "ALL CONTRACTS" list shows the WORKBENCH'S OWN internal card
+sub-templates (=mcp-env-card=, =mcp-open-env-card=, =mcp-tab-card=,
+=mcp-function-card=, =mcp-instance-card=, =mcp-event-card=, =mcp-param-card=,
+=mcp-gallery-card=, =mcp-param-edit=). These are the renderer's internals, not
+anything the user composed. A Figma inspector never shows you its own toolbar's
+internal components. The gallery already filters out =mcp-workbench=
+(=gallery_functions=); the contract list needs the same self-exclusion.
+
+** R3-C3 (leak) — a template-only function mounted STANDALONE renders blank.
+=st_mount= without =host=/=region= (the agent-control path) produces a page whose
+=<body>= is just the runtime =<script>= — the function's =main= template is in
+the =/bundles= payload but there is no region root + =@view= on the standalone
+page to mount it (only the workbench host page wires that up). So an
+agent-control panel's buttons never appear, and =st_await= can never resolve a
+human answer. The agent↔human co-edit story (M5's reason to exist) is unreachable
+through the documented =agent_control:true= mount.
+
+** R3-C4 (regression) — source editor self-mutates on hydration.
+Opening the inspector with a selected guest fired TWO unsolicited
+=mcp_source_edit= =change= events during page hydration, each rewriting the
+guest source from the textarea's value — and one corrupted it ("Hello" →
+"Heello") and bumped the function to revision 2, with NO user action. =on:
+"change"= on a =text:=-bound textarea fires when hydration sets the value. A
+live-coding tool that silently edits the artifact you're inspecting is a trust
+break.
+
+** What genuinely WORKS (credit to round 2)
+- The warm-dark organic chrome is real and on-spec (espresso bg, ember accent,
+  serif wordmark, edge summon-glyphs, scrim, soft radii). Design doc honoured.
+- The drawer model is pure-Spacetime: one =$drawer= string signal + =@on click=
+  + reactive =.is-open=. No custom JS. Elegant.
+- The Figma SELECT→INSPECT loop is genuinely there: click a composed guest ⇒
+  =$selected= ⇒ ember ring + inspector auto-opens + binds the guest's name +
+  source. Selection survives drawer toggles (Figma-correct).
+- =st_mount host=/region= composition (BUG-111 fix) holds: the guest mounts as a
+  sibling on the stage, empty-state hides.
+- Compile gating: a broken function REFUSES to mount, with READABLE diagnostics
+  (FEAT-133 fix) — the biggest R1 DX wound is healed.
+- Nav loop (BUG-110 fix): Open-environment repaints the open-envs list live.
+- The living gallery (M2) renders real clickable tiles, broken fns excluded.
+- The source editor LOADS the correct live source (when not self-mutating).
+
+* Part 3 — Comparison to the prior rounds
+| Concern (north-star DNA)        | Round 1 (pre-046)        | Round 3 (this, post-046)                    |
+|---------------------------------+--------------------------+---------------------------------------------|
+| Live loop (compose/nav/diag)    | ✗ all broken             | ✓ FIXED (BUG-110, BUG-111, FEAT-133)        |
+| Squarespace: beautiful defaults | ✗ inert ghost-pills      | ✓ living gallery + house-style baseline      |
+| Squarespace: zero-blank-anxiety | ✗ dead "Begin here"      | ✓ gallery is a real front door               |
+| Figma: select→inspect           | ✗ inspector bound to nil | ✓ select ring + bound inspector (the win)    |
+| Figma: property panel (editable)| ✗ read-only dump         | ⚠ control RENDERS, but edit doesn't apply (R3-C1) |
+| Spacetime: everything live      | ✗ static snapshot        | ✗ REGRESSED at a new seam — seed path dead (R3-C1) |
+| Spacetime: hot-swap breathing   | (claimed via re-put)     | ⚠ source hot-swap path exists but self-fires (R3-C4) |
+| Agent↔human co-edit (comms)     | ✗ empty shell            | ⚠ feed chrome real; agent-control mount blank (R3-C3) |
+
+Round 2's brainstorm (the 3-DNA doc) was RIGHT about the moves and RIGHT that
+they're mostly composition of shipped surfaces. What it could not see (because
+each move was verified in isolation, with a guest whose value happened to match
+its default, or a screenshot that captured the chrome not the data) is that the
+common DEPENDENCY of M3'/M4/M6 — a working param contract + a live input seed —
+is broken. The moves were verified at the CHROME layer; the DATA layer underneath
+them never carried a value end-to-end. That is the gap between "live-verified"
+(the ring appears, the input appears) and "works" (the value flows).
+
+* Part 4 — The FEEL gap: why it STILL isn't Spacetime+Squarespace+Figma/Framer
+The skin is now genuinely studio-grade. The remaining distance is almost entirely
+the DATA layer + a few leaks. Three feelings are still missing:
+
+** Squarespace = "I change a thing and see it" — *blocked by R3-C1.*
+The defining Squarespace gesture is direct: edit the headline, the headline
+changes. Here you edit the =title= param and NOTHING happens on the stage. Until
+the seed path carries the value, every guest is frozen on its defaults — the
+studio looks editable but is read-only in practice.
+
+** Figma/Framer = "the panel reflects + drives the selection" — *half-there.*
+Select→inspect is the round-2 triumph and it WORKS. But the panel is INERT: it
+shows one param (when extraction doesn't drop it), as a bare textbox (no type),
+that doesn't drive the guest (R3-C1). And it's polluted with the host's own
+internals (R3-C2). A property panel that shows the wrong properties and can't
+change them isn't yet a property panel.
+
+** Spacetime = "everything is live, composable, self-describing" — *the seam betrays it.*
+The philosophy is the whole point, and it's exactly where the regression bites:
+the param contract is the self-description, the seed is the liveness, and both
+are broken. Worse, the one place data DOES flow unbidden (R3-C4 hydration edits)
+flows the WRONG way — the tool edits itself. Self-describing requires the
+description to be COMPLETE (all params, with types) and the liveness requires the
+value to MOVE; today neither holds.
+
+* Part 5 — Design brainstorm (north-star moves, ordered by leverage)
+Each is a DIRECTION; most are small fixes to shipped seams, not new subsystems.
+
+** D1. Repair the seed path (prerequisite for the studio FEEL) — fixes R3-C1.
+The floor, exactly as R1's "close the live loop" was. Three sub-moves, all in the
+contract/bundle/region-seed pipe, none new subsystems:
+- D1a: capture file-scope =@param= into the contract (not just signature params).
+  This is where the self-description should be the SAME mechanism — the param
+  registry should not care whether a param was declared in the signature or with
+  =@param= (one need, one impl; AGENTS harmony).
+- D1b: fix the param-spec collector to keep ALL signature params, not just the
+  first. (Likely an iterator that breaks early / overwrites a single slot.)
+- D1c: carry type + default + optionality through extraction → the inspector can
+  render the right CONTROL (number stepper, enum select, checkbox) with the
+  default as placeholder. This unlocks the Framer property panel for real.
+- D1d: write the region seed — =st_mount input= and =mcp_param= must land in
+  =bundles?region=stage= =input= and seed the guest's signals via the existing
+  =@view= root. (The transport exists; the WRITE is missing.)
+
+** D2. Stop the host plumbing leak — fixes R3-C2.
+Self-exclude =mcp-workbench='s own templates from "ALL CONTRACTS" (the same
+=name != "mcp-workbench"= filter the gallery already uses). Better: scope the
+inspector's contract list to the SELECTED frame by default (the panel should
+show what's selected, with "all" behind a disclosure) — that's more Figma-true
+anyway and sidesteps the leak.
+
+** D3. Make standalone mounts render — fixes R3-C3.
+A standalone =st_mount= (agent-control or preview) needs the SAME region-root +
+=@view= wiring the host stage has, so a template-only function actually paints.
+Either (a) wrap standalone instances in a minimal region shell that mounts the
+=main= template, or (b) document that agent-control panels MUST be composed into
+a host region (and make =agent_control= imply a host). Without this, the comms /
+agent-affordance story (M5's purpose) can't be demonstrated.
+
+** D4. Make the source editor edit only on INTENT — fixes R3-C4.
+=on: "change"= fires on hydration-set values. Gate the =mcp_source_edit= on a
+real user edit: a dirty flag, an explicit "save" affordance, or compare against
+the loaded source before dispatching. A live-coding tool must never mutate the
+artifact just because you looked at it. (Also: the corrupted rev-2 "Heello"
+greeter is live evidence — worth a guard test.)
+
+** D5. Inspector = type-aware property panel (the Framer move) — depends on D1c.
+Once types flow: render each param as its natural control, show the default as
+placeholder, mark optionals, and (later) group by template. This is the move
+that makes the right panel FEEL like Framer rather than a form.
+
+** D6. First-paint polish (carried from R1 D8, still open).
+Workbench flashes blank until networkidle (the headless driver needed an explicit
+networkidle2 nav to render at all). Server-render the shell or show a warm
+skeleton. First impression; Squarespace/Framer never flash blank.
+
+** D7. (north star, unchanged) one meta-renderer, three faces.
+=__mcp__= / =__admin__= / =__dev__= still rhyme; the two-consumer rule from
+round 2 still says "extract on the second real consumer, not speculatively."
+Nothing this round changes that — but D1 (the param contract) is exactly the kind
+of shared primitive that, once correct here, the admin's typed-entry editor could
+share. Watch it as the convergence seam.
+
+* Part 6 — Honest verdict
+Round 2 was a real advance: it took a beautifully-dressed static inspector and
+gave it a working live loop, a gallery, a select→inspect ring, and the CHROME of
+a property panel, comms feed, and source editor — all pure-Spacetime, all
+on-spec. The studio now LOOKS the part.
+
+But "looks the part" is exactly the trap the AGENTS stakes warn about:
+verifications-you-didn't-do. The six moves were each verified at the chrome layer
+(the ring appears, the input appears, the feed renders) and signed off as DONE —
+while the DATA layer beneath them (param contract + input seed) never carried a
+value end to end. So the workbench today is a studio you can look at but not yet
+USE: compose a guest and it shows defaults; edit a param and nothing moves; open
+the inspector and it silently edits your source. The distance to
+"Spacetime+Squarespace+Figma/Framer" is no longer chrome — it is:
+1. floor: repair the seed path + param contract (D1) — make values FLOW.
+2. trust: stop the self-mutation + the plumbing leak (D2, D4) — make it SAFE.
+3. reach: type-aware property panel + standalone render (D3, D5) — make it FELT.
+
+The feel gap is now a DATA gap. Fixing it is small, well-scoped seam repair —
+not a new subsystem — and it is the difference between a studio that demos and a
+studio that works.
+
+* Artifacts
+Screenshots (scratch/): wb-02-loaded.png (empty stage), wb-03-composed.png
+(greeter, unseeded), wb-04-inspector.png (ALL CONTRACTS leak), wb-06-select-inspect.png
+(select→inspect ring — the win), wb-07-nav.png (env drawer), wb-08-comms.png
+(comms feed), wb-09-editable-params.png (carded: editable title chrome vs empty stage).
+Live server: inst-1 (workbench host), inst-2 (standalone agent-control, blank).
+Functions registered this run: greeter (fn-2, @param — empty contract),
+broken (fn-3, refused), agent-control (fn-4, standalone-blank), carded (fn-5,
+sig params — only first captured).
+Prior rounds: @research/mcp-workbench-review-2026-06-19.org (R1),
+@research/mcp-workbench-three-dna-brainstorm-2026-06-19.org (R2 brainstorm),
+!tasks/plans/PLAN-046-mcp-workbench-studio-round-2-house-style.org (R2 plan, DONE).
+Design doc: @research/mcp-design-language-organic-birthplace.org.
+Memory: EP-ba2b208b8a2ac87a.

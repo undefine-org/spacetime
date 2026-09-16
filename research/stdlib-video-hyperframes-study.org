@@ -1,0 +1,213 @@
+#+TITLE: stdlib/video — HyperFrames study + Spacetime reimplementation vision
+#+DATE: 2026-07-18
+#+STATUS: exploration / vision (no implementation yet)
+
+* What HyperFrames is (heygen-com/hyperframes, Apache-2.0, TS, ~36k stars)
+
+Thesis: *video is a deterministic function of (document, t)*.
+=frame = floor(time × fps)= → headless Chrome seeks each frame → captures →
+FFmpeg encodes. "Write HTML. Render video. Built for agents."
+
+** The four pillars
+
+1. *Composition contract* (=@hyperframes/core=): every element with
+   =class="clip"= + =data-start= / =data-duration= / =data-track-index= is a
+   timeline clip. Sub-compositions via =data-composition-src= (an HTML file
+   embedded as a clip). Variables parameterize a composition so one source
+   renders many videos. "Framework-owned media playback": =<video>/<audio>=
+   elements are *seeked* by the runtime to clip-local time, never free-running —
+   that is what makes capture deterministic.
+
+2. *Engine/producer* (=@hyperframes/engine=, =@hyperframes/producer=): warm
+   Chrome via CDP BeginFrame API, per-frame seek+capture, pipe to FFmpeg.
+   H.264/ProRes/HEVC/VP9/AV1/PNG-seq, HDR10, 4K via device-scale supersampling.
+   Audio is NOT captured from the page — it is composed at encode time from the
+   declared audio clips (manifest → ffmpeg mix). Cloud/Lambda/Cloud-Run
+   adapters for distributed rendering; =--variables= batch rendering for
+   template videos at scale.
+
+3. *Studio* (=@hyperframes/studio= + =studio-server=): browser NLE. React app;
+   iframe preview runs the SAME runtime as render (preview ≡ render, pixel
+   identical); postMessage bridge for play/pause/seek; timeline panel parsed
+   from the composition source; *timeline edits persist back into the HTML
+   source* (move/trim → rewrite =data-start/duration=); element picker;
+   CodeMirror source editor; GSAP keyframe diamonds + arc motion path editing;
+   hot reload preserving playhead. Plus a headless *SDK*
+   (=@hyperframes/sdk=): query/mutate/batch/undo-redo/patch-events over a
+   composition — the agent-facing editing engine behind the GUI.
+
+4. *Catalog + skills*: ~120 registry items (=npx hyperframes add <name>=) —
+   shader transitions (whip-pan, glitch, light-leak, SDF iris…), code
+   animation (typing, diff, morph, particle-assemble, 3D extrude), maps/data
+   viz (choropleths, flight arcs, chart races), lower thirds (×12), kinetic
+   caption styles (×16), social cards (X/Reddit/Spotify/TikTok), GLTF device
+   mockups (iPhone/MacBook with live HTML-in-canvas screens), VFX (liquid
+   glass, portal, shatter). Each block = a self-contained composition HTML +
+   registry metadata (type, dimensions, duration, install target).
+   19 agent *skills*: a =/hyperframes= router + creation workflows
+   (product-launch-video, pr-to-video, faceless-explainer, music-to-video,
+   slideshow, …) + domain skills (core contract, animation doctrine, keyframe
+   seek-safety, media OS, registry). =frame.md= = design.md inverted for the
+   camera frame.
+
+** Their structural weakness (our opening)
+
+HyperFrames *retrofits* seekability onto runtimes that fight it: GSAP/CSS/WAAPI/
+Lottie/Three each need a "frame adapter", and "seek-safe keyframe authoring" is
+an entire skill because authors constantly write animations that break under
+seek. Their determinism is a discipline enforced by lint + doctrine docs.
+
+Spacetime *owns the clock*. =ST._clock= + the rAF coordinator already run every
+driver; =@clock install / advance / sample / run-to-end= already seeks virtual
+time deterministically (docs/testing/ANIMATION.md calls this a moat). For us,
+"render a video" is not a new engine — it is =@clock= + CDP screenshot + encode.
+Determinism is a property of the architecture, not a doctrine.
+
+* Existing Spacetime affordances that map 1:1
+
+| HyperFrames piece                | Spacetime affordance already shipped                          |
+|----------------------------------+---------------------------------------------------------------|
+| seek-driven capture engine       | =@clock= virtual time + warm-Chromium CDP backend (src/cdp.rs, =@capture= screenshot W7) |
+| frame adapters (GSAP/CSS/WAAPI)  | driver signals 0→1 (=stdlib/primitives/animation/drivers.st=) — a time driver is just another driver |
+| preview ≡ render                 | same runtime in dev server + CDP backend; fidelity ladder guarantees honesty |
+| =data-composition-src= sub-comps | component imports; scenes as components                       |
+| variables / template videos      | capture-types param surface (=$price number=), =--data= at build |
+| catalog + =hyperframes add=      | showcases rails: doc-comment SCHEMA, registry, CLI (=stdlib/showcases/=) |
+| shader transitions package       | =stdlib/3d= (vendored three.js) =@stage/@post=; candidate vendor: gl-transitions GLSL set |
+| device mockups (GLTF + HTML-in-canvas) | =stdlib/3d= GLTF support                                |
+| code animation blocks            | =stdlib/syntax=                                               |
+| kinetic captions                 | =stdlib/text= (pretext: real text measurement)                |
+| studio persist-back editing      | =stdlib/editable= + CMS/content-editing surface               |
+| SDK (headless comp editing)      | the metasystem itself is self-describing; org/editable rails  |
+| skills                           | =.claude/skills/spacetime-design= precedent                   |
+| lint (seek-safety, determinism)  | =cargo run -- check= + antipatterns registry                  |
+| docs-as-feature                  | =@doc= / md module — storyboard/script colocated in the comp  |
+
+* Vision: stdlib/video
+
+One sentence: *a Spacetime page IS a video* — the same =.st= source plays live
+on the web (zero render) and renders to a deterministic MP4, because scenes are
+just elements driven by a time signal from the clock we already own.
+
+** Author surface (sketch — honors harmony rules: no new sigil meanings)
+
+#+begin_src spacetime
+@import "stdlib/video"
+
+@composition(size: 1920x1080, fps: 30) {
+  @scene intro(duration: 3s) {
+    h1 { "Spacetime" @in fade-up(400ms) @out fade(200ms) }
+  }
+  @scene features(start: after intro, duration: 6s, track: 1) {
+    @each $f in $features { .card { `$f.title` @in slide-left(stagger: 80ms) } }
+  }
+  @transition(from: intro, to: features) whip-pan(300ms)
+
+  @audio bgm(src: "assets/bgm.mp3", gain: 0.6, duck: voice)
+  @voice(src: "assets/vo.mp3")
+  @captions(src: "assets/vo.vtt", style: karaoke)
+}
+#+end_src
+
+- =@scene= = clip: a component whose mount/opacity/enter/exit are driven by a
+  clip-local time signal derived from the master clock. Relative starts
+  (=after intro=) resolve at compile time — like their =data-start="intro"= but
+  checked by the compiler, not string-matched at runtime.
+- =@in/@out= = enter/exit animation presets riding existing animation
+  primitives; any existing driver-based animation works inside a scene
+  unchanged (this is the moat: no "seek-safe" doctrine needed).
+- Media elements inside a composition get framework-owned playback: the clip
+  time signal seeks them (extend =stdlib/primitives/media.st= /
+  =video-visibility.st= family).
+- Audio never rendered from page: =@audio/@voice= declarations compile to an
+  *audio manifest*; the encoder mixes it (gain/duck/trim) via ffmpeg. Fully
+  deterministic.
+
+** The one-clock unification (the core design win)
+
+ST._clock, three consumers, zero new engines:
+1. *Live page* — rAF drives the clock; the composition plays as a website
+   section (launch video = hero section, literally the same source).
+2. *Tests* — =@clock advance= + =@timeline= claims; golden-frame tests capture
+   frame at t on the =paint= rung and diff (fits FIDELITY_LADDER — refuses on
+   =--headless=, runs on =--cdp=).
+3. *Render* — =cargo run --features cdp -- render projects/x/ --out out.mp4=:
+   warm Chromium, for k in 0..N { clock.seek(k/fps); waitSettled;
+   captureScreenshot } → pipe PNG stream to ffmpeg stdin → mux with audio
+   manifest. PNG-sequence fallback when ffmpeg absent; =doctor= checks ffmpeg
+   like it checks Chrome. =--data row.json= → batch/template rendering.
+
+** Catalog (stdlib/video/catalog on showcase rails)
+
+Reuse the doc-comment SCHEMA discipline (scenario × style × school → here:
+category × style). Seed categories mirroring their proven demand:
+transitions (ride 3d/@post; vendor candidate: gl-transitions GLSL corpus as
+DATA), lower-thirds, kinetic captions, title/logo cards, code walkthrough
+scenes (ride stdlib/syntax), chart/map scenes, social cards, device mockups
+(ride 3d GLTF). Each entry = an importable =.st= scene component with typed
+params — installable by import, no =npx add= copy step needed (better than
+theirs: catalog blocks are *library components*, not copied files that drift).
+
+** Studio — dogfooding, not React
+
+Their Studio is a React NLE bolted beside the runtime. Ours should be a
+*Spacetime site* (like demos/spacetime-docs): timeline panel reads the
+composition's own registry (self-describing metasystem — clip names, starts,
+durations are compile-time data); scrubber/transport drive ST._clock through
+signals (no custom JS — AGENTS rule holds); hot reload already exists in the
+dev server; persist-back timeline editing (move/trim → rewrite =@scene= args)
+rides the editable/CMS surface which already knows how to write source back.
+If a needed affordance is missing (e.g. writing a directive arg from an
+editable control), that's a metasystem feature to design properly — exactly
+the AGENTS.md decisionmaking rule.
+
+** Vendoring assessment
+
+- *ffmpeg*: external process dep (compiler-side, like Chromium/CDP) — NOT a
+  =.st= =%vendor=. =doctor= verb learns to find it.
+- *gl-transitions* (MIT, ~80 GLSL transition functions as data): strong
+  =%vendor= candidate riding stdlib/3d — matches "variants are DATA" elegance
+  bar; deletes need to hand-write transition shaders.
+- *VTT/SRT parsing* for =@captions=: tiny grammar — candidate for a small
+  vendored parser (snarkdown-scale) or %form-style grammar; decide at design
+  time, prefer whichever deletes more.
+- Beat detection / music sync: defer (their music-to-video tier); revisit.
+
+** What this unlocks for Spacetime UX
+
+1. Launch videos, changelog videos, PR-to-video for Spacetime projects,
+   authored in Spacetime — the toolchain markets itself.
+2. Page ≡ video duality no competitor has: hero section that IS the mp4;
+   render the same source to social formats (9:16 via param).
+3. Deterministic motion testing and video rendering share one vocabulary —
+   =@timeline= claims graduate into golden-frame CI for brand motion.
+4. Agent-native production loop (skills) on a surface with *compile-time*
+   checked timing — agents get errors, not seek-drift.
+5. Template video at scale: capture-types params + batch render = personalized
+   video pipelines (their Lambda story) on our CLI.
+
+** Risks / open questions
+
+- Frame-exact =<video>= seeking in Chromium is finicky (they solved it with
+  framework-owned playback + careful readiness waits; we must too:
+  =document.fonts.ready=, media =seeked= events, settle barrier per frame).
+- Render throughput: seek-capture is slow-but-sure; parallelize by scene later
+  (their Lambda insight: scenes are embarrassingly parallel).
+- Timing-arg persist-back needs an editable-surface affordance that may not
+  exist yet — design it as a proper metasystem feature, not a bypass.
+- =@transition= spanning two scenes needs both mounted during overlap —
+  clip model must support overlap windows (they use track z-order; we have
+  tracks in the sketch).
+
+** Proposed phasing (when we commit)
+
+- W1 core: time driver + =@composition/@scene= + relative starts; live-page
+  playback. (Pure stdlib + registry; no new Rust subsystem.)
+- W2 render: =render= CLI verb on =cdp= feature; ffmpeg encode; doctor check;
+  PNG-seq fallback.
+- W3 media/audio: framework-owned media seek; audio manifest + mix; =@captions=.
+- W4 catalog seed: transitions (+ gl-transitions vendor), lower-thirds,
+  captions, title cards — on showcase SCHEMA rails.
+- W5 studio: demos/video-studio =.st= site (timeline, transport, scrub);
+  persist-back via editable surface (+ any metasystem feature it demands).
+- W6 hardening: golden-frame tests, determinism lint rules, agent skill.

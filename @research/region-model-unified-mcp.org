@@ -1,0 +1,89 @@
+#+TITLE: Unified MCP — Region Model (design doc, PLAN-039 §3)
+#+CUSTOM_ID: region-model-unified-mcp
+
+* Context
+Locked decision from the unified-live-MCP-environment design iteration
+(2026-06-17). The workbench is ONE persistent Spacetime page; every other
+loaded Spacetime (stdlib / env / agent-sent / kit) composes INTO it as a
+region-mounted bundle. This document specifies the region: its identity,
+lifecycle, isolation model, and the v1 topology.
+
+Composition primitives this rests on are ALL shipped:
+  - @template with &-element params (layout-with-holes)  [verified, FEAT-071]
+  - &parent(args){ child-markup }  (slot fill)            [verified compiles]
+  - @view $sig { pat => &t(); }  (reactive region mount)  [FEAT-074]
+  - Spacetime.templates runtime Map                         [source-verified]
+  - ST.set(el,name,v) element-scoped state                  [FEAT-071]
+
+* What is a region?
+A region is a DOM element that serves as a reactive mount point for exactly one
+bundle (one template instance) at a time. The workbench chrome declares regions;
+=st_mount= fills them; =@view= / =region-mount= swaps them.
+
+* Region identity (attributes on the region ROOT, not on <html>)
+  - =data-st-region="{region_id}"=  stable handle (e.g. =main=, =inspector=).
+  - =data-st-instance="{instance_id}"=  the currently-mounted instance (inst-N).
+    Empty when no bundle is mounted.
+  - =data-st-origin="{origin}"=  origin of the mounted bundle
+    (Stdlib | Env(env_id) | Agent(agent_id) | Kit). Empty when no bundle.
+
+The legacy =data-st-mcp-instance= on =<html>= is RETIRED. Standalone per-instance
+pages are removed (Fork 6): one rendering pipeline, the region pipeline. The host
+workbench page itself has origin =Stdlib= and records its own instance on its
+chrome root.
+
+* Region lifecycle
+  1. DECLARED (static, in workbench chrome source): =<main data-st-region="main">=. v1 regions: =nav=, =main=, =inspector=, =comms=. Dynamic region creation is out of scope for v1.
+  2. EMPTY: no bundle mounted; region renders =&region-empty()= (inviting placeholder explaining the region's role).
+  3. MOUNTING: =st_mount(fn, region, input)= -> bridge -> page sets the per-region signals =$region_{id}_tpl= (template name) + =$region_{id}_input= (input data). =@view= / =region-mount= subscribes, looks up the factory in =Spacetime.templates=, disposes any prior content, mounts.
+  4. MOUNTED: region root gets =data-st-instance= + =data-st-origin=; the bundle's CSS is registered wrapped in =@scope ([data-st-region="{id}"]) { ... }=; the bundle's template factory runs against the input.
+  5. HOT-SWAP: signal changes -> dispose prior (=ST.dispose= subtree + remove children) -> mount new. Prior scoped state is DISCARDED by default (keep-alive is a follow-up).
+  6. UNMOUNT: signal cleared -> dispose -> region returns to the empty placeholder.
+
+* State isolation
+Each mounted instance's state is element-scoped via =ST.set(region_root, name, val)= (FEAT-071). Two regions mounting the same bundle are independent instances with independent state. No cross-region leakage. No new isolation machinery — this is the existing template-instance model applied N times on one page.
+
+* CSS isolation (v1)
+Each bundle's CSS, at registration, is wrapped: =@scope ([data-st-region="{id}"]) { ...bundle css... }=. Selectors confine to the region subtree. Workbench chrome CSS is page-level (unscoped). Two-tier: chrome (unscoped) + bundles (scoped).
+
+Known gaps deferred to FUP-062 (proper @scope macro):
+  - =@keyframes= are global even inside =@scope= -> v1 lint warns authors off top-level keyframes.
+  - custom properties on =:root= leak -> v1 lint warns authors off =:root= vars.
+
+* Event / host-bridge isolation
+  - =@mcp-host= migrates from =%scope file= to =%scope selector= over =[data-st-instance]=. One bridge per region.
+  - =window.__stHost= resolution: =@mcp-click= / =@mcp-action= payloads resolve the NEAREST ancestor instance via =target.closest('[data-st-instance]').__stHost= (not a global). Each region's bridge attaches to its root element. No cross-region event misrouting.
+  - Signal sink =/__mcp/signal/{instance_id}=: unchanged shape; instance now = region-instance.
+  - =@mcp-input(refresh:)= polls =/__mcp/instance/{instance_id}/input.json= per region.
+
+* Region topology (v1 workbench chrome)
+#+begin_example
++-----------------------------------------------------+
+| topbar: host instance id . origin summary . refresh  |
++----------+----------------------------+-------------+
+| #nav     | #main                      | #inspector  |
+| envs     | live content / mounted     | contract +  |
+| tabs     | function (C3)              | origin chip |
+| (C1)     |                            |             |
+|          |                            +-------------+
+|          |                            | #origin     |
+|          |                            | every loaded|
+|          |                            | Spacetime + |
+|          |                            | origin      |
++----------+----------------------------+-------------+
+| #comms: agent-emitted buttons / kit (picker/form) (C2)|
++-----------------------------------------------------+
+#+end_example
+C1 (chrome: envs/tabs), C2 (agent-comms), C3 (live content) nest in ONE page,
+ONE DOM, ONE runtime.
+
+* =st_mount= contract (v1)
+  - =st_mount(fn_id, region?, input?) -> { region_id, instance_id }=.
+  - =region= omitted -> auto-allocate into the default region (=main=) or the next free declared region.
+  - No standalone-page return path (Fork 6 removed it). A future standalone preview, if wanted, is a minimal host page mounting the bundle into a single full-viewport region (FUP-061).
+
+* Why this design (locked rationale)
+  - Reuses shipped composition primitives verbatim; no new language feature needed for v1.
+  - "Chrome is special" (Fork 2-A): the chrome owns region topology, is unscoped, must pre-exist. Forcing it into the bundle model adds a bootstrap special-case uglier than admitting chrome is special.
+  - Flat template registry + origin-as-metadata (Fork 3-B): preserves author syntax (&card, not &agent-7:card); collisions are loud errors at registration, not silent last-wins.
+  - Extend @view for dynamic template names (Fork 1-A): deletes the one dispatch asymmetry (@view was the only dispatch primitive without $-variable resolution); region semantics == @view wildcard arm with a dynamic name.

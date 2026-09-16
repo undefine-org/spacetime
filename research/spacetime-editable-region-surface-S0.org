@@ -1,0 +1,179 @@
+#+TITLE: Region-Editing Live Surface — S0 Design (FUP-045)
+#+DATE: 2026-06-12
+#+STATUS: ACCEPTED (design); implementation S1–S4 follows
+
+* Why this doc
+FUP-042 made the *model* (=ST.Editable=, =public/runtime/editable.js=) region-complete:
+=project=/=liftBlock=/=validate=/=resolvePath= all descend the region tree, proven by 29
+model tests + a nested-tree =@property= fuzz. But the *live surface*
+(=stdlib/editable/primitives/editable-surface.st=) predates regions and speaks the FLAT
+path only. So a region block (a list, a two-column layout) RENDERS in the admin but cannot
+be EDITED: the caret math collapses all regions into one text run.
+
+This doc specifies the surface upgrade — the smallest set of changes that makes a region
+block clickable+typable while keeping every flat-doc behaviour byte-identical.
+
+* The exact seam (grounded in the kernel, not a sketch)
+Three functions stand between "renders" and "edits". Two are FLAT; one is already done.
+
+| layer                     | function(s)                          | region-aware? |
+|---------------------------+--------------------------------------+---------------|
+| forward projection        | =E.project= → =projectBlock=         | ✓ DONE (R2)   |
+| backward lift (paste)     | =E.liftHtml= → =liftBlock=           | ✓ DONE (R2)   |
+| position model            | =E.resolvePath= / =blockSize=        | ✓ DONE (R1)   |
+| *selection bridge*        | =E.posFromDOM= / =E.domFromPos=      | ✗ FLAT  (S1)  |
+| *edit ops*                | =insertText=/=deleteRange=/=splitBlock= | ✗ FLAT (S2) |
+| live host wiring          | =editable-surface.st= beforeinput    | thin glue (S3)|
+
+** Why FLAT bridge + FLAT ops collapse regions
+- =E.posFromDOM= walks =collectTextNodes(block)= — a DFS that gathers *every* text node
+  under the block element, INCLUDING text inside =data-st-region= hosts, as one flat run.
+  Position accounting adds +1 per BLOCK boundary only; it never spends the per-region
+  open/close boundary that =blockSize= charges (=regionInnerSize(r) + 2= per region). So
+  the integer it returns disagrees with what =resolvePath= expects for the same caret.
+- =E.insertText/deleteRange/splitBlock= call =E.resolve= → ={blockIndex, offset}=, then
+  splice =block.content=. But a region block keeps its text in
+  =block.regions[name].content= (inline region) or deeper (=block region= → child blocks),
+  NOT in =block.content=. ∴ an op aimed inside a region edits the wrong array (or a
+  non-existent one).
+
+* Decision: Approach A — one contenteditable, PATH-aware bridge
+USER decision (2026-06-12). The kernel's load-bearing invariant is *DOM is a render
+target; the AST is truth* (the module header states it: "reads NO DOM state back").
+- *A (chosen)*: ONE =contenteditable= host owns the whole block. The bridge becomes
+  recursive — it walks the projected DOM tree the SAME way =blockSize=/=resolvePath=
+  accumulate, descending =data-st-region= hosts and spending region boundaries. Ops route
+  through =resolvePath= to reach the target region's content array. One caret model, one
+  truth, paste/undo uniform.
+- *B (rejected)*: nest a =contenteditable= per region. Reuses the proven flat bridge
+  per-region BUT hands the browser back authority: nested-CE selection leaks across
+  boundaries, focus/blur coordination, paste-across-regions undefined, undo spans hosts.
+  Fights the kernel invariant. No.
+- *C (deferred-into-A)*: structural-only (add/delete/reorder list items via buttons, no
+  inline typing). This is a strict subset of A's capability and falls out for free once
+  A's ops land; not a separate architecture.
+
+* Design — the unifying principle
+The bridge and the model must accumulate positions IDENTICALLY, because they are inverse
+maps over the same deterministic projection:
+#+begin_example
+  posFromDOM : (DOM node, offset)  → integer pos        (forward)
+  domFromPos : integer pos          → (DOM node, offset) (inverse)
+  resolvePath: integer pos          → doc PATH           (model)
+#+end_example
+Today the bridge accounts positions with a *block-only* boundary budget; the model accounts
+them with a *block + per-region* budget (=blockSize=). They agree for flat docs (no regions
+⇒ budgets coincide) and DIVERGE the moment a region exists. The fix is to give the bridge
+the SAME structural walk =blockSize= uses.
+
+** S1 — PATH-aware selection bridge
+Rewrite =posFromDOM= / =domFromPos= as a structural recursion mirroring =blockSize=:
+- Walk the host's block children. For each block element, if it has =data-st-region= host
+  children (region block), descend each region host spending the region open/close
+  boundary (+1/+1) and recursing — a block-kind region recurses into child block elements;
+  an inline-kind region sums its text. A block element with NO region hosts is the flat
+  (degenerate) case → the existing text-node sum, byte-identical.
+- The accounting is *exactly* =blockSize='s tree walk, so =posFromDOM= and =resolvePath=
+  return positions that name the same caret, and =domFromPos∘posFromDOM = id=.
+- Region host identification is SCHEMA-CONSISTENT with project/lift: a =data-st-region=
+  attribute marks a region host (project sets it; lift reads it). The bridge reads the same
+  attribute — no schema lookup needed at the DOM layer (the DOM already carries the marker).
+- *Provable headless*: the MAPPING LOGIC is testable against a projected DOM in V8 LinkeDOM
+  (project a region doc → walk it → assert pos round-trips), no real browser needed. Only
+  the *live Selection* read needs CDP.
+
+** S2 — region-aware ops
+=insertText=/=deleteRange=/=splitBlock= currently resolve flat then splice =block.content=.
+Generalize: resolve via =resolvePath=, follow the path to the *leaf region's content array*
+(=block.regions[name].content=), and splice THERE. A flat block's path terminates in the
+implicit ='content'= region whose content IS =block.content= — so the flat code path is the
+degenerate tail, kept byte-identical. =splitBlock= inside a block-region splits the child
+block sequence at the path's inner block index (list-item split = new =li=); inside an
+inline region it splits the inline run (unchanged semantics, new home array).
+- *Provable headless*: pure ops, fuzz-testable. Extend the nested-tree =@property= to apply
+  op-sequences inside regions and assert client≡server validity + monotone positions at
+  every depth (the FUP-042 fuzz already walks the tree; add op application).
+
+** S3 — surface rewire
+=editable-surface.st='s =beforeinput= funnel + =readSelection=/=reproject= already call the
+=E.*= names; once S1+S2 make those names region-aware, the surface inherits region editing
+with near-zero change. The one addition: =reproject= restores the caret via =domFromPos=,
+which S1 makes region-aware — so the caret lands in the right region after every op.
+
+** S4 — CDP live-click gate
+A =@drive= test under =--features cdp= (Chromium IS available here:
+=/usr/bin/google-chrome-stable=, =src/cdp.rs find_chrome()=): mount a project with a region
+block, click into the second region, type, assert the caret position + the persisted doc.
+This is the one rung that proves the *browser Selection* half end-to-end (LinkeDOM has no
+Selection). Authored regardless; run here.
+
+* Invariants (the floor that must not move)
+1. *Flat byte-identity*: every existing flat-doc behaviour — positions, projection,
+   selection, persistence — is unchanged. The 20 flat-floor tests + admin flat richtext
+   stay green untouched.
+2. *Bridge≡model*: =posFromDOM= and =resolvePath= name the same caret for every position;
+   =domFromPos∘posFromDOM = id= on every projected DOM (the round-trip gate).
+3. *Client≡server*: an edit inside a region produces a doc the server =validate.rs=
+   accepts (regions validated by kind, undeclared dropped) — the FUP-042 lockstep holds
+   through the live surface.
+4. *DOM is a render target*: no op reads DOM state back as truth; every keystroke is
+   intent → op-on-AST → re-project (the module header's promise, preserved).
+
+* Waves
+| wave | deliverable                                            | rung it proves on |
+|------+--------------------------------------------------------+-------------------|
+| S1   | PATH-aware bridge (posFromDOM/domFromPos descend regions) | V8 headless (mapping) |
+| S2   | region-aware ops (resolvePath-routed splice)             | V8 headless (fuzz) |
+| S3   | surface rewire (editable-surface.st)                     | lib + compiler    |
+| S4   | CDP @drive live-click region-edit                        | CDP (Chromium)    |
+
+Each wave is followed by a reviewer swarm (S1r/S2r) before the next builds on it.
+
+* Deferred beyond this arc (filed if reached)
+- Selection CROSSING a region boundary (caret drag from left column into right): a single
+  Range whose endpoints sit in different regions. The model represents this as two paths;
+  the surface must decide the semantics (clamp to one region vs. multi-region op). Out of
+  S1–S4 scope; the bridge will CLAMP cross-region selections to the anchor's region (safe,
+  no data loss) and a follow-up adds true cross-region ranges.
+
+* AS-BUILT (S1–S4 shipped, 2026-06-12)
+The four waves landed; two were reviewer-hardened. Final shape + the things the
+design learned in flight:
+
+- *S1 bridge* (commits 11460633 + 5732a017): rebuilt posFromDOM/domFromPos as an
+  ANCHOR MAP — one walk of the doc spending the SAME boundary budget as
+  blockSize/resolvePath, so bridge≡model by construction. A PROBE before coding
+  surfaced that the OLD bridge silently disagreed with the post-FUP-042 folded flat
+  convention (open=acc+1 vs acc) — a latent off-by-one in the LIVE flat editor, not
+  just a region gap. Reviewer caught a vacuous equality assertion + an empty
+  block-region having no caret home + a region-boundary caret snapping to the wrong
+  region; all three fixed by anchoring each region-OPEN boundary to its host element
+  + a real bridge≡model gate. Signature gained `doc` (AST = structural guide).
+- *S2 ops* (commits 061f96ce + 49b469cd): one resolveLeaf(d,pos) helper generalizes
+  resolve down the region tree; every op routes through it. Flat = the degenerate
+  tail (byte-identical). Reviewer caught a CRASH on editing an empty block-region
+  (phantom child deref — reachable BECAUSE S1 gave it a caret home), a multi-block
+  activeMarks regression, and paste (insertDoc) still on E.resolve (silent loss into
+  a region); all fixed — empty-region edit now MATERIALIZES a first child block
+  (typing into an empty list makes its first item). Op-fuzz extended to 0-item lists
+  + a per-edit project→lift round-trip.
+- *S3 surface* (commit 5d37a681): the funnel already called every now-region-aware
+  E.* fn, so it inherited region editing. The one fix: E.splitCaret(doc,pos) replaces
+  a hardcoded `+2` post-split caret (a flat assumption that over-shoots an inline-
+  region no-op split). 5 compiler snapshots re-accepted (editable.js bundle inlined).
+- *S4 live proof* (commit 10ec4890): the full loop verified under REAL Chromium via
+  the browser tool against projects/region-edit-demo/ — a real Selection in the right
+  column → posFromDOM=6 → insertText → right region 'RZ' / left 'L' → caret restored
+  in the right region. CORRECTION to the inherited session note: chromiumoxide/--cdp
+  IS available here (/usr/bin/google-chrome-stable). The automated @drive form
+  (stdlib/editable/tests/region-surface.cdp.test.st) is RUN-PENDING on BUG-095 (the
+  @eval/@drive lexer can't parse a structured-value body) — a test-runner bug, filed.
+
+FLOOR HELD: 20 flat tests + 4 surface tests unchanged; flat caret/positions/persist
+byte-identical. The live flat editor's latent off-by-one (S1) is now FIXED as a bonus.
+
+Deferred (filed where reached): cross-region SELECTION (a Range whose endpoints sit
+in different regions) — deleteRange/toggleMark/activeMarks clamp to the anchor leaf
+today (safe, no cross-region data loss); true cross-region ranges + the BUG-095 lexer
+fix are the next wave.
+

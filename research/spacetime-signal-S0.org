@@ -1,0 +1,618 @@
+* ════════════════════════════════════════════════════════════════════════
+* S1 — FINAL MODEL (canonical; supersedes all exploratory sections above)
+* ════════════════════════════════════════════════════════════════════════
+
+Resolved over 2026-06-13 dialogue. @signal is REJECTED as a top-level directive.
+The reactive-output story is TWO new @data kinds + ONE consumer directive, all
+powered by ONE extended pattern-matcher. Nothing parallel to @data; everything
+is @data's own machinery generalized.
+
+** The five pillars
+
+1. @host — a transport+config binding. Declares the wire ENVELOPE type, which
+   types the decode subject `$.`.
+     @host $api : http("https://api.example.com") { headers: { authorization: $token }; }
+     @host $mcp : ws($hostSocket);
+   http  $. = Response { status int, ok bool, body Json, headers }   discriminator: status
+   ws    $. = Message  { type string, payload Json }                 discriminator: type
+
+2. @data signal / @data stream — kinds 6 & 7 of @data (NOT @signal).
+   signal = ONE correlated reply (≈ PureScript Aff). stream = MANY replies over
+   time (≈ Event). A signal yields a CALLABLE $name + $name.pending/$name.error,
+   exactly as @data fetch yields $x + $x_loading/$x_error/$x_refetch().
+   Pure uncorrelated server-push is NOT a signal — it is @data subscribe …
+   from $host (an inbound SOURCE, routed by from+topic, never "which signal?").
+
+3. The unified matcher — ONE pattern grammar (extended stdlib match_pat /
+   match_arm capture types), embedded in THREE host positions. Matcher identical;
+   only subject + consequence differ:
+     | host                       | subject        | each arm consequence         |
+     |----------------------------+----------------+------------------------------|
+     | @match $x { }              | a value        | &template(args)  (render)    |
+     | receive { } in signal def  | envelope $.    | CONSTRUCT a variant (decode) |
+     | receive { } in @handle     | the variant sum| effect statements (handle)   |
+   `receive` is THE matcher keyword at BOTH pipeline stages; variant names are
+   shared decl↔use (like &card decl vs use).
+
+4. @handle $sig { … } — the consumer directive. RE-OPENS the signal's @data
+   clauses (optimistic / receive / final) for THIS scope. A fire resolves to its
+   NEAREST enclosing @handle (scope cascade, like CSS); absent one, the def
+   defaults apply. One signal, many handlers, each owning its scope's behavior.
+   @each : collection-in-space  ::  @handle : signal-responses-in-time.
+
+5. policy — owns races/lifecycle, never the matcher:
+     policy latest|queue|parallel|drop [timeout T] [retry n]
+   latest = killFiber the in-flight (search-box classic). Correlation id is
+   runtime/invisible (≈ makeAff fiber). cancel: $sig.cancel().
+
+** `final` — the unifying termination idea (arm-modifier → block, by causation)
+
+  - decode arm modifier:  `"chosen" => Chosen(..) final;`  marks an outcome TERMINAL.
+  - @handle block:        `final { … }`  runs when a terminal arm fires (or
+    cancel/timeout). Being a block, it DRYs cleanup across multiple terminal arms.
+  One-shot @data signal = EVERY arm implicitly final ⇒ its final{} is "after the
+  one reply." Stream = only `final`-marked arms end it. One word, one concept
+  (termination): final STATES (arms) + their onExit (block). A state machine.
+
+** TYPING — one optional knob: `as Type` (+ optional sum name). All inferred downstream.
+
+The output type of a decode-receive arg BECOMES the binding type of the matching
+@handle-receive arm (decl↔use). So typing needs ONE ascription operator that
+FLOWS — never re-stated:
+
+  send POST "/url" { title: $text } as CreateReq        // request body type (optional)
+  receive to AddResult {                                  // SUM via `to` (the through-line)
+    2xx => Created($.body as Todo);                       //   the response INTERFACE @type
+    207 => Partial(normalize($.body) as Report);          // preprocessing + output type
+    422 => Invalid($.body as Errors);
+    _   => Failed($.statusText);                          // inferred (string)
+  }
+  // downstream: INFERRED, not restated —
+  @handle $add { receive { Created($todo) => … } }        // $todo : Todo (carried)
+
+  - `as Type` = the single optional type knob across send / receive / optimistic.
+    Reads "treat this value AS T" = ascription. NOT `: Type` (`:` is value-position,
+    sigil law) and NOT space-form `$b Todo` (reads as a param DECL; a decode arm
+    CONSTRUCTS, doesn't declare params).
+  - `Created(Todo)` is SUGAR for `Created($.body as Todo)` (no-preprocessing case).
+  - the SUM is named via `to` (`receive to AddResult { … }`) and names the response
+    @type — THIS is what the live environment introspects as the interface.
+  - optimistic needs no annotation (mutates already-typed signals).
+  - sum variants require @type to gain sum form: `@type AddResult { Created(Todo)
+    | Invalid(Errors) | … }` — the only heavy new language weight; a general win;
+    stdlib-defined; no Rust parser work (extends match_pat capture + @type).
+
+** TYPE CREATION — ONE mechanism, TWO scopes (no anonymous sums)
+
+There is NO "anonymous sum." `receive Name { … }` DEFINES the named sum `Name`
+IN THE SIGNAL'S SCOPE — the arms ARE its definition (each constructor + its `as`
+is a variant decl). It is a first-class, referenceable type (matched by @handle,
+published by name to reference.st / the MCP registry), co-located with its decode
+logic. This mirrors @data's inline-vs-fetch duality exactly:
+
+    receive to AddResult { 2xx => Created($.body as Todo); … }   // type + decode, signal scope
+    @type   AddResult { Created(Todo) | … }                    // type only, file scope (shareable)
+
+  - inline `receive Name` carries MORE info (variants AND their wire-decode map).
+  - external `@type Name` carries LESS (variants only); the signal's `receive`
+    arms map onto the referenced type.
+  - ONE registry entry either way (a named sum). Only axis = SCOPE (signal-local
+    vs file). The reifier gathers variants from arms identically; it just binds a
+    NAME instead of a nameless sum — deletes the anonymous-sum special case.
+  - composes: an arm may spread a referenced sum —
+      @type ApiError { Invalid(Errors) | RateLimited(int) }
+      receive to AddResult { 2xx => Created($.body as Todo); _ => $.body as ApiError; }
+  - Name OPTIONAL: omitted ⇒ auto-named as the signal's response type (still scoped,
+    still named — never anonymous). external @type = hoist for sharing/recursion;
+    inline `receive Name` = the nicest, default form.
+
+  WHY (the user, 2026-06-13): the inline form is the nicest version, so it must be
+  a real in-scope type definition — NOT a second-class anonymous sum. Keeping it a
+  named scoped def is LEANER (one type-creation mechanism, no anonymous case) and
+  keeps the external @type form fully as powerful (sharing/recursion/composition).
+
+** `to <Sum>` — the response-type THROUGH-LINE (pipeline-stage-target reading)
+
+The whole signal reads as a PIPELINE; `to` marks each stage's FORWARD TARGET:
+
+    $add(args) ─send to $api─▶ ─receive to AddResult─▶ ─@handle … to AddResult─▶ effects
+                 target: host        target: sum TYPE          target: sum TYPE
+
+ONE relation (forward target); the STAGE KEYWORD (send/receive/@handle) says which
+KIND of target (host value vs sum type). So `to` is NOT overloaded — it is the
+same "flows-next" relation everywhere. Decided acceptable over a second connective
+(`as` would collide with carry-type ascription). The response type is thus the
+through-line, threaded end-to-end, never re-derived:
+
+    receive to AddResult { 2xx => Created($.body as Todo); … }   // decode → AddResult
+    @handle $add to AddResult { receive { Created(t) => … } }    // SAME through-line, reads identically
+
+POSITION DECIDES ROLE (one rule, no token-dependent flip):
+
+    receive  <envelope-alias>?  to <Sum>?  { arms }
+             └ LEFT of `to`             └ RIGHT of `to`
+             = INPUT matched            = OUTPUT produced
+             (envelope, aliases $.)     (the sum type)
+
+Left of `to` = input (envelope); right of `to` = output (sum). Always. This is the
+pipeline reading applied consistently — `to` separates source from target.
+
+FORMS:
+    receive { }                       // both implicit ($. envelope, auto-named sum)  (lean default)
+    receive to AddResult { }          // sum named (the through-line)
+    receive Response to AddResult { }  // envelope alias + sum named
+    @handle $add { }                  // inferred
+    @handle $add to AddResult { }      // through-line restated at handle
+
+FORBIDDEN: a lone `receive Foo { }` (bare name, no `to`). A name's role must NOT
+flip on a later token. To name the SUM you ALWAYS go through `to` — so the SHORT
+named form (`to AddResult`) names the VALUABLE thing (the sum), never the cosmetic
+envelope. REJECTED "bare name = envelope" (would make the easy form name the
+unimportant input). The envelope alias is NEVER mandatory (@host fixes its type;
+aliasing only buys `Response.status` over `$.status` self-doc).
+
+WHY (user, 2026-06-13): a bare `receive AddResult {}` was ambiguous against
+`receive Response to …` (same position, opposite role). Resolved by position-only
+roles + forbidding the lone-name form. `to <Sum>` flows across receive↔@handle and
+makes the response type the visible spine of the pipeline (pipeline-stage-target
+reading of `to`). Nothing shipped — no migration.
+
+** Canonical example — HTTP mutation (the web-app killer case)
+
+#+begin_src spacetime
+@host $api : http("https://api.example.com") { headers: { authorization: $token }; }
+
+@data signal $add(text string) to $api {
+  send POST "/api/todos" { title: $text }
+  receive to AddResult {
+    2xx => Created($.body as Todo);
+    207 => Partial(normalize($.body) as Report);
+    422 => Invalid($.body as Errors);
+    _   => Failed($.statusText);
+  }
+  policy latest
+  optimistic { }                      // default; scopes override
+}
+
+.quick-add {
+  @handle $add {
+    optimistic { $todos <- $todos.concat({ title: $draft, pending: true }); }
+    receive {
+      Created($todo)  => $todos <- $todos.replace(pending, $todo);
+      Partial($p) when $p.failed.length => $toast <- $p.failed.length + " failed";
+      Invalid($errs)  => $formErrors <- $errs;
+      Failed($msg)    => { $todos <- $todos.without(pending); $toast <- $msg; }
+    }
+    final { $draft <- ""; }
+  }
+}
+#+end_src
+
+** Canonical example — WebSocket stream (the MCP picker); IDENTICAL shape
+
+#+begin_src spacetime
+@host $mcp : ws($hostSocket);
+
+@data stream $propose(options Option[]) to $mcp {
+  send emit "proposal" { options: $options }
+  receive to Proposal {
+    "previewed" => Previewed($.payload as Preview);       // non-terminal → re-runs
+    "chosen"    => Chosen($.payload as Choice) final;     // terminal
+    "cancelled" => Cancelled final;
+    _           => Failed($.payload);
+  }
+  policy latest
+}
+
+.picker {
+  @handle $propose {
+    receive {
+      Previewed($p) => $hover <- $p.index;                // streams
+      Chosen($c)    => { $selected <- $c.index; $done <- true; }
+      Cancelled     => $selected <- -1;
+      Failed($_)    => $toast <- "lost connection";
+    }
+    final { $hover <- null; }
+  }
+}
+#+end_src
+
+HTTP vs WS differ ONLY in @host + discriminator (status vs type). @handle is
+transport-agnostic (matches variant NAMES). The abstraction holds.
+
+** Every edge case → exactly one home (NONE in the matcher)
+
+  correlation        runtime, invisible (fiber/makeAff)
+  race               policy latest|queue|parallel|drop
+  multi-site optimism @handle re-opens optimistic (nearest-scope cascade)
+  pure server-push   @data subscribe … from $host  (a SOURCE, not a signal)
+  cancel / timeout   $sig.cancel() · policy … timeout
+  one-shot vs stream @data signal vs @data stream; `final` arms mark terminals
+  preprocessing      decode receive arm RHS = expr/block constructing the variant
+  cleanup            final{} block (DRYs across terminal arms)
+  pending / error UI $sig.pending, $sig.error  (auto-yielded, like fetch)
+  exhaustiveness     @handle receive: compile error if a variant uncovered & no _
+  transport diffs    @host only (types the decode subject)
+  typing             one optional `as Type`; flows decl→use; sum NAME publishes interface
+
+** SELF-DESCRIBING INTERFACES → the live-environment payoff (the original ask)
+
+reference.st renders the macro catalog via `@data dispatch $macros` — reading the
+compiler's REGISTERED %forms (the introspection rail). A `@data signal` + decode
+`receive to AddResult { … }` REGISTERS: input type `(text string)`, response interface
+`AddResult = Created|Partial|Invalid|Failed`, and transport. So an MCP "interface"
+is a .st FUNCTION whose @data-signal registry IS its schema. st_mount(fn) =
+"compile .st, READ its signal registry, expose the typed interface" — the SAME
+rail reference.st uses. The interface describes itself; nothing is a hand-fed
+prompt schema. THAT is "fully live from scratch, not a prompt thing."
+
+** Implementation weight (honest)
+  NEW language: @host · @data signal/stream · @handle · `receive`/`final`/`policy`
+    clauses · extended match_pat (literal/range/constructor/struct/guard/binding)
+    · @type sum variants · `as` ascription that flows.
+  REUSED: @data kind-word dispatch (data-kind.st), @match capture machinery
+    (match-block.st), %primitive transport-owning rail (dev-ws), demand-injection
+    + dedup (emit-prelude), @data dispatch introspection (compiler.rs).
+  Matcher work is STDLIB capture-type extension (no Rust parser) per metasystem rule.
+
+* ════════════════════════════════════════════════════════════════════════
+* (BELOW: exploratory history, 2026-06-13 — superseded by S1. Kept for rationale.)
+* ════════════════════════════════════════════════════════════════════════
+
+#+TITLE: @signal — declarative agent/host signal-back (design S0)
+#+STATE: DESIGN
+#+CUSTOM_ID: SIGNAL-S0
+#+RELATES: PLAN-037
+
+* Why
+
+PLAN-037 froze the human→agent signal path at the wrong layer. Today three
+parallel Rust impls of ONE need (a live page sends a structured value back to
+its host):
+  - picker   : <form method=post> + Rust /__mcp/choose route + ChooseForm{option:usize}
+  - elicit   : 100% Rust server→client roundtrip
+  - (compile): st_tab_open, no signal
+Each new interaction ⇒ new Rust tool + descriptor prose + Spell re-register +
+rebuild. That is the "prompt thing." It violates harmony (one need, one impl).
+
+The keel that is MISSING is a Spacetime language surface: a declarative way for
+a page to emit a typed payload back to whatever hosts it. With it, an MCP
+"interface" stops being a Rust tool and becomes a .st FUNCTION loaded live: it
+declares its input (params), renders UI, and declares its signal-back. picker /
+form / confirm all collapse into library functions called through ONE generic
+transport.
+
+* The dual it completes (this is the whole idea)
+
+Spacetime already has the INBOUND half. @signal is the OUTBOUND mirror, reusing
+existing sigils — no new sigil, no overload (AGENTS harmony rule).
+
+  | direction | construct      | introducer        | backed by            |
+  |-----------+----------------+-------------------+----------------------|
+  | IN  ←     | @data fetch    | : url             | data-source (GET)    |
+  | IN  ←     | @data <kind>   | from $src         | reactive source      |
+  | OUT →     | @signal        | to "url"/$sink    | sink (POST/emit)     |
+
+Notation already in the language that @signal rhymes with:
+  - `->` = "transition / yield / reducer step" (the OUTWARD arrow). %primitive
+    already writes `%yield val -> $sig` to push a value OUT. @signal is the
+    author-level OUTWARD verb, mirroring @data as the author-level INWARD verb.
+  - `from $src` introduces a SIGNAL SOURCE (inbound). `to <sink>` introduces a
+    SIGNAL SINK (outbound). Same word-class, opposite arrow.
+  - websocket macro already exposes `send({...})`. @signal generalizes "send a
+    payload out" to ALL hosts (http sink, ws, dev-bridge, MCP) under one verb.
+
+NB token `@signal` is FREE: grep shows only `$signal` *param-names* in scene
+macros (a captured ident), never a directive `@signal`. No collision.
+
+* Shape (one construct, kind word selects the host — mirrors @data's 5 kinds)
+
+  @signal <kind> $name <Payload>? to <sink> { options }? ;
+
+  then FIRE it from any reactive context with  $name(payload)  or  $name <- payload
+
+  | kind  | host                         | sink form            |
+  |-------+------------------------------+----------------------|
+  | post  | HTTP endpoint (fetch POST)   | to "url"             |
+  | emit  | MCP / dev host bridge        | to $host  (implicit) |
+  | ws    | open websocket               | to $socket           |
+
+The kind IS the transport (no hidden switch) — identical philosophy to @data.
+`$name` becomes a callable in event bodies; firing returns a reactive result
+signal (the host's reply), so a response round-trips back IN as data — closing
+the loop without a second construct.
+
+* ── USE CASES (syntax per case, as requested) ──────────────────────────────
+
+** UC1 — MCP picker (the founding case): choose one of N options
+
+Replaces st_propose's bespoke Rust route. The picker .st DECLARES its own
+signal; the MCP host just relays whatever payload arrives.
+
+#+begin_src spacetime
+@data fetch $proposal : "data.json";          // input (unchanged)
+@data derive $options : $proposal.options;
+
+// Declare the outbound signal: a choice goes back to the host.
+@signal emit $choose { payload: $idx number } to $host;
+
+@template &card($opt) {
+  <section class="card">
+    <h2>`$opt.label`</h2>
+    <iframe src="`$opt.previewUrl`"></iframe>
+    // FIRE the signal on click — no <form>, no Rust route, no usize struct.
+    <button>Choose</button> { @on click { $choose({ payload: $opt.idx }); } }
+  </section>
+}
+.grid { @each($options as $opt) { &card($opt); } }
+#+end_src
+
+Agent side: `st_await(instance)` blocks → returns `{payload:1}` (the raw
+declared shape) the instant the human clicks. The shape is the FUNCTION's, not
+Rust's.
+
+** UC2 — native typed form (replaces st_elicit's Rust form)
+
+A function that gathers structured input and signals it back in one shot.
+
+#+begin_src spacetime
+@signal emit $submit {
+  name  string,
+  theme oneof("light","dark"),     // enum → reuses capture-type vocabulary
+  notify bool
+} to $host;
+
+<form>
+  <input name="name">      { @on input  { $draft <- { ...$draft, name: $.value }; } }
+  <select name="theme">…</select>
+  <button>Save</button>    { @on click  { $submit($draft); } }
+</form>
+#+end_src
+
+The declared payload block IS the schema — the host can surface it as a native
+prompt (MCP elicitation) OR render the form. One declaration, two render hosts.
+This is the t1 "typed placeholder" idea realized as the signal's own type.
+
+** UC3 — confirm / decision (a yes/no that returns immediately)
+
+#+begin_src spacetime
+@signal emit $decide { ok bool } to $host;
+
+<div class="confirm">
+  <p>`$question`</p>
+  <button class="yes">Confirm</button> { @on click { $decide({ ok: true  }); } }
+  <button class="no">Cancel</button>   { @on click { $decide({ ok: false }); } }
+</div>
+#+end_src
+
+** UC4 — live form POST to a real backend (NOT agent-specific)
+
+@signal is a general platform construct; MCP is just one host. A normal site can
+POST a contact form with zero custom JS:
+
+#+begin_src spacetime
+@signal post $send { email string, message string } to "/api/contact"
+  { on-ok: $sent <- true; on-err: $err <- $.message; };
+
+<form>
+  …fields bind into $draft…
+  <button>Send</button> { @on click { $send($draft); } }
+</form>
+<p class="thanks">`$sent ? "Thanks!" : ""`</p>
+#+end_src
+
+The reply round-trips IN: `on-ok`/`on-err` are reactive steps (`<-`), so the
+response re-enters as data. This is the dual closing on itself — out then back
+in — using only existing operators.
+
+** UC5 — telemetry / fire-and-forget emit (no reply awaited)
+
+#+begin_src spacetime
+@signal emit $track { event string, ms number } to $host;
+.cta { @on click { $track({ event: "cta_click", ms: performance.now() }); } }
+#+end_src
+
+Host decides what to do; page neither blocks nor reads a reply. Same verb, the
+reply signal is simply ignored.
+
+** UC6 — streaming / progressive choice (agent watches a sequence)
+
+Because firing is just calling `$name(p)` in any reactive body, a page can emit
+MANY times. The agent's `st_await` can be called repeatedly to consume a stream
+(e.g. a slider the human drags → continuous values; agent samples the latest).
+
+#+begin_src spacetime
+@signal emit $tune { value number } to $host;
+input[type=range] { @on input { $tune({ value: $.valueAsNumber }); } }
+#+end_src
+
+* ── Semantics ─────────────────────────────────────────────────────────────
+
+1. Declaration registers a named OUTBOUND channel + (optionally) a typed payload
+   shape. The shape uses the SAME type vocabulary as params/capture-types
+   (`string`, `number`, `bool`, `oneof(...)`, nested object). No new type system.
+2. `$name(payload)` (call form) or `$name <- payload` (assign form) FIRES it.
+   - call form reads cleaner inside `@on click { … }`; assign form mirrors `<-`.
+   - DECISION NEEDED: pick ONE fire syntax for harmony (see Open Qs).
+3. The fire EXPRESSION evaluates to a reactive RESULT signal — the host's reply.
+   `on-ok`/`on-err` options are reducer-style steps over that result, so a
+   response re-enters as ordinary `@data`. No second "response" construct.
+4. Host binding by kind:
+   - post : compiles to `fetch(url,{method:POST,body:JSON})` (own the primitive,
+     don't hand-roll per page — one %primitive, like dev-ws).
+   - emit : routes to `$host` = an injected host bridge (MCP sets
+     `window.__stHost`, exactly like __dev__ sets `window.__stDevWs`). The MCP
+     relay posts to `/__mcp/signal/{instance}` → store → unblocks st_await.
+   - ws   : `socket.send(JSON)` over an @websocket-opened channel.
+5. SSG/static: a page with only @signal (no @data fetch) is still static HTML +
+   a tiny emit primitive; the sink is wired at hydrate.
+
+* ── Why a primitive, not hand-rolled JS (AGENTS rule) ─────────────────────
+
+The OUTBOUND transport (fetch POST / host-bridge post / ws send) is owned by ONE
+`%primitive st-signal()` (sibling of dev-ws), demand-injected only on pages that
+use @signal. `@signal` is the `%macro` author-surface over it — same rail as
+`@websocket` → websocket primitive, `@data fetch` → data-source. We vendor +
+own the transport behind a primitive; pages never write `fetch(...)` by hand.
+
+* ── DECISIONS LOCKED (user, 2026-06-13) ───────────────────────────────────
+
+  OQ1 fire syntax   → CALL form:  `$choose({ payload: 1 })`  (effect, not value-set)
+  OQ2 sink keyword  → `to`        (mirrors `from`; `:` stays value-only)
+  OQ3 reply         → BOTH options-block AND result-signal; + WRITE DOCS
+  OQ4 host          → MACRO VARIANTS cover every sink; `to mcp` is first-party
+
+* ── THE THESIS: @data and @signal = reactive I/O ───────────────────────────
+
+Every interactive app is one loop:
+
+    SOURCE ──→ STATE ──→ VIEW ──→ INTENT ──→ (SOURCE) …
+   (data in)  (signals) (render) (data out)
+
+Spacetime already nails  SOURCE→STATE→VIEW  (@data · signals · @each/holes).
+The  INTENT→OUT  arc has no home — pages drop to imperative `@on click { fetch() }`.
+@signal completes the ring. The `->` operator ("transition / yield") already NAMES
+outward flow; @signal is its author-level home. The pairing:
+
+    | axis        | @data (IN, source)        | @signal (OUT, sink)            |
+    |-------------+---------------------------+--------------------------------|
+    | introducer  | `: value` / `from $src`   | `to <sink>`                    |
+    | role        | where values COME FROM    | where values/effects GO TO     |
+    | kind word   | inline/fetch/derive/…     | post/emit/ws/…                 |
+    | yields      | $x (+ _loading/_error)    | $x callable (+ reply signal)   |
+
+Learn one, you know the other. THIS symmetry is the delight: reactive INPUT and
+reactive OUTPUT in one vocabulary, sharing the same `$signal`.
+
+* ── @signal ACROSS the four Spacetime contexts (the sibling claim) ─────────
+
+** A. Web app framework — mutations that reconcile with reads (the killer case)
+
+The defining need: read a collection, mutate it, reflect optimistically,
+reconcile on the server reply. Today = fetch + setState + rollback glue. With
+@signal the WRITE lives next to the READ and shares the signal:
+
+#+begin_src spacetime
+@data fetch $todos Todo[] : "/api/todos";          // the source
+
+@signal post $addTodo { text string } to "/api/todos" {
+  optimistic: $todos <- $todos.concat({ id: temp(), text: $.text, pending: true });
+  on-ok:      $todos <- $todos.replace(temp(), $.todo);   // reply re-enters as data
+  on-err:     $todos <- $todos.without(temp());
+}
+
+<button>Add</button> { @on click { $addTodo({ text: $draft }); } }
+#+end_src
+
+TanStack-Query-grade mutation ergonomics, native, zero action-creator/reducer
+sprawl. The reply round-trips IN via `<-` steps — the loop closes in ONE construct.
+
+** B. Public landing page framework — conversion events from a static page
+
+Contact / newsletter / waitlist + analytics. SSG-friendly: the page stays static
+HTML; @signal demand-injects a tiny emit primitive ONLY where used (same rail as
+@doc→snarkdown). No SPA tax for a landing page.
+
+#+begin_src spacetime
+@signal post $subscribe { email string } to "/api/lead" { on-ok: $done <- true; };
+@signal emit  $track { event string } to mcp;          // fire-and-forget telemetry
+
+<form>… <button>Join</button> { @on click { $subscribe({ email: $email }); } }</form>
+<p class="ok">`$done ? "You're on the list." : ""`</p>
+#+end_src
+
+** C. Mobile app framework — commands to device + screen navigation
+
+Reframes mobile: device effects + navigation are SINKS; @signal is the author
+surface, the existing primitive is the transport (symmetric with @data fetch
+sitting over the data-source primitive). `to <sink>` is polymorphic over a
+DEVICE bridge, not just a URL.
+
+#+begin_src spacetime
+@signal emit $push { screen string, id string } to $nav;   // push a screen
+@signal emit $save { key string, value any }    to $store; // persist
+@signal emit $buzz { style string }             to $haptic;
+
+.row { @on click { $push({ screen: "detail", id: $item.id }); } }
+#+end_src
+
+** D. Agent / embedded host (MCP) — the founding case
+
+`to mcp` (first-party keyword sink) or `to $host` (generic injected bridge). The
+picker / form / confirm functions from §UC1-3 are exactly this. The MCP relay
+posts the payload to /__mcp/signal/{instance} → unblocks st_await.
+
+* ── The unifying realization ───────────────────────────────────────────────
+
+`to <sink>` is POLYMORPHIC over the destination CLASS — exactly as @data's source
+is polymorphic over the origin class:
+
+    URL          → server        (post: web app mutations, landing forms)
+    mcp / $host  → agent/embed    (emit: pickers, prompts, telemetry)
+    $socket      → realtime       (ws: live apps)
+    $nav $store $haptic $share → device  (emit: mobile)
+
+One verb, many sinks; kind-word + sink pick the transport. Same shape as @data,
+mirrored. Spacetime becomes a complete reactive-I/O language.
+
+* ── MACRO VARIANTS (cover everything — multi-%form, like @on) ──────────────
+
+  @signal post $n <P>? to "url"   { optimistic?; on-ok?; on-err? }   // HTTP
+  @signal post $n <P>? to "url" method DELETE { … }                  // verb override
+  @signal emit $n <P>? to mcp     { … }                              // first-party host
+  @signal emit $n <P>? to $host   { … }                              // generic bridge
+  @signal emit $n <P>? to $nav    { … }                              // device/nav bridge
+  @signal ws   $n <P>? to $socket { … }                              // open socket send
+
+v1 SCOPE: post + emit(to mcp / to $host). ws + device sinks are the SAME macro
+family, added as variants once the core lands (proves polymorphism without
+over-building).
+
+* ── DOCS DELIVERABLE (OQ3) ─────────────────────────────────────────────────
+
+After impl: write docs/language/data-and-signal.md (the @data + @signal pair as
+reactive I/O) AND a live .st reader in demos/ mirroring demos/spacetime-docs
+(@doc(src:) so it can't drift). Doc leads with the SOURCE↔SINK symmetry, then the
+four-context mapping. Part of the contract — design ∧ docs.
+
+* ── (historical) Open questions — resolved above ─────────────────────────
+
+OQ1  Fire syntax — ONE of these, for harmony:
+       (a) call form     `$choose({ payload: 1 })`
+       (b) assign form   `$choose <- { payload: 1 }`
+       (c) arrow form    `{ payload: 1 } -> $choose`   (most literal to the `->` law)
+     Lean: (a) call form — reads as an action inside @on; assign/arrow read as
+     state, but firing is an EFFECT not a value-set.
+
+OQ2  Sink keyword — `to` (proposed, mirrors `from`) vs reuse `:` ?
+     Lean: `to` — `from` introduces an inbound source, `to` an outbound sink;
+     keeps `:` purely value-introducing. Clean dual, no overload.
+
+OQ3  Reply handling — `on-ok:`/`on-err:` options block vs the fire-expression
+     being a result signal you bind elsewhere. Lean: support BOTH (options for
+     the common inline case; result-signal for advanced derive chains).
+
+OQ4  emit host discovery — implicit `to $host` (injected bridge) vs explicit
+     `to mcp` keyword. Lean: implicit `$host` — the page shouldn't name its host;
+     the host injects itself (like __dev__). Keeps the function portable across
+     hosts (MCP today, anything tomorrow).
+
+* ── Test plan (design-first, before any build) ────────────────────────────
+
+Per AGENTS testing rails (@mount/@when/@then):
+  - parse: each UC compiles; @signal registers a channel; payload shape captured.
+  - emit→capture: @mount a UC2 form, @when click, @then a mock host received the
+    exact declared payload (logic backend; no layout needed).
+  - reply round-trip: mock sink returns {ok}, @then on-ok step fired ($sent==true).
+  - negative: payload violating declared shape → compile error (type vocab reuse).
+  - MCP integration (cdp/live): st_mount(picker.st)+drive click → st_await returns
+    declared payload. Picker .st loses ALL Rust-contract coupling.
+
+* ── Downstream collapse on PLAN-037 (the payoff) ──────────────────────────
+
+  st_propose + st_proposal_status + st_await_choice + st_elicit  (4 Rust tools)
+      �averaging into⇒
+  st_mount(fn, input) + st_await(instance)                       (2 generic verbs)
+  picker.st / form.st / confirm.st  →  stdlib/__mcp__/ library functions
+  /__mcp/choose, ChooseForm, OptionDiagnostic, badge-precompute  →  DELETED
+  one generic /__mcp/signal/{instance} sink replaces all bespoke routes.

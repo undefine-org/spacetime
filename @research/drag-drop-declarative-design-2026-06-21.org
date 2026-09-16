@@ -1,0 +1,169 @@
+#+TITLE: Declarative drag-and-drop for Spacetime — @drop-zone + a signal-yielding @drag lifecycle
+#+DATE: 2026-06-21
+#+STATUS: DESIGN (planning mode — review before implementation)
+
+* Why
+=@drag= is one of Spacetime's oldest gesture macros and it shows. Building
+demos/liveview-kanban surfaced three structural weaknesses, all of which force a
+page to reach into raw JS/DOM — exactly the escape hatch the project's own rules
+push against ("Spacetime websites should ONLY rely on Spacetime … no custom JS").
+
+** Weakness 1 — drop detection is imperative JS in the page
+Today a drop is authored as:
+#+begin_src
+@drag(axis: "both") {
+  on-drop: $move({ card: $.dataset.id,
+                   to: (ST.dropTarget($, '.col') || $.closest('.col')).dataset.col })
+}
+#+end_src
+=ST.dropTarget=, =$.closest=, =$.dataset= are RAW runtime/DOM calls living in the
+page. The page is no longer "the program" in Spacetime terms — it's JS glue. A
+correct drop also has to know the drop-zone SELECTOR ('.col') and the FIELD
+('col') as magic strings.
+
+** Weakness 2 — no notion of a drop ZONE as a first-class thing
+There is no directive that says "this element is a place things can be dropped."
+Hit-testing is done ad hoc at release time. So you cannot:
+- highlight a zone while a draggable hovers it (needs a hover signal),
+- accept/reject by zone (a "done" column that refuses cards with open subtasks),
+- read structured data off the zone without =.dataset= string-fishing.
+
+** Weakness 3 — =bounds:= is inert (PLAN-057)
+=@drag(bounds: &track)= does nothing: a =%derives= clamp runs in a detached
+compute closure with no element-resolution context, so the bound element never
+resolves. Documented, filed, still a dead param.
+
+* The Spacetime-native shape
+Two cooperating directives, both signal-first, page writes ZERO JS:
+
+** A. =@drop-zone= — a place things can be dropped, yielding live signals
+#+begin_src
+[data-col="doing"] {
+  @drop-zone(group: "cards") as $zone {
+    accepts: $card.tag != "locked";   // optional predicate; default true
+    over    { background: rgba(255,255,255,0.04); }   // state while a draggable hovers
+    reject  { outline: 1px solid var(--bad); }        // state while hovering but !accepts
+  }
+}
+#+end_src
+- =group= namespaces draggables↔zones (a card drags among "cards" zones only).
+- =as $zone= yields a SCOPED zone descriptor (its dataset + resolved element),
+  mirroring =@presence(...) as $name=. Inside =accepts:= the dragged item is
+  bound as =$card= (the draggable's payload — see B), the zone as =$zone=.
+- =over= / =reject= are STATE clauses (same %states surface @drag already has):
+  applied while a compatible draggable hovers (and passes / fails =accepts=).
+- The zone registers itself in a runtime registry keyed by =group=; the gesture
+  hit-tests against THAT registry (not a magic selector), and the registry walk
+  is the hardened overlay-resilient stack walk we just shipped in =ST.dropTarget=.
+
+** B. =@drag= gains a declarative lifecycle (deprecate the JS on-drop)
+#+begin_src
+.card {
+  @drag(group: "cards", payload: $c) {           // payload: this draggable's data
+    dragging { scale: 1.04; box-shadow: …; }      // unchanged: state while active
+    on-enter $zone { /* mutations; $zone is the hovered zone */ }
+    on-leave $zone { … }
+    on-drop  $zone {                               // fires on release over a zone
+      $move({ card: $payload.id, to: $zone.col }); // $zone.col, not .dataset string-fishing
+    }
+    on-cancel { … }                                // release over no zone / Esc
+  }
+}
+#+end_src
+- =group= pairs with =@drop-zone(group:)=. =payload: $c= names the dragged datum
+  (so =$payload= is available in the lifecycle clauses — no =$.dataset.id=).
+- =on-enter/on-leave/on-drop= bind =$zone= = the zone descriptor under the
+  pointer (its dataset fields are typed signals: =$zone.col=, not a string dig).
+  These reuse the SAME mutation-statement rail as the current =on-drop:= action
+  and @on/@effect (= ST.runMutations), so the body is ordinary Spacetime
+  mutations — the win is that =$zone=/=$payload= are BOUND, no raw DOM.
+- =on-drop= only fires when release is over an ACCEPTING zone; otherwise
+  =on-cancel= runs (so a rejected drop springs back declaratively, no manual
+  spring-back JS).
+
+** C. =bounds:= fixed as part of the same pass (closes PLAN-057)
+Resolve the bounds element through the SAME registry/element-resolution seam the
+drop-zone uses, then the existing =%derives= clamp reads a real rect. The bounds
+element is just a degenerate "zone" the gesture clamps to. One mechanism (zone
+registry + element resolution) closes both the drop-zone gap AND the bounds gap —
+this is the elegance-bar test (a new mechanism must DELETE existing special cases:
+here it deletes =ST.dropTarget= magic-selector calls from pages AND the inert
+=bounds= branch).
+
+* Grammar (proposed, reuses existing capture surfaces)
+- =@drop-zone(group: $g:string, ...)? as $zone:ident { ($accepts:expr)? $states }=
+  - =as $zone= : same =as $name:ident= surface as @presence.
+  - =accepts:= : an =expr?= clause (parity with =on-drop:= today).
+  - =over= / =reject= : entries in the =%states= block (already how @drag merges
+    custom states), gated by the hover+accept predicate.
+- =@drag(group: $g:string?, payload: $p:expr?, axis…, bounds…, …) { … on-enter $z { } on-leave $z { } on-drop $z { } on-cancel { } }=
+  - =on-enter/on-leave/on-drop $zone= : a NEW capture type =drag_lifecycle_arm=
+    (=clauseName $bind:ident? "{" $body:balanced('}') "}"=), sibling to
+    =handle_arm=. =on-cancel= has no bind. This is DATA (registry of clause
+    names), not a Rust match per clause — kinds-as-data per AGENTS.
+  - keep =on-drop: <expr>= (no zone bind) as the back-comp short form during
+    migration, then retire it.
+
+* Primitive sketch
+- =drop-zone= primitive: on init, register =\{ el, group, dataset, accepts \}= in
+  =ST._dropZones[group]= (a Set). On cleanup, unregister. Yields =$zone= = a
+  proxy over the zone's dataset (so =$zone.col= reads =data-col=) + a private
+  element handle. Exposes =$hovering= (bool) + =$accepting= (bool) signals that
+  drive the =over=/=reject= states via the existing state machinery.
+- =gesture=/=@drag= changes: during =pointermove=, hit-test the pointer against
+  =ST._dropZones[group]= via the overlay-resilient stack walk; yield
+  =$hoverZone= (the descriptor) and toggle the hovered zone's =$hovering=. On
+  =pointerup=, if =$hoverZone && accepts=, run =on-drop= with =$zone= bound,
+  else run =on-cancel=. =on-enter/on-leave= fire on hoverZone transitions.
+- =ST.dropTarget= becomes an INTERNAL helper of the gesture (no longer called
+  from pages); the public surface is the registry + the lifecycle clauses.
+
+* Migration — demos/liveview-kanban
+Before:
+#+begin_src
+[data-col="doing"] > .col__cards { @each($doing as $c, key: $c.id) { &card($c); … } }
+.card { @drag(axis:"both") { dragging{…} on-drop: $move({card:$.dataset.id, to:(ST.dropTarget($,'.col')||$.closest('.col')).dataset.col}) } }
+#+end_src
+After:
+#+begin_src
+[data-col="doing"] {
+  @drop-zone(group: "cards") as $zone { }      // data-col is read as $zone.col
+  > .col__cards { @each($doing as $c, key: $c.id) { &card($c); … } }
+}
+.card {
+  @drag(group: "cards", payload: $c) {
+    dragging { scale: 1.04; … }
+    on-drop $zone { $move({ card: $payload.id, to: $zone.col }); }
+  }
+}
+#+end_src
+Zero =ST.*=, zero =$.dataset=, zero magic selectors in the page.
+
+* Test plan
+- Unit (headless): drop-zone registry add/remove on mount/cleanup; gesture
+  hit-test selects the registered zone (mock elementsFromPoint — the overlay
+  walk we just added); accepts:false routes release to on-cancel not on-drop;
+  on-enter/on-leave fire on hover transitions; =$zone.col= reads the dataset.
+- Headless @drag lifecycle: pointerdown→move-over-zone→up runs on-drop with
+  =$zone= bound; release over no zone runs on-cancel; bounds clamp (mocked rects)
+  closes PLAN-057.
+- Live (puppeteer, --debug): kanban migrated form moves + persists + over-state
+  highlight; CDP layout assertion once the CDP harness lands (PLAN-056).
+
+* Open questions for review
+1. =group= default: implicit single global group, or require it? (Lean: optional,
+   default group "" so simple single-type boards need no group.)
+2. =$zone= dataset typing: untyped proxy over data-* (string values), or allow
+   =as $zone: Zone= with a @type for typed fields? (Lean: optional typeref like
+   @presence, default untyped.)
+3. Keep =on-drop: <expr>= short form permanently (no zone) for trivial drags, or
+   retire after migration? (Lean: keep — it's the zero-zone gesture case.)
+4. Reorder-within-zone (sortable lists) — in scope now, or a follow-up
+   =@sortable= built on the same registry? (Lean: follow-up; this pass is
+   cross-zone moves + bounds.)
+
+* Scope boundary
+This design covers: =@drop-zone= directive, =@drag= lifecycle clauses, the zone
+registry + overlay-resilient hit-test (already shipped in ST.dropTarget), and the
+=bounds:= fix (PLAN-057). It does NOT cover sortable/reorder-within-list, touch
+long-press, or multi-select drag — each a clean follow-up on the same rail.

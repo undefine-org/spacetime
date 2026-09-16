@@ -1,0 +1,194 @@
+#+TITLE: SIP-001 family — read this first
+#+DATE: 2026-07-26
+#+STATUS: Orientation document. Assumes ZERO prior context.
+
+* What problem is being solved
+
+Spacetime can animate a web page. It cannot compose a VIDEO — and the two
+turn out to be the same problem with a different clock.
+
+The concrete goal: reimplement a HyperFrames-class HTML→video pipeline
+(134 catalog blocks: lower-thirds, transitions, code snippets, maps, VFX,
+captions — each ~400 lines of GSAP + hand-rolled WebGL + a DOM rasterizer)
+as a Spacetime stdlib module, WITHOUT inventing a separate video language.
+
+The bet the whole family rests on:
+
+#+begin_quote
+A website and a video differ only in WHICH SIGNAL DRIVES THE TIMELINE.
+Scroll position, wall clock, a media element's playhead, slide index, a
+signal change — same composition, different driver.
+#+end_quote
+
+If that holds, one grammar serves scrollytelling, slide decks, product
+pages, music videos, and 60-second render-to-MP4 films. If it does not,
+the family should be reopened rather than patched (SIP-001b §5 states this
+as a falsifiable test).
+
+* The four documents
+
+| Doc | Owns | Status |
+|-----+------+--------|
+| **SIP-001** — Timelines | The language: drivers, =@on=, =@score=, =rate=, arms | Draft v5 |
+| **SIP-001b** — The Future | Everything downstream: render, studio, interchange, catalog, a11y, phasing | Draft v1 |
+| **SIP-001c** — Forms | The =--= dashed-ident sigil + =@form= (reusable chunks) | Draft v2 |
+| (this file) | Orientation | — |
+
+They land as ONE cutover — the migration wave rewrites ~570 call sites
+across stdlib/examples/tests/demos, and splitting it would mean migrating
+twice. NB: **SIP-002 is unrelated** (Literate Spacetime, =.st.md=, already
+shipped); an early draft of 001c was mis-numbered 002 and renamed.
+
+* The core ideas, in dependency order
+
+** 1. Three categories of name, three sigils (SIP-001c)
+
+| Sigil | Category | Answers | Example |
+|-------+----------+---------+---------|
+| =&= | identity — a thing in the world | /which one?/ | =&header=, =&voice=, =&.= (self) |
+| =$= | data — values that flow | /what value?/ | =$cart.open=, =$items= |
+| =--= | form — a chunk of language | /what shape?/ | =--fade-in=, =--ease-out-expo= |
+
+The third was missing, and its absence caused a real design failure: an
+earlier draft could not say what =&reveal= WAS ("neither a proper function
+nor a proper elem-ref"). It is neither because it is a form: pure,
+parameterized Spacetime text, spliced where referenced — no identity, no
+state.
+
+=--= is not invented. CSS uses dashed-idents for exactly this
+(=css-mixins-1=): =@function --double(--x)= (shipping in Chromium),
+=@mixin --card= + =@apply=. Spacetime adopts the namespace and the
+position rule, and adds body kinds CSS has no concept of (keyframe paths,
+easing curves, score fragments).
+
+#+begin_src spacetime
+@form --reveal($distance = 20px) { opacity: 0 -> 1; translate-y: $distance -> 0; }
+.card { --card-surface; @on &.visible --reveal(distance: 40px); }
+#+end_src
+
+** 2. Drivers are typed projections of references (SIP-001)
+
+A driver is not a keyword. It is a MEMBER of a reference, and the
+reference's KIND decides which members exist:
+
+#+begin_src spacetime
+&.visible(threshold: 0.5)   // this element entering the viewport
+&.scroll(scope: cover)      // this element's scroll progress
+&.clip                      // this element's span in an enclosing score
+&voice.playback             // a media element's playhead
+&intro.done                 // another timeline finishing
+$cart.open                  // a signal changing
+#+end_src
+
+Drivers have VALUE TYPES, which is what makes composition derivable rather
+than asserted: **Progress** (continuous), **Transport** (seekable —
+therefore renderable), **Gate** (a window), **Event** (a moment).
+=A && B= masks; =A | B= falls back. So a catalog block reads:
+
+#+begin_src spacetime
+@on (&.clip | &.time(4.8s)) --life      // scored → clip; standalone → wall clock
+#+end_src
+
+That single line replaces what would otherwise be a "preview mode" flag.
+
+** 3. One head: =@on driver form?= (SIP-001)
+
+Replaces NINE macro heads (=@scroll @load @hover @click @mouse @pointer
+@time @loop= + the =@on= dispatcher family), =@after=, and =@effect=.
+
+#+begin_src spacetime
+.header { @on &.visible --reveal(600ms) as &header-reveal; }
+.sub    { @on &header-reveal.done --fade-in(300ms); }
+.counter{ @on &.click { $count <- $count + 1; } }
+.app    { @on $rows(debounce: 600ms) { $nonce <- $nonce + 1; } }   // was @effect
+.show   { @on $take { a -> b => --cut;  b => --dissolve(6f);  _ => --cut; } }
+#+end_src
+
+Two arrows, one meaning each: =->= is a step between values (in keyframes
+AND in transition patterns); ==>= is pattern ⟹ consequence (in every arm
+host). A bare pattern means "arrived here from anywhere"; =a -> b= means
+"arrived at b FROM a" — opt-in, so N states never force N² arms.
+
+** 4. =@score= — arrangement, same driver grammar (SIP-001)
+
+**W4 design locked 2026-07-31** (rulings + rejected alternatives: SIP-001
+§Proposal/4). The headline is that =@score= adds NO runtime concept — every
+driver already publishes one 0..1 progress signal, and a score is a pure
+derivation over it:
+
+- the DRIVER owns the time domain (=domain:= registry column); a score never
+  declares a duration of its own, so the website and video poles need no
+  second rule;
+- grouping is a score FRAGMENT (=@form score --name=, already implemented) —
+  there is no scene keyword;
+- the IR is a WINDOW MAP (=parentProgress -> childProgress=). Live evaluates it
+  on rAF, render at frame /n/: one evaluator, two callers. =rate:= is that
+  map's derivative, which is why ramp/freeze/reverse are one concept;
+- =&.clip= / =&.visible= stay projections — sub-typing was evaluated and
+  rejected (fragments are already projection-agnostic).
+
+#+begin_src spacetime
+.film { @score &.time(60s) as &film {
+  &intro as &opening -> --whip-pan(300ms) -> &features(items: $items) -> &outro;
+  &lower-third(name: "Ada") at 2s for 3s;
+  &broll(src: "city.mp4") in 4s out 9s during &opening;
+  mark &chapter1;
+} }
+
+.story { @score &.scroll(cover) { &fact-a for 30% -> &fact-b for 40%; } }
+.deck  { @score &.steps(advance: &.click | &.key(" ")) { &t -> &p -> &c; } }
+.mv    { @score &voice.playback { &cover for beat(16) -> &verse for beat(32); } }
+#+end_src
+
+Punctuation rule: **parens carry what the FUNCTION owns; trailing words
+carry what the LANGUAGE owns.** =&broll(src: …)= is the clip's own
+parameter; =in 4s out 9s during &opening= is placement vocabulary. This is
+not cosmetic — the trailing words are exactly the surface a studio UI can
+drag, so timeline editing becomes a source rewrite (SIP-001b §2).
+
+** 5. =rate= is a property, not a placement word (SIP-001)
+
+#+begin_src spacetime
+rate: 1 -> 2;    // speed ramp (easable, keyframeable, range-able)
+rate: 0;         // freeze frame
+rate: -1;        // reverse
+#+end_src
+
+Three montage staples, zero new vocabulary. Distinct from =hold(until:)=,
+which stops the PLAYHEAD (interactive gate) rather than one clip.
+
+* What it deletes
+
+9 macro heads + dispatchers · =@after= · =@effect= · =trigger: "…"= string
+refs · ident-based timeline naming + the =ST.timelines= string registry ·
+=&ease-*= as entities (28 curves → forms) · =~= presets (half-built,
+unused) · =@pose-track objectIndex= · the clip-degrade special case ·
+freeze/ramp/reverse as separate concepts · multicam's state-machine
+workaround · copy-paste style mixins.
+
+Adds: one dashed-ident token class, one directive (=@form=), one head
+generalization (=@on=), one directive (=@score=), capture types as DATA.
+
+* Honest status — what is NOT proven
+
+1. RESOLVED 2026-07-26 — BUG-229 is FIXED (0d437e5b, 44da039b). =check= gates
+   on capture-type failure inside directive bodies, so the negative case now
+   fails as it must and grammar in this family IS validatable. The gate is
+   =tests/bug_229_capture_type_failure_gate_test.rs= (positive + negative).
+2. The statement-vs-value position rule for =--x(…)= is specified but not
+   spiked (SIP-001c open q1).
+3. RESOLVED 2026-07-31 — sticky-scroll (B1) and interruption (B8) both have
+   worked examples now (SIP-001 §Pressure tests). Sticky needs no JS: CSS owns
+   the pinning, the score owns the mapping.
+4. Audio: live WebAudio vs render-side ffmpeg must be reconciled by a
+   conformance test, or live and rendered films will diverge (001b §8.6).
+
+* Where to start reading
+
+- Designing syntax? → SIP-001 §Ontology, then §Pressure tests (A/B/C
+  tables: montage, website, semantic-integrity).
+- Implementing? → §Blast radius (meta-compiler / runtime / stdlib), then
+  §Migration (the capsule model), then BUG-229 first.
+- Wondering why a decision went the way it did? → each doc has an
+  Alternatives table with the rejected options and the reason.
+- Building the tooling? → SIP-001b.

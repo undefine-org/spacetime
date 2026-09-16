@@ -1,0 +1,200 @@
+#+TITLE: Phase B — O2 Full Convergence: One Template Model (html5ever + reactive holes + stdlib grammar)
+#+AUTHOR: Spacetime platform (PLAN-030 / FEAT-073)
+#+DATE: 2026-06-07
+#+STARTUP: overview
+
+* Mandate
+User directive (standing, DEC-always-choose-maximal-convergence): ALWAYS the maximal
+convergence / cleanest cutover, ZERO deprecated paths. Pre-release → no back-compat owed.
+∴ Phase B = O2: unify the =@template= body onto ONE model — html5ever HTML parsing + the
+reactive-hole interpolation model + stdlib =%capture_type= grammar — and DELETE the legacy
+=parse_component_body= HTML scan AND the runtime factory regex-interpolation. One parser, one
+interpolation model, one grammar. No coexistence.
+
+* Verified ground truth (all from code, 2026-06-07)
+
+** Two template models exist today (the duplication to collapse)
+| Concern | LEGACY (component body) | TARGET (file-scope HTML, the survivor) |
+|---------+-------------------------+----------------------------------------|
+| HTML parse | bespoke =scan_html_tag= string scan (form_compiler.rs); BUG-059 lived here | =scan_html_region= → skeleton+holes → html5ever =parse_fragment= (treesink.rs, PLAN-023 W1) |
+| Interp | bare =$x= kept LITERAL in =html=; runtime FACTORY regex-replaces =$var=/=$var.path= w/ escapeHtml/escapeAttr; =&param= element subst (template.st:175-230) | =`$expr`= backtick HOLES → =HtmlExpr::Hole(JsExpr)= → reactive accessors (emit/html.rs:22) |
+| Constructs | per-construct RUST ladder in =parse_component_body= (state/inject/toggle/@on/&ref) | n/a |
+| IR | =ComponentBodyDef{html, states, directives, injections, exports, css_rules, refs, selector_refs}= | =HtmlExpr= tree |
+
+** The reactive-hole pipeline (what everything converges onto)
+=HtmlBlockAst{skeleton, holes}= (parser/ast.rs) -> =treesink::parse_html_skeleton= ->
+=Vec<HtmlExpr>= -> =emit::html::emit_all= -> reactive DOM. =HtmlExpr= (ir/code.rs:299):
+Element{tag, attrs: Vec<(String, Vec<AttrPart>)>, children}, Text, Hole(JsExpr), Raw.
+=AttrPart::{Lit, Hole}= for attr-position holes. Holes carry =JsExpr::Raw(source)= in W1; the
+emit phase rewrites them into signal-aware accessors. Sentinels =HOLE_OPEN/CLOSE=
+(=\u{E000}/\u{E001}=) mark hole positions in the skeleton (never occur in real markup).
+
+** Interpolation authoring: bare $x vs backtick (the convergence decision)
+Backticks =`$expr`= exist to hold ARBITRARY expressions (=`$cart.total | currency`=), parsed
+as a full Spacetime expression. Bare =$x= is the legacy template-only shorthand. 96 @templates,
+~136 files use bare =$x=. DECISION (clean cutover + minimal authoring churn): the unified
+skeletonizer AUTO-NORMALIZES bare =$x=/=$x.path= in HTML text+attr position into holes
+(=`$x`=), so existing authoring stays valid AND lowers to the reactive model. Backticks remain
+for arbitrary expressions. ONE model (holes); =$x= is sugar the skeletonizer desugars. The
+legacy factory regex path is DELETED, not kept as fallback.
+
+* Target architecture (ONE model)
+#+begin_example
+@template &name($p) { BODY }
+        │
+        ▼  segment (BUG-059 segment_component_body — generic, KEEP)
+   [ HtmlRun | ConstructSeg ]*
+        │                    │
+        │ HtmlRun            │ ConstructSeg
+        ▼                    ▼
+  normalize bare $x→holes   stdlib %capture_type `component_item` engine (custom.rs)
+  → skeleton + holes          → Named/Array records
+  → treesink/html5ever        → reify_component_body
+  → Vec<HtmlExpr>             → states/directives/injections/exports/refs
+        │                    │
+        └─────────┬──────────┘
+                  ▼
+   register-template payload: HtmlExpr-derived reactive DOM builder
+   (NOT an html string + regex) + the non-HTML construct vecs
+#+end_example
+
+Net deletions at the end: =parse_component_body= per-construct ladder + =scan_html_tag= +
+factory regex-interpolation (template.st:175-230) + the legacy =html= string field semantics.
+
+* Execution waves (each ends with a REVIEWER SWARM; main thread does architecture)
+
+** Done (foundation)
+- B-Wave 1 ✓ multi-token literals in the %capture_type engine (commit cf9f831a; R-wave clean).
+
+** B-Wave 2 — Unified interpolation skeletonizer (bare $x → holes)
+Make component-body HTML runs produce =(skeleton, holes)= exactly like file-scope HTML, with a
+normalization pass that converts bare =$x=/=$x.path=/=&param= in text+attr position into holes
+(=&param= → element-hole). Reuse =treesink::parse_html_skeleton=. Output: =Vec<HtmlExpr>= for
+the body's HTML. GATE: a @template with =$title= + =[attr]="$x"= produces the SAME reactive
+HtmlExpr a backtick author would; emitted JS asserted; existing template render tests green.
+
+** B-Wave 3 — Stdlib component grammar + reify_component_body
+=stdlib/capture-types/component-body.st=: =component_body=/=component_item= and the construct
+leaf grammars (state_decl, injection, class_toggle, on_block via on_action, template_invocation,
+match_block). =reify_component_body= (custom.rs wrap_reifier) maps records → the non-HTML parts
+of =ComponentBodyDef=. Switch the =CaptureType::ComponentBody= dispatch (form_compiler.rs:1209)
+to run the engine. Bounded leaf types before literals (binding/string, not greedy expr — see
+B-Wave 1 idiom). GATE: full bug059_*/feat071_* corpus + snapshots green (audited).
+
+** B-Wave 4 — Reactive register-template (retire factory regex + html string)
+register-template consumes =HtmlExpr= (reactive DOM builder) instead of an html string +
+regex-interpolation. DELETE the factory regex passes (template.st:175-230) and the legacy
+=html= field semantics. Instance state/directives/injections wire onto the HtmlExpr-built DOM.
+GATE: V8 — counter/isolation/class-toggle/slot all green on the reactive builder; no regex
+interpolation remains.
+
+** B-Wave 5 — Retire dead Rust
+Delete =parse_component_body= internals, =classify_construct_start=, =scan_html_tag=,
+=scan_*= superseded by engine+html5ever. ZERO dead-code warnings. GATE: full corpus green.
+
+** Phase C — @match as pure .st
+=match_block= grammar (B-Wave 3 arm) + =%primitive match-render= =%emit js= (reuse the dormant
+template.st @match runtime). Un-ignore feat073_match V8 tests. GATE: green, pure .st.
+
+* Risks
+- R-interp: bare-$x normalization must match the factory's CURRENT semantics EXACTLY
+  (escapeHtml in text, escapeAttr in attrs, =$x.path= dotted access, =&param= trusted-element
+  subst). Mitigation: differential test — the same @template renders byte-identical DOM before
+  (legacy) and after (reactive), across the bug059/feat071 corpus, in V8.
+- R-each: =@each= invocations (=&card($item)=) already use the each-with-templates primitive
+  with their OWN arg resolution; ensure the reactive builder composes with it (don't double-
+  interpolate). Mitigation: B-Wave 4 V8 test with @each + interpolated child.
+- R-scope: instance scoped state (=$count=) injection/binding must target the HtmlExpr-built
+  element tree (root resolution — the FEAT-071 matches() fix). Mitigation: reuse resolveScoped.
+- R-blast: 96 templates. Mitigation: ComponentBodyDef IR stays; consumers untouched; corpus +
+  serve-and-eyeball a real multi-template site (unkn/admin) each wave.
+
+* Reviewer swarm protocol (every wave)
+Parallel =reviewer= subagents, ≤3-5 files each, lenses: interp-fidelity (byte-identical DOM
+vs legacy across corpus, emitted-JS asserted), html5ever-correctness (void/raw-text/nested/
+malformed/attr-holes), grammar/reifier-parity (ComponentBodyDef identical), DRY/no-legacy-path
+(assert the deleted regex/scan paths are GONE, not dormant), V8-behavior (render+interact).
+Findings → BUG/FEAT linked to PLAN-030, fixed mid-flight before next wave.
+
+* Acceptance (Phase B O2 done)
+- [ ] ONE template model: html5ever parse + reactive holes + stdlib grammar.
+- [ ] parse_component_body + scan_html_tag + factory regex-interpolation DELETED (no fallback).
+- [ ] bare =$x= authoring still works (desugared to holes); 96 templates compile + render.
+- [ ] full corpus green (lib/integration/v8/headless), emitted-JS asserted, snapshots audited.
+- [ ] @match pure .st; feat073_match V8 tests un-ignored + green.
+- [ ] a real multi-template site (unkn or admin pane) served + eyeballed per wave.
+- [ ] every wave passed its reviewer swarm; all findings resolved.
+
+* CRITICAL FINDING (2026-06-07) — the reactive-hole renderer does NOT exist yet
+
+Verified from emit/html.rs + PLAN-023 status:
+- The file-scope HtmlExpr path is SSG-ONLY. emit_hole emits a STATIC placeholder
+  `<!--st-hole:src-->` (html.rs:31); the "reactive emit phase (PLAN-023 W3/W4)" that would
+  turn a Hole into a hydrated reactive accessor is EXPLICITLY a TODO (html.rs:29-30) and
+  PLAN-023 W4 is BLOCKED/incomplete ("per-item render runtime... NOT an independent slice";
+  "reactive HtmlExpr runtime" unbuilt).
+- The ONLY working REACTIVE template renderer today is the factory in template.st (the regex
+  string-interpolation path) — the very thing O2 proposed to delete.
+
+** Implication
+"Converge component templates onto the file-scope reactive-hole model" is converging onto a
+model that is NOT reactive yet. Naively doing so REGRESSES every @template from working-
+reactive (factory) to static (SSG holes). That violates the goal.
+
+** Corrected convergence target (still maximal, still one path — but the RIGHT one)
+The convergence target is the WORKING REACTIVE RENDERER, upgraded to consume html5ever-parsed
+structure. Concretely the unified model is:
+  segment → html5ever parse (HTML correctness, retire scan_html_tag)
+          → HtmlExpr (ONE HTML IR)
+          → a REACTIVE HtmlExpr→DOM builder in register-template (BUILD this; it replaces BOTH
+            the factory regex AND becomes the missing W3/W4 reactive emit)
+          + stdlib %capture_type grammar for constructs (retire per-construct Rust)
+So O2 ENTAILS building the reactive HtmlExpr renderer (the PLAN-023 W3/W4 gap) — that is the
+real heart of the cutover, not a reuse. This is larger than first scoped but is the ONLY way
+to have one non-deprecated path (it also unblocks file-scope reactive HTML + HTML @each, which
+PLAN-023 left blocked — a strict win, full convergence across BOTH systems).
+
+** Decision needed (scope acknowledgement, not a path fork)
+This makes Phase B O2 also COMPLETE PLAN-023 W3/W4 (reactive HtmlExpr runtime). That is the
+correct maximal-convergence move (one reactive HTML renderer for templates AND file-scope), but
+it is a substantial build. Proceeding on main thread, wave-by-wave, reviewer-hardened. The
+revised B-Wave 2 is therefore: "build the reactive HtmlExpr→DOM runtime" (the keystone), THEN
+route both component templates and file-scope HTML through it.
+
+* B-WAVE 3 SPIKE (2026-06-08) — full component-body grammar via engine: VIABLE
+
+Proved the generic %capture_type engine parses a FULL construct-segment body. Grammar:
+  %capture_type cb_state  { "$" $name:ident $ty:ident ":" $init:expr ";" }
+  %capture_type cb_inject { $target:ident "<-" $val:expr ";" }
+  %capture_type cb_toggle { "." $cls:ident ":" $sig:binding ";" }
+  %capture_type cb_item   { (cb_state) | (cb_inject) | (cb_toggle) }
+  %capture_type cb_body   { ( $items:cb_item )* }
+Input `$count number: 0; .c: $count; text <- $count;` -> Array[{state},{toggle},{inject}],
+ALL 24 tokens consumed. Choice branch name = discriminator (reifier dispatches on it).
+
+** Confirmed Phase B architecture
+component_body = BUG-059 segmenter (HTML-run vs construct-seg) +
+  HTML-runs -> html5ever (treesink/parse_html_skeleton, BUILT) +
+  construct-segs -> generic %capture_type engine (PROVEN) +
+  generic reify_component_body -> ComponentBodyDef (the IR stays).
+Retires parse_component_body's per-construct Rust AND the @match special-case (BUG-060).
+
+** Realistic scope (why it's a multi-wave cutover, not one edit)
+parse_component_body (~700 lines) carries subtle behaviors the engine path must preserve:
+section_transitions (W0700 interleave), E0900/E0920/E0921/E0922 diagnostics, the @on-block
++ sibling dispatch (R-wave P1), data-st-id/data-st-origin provenance injection, the
+behavior-block inner classification. Each must be matched by the grammar+reifier or moved to
+a post-parse validation pass. ComponentBodyDef IR stays (consumers untouched).
+
+** Phase B execution (next waves, each spike->build->reviewer-swarm)
+B3a. Build reify_component_body (generic, registered in wrap_reifier) producing the non-HTML
+     ComponentBodyDef parts from a cb_body record. Differential-test vs parse_component_body
+     output across the bug059/feat071/feat073 corpus (byte-identical ComponentBodyDef).
+B3b. Stdlib component-body.st grammar (cb_state/inject/toggle/on/ref/match/html-run + cb_body).
+     @match folds in as a cb_item arm -> retires the @match Rust reifier (closes BUG-060).
+B3c. Interleave HTML-runs (segmenter -> html5ever) with construct records; preserve provenance.
+B3d. Switch CaptureType::ComponentBody dispatch to the engine+reifier; keep parse_component_body
+     behind a feature/flag until differential parity is proven, then DELETE it (full cutover).
+B3e. Move diagnostics (E0900/E092x/section_transitions) to the reifier or a validation pass.
+GATE: zero "@match"/ComponentMatch/MatchArm/parse_component_body per-construct logic in src/;
+full corpus byte-identical or audited; fleet builds; reviewer swarm per sub-wave.

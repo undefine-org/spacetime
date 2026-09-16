@@ -1,0 +1,86 @@
+#+TITLE: W3 — provenance-driven inline editing for non-richtext fields (plan)
+#+DATE: 2026-06-12
+#+STATUS: PLAN (investigation done; implementation pending user go)
+
+* Goal
+Make the WHOLE published page editable, not just the @richtext body. On the blog:
+the title (`$post.title`) and dateline (`$post.dateline`) should click-to-edit in
+edit-mode and persist to disk — the same round-trip FUP-047 closed for @richtext,
+extended to plain bound text. This is the fullest expression of the user's
+"editable-everything via introspection" framing.
+
+* What already exists (so we extend, never re-add)
+- `dev-editable` (stdlib/__dev__/primitives/dev-editable.st) ALREADY makes any
+  `[data-st-bind]` node click-to-edit in edit-mode (hover "Click to edit", contenteditable,
+  blur→commit) and emits a `data` edit event on `window.__stDevEditable.onEdit`.
+- `dev-save` ALREADY turns that event into an EditJson and persists (FUP-047 generalized
+  its path handling to accept an explicit `{file, path}`).
+- `data-source` ALREADY registers a fetch source's backing file in `ST._dataRegistry`
+  (FUP-047), so resolveFilePath resolves the real file.
+- The schema/runtime/dev-tools-injection fixes from FUP-047 all apply here unchanged.
+
+∴ W3 is WIRING + ONE provenance gap, not new infrastructure.
+
+* THE GAP (root-caused this turn)
+`data-st-source` and `data-st-index` are emitted ONLY by `@each` (stdlib/primitives/data/
+each.st:141,311) at runtime — they tag COLLECTION ROWS. A SINGLE-OBJECT bind outside any
+`@each`, e.g. `<h1 data-st-bind="$post.title">`, gets NO source/index. So:
+
+  dev-editable readProvenance() (dev-editable.st ~95-120):
+    - walks up for `[data-st-source]` → finds none → source = null
+    - field = bind.replace(/^\$\./,'')  → "$post.title" → "post.title"  (only strips `$.`)
+  dev-save data branch then builds jsonPath = '[' + index + '].' + field
+    → '[null].post.title'  → garbage → cannot persist.
+
+This is the SAME collection-shape assumption FUP-047 fixed in the editable-surface. The
+blog's own comment ("plain bound text is click-to-edit via the dev provenance path") is
+currently ASPIRATIONAL for single-object sources — it only works for @each rows today.
+
+* Design — extend dev-editable to the single-object shape (mirrors FUP-047)
+The bind string ITSELF carries the full path: `$post.title` = source `post`, json path
+`.title`. dev-editable should derive {source, path} from the bind when there is no
+`[data-st-source]` ancestor, exactly as the surface now does:
+
+  parse bind `$x.y.z` / `$x[i].y`:
+    - source  = first segment after `$`  (`post`)
+    - jsonPath = remainder, leading '.'/'[' preserved  (`.title`)
+  emit the data edit with editType:'data', source, path  (NOT index/field)
+  → dev-save already accepts {source, path} (FUP-047) and resolves the file via
+    _dataRegistry.get(source).src.
+
+When a `[data-st-source]` ancestor IS present (an @each row), keep today's
+{source, index, field} → '[i].field' path (unchanged — collection case). So one
+readProvenance produces the right shape for BOTH, just like resolveLeaf/the surface.
+
+Value coercion: a plain text field persists its textContent (string). No widget needed for
+v1 (text). Richer widgets (media/number/toggle/select INLINE on the page, reusing the
+drawer `&fld-*` templates) are the NEXT layer (W3b) — out of this first cut.
+
+* Build (small, one wave)
+1. dev-editable readProvenance: when no `[data-st-source]` ancestor, parse the bind into
+   {source, path}; carry both on the edit event. (the one real change)
+2. dev-save saveEdit data branch: already handles {source, path}; verify the bind-derived
+   field name isn't double-applied (drop the legacy `field` when `path` is present — already
+   the precedence after FUP-047).
+3. Demo: the blog title/dateline become editable + persist (no .st change needed — they
+   already carry data-st-bind). Prove: edit title → reload → survives.
+4. Tests: a headless surface/automation test that a single-object [data-st-bind] edit emits
+   an EditJson with path '.title' to the right file; and a guard that an @each-row edit still
+   emits '[i].field' (no regression).
+
+* Non-goals (this cut)
+- Inline media/number/toggle widgets on the page (W3b — reuse drawer templates).
+- Cross-field validation, optimistic-conflict UI beyond the existing toast.
+- Prod auth (local-dev only, per the user).
+
+* Acceptance (observable)
+- On editable-blog --debug: hover title in edit-mode → "Click to edit"; edit → blur →
+  EditJson{file:'content/post.json', path:'.title'} → server ok → reload survives.
+- @each collection editing still persists as '[i].field' (no regression).
+- lib/surface/editable_model suites green.
+
+* Provenance
+Investigation this turn: dev-editable.st readProvenance (single-object source=null gap),
+each.st (data-st-source only on rows), dev-save.st (path already generalized by FUP-047),
+form_match.rs/export/html.rs (provenance emit/strip). Mirrors the FUP-047 collection-shape
+fix, one layer out (plain text instead of the rich-text doc).

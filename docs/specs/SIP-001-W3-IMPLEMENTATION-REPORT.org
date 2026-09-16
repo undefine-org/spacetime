@@ -1,0 +1,660 @@
+#+TITLE: W3 Implementation Report — the @on cutover
+#+STATUS: RUNNING LOG — decisions worth reviewing after the fact, appended as waves land
+#+CONTEXT: PLAN-124 execution. User directive (2026-07-26): "work autonomously;
+record any decision worth reviewing after the fact in an implementation report
+file." This is that file. Newest entries LAST.
+
+* D1 (W3.1) — the dispatch table lives in the registry entry: `primitive` field
+
+Decision: each driver entry declares WHICH binds primitive the @on resolution
+emits (`primitive: intersection`, `primitive: event-driver`, …). The
+alternative — one Rust match from driver name to primitive — is the closed
+enum this whole plan exists to avoid; the alternative of one @on-head macro
+per driver (form.st's kind-is-the-macro shape) does not fit because `@on` is
+ONE directive with a driver SLOT, not six directives.
+
+Consequence: adding a driver whose runtime an existing primitive family
+covers is a drivers.st-only change (data). Adding a driver needing a NEW
+primitive is data + one primitive (the runtime vocabulary — necessarily not
+data). Review point: if a later wave adds a Rust `match driver_name`, that is
+the rot returning; the field exists so it never has to.
+
+* D2 (W3.1) — `planned:<name>` markers for future primitives
+
+steps, playback, clip, done are registered TODAY with
+`primitive: planned:steps-driver` etc. Rationale: the grammar and the
+unknown-driver diagnostic (W3.2) should know these words NOW (an author
+writing `&.playback` gets "planned, not yet bound", not "unknown driver" —
+and certainly not a silent no-op). The marker's shape is pinned by a gate
+test so the resolution can match on the prefix.
+
+* D3 (W3.1) — reduced_motion vocabulary: skip | hold | allow
+
+- `skip` — entrance choreography (visible, time, load, steps, clip, done):
+  jump to the final state.
+- `hold` — ambient/repeating (loop, playback): do not auto-play at all.
+- `allow` — user-initiated (hover/click/focus/submit/key, scroll, mouse,
+  pointer): interaction-driven and scroll-linked motion is the user's own
+  act; common practice (and the CSS media query's intent) allows it.
+
+Review point: this vocabulary predates the reduced-motion implementation; if
+the runtime lands different semantics, update the FIELD VALUES (data), not
+the vocabulary.
+
+* D4 (W3.1) — params are NOT in the registry entry
+
+The SIP's projection table lists per-driver params (threshold: 0.1, …). They
+are deliberately not duplicated into the entry: the @on head grammar owns the
+call shape, the primitive owns the arg signature. Three owners, one fact
+each. If W3.2 finds a param the grammar cannot express (e.g. `.scroll`'s
+`scope: cover`), the grammar grows — not the entry.
+
+* D5 (W3.1) — drivers.st is NOT added to stdlib/index.st
+
+form.st is absent from index.st too: the embedded registry is the always-on
+base and covers both plain files and `@import "stdlib"` users (verified:
+`@import "stdlib"` + `@form` compiles). index.st's import list is additive
+sugar, not the load path. Both files are wired into the three load-bearing
+spots: stdlib_embedded.rs, lsp/form_registry.rs, lsp import_resolver.rs.
+
+* W3.1 gate state
+
+tests/sip_001_w3_driver_registry_test.rs (4 green): the registry declares
+exactly the SIP-001 projection table (16 drivers); every entry carries
+primitive/value_type/seekable/reduced_motion/on_kinds as typed data; a
+made-up driver (`gamepad-axis`) is readable through the production
+registration path; `planned:` markers are distinguishable from bound
+primitives.
+
+* D6 (W3.2) — `drive` is a pseudo-primitive expanded between Evaluate and Resolve
+
+The @on macro's `%binds` is one line: `drive(&self, driver: $driver, form:
+$form)`. src/pipeline/drivers.rs expands it into the entry's real primitive
+(from the registry's dispatch table, D1) + apply-animations (resolved motion
+form). Alternatives rejected: a per-driver %if ladder in the macro (the
+closed enum in grammar clothing — what this replaces), and making the binds
+expander itself registry-dynamic (a bigger metasystem change than the wave
+needs; FUP-155's assignment-phase rethink may absorb it later).
+
+* D7 (W3.2) — the @on form slot owns its own unknown-form error
+
+BUG-241's validate_form_refs sees statement-position splices; the @on form
+slot is a CAPTURE (`$form:form_application`), invisible to it. The drive
+expansion emits E0948 for an undeclared form instead — same class (E0947),
+different position. If a general "registry-backed reference validation" pass
+ever lands (FUP-155), the two should fold into it.
+
+* D8 (W3.2) — subject-kind checking is only decidable subject-less
+
+`&.playback` (no subject) is checkable: the host is an elem, playback's
+on_kinds is media → E0949. `&intro.playback` needs TYPED REFS (is &intro
+elem, media, or template?) — W4 territory, SIP-001 §2's kind table. Today's
+rule: subject-less → elem check; with-subject → allow, documented.
+
+* D9 (W3.2) — `params` is RETIRED (FUP-040) and bites silently (FUP-151)
+
+The W1 spike grammar and the SIP text use `( $params:params )?` for
+call-site args. The stdlib `params` capture type was RETIRED (FUP-040:
+param_list is the one declaration surface), and an unknown capture type
+falls back to a lenient Expr — the params group then EATS THE NEXT CAPTURE'S
+TOKENS (`&.visible --rise` failed as "form_application got SEMICOLON": the
+driver's params group swallowed `--rise`). W3.2's capture types therefore
+carry NO params groups; call-site args (`--rise(distance: 12px)`,
+`&.visible(threshold: 0.5)`) get a real `call_args` capture type in W3.3,
+where the parameterized fences live. The W1 spikes keep their lenient
+params groups (their accept tests prove nothing about params) — flagged for
+W3.3 to replace.
+
+* D10 (W3.2) — a quoted literal in %form is NOT a token literal
+
+`%form { … ";" }` stores the literal as the THREE-CHARACTER string `";"` and
+never matches a `;` token (data-kind.st:361's bare `;` is the working
+precedent; editable.st's `";"?` sites are suspect for the same reason —
+never verified). The BUG-241 spike wrote `";"` and never caught it because
+its form was never consulted. Worth a metasystem diagnostic one day (a
+quoted single punctuation literal in a %form is almost always a mistake).
+
+* D11 (W3.2) — capture shapes: multi-capture types nest, single-capture types flatten
+
+Verified: `driver_expr` (two+ inner captures) yields
+`driver: Named{subject, member}`; `form_application` (ONE inner capture)
+yields a FLAT `form: Ident("--rise")`. The drive expansion reads nested-first
+with top-level fallback. An absent subject captures as an EMPTY string, not
+a missing key.
+
+* D12 (W3.3) — easing sigil normalizes at the emission boundary
+
+Form-registry easing names carry the sigil (`--ease-out-expo`); the runtime's
+easing map (public/runtime) is keyed BARE. The drive expansions strip `--`
+from easing values when emitting. Full easing-form resolution (an easing
+form's curve looked up in the registry and emitted) is its own wave — the
+sigil-strip is the honest boundary, documented, not the end state.
+
+* D13 (W3.3) — settings route by the primitive's own signature
+
+`stagger: 70ms;` in a motion body is NOT a keyframe: the root-level
+animations builder drops setting props silently. The expansion routes a
+no-arrow line to apply-animations ARGS when its name is in the primitive's
+own param list (registry data, minus el/driver/animations) — no hardcoded
+setting list.
+
+* D14 (W3.3) — mutations route to on-mutation-handler, EVENT drivers only
+
+`@on &.click { $open <- !$open; }` needs no driver primitive (the handler
+attaches its own listener); a mutation on a progress/transport driver is
+E0949 (progress DRIVES, it cannot fire — the SIP's Gate/Event distinction
+applied at compile time). The mutation text is reconstructed from the
+capture (`$target <- expr`) verbatim.
+
+* D15 (W3.3) — `raw_until_semicolon` is a dead grammar; `balanced` is the line capture
+
+The pre-existing keyframe_prop/raw_until_semicolon pair fragmented values
+(`70ms` → `"7"`, `#8ab4ff` → `"#"`) — unused by any passing path, measured
+this wave. `motion_line` uses `balanced(';')` (the keyframes.st precedent).
+Left in place (on-actions.st serves the mutation dispatcher), flagged.
+
+* W3.3 gate state
+
+THE ARTICLE COMPILES: `cargo check docs/specs/SIP-001-LAUNCH-ARTICLE.st.md`
+is green — every @on surface live: statement splices (W3.2), driver bodies
+(choreography + settings + static props), signal arms (gate/event/
+transition/wildcard + call args + `6f` frames), click mutations.
+Tests: W3.3a 4 (arms), W3.3b 4 (bodies) — asserted on emitted JS throughout.
+Selection: `mutation_actions` joined the permissive-body set so the
+constrained `on_arm+` is tried first and non-arm bodies fall through (the
+existing mechanism, used as intended).
+
+* W3.2 gate state
+
+Article: the `@on &.visible --rise;` fence compiles AND emits —
+IntersectionObserver + `__drive_visible_1` + resolved keyframes with
+`$distance` substituted to `24px` (tests/sip_001_w3_on_head_test.rs, 6
+green, asserted on emitted JS). Remaining article reds: exactly the three
+W3.3 shapes (two driver-body fences, one signal-arms fence). Error paths:
+unknown driver → E0948 naming the full registry; planned driver → E0948
+"PLANNED, not yet bound"; non-motion form → E0949; undeclared form → E0948.
+
+* D16 (W3 review) — six findings, and the blast-radius lesson in strict matching
+
+Both reviewers returned "incorrect". Six fixes, each with a regression test:
+
+1. **P1 defaults collapse** — an omitted call arg produced an EMPTY override
+   that won over the declaration default. Fixed at the substitute_params
+   boundary (empty type_ref = no override). My W3.3 tests asserted the
+   override case but never the default-fallback case — the same
+   single-variant blindness the W1/W2 reviewers caught.
+2. **Statement args ignored** — form_application grew `args` in W3.3 but the
+   statement expansion still read the obsolete `form_params`. All three
+   slots (statement, arm, body splice) now share resolve_form_with_args.
+3. **Substring substitution** — `$x` rewrote `$x2` to `10px2`. Substitution
+   is token-bounded now (replace_param_token).
+4. **`stagger: 70ms` emitted as a string** — computed NaN at runtime.
+   Time-valued settings parse to the NUMBER the primitive signature
+   declares. My test asserted the STRING was present — presence is not
+   correctness; the fixed assertion is `defaultStaggerDelay = 70` numeric.
+5. **Mixed arms+mutation fell through to the WRONG dispatcher** —
+   `IdentExtractor` deliberately strips `$` (alias harmonization), so the
+   legacy mutation dispatcher claimed `@on $sig { true => --x; $y <- 1; }`
+   after on_arm+ rejected it. New `event_name` capture type (no sigil
+   strip) for the legacy event slot; the arms failure now surfaces.
+6. **Two forms silently dropped** — `@on &.visible --a --b;` matched nothing
+   and vanished (the `;` literal's LiteralMismatch is suppressed). The
+   trailing-`;` literal is now the statement's COMMITMENT point: leftovers
+   before it are ExtraInlineTokens (retained).
+
+**Blast radius of strict matching (41 → 12 → 0):** the body-less
+strict-inline extension broke established surfaces that RELY on leftover
+tolerance — extra tokens BEFORE an arg list (`@value-change count(duration:
+500ms)` names its watcher; 2b's own comment blesses it) and the lone
+trailing `;` every body-less statement ends with (`@import "./faq.st";`).
+Strict now requires: body-less AND no ARG_LIST present AND leftover beyond a
+lone `;`. The general lesson: tightening the matcher is never free — every
+leniency is load-bearing somewhere until proven otherwise, and the full
+suite is the only honest measurement.
+
+* W3.4 survey and DESIGN GATE (2026-07-28) — the wave stops here for the user
+
+The cutover cannot reach its gate (repo compiles post-migration) without
+design answers the conversational-design rule reserves for the user. The
+measured state:
+
+** Capability delivered for it (025981d5): driver params —
+`&.visible(threshold: 0.5)`, `&.scroll(start: 0.2)` — the rewrite targets
+parse and emit.
+
+** Measured usage (files):** @scroll 47 · @loop 29 · @load 11 · @mouse 4 ·
+@hover 4 · @click 2 · @value-change 2 · @time 1 · @pointer 0 · @after 1.
+
+** Fidelity risks the capsule must answer (measured, not guessed):**
+1. Real call shapes are MESSIER than the stdlib %form inventory suggests:
+   `@scroll reveal(600ms, threshold: 0.2, easing: ease-out)` (duration and
+   threshold params not in the scroll-timeline form I first read — there are
+   sibling/variant forms to inventory), `@scroll reveal(&quick-reveal)` (an
+   ELEMENT ref as the first param), `@loop rotate($duration)` (a SIGNAL as a
+   duration arg — the typed-args question the W2 review already flagged).
+   Each variant needs its own %match rule; an inventory sweep is step one.
+2. `@after` chaining keys on timeline NAMES (`@scroll reveal(...)` names the
+   timeline `reveal`). The new head has no name slot — SIP-001's answer is
+   the `as &name` clause, NOT YET IMPLEMENTED. Rewriting named timelines
+   before `as` lands silently breaks @after (1 file today, but the pattern
+   is the point).
+3. @value-change has NO mechanical target: the new surfaces are `@on
+   <&-driver>` (bodies) and `@on $signal` (arms, form-consequences only).
+   `@value-change count(duration: 500ms) { font-size: 14px -> 24px; }` is a
+   signal-driven INLINE keyframes body — neither surface takes it today.
+
+** Design questions for the user (the wave resumes on answers):**
+- Q1 `as &name`: implement the timeline-naming clause now (unblocks @after
+  fidelity), or accept that named timelines migrate WITHOUT their chain and
+  @after gets its own wave (W4's `.done` driver is already planned)?
+- Q2 @value-change: which surface? (a) `@on $count { _ => --form; }` —
+  wildcard arm, form-consequence only (users wrap inline keyframes in a
+  form); (b) a `.change` projection on bindings (`$count.change` — extends
+  driver_expr to binding subjects); (c) keep @value-change as a current
+  directive outside the cutover.
+- Q3 Scope check: does W3.4 retire the eight mapped directives in ONE
+  capsule wave-date (2026-07-26), with @effect and the waapi variants
+  (@wscroll/@wloop/@wload — the compositor path, currently a SEPARATE
+  supported surface) left current?
+- Q4 FUP-152 (`~` retirement, 435 uses) and FUP-153 (PresetType deletion):
+  confirmed as their own wave (FUP-152's re-measure mandate), NOT folded
+  into W3.4?
+
+** Proposed split on answers:** W3.4a = inventory sweep + capsule for the
+eight mapped directives (mechanical, gates: suites + repo compile with
+capsule active + zero `%if $event ==` ladder remnants) · W3.4b = the
+design-gated items above.
+
+** D19 (2026-07-26, W3.4): the flaky E0804 was a poisoned stdlib binary cache — cache writes are now gated on clean loads
+
+Symptom across the W3.4 sweep: builds of files using retired directives
+intermittently failed with `error[E0804]: Directive '%binds' not valid in
+this context` at spans inside stdlib macro defs (on-event.st:230, on.st:66,
+timeline.st:71), the "missing" parameter varying run to run
+('event'/'signal'/'driver'). Fresh full stdlib loads always passed
+(measured 25/25, 0 errors, 71 capture types); cached builds failed.
+
+Root cause (measured, not guessed):
+1. The E0804 headline was the friendly-error formatter MISLABELING a
+   resolve-time `MissingParameter` (any error whose source line contains
+   `%binds` is re-summarized as a bind-context error). The real error:
+   expanding a matched stdlib macro whose form captures were absent.
+2. `IncrementalStdlibCache` wrote `registry.bin` UNCONDITIONALLY — a load
+   that raced a mid-edit stdlib state (this session edited on.st /
+   drivers.st / the capsule dozens of times while builds ran) persisted a
+   partially-populated registry. Cache HITs drop load errors
+   (`errors: Vec::new()`), so the poison was silent and sticky until the
+   next stdlib mtime change. Which macro failed first varied with per-process
+   HashMap iteration order over the match set — the apparent nondeterminism.
+
+Fix: both cache-write sites (`from_dirs`, `refresh_if_needed`) now skip the
+write when the load carried errors (log::debug when skipping). Invariant: a
+cached registry always came from a zero-error load, so dropping errors on
+hit is sound. Proof: 30/30 consecutive CLI builds of a retired-syntax file
+pass after the fix (was intermittently failing before).
+
+Secondary fix folded in: `make_error_friendly` mislabeling left as-is (the
+underlying load/resolve error now surfaces at the right time and place —
+the sticky-poison path that made the mislabel visible is gone).
+
+** D20 (2026-07-26, W3.4 review swarm): 10 findings fixed — behavior-exactness is verified, not assumed
+
+Both reviewers ruled "incorrect"; all findings fixed and re-verified:
+
+1. Capsule rules now preserve the retired defaults/params exactly (verified
+   against the quoted retired %binds): load easing `ease-out-quad`; mouse/
+   pointer `invert`; time `alternate`/`autoplay`; loop `mode:string =
+   "pingpong"`. `@on visible` ease-out default confirmed behavior-exact.
+2. `instantiate_template` gained a `CapturedValue::Time` arm — a defaulted
+   `:time` no longer renders as a literal `` `$duration` `` hole.
+3. Absent OPTIONAL captures without defaults rendered verbatim holes into
+   migrated source (measured: `@loop x(600ms)` → `mode: `$mode``). Fixed
+   twice: loop rules declare the retired defaults; NEW LOAD-TIME VALIDATION
+   rejects any rule splicing an optional-without-default capture
+   (RED→GREEN tests in metasystem::tests::migrations).
+4. Empty motion body (`@on &.scroll { }`) binds NO body capture — expansion
+   defaults to empty AND emits the driver bind independent of animation
+   presence (driver-only progress exposure; apply-animations only when
+   keyframes exist). Verified in emitted JS.
+5. `interactive` from the driver registry is forwarded to apply-animations
+   (the retired event binds passed `interactive: true`; the runtime gates
+   on it — was silently lost). Verified in emitted JS.
+6. Extras accounting now mirrors the real matcher: positionals bind UNNAMED
+   params only (measured: pre-cutover `@time pop(300ms)` emits dur=1000ms —
+   the positional was silently dead). `%drops (_)` declared on every
+   named-only rule (load/time/mouse/pointer/hover/click/focus) — measured
+   dead, documented, behavior-exact.
+7. `positional_group_fits` shares `parse_duration_with_unit` (`1m`/`1000us`/
+   `60fps` no longer misclassified).
+8. validate.rs: template_continues_with_non_ident checks ALL continuations
+   (a second literal-led one still cycles); overlap key keeps literal ORDER
+   (`@on hover visible` ≠ `@on visible hover`).
+9. Cache canary bumped to v2 — pre-gate caches (writable by erroring loads)
+   are invalidated, not trusted.
+10. Dead bindings removed; clippy-clean.
+
+LESSON (process): two "flaky compiler" episodes this wave were environmental,
+not compiler nondeterminism — (a) poisoned registry.bin (fixed in D19), and
+(b) cargo's mtime fingerprint missing same-second source edits, leaving
+`cargo run` on a STALE binary. When behavior is impossible, `touch` the
+edited sources and rebuild before believing any measurement.
+
+** D21 (2026-07-26, W3.5): subject projections — the OBSERVED element vs the ANIMATED element
+
+User request: document that `@on` accepts any elem-ref subject, so elements
+can depend on each other. Measurement found the shape PARSED but the subject
+was silently DROPPED (selector-phase primitives force element args to the
+init `el` — expand.rs:330). Implemented:
+
+- The DRIVER (and mutation listener) attaches to the SUBJECT
+  (`@on &hero.visible …` observes the hero), resolved by NAME through the
+  established element-ref rail (`ST.ref("hero")` — `&name selector;`
+  declares the ref; `&name { }` is an ENTITY in the st-world registry, a
+  different rail the subject route does not read — on_kinds is where a
+  future wave maps non-elem subjects).
+- The ANIMATED element stays the scope owner (self): hero's visibility
+  drives the card's animation. Observed and animated are different
+  questions; `@on` answers them separately.
+- expand.rs: a named Element capture in a selector-phase element arg emits
+  `ST.ref("name")` instead of the forced `el`. Blast radius measured: no
+  stdlib `%binds` forwards a named Element into a selector-phase primitive
+  (21-SubjectReview).
+
+Gates: sip_001_w3_on_head_test (subject routing + owner assertion),
+sip_001_w3_driver_body_test (subject with inline body, driver-only body),
+sip_001_w3_article_gate_test (7 fences against the article's emitted JS —
+every ST.ref must live in driver code).
+
+** D22 (2026-07-26, W3.5): BUG-246 — the event grammar dropped a second paren group
+
+`@on &.visible(threshold: 0.2) --rise(distance: 8px);` lost the form's args
+at PARSE time (defaults silently substituted): `directive_with_source`
+closed the DIRECTIVE at the second `(` (no route for a second parenthesized
+group), and try_match's splice-back merged only the FIRST ARG_LIST child.
+Fixed: tight paren-group loop in the grammar (newline-led `(` still closes);
+splice ALL ARG_LIST children span-ordered. Found by the article gate (the
+article was the first to combine driver params + form args); regression
+test at the match level (custom.rs::driver_form_probe). Review: correct.
+
+Article truths the gate enforced ( fences now teach only live syntax):
+- `duration:` on a driver splice is DEAD (form params route to keyframes;
+  `visible` is progress-triggered) — the footer/table fences lost it; the
+  rise form lost its unused `$duration`.
+- `stagger: 0.06 first` was one balanced setting that NaN'd — split into
+  `stagger: 60ms; staggerFrom: first;`.
+- `scale-x: $page` emits a CSS property browsers ignore — the driver-only
+  example consumes progress via `--fill: $page;` + `transform: scaleX(var(--fill))`.
+- The subject fixture is `&hero .hero;` (element ref), not `&hero { }` (entity).
+
+LESSON: the article-as-acceptance-test works — three of the four were
+silent-behavior bugs no check-green would have caught. Gates assert
+emitted effects, never compilation success.
+
+** D23 (2026-07-26, W3.5): BUG-250 — reactive CSS values are expressions OR templates, never raw
+
+User report: serving the article died at load with "identifier starts
+immediately after numeric literal" (runtime.js:11709) — `border: 1px solid
+$brand.rule;` emitted `__v = (1px solid ST.resolve(...))`. The reactive CSS
+lowering treated EVERY declaration value as one JS expression; mixed
+shorthands were never exercised before (no repo usage — the article is the
+first, again).
+
+Fix (compiler.rs `lower_css_binding_value`): two readings, never a guess —
+strip quoted strings and `$ident(.seg)*` reads; letters in the remainder =
+CSS TEMPLATE (`"1px solid " + ST.resolve(brand).rule`, full dotted reads,
+also fixes `calc(100% - $x)` / `translate($x, $y)`); digits/operators/parens
+alone = EXPRESSION (unchanged: `$brand.panel`, `$a + 1`, `$items.length`,
+ternaries). Verified: the served article's full runtime passes `node --check`.
+
+Gates: 3 lib tests (discriminator + template shape + expression
+preservation) + the article gate now runs `node --check` on the emitted
+spacetime.js — content assertions passed while the runtime was syntactically
+dead; this class is now gated structurally (skips with a note when node is
+unavailable).
+
+** D24 (2026-07-26, W3.4b decisions-in-progress): user rulings so far
+
+- Q4 (FUP-152 + FUP-153): DECIDED — after W4, ONE wave: FUP-153 (generic
+  registry read-back, deletes PresetType) first, then FUP-152 (~ migration,
+  435 uses) on top of it. Rationale: ~-retirement's rewrite target IS the
+  kinds-as-data registry 153 builds; reversing the order migrates twice.
+- Q5 (BUG-247/248/249): DECIDED — fix right after all remaining syntax
+  questions for this initiative settle (not before — syntax churn first).
+- Q1 open: timeline sigil. Analysis tabled: timelines are SIGNALS
+  (`as $name` binds progress into scope; `.done` is a signal-subject
+  projection); today's ST.timelines is a string-keyed side registry outside
+  every compiler rail. `.done` and Q2's `.change` are ONE mechanism →
+  Q1+Q2 collapse into a single "signal-subject projections" wave.
+- Q3 open: @w* measured ZERO usage repo-wide (experiment, no adoption).
+  Options sharpened to delete (iv, recommended — compositor returns later
+  as automatic eligibility, never author-facing) vs param-ify (ii).
+
+** D25 (2026-07-26, W3.4b decisions): signal-subject wave + @w* deletion
+
+- Q1 sigil: user rules `$` — timelines are signals. OPEN SUB-QUESTION (user
+  probe): how projections fit the Spacetime architecture — analysis follows
+  in the report as the signal-subject wave design.
+- Q2 DECIDED: ONE wave — `.change` + `.done` as signal-subject projections;
+  `@value-change` retires into `@on $sig.change(...)`; arms stay for
+  discrete dispatch.
+- Q3 DECIDED: DELETE @wscroll/@wload/@wloop (zero usage, experiment).
+  Compositor returns later as automatic compiler eligibility, never an
+  author-facing surface.
+
+** D26 (2026-07-26, design probe): `.` = typed facet access; `done` is a PROPERTY, not a projection
+
+User probe: discomfort with `.` representing something that isn't a property.
+Diagnosis: `.` is OVERLOADED today — data-space property access
+(`$brand.rule`) vs observation-space driver selection (`&hero.visible`). A
+W3-built harmony violation (one sigil, two meanings).
+
+Resolution: ONE meaning — typed facet access. The existing driver registry
+already IS a facet table: `on_kinds` = declaring subject type, `value_type`
+= facet type. Grammar positions are type-checked consumers (@on head:
+driver-typed; arms/reactive CSS: value-typed). Types INFERRED from bindings,
+never annotated — "between i and iii" per the user.
+
+`as $reveal` binds a progress-TYPED signal (type from the driver's
+value_type). Progress bindings carry derived facets: done(bool) =
+"progress reached 1", later running(bool). Cascade:
+- `@on $reveal.done { true => --subtitle; }` = EXISTING arms surface
+  (gate semantics, W3.3) — `.done` registry entry, done-driver primitive,
+  and the as-binding analysis pass ALL EVAPORATE.
+- Latch question dissolves: time drivers clamp → natural latch; scrub
+  flips back → reversible (the ARM SHAPE chooses gate vs latch — W3.3's
+  existing distinction).
+- `done` readable in expressions via facet lowering (progress >= 1).
+
+Type hierarchy as data: progress-signal <: signal (inherits `change`, adds
+done/running); elem facets unchanged.
+
+Residual fork — @value-change's replacement on plain signals:
+(alpha) `.change` driver-facet (type driver<event>, params on the driver —
+type-clean, RECOMMENDED) vs (beta) inline arm consequences with head params
+(deletes more surface but smuggles driver params into the arms head —
+repeats the overload mistake class). Awaiting user ruling.
+
+PLAN-126 greenlit for BEFORE W4 (user, D25 follow-up); this probe is its
+design basis.
+
+** D27 (2026-07-26, showcase): the Q2 premise was WRONG — measured @value-change is an elem text animator
+
+Writing the pre-approval syntax showcase (user requirement) forced a
+measurement the Q2 framing skipped: ALL SIX real @value-change uses
+(zeystudios x5, ora-ventures x1) are character-level TEXT flips
+(:entering/:exiting two-slot bodies, no signal subject — the driver
+observes ELEMENT TEXT CONTENT, changed by @cycle or a text binding). The
+report's "signal-driven inline keyframes" shape has ZERO repo usage.
+
+Corrected mapping: @value-change -> `@on &.text-change(...)` (elem facet,
+driver<event>, registered two-slot body kind; value-change-driver primitive
+re-homes unchanged). The approved `.change` signal-facet (user, alpha) was
+voted on the wrong premise -> re-decision presented in the showcase:
+(alpha') keep vs (gamma) defer as planned: (recommended — elegance bar
+applied to our own proposal).
+
+Also verified for the showcase: arms do NOT fire at mount (primed guard,
+signal-arms.st); scroll clamps progress to [0,1] exactly (drivers.st:96);
+arm matching is STRICT equality (v === m).
+
+Showcase: docs/specs/SIP-001-W36-SYNTAX-SHOWCASE.org — the approval gate
+for PLAN-126.
+
+** D28 (2026-07-26, user ruling): body-less @on statements carry `:` before the consequence
+
+`@on &hero.visible(threshold: 0.2): --rise(distance: 8px);` — `:` introduces
+a VALUE (the sigil discipline), `{ }` is choreography. No braces => colon.
+Arms (always braced) unchanged. Touches: the drive pseudo-primitive %form,
+the cutover capsule's 14 rewrite rules, the article, its gates. Lands in
+PLAN-126.
+
+** D29 (2026-07-26, §7 resolved): the mechanism is the PUBLISHED SIGNAL — all three facets ship
+
+User directive: read the actual implementations of done/change/text-change
+to find the elegance bar. Measured: done = pure lowering (derived signal
+`p >= 1`, edges via arms — NO driver); change = ST.watch listener + thin
+one-shot-transport primitive; text-change = MutationObserver listener +
+the existing char-choreography primitive re-homed UNCHANGED. Every driver
+is listener -> transport -> progress; the wave makes stage 3 first-class
+(`as $name` names the existing %yield/ST.set rail). The special case it
+deletes, measured: 10 ST.timelines.register copies + 8 handle calls +
+after-driver (drivers.st:1520) + the name: param on every driver's %binds —
+the entire string-keyed registry complex that exists only for @after.
+.change individually deletes nothing, but the bar applies to MECHANISMS:
+change is an instance (registry row + thin listener), not a subsystem.
+(alpha') confirmed on the corrected justification.
+
+Also: user caught a showcase bug — `@on &scroll(...)` is invalid; the
+uniform head is `& <subject?> . <facet> ( <params?> )` (&x always names an
+element; observing is always .facet on one). Showcase §3.1 fixed.
+
+** D30 (2026-07-26, user rulings): clause order, mutation colon, bool-statement sugar
+
+1. Clause order A: `@on <driver> as $name: <consequence>;` — bind before
+   consequence.
+2. D28 extends to mutations: `@on &.click: $open <- !$open;` — same rule,
+   reuses the body mutation dispatcher (no new mechanism).
+3. BOOL-STATEMENT SUGAR (user chose (ii), against the tabled (i)):
+   `@on $reveal.done: --rise;` is LEGAL — a bool-typed subject in statement
+   position desugars to `{ true => --rise; }`. IMPLEMENTATION CONSTRAINT
+   (recorded so the sugar doesn't become the overload class D26 fixed):
+   this is a COMPILE-TIME desugar onto the drive-arms path — one mechanism
+   (arms), two surface spellings, NO second dispatcher. Semantics: the
+   sugar is the latch shape (fires on false->true; no auto-reverse — gates
+   need both arms explicit in braces). Generalizes to any bool signal:
+   `@on $open: --slide-down;`. Other type mismatches in statement position
+   still E0950 with teaching messages.
+
+Also resolved without a fork: `as` on event drivers needs no special case
+(event-driver tracks progress 0->1 on trigger — publication is uniform);
+`as` on arms heads is rejected (publication is a driver concern; arms
+consume values).
+
+** D31 (2026-07-26, user ruling): (ii)+(iii) BOTH ship in PLAN-126 — .prev facet AND arm guards
+
+Full-facts table (verified): keyframe endpoints and arm consequence args
+bake at COMPILE TIME under every option (expand_arms substitutes params at
+build; apply-animations interpolates baked IR); value-reactive endpoints
+need runtime resolution — a separate, unpriced machinery addition, filed
+as an FUP-to-SIP (user request). An earlier claim that keyframes read
+signals at play time was WRONG and is corrected here.
+
+(ii) `.prev` — value-typed facet of every signal: the previous value
+(at mount = the initial value, mirroring the arms primed-guard). Runtime
+anchor exists (arms' prev tracking); expression-position lowering = a
+prev-retaining runtime read. Serves DATA reads (color, text) and
+derive-based dispatch.
+
+(iii) arm guards + binding patterns — dispatch-space value-reaction:
+patterns extend with bindings `$old -> $new` and an optional `where <expr>`
+guard, evaluated at MATCH time by the arms runtime (consequence args stay
+compile-time — dynamic args are the FUP). `$` in pattern position
+INTRODUCES A BINDING (documented extension; everywhere else it reads).
+Specificity: all matching arms play (status quo); guards filter.
+
+** D32 (2026-07-29, PLAN-126 W5): migrations + deletions — the wave's net accounting
+
+MIGRATIONS: @value-change -> @on &.text-change (capsule %rewrite value-change
++ retired definition; 7 sites across zeystudios/ora-ventures — the survey
+said 6, measured 7; two-slot body landed as on_text_slot/motion_line* —
+MUTUAL recursion between capture types silently breaks matching, filed
+FUP-157). Legacy `@on load x(…)` — the retired dispatcher NEVER had a load
+arm (dead sites surfacing as E0911 at @version 2026-07-26): added
+%rewrite on-load; 5 sites hand-migrated to `as $name` form. `@on scroll
+x(threshold: 80px)` was DEAD CODE (no dispatcher scroll arm; fixed-nav rect
+never moves) — deleted with FUP-158 (px-threshold triggers). @after (2 test
+files) -> `@on $x.done` arms; have_timeline probes re-homed from
+ST.timelines to ST.resolve (publication rail) across 12 probe macros +
+6 test files (2 agents).
+
+DELETIONS (measured): ST.timelines runtime module (public/runtime/
+timelines.js) + %runtime-registry entry + 9 registration sites + 8 handle
+calls across driver primitives; after-driver primitive + after macro;
+@wscroll/@wload/@wloop/@whover/@wclick/@wvisible/@won macros (ZERO repo
+usage — experiment) + waapi primitives dir + embeds + LSP registry; the
+space statement form (D28) — replaced by an ERROR SIBLING: missing colon
+now fails loudly with the exact rewrite (E0946), never a silent drop.
+
+FIXES ON THE WAY: expr_lowering registry field wired (facets in reactive
+CSS/guard expressions — the article's .prev fence caught it); ST.prev
+runtime helper (lazy per-node subscribe, flush semantics — V8 tests pin
+§6.12); best-failure tie-break prefers reportable kinds (the two-forms
+surface stayed loud through the colon form); E0950 registered (incl. the
+main.rs relabel table); snapshots regenerated (timelines removal + ST.prev).
+
+ARTICLE: three new sections — Names (as/publication/.done/gate-latch/sugar),
+Signals (.change/text-change), arms (guards/.prev/mutation colon) — every
+fence gated on emitted runtime (9/9 article gates incl. node --check).
+
+VERIFICATION: lib 2890 ✓ integration 202 ✓ v8 451 ✓ (5 new ST.prev tests)
+SIP W1/W2/W3/W36 all green ✓ headless 605/74/36 (baseline 610/83/38 —
+FEWER failures; var-scroll 2 reds verified pre-existing at d560bdca, error
+message improved) ✓ zeystudios + ora-ventures build ✓ (zeystudios .zey-gift
+was provably dead CSS — commented with a marker, NOT deleted).
+
+PROCESS NOTE (for D20's lesson list): the W5a agent aborted partly on my
+waapi-deletion race (concurrent include_str! removal broke their build);
+capsule files and deletions must sequence, not race.
+
+** D33 (2026-07-29, PLAN-126 review swarm): 14 findings, all resolved — incl. a PRE-EXISTING W3 runtime break
+
+3 reviewers (pipeline / matcher / deletions). Dispositions:
+
+P1:
+- A (publication alignment): `%yield progress -> $%name` splices the name
+  PARAM, which the drive expansion never passed — every NAMELESS driver
+  since W3 published to `""` while consumers watched the real drive_name
+  (masked by the capsule's always-`name:`). Fix: inject `name: drive_name`
+  for name-param primitives; fixed-yield primitives (intersection,
+  change-driver, prev-signal) alias via a new `progress_export` registry
+  field (visible: ratio, change: progress). GATED: emitted ST.set under the
+  drive name for nameless AND as-named drivers.
+- B (§5 collision): arms facet splitting now requires TYPE EVIDENCE —
+  `.done` an `as`-bound publication, `.prev` a declared signal or `as`;
+  untyped → E0950, never silently watching the head (uninferrable ⇒ error).
+- D: bool sugar restricted to bool-typed facets; `.prev` in statement
+  position → E0950.
+- MA: registered facet reads force the template path in reactive CSS (was
+  falling through to bare member access in pure-expression position).
+- MB: facet_expr_lowering threads the ACTIVE registry (was
+  cached-per-call; user-registered facets invisible).
+- DA: wait_for_timeline re-homed onto a new ST._published owner index
+  (ST.set-maintained, pruned on read) — was hardcoded to document.body,
+  missing every element-owned timeline.
+- DB: capsule single-slot sources — the machinery PROVES it can't express
+  them (same-wave rules must be disjoint; `keyframes?` breaks the %match
+  parse — measured). Two-slot rule kept + %hint with the manual shape.
+
+P2: C (sugar arms honor form duration/easing) · E (two-slot honors the
+  subject) · F (`as` on text-change → E0950) · H (empty slot → no arg →
+  runtime defaults fire, behavior-exact with the retired optional slots).
+P3: G (duplicate slots → E0950).
+
+CLEAN verdicts: error sibling, zero-items rejection blast radius, tie-break
+identity, is_form_param_optional recursion, deletion completeness
+(no live ST.timelines/@after/waapi survivors).
+
+LESSON (the gate class that matters most): the article gates asserted
+STRINGS ("reveal" present) while the publication wrote to "" — a false
+green. The review swarm caught what string-gates can't. New gates assert
+the WRITE shape (`ST.set(el, "reveal"`), not the name's presence.

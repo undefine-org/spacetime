@@ -1,0 +1,391 @@
+#+TITLE: SIP-002 — Literate Spacetime: Markdown as host (.st.md)
+#+DATE: 2026-07-24
+#+STATUS: LANDED v1 (2026-07-24) — tangler + ingress wiring shipped; see §Implementation log
+#+SIP: 002
+
+* Header
+
+| Field | Value |
+|-------+-------|
+| SIP | 002 |
+| Title | Literate Spacetime: Markdown as host (=.st.md=) |
+| Status | Landed v1 (wave 1) |
+| Motivating work | =@doc= / =md= module (stdlib/md), demos/spacetime-docs, demos/starter-pack, projects/backdesk-new /process + /brand |
+| Prior art | Knuth WEB (tangle/weave), Literate Haskell =.lhs=, Org Babel, Observable notebooks, Rust doc-tests |
+| Blast radius | one new source-level pass + one extension registration; zero new runtime |
+
+* Abstract
+
+A =.st.md= file is a Markdown document whose fenced =st= code blocks ARE the
+program. The compiler *tangles* it into an ordinary =StFile= before parsing:
+prose becomes =@doc= sections (the existing md rail), fences splice through
+verbatim, and *document order is preserved* — so a fence that declares markup
+renders its live result exactly where it sits in the essay.
+
+The deep move is that Spacetime collapses Knuth's two outputs into one:
+
+- Knuth: =tangle= → compilable program; =weave= → printable document. Two
+  artifacts, one source.
+- Spacetime: the *unroll == hydrate* invariant already makes the served page
+  and the running program the same artifact. ∴ *weave == tangle == hydrate*:
+  the woven document IS the running program. The essay is alive — its demos
+  are not screenshots of the code, they are the code, executing inline.
+
+No new runtime, no new author-facing directive, no new sigil. The tangler is
+a source-to-source transform that only *synthesizes calls to machinery that
+already exists* (=@doc=, tag literals, selector scopes).
+
+* Motivation
+
+Three sites in this repo already hand-build the literate shape:
+
+- =demos/spacetime-docs/index.st= — 6 × =[data-doc] { @doc(src: …) }=
+  sections wired to empty divs by hand.
+- =demos/starter-pack/index.st= — 4 chapters, each "md beside a live
+  playground compiled from the same file", with the seg/render wiring
+  written manually.
+- =projects/backdesk-new/{process,brand}.st= — same pattern again.
+
+The pattern is proven and loved; the *wiring* is boilerplate: every prose
+block needs (a) an empty mount element, (b) a selector scope, (c) an =@doc=
+call, and the author must keep their order straight by hand. Literate mode
+makes the file itself the wiring: prose is prose, code is code, order is
+document order.
+
+Second motivation: *doc-driven development*. =@test= blocks are directives in
+=.st= files; in a =.st.md= they sit inside the essay that explains them. A
+tutorial's examples become its test suite (=spacetime test tutorial.st.md=)
+— the doc cannot drift because the doc is CI.
+
+* Ontology — what a .st.md IS
+
+#+begin_example
+document   ::= segment*
+segment    ::= prose | fence
+prose      ::= markdown text (inert; no holes, no directives)
+fence      ::= ```st [flag*] NEWLINE st-source NEWLINE ```
+flag       ::= hidden | src
+#+end_example
+
+- *Prose is inert.* It renders through snarkdown exactly as =@doc= content
+  does today. No hole interpolation inside prose — see §Sigil harmony.
+- *A fence is real Spacetime source*, spliced into the tangled =StFile= at
+  its document position. Anything legal at =.st= file scope is legal in a
+  fence: imports, =@type=, =@data=, tag literals, templates, selector
+  scopes, =@test= blocks.
+- *Fences share one file scope.* A signal declared in fence 1 is visible in
+  fence 9 — the fences are one program, sectioned by prose. (Knuth's
+  chunk-reordering =<<name>>= is deliberately NOT adopted; Spacetime files
+  are already order-tolerant for scopes/templates, so reordering machinery
+  would be complexity without payoff. See §Rejected.)
+
+** Fence flags (variants are data, not match-arms)
+
+| flags | tangled? | source shown? | use |
+|-------+----------+---------------+-----|
+| (bare) =st= | yes | no | the common case: code that runs; its *effect* (rendered markup) appears at this position |
+| =st src= | yes | yes (highlighted block *above* the effect) | teaching: show the code AND run it — the starter-pack pattern |
+| =st hidden= | yes | no | plumbing the essay shouldn't show (imports, theme CSS) — still runs |
+| any other language | no | yes (plain code block) | non-st code samples: inert, rendered by snarkdown as today |
+
+NB =src= shows the *fence text verbatim* in a =<pre class="lit-src">=; it is
+data (a string in the synthesized page), not a second parse. A non-=st=
+fence is untouched prose — so quoting Spacetime *without running it* is just
+a =spacetime=-tagged fence (the doc-writing convention already used across
+=docs/=), preserved byte-for-byte.
+
+* Tangle semantics (the whole algorithm)
+
+Input: =.st.md= text. Output: =StFile= source + a =LineMap=.
+
+1. Split the document into segments by scanning fenced-block boundaries
+   (CommonMark fence rules: 3+ backticks, matching close, info string).
+2. For each *prose* segment =i= (non-empty after trim), synthesize:
+   a mount element =<section class="lit-prose" data-lit-seg="i"></section>=
+   and a scope =[data-lit-seg="i"] { @doc(content: "<escaped markdown>") }=.
+3. For each =st= fence, splice its body through verbatim. For =st src=
+   fences, additionally synthesize *before* the splice a
+   =<pre class="lit-src"><code>escaped fence text</code></pre>=.
+4. Emit segments in document order. Record, for every output line, the
+   originating input line (the =LineMap=).
+
+That is the entire transform. Everything downstream — parsing, form
+matching, =@doc= content injection (=inject_doc_content= already handles
+=content:= strings), SSG unroll, hydration — is the *existing* pipeline,
+untouched.
+
+** Verified spikes (all compile and serve today, hand-tangled)
+
+| claim | spike evidence |
+|-------+----------------|
+| prose→=@doc(content:)= with escapes (quotes, newlines, code spans) compiles | =tests/fixtures/literate-spikes/esc.st= ok |
+| interleaved markup/scopes/prose preserve document order in served HTML | =tests/fixtures/literate-spikes/interleave.st= → served order =p1, demo1, p2= ok |
+| signals declared early are live in later fences; bindings work across prose | =tests/fixtures/literate-spikes/index.st= (counter across segments) ok |
+| imports may appear mid-file (fence 5 can =@import= something new) | =tests/fixtures/literate-spikes/midimport.st= ok |
+| the whole shape at production scale | =demos/starter-pack/index.st= — IS a hand-tangled =.st.md= |
+
+∴ the tangler's output language needs *nothing new*. The pass is pure
+sugar-elimination — the strongest position a new surface can be in.
+
+* Pipeline placement
+
+The tangle is a *file-read concern*, not a parse concern — it runs wherever
+=.st= bytes enter the system, keyed by extension:
+
+| entry point | today | change |
+|-------------+-------+--------|
+| =src/server.rs::get_or_compile= (~L379) | =read_to_string(st_path)= | =read_source(st_path)= → tangles when path ends =.st.md= |
+| =src/main.rs= check/build discovery (~L2519 walkdir) | filters =ext == "st"= | also accept =.st.md= |
+| =try_serve_st_page= (FEAT-093 clean paths, =src/server.rs= ~L1418) | candidates =<p>.st=, =<p>/index.st= | add =<p>.st.md=, =<p>/index.st.md= |
+| LSP / =#diagnostics= | spans on =.st= | spans mapped through =LineMap= |
+
+Implementation shape: =src/literate.rs= —
+
+#+begin_example
+pub struct Tangled { pub source: String, pub map: LineMap }
+pub fn is_literate(path: &Path) -> bool          // ends_with(".st.md")
+pub fn tangle(input: &str) -> Tangled            // pure, no fs
+#+end_example
+
+plus one =read_source(path)= helper returning =(String, Option<LineMap>)=
+that every entry point calls instead of raw =read_to_string=. The =LineMap=
+rides on =CompileOptions= so diagnostics translate tangled line → source
+line before rendering. (Line-mapping is the only genuinely new engineering;
+the transform itself is ~100 lines and fence scanning is CommonMark-stable.)
+
+*Not* in scope: making the tangler a =%macro=. The metasystem operates on
+parsed =.st= constructs; this pass runs *before* parsing by definition. It
+is infrastructure of the same kind as =inject_doc_content= — and sits right
+beside it in spirit: both replace author-visible sugar with canonical forms
+at build time.
+
+* Sigil harmony audit (AGENTS: one sigil, one meaning)
+
+- *Markdown backtick vs hole backtick.* In =.st= markup, backtick is THE
+  hole. In Markdown prose, backtick is a code span. These collide ∴ prose
+  is *inert by fiat*: =$count= inside a prose code span renders as a
+  literal code span, never a hole. Live values in prose are expressed the
+  Spacetime-native way — a tiny element + binding in a fence
+  (=<span class="n-out"></span>= + =.n-out { text <- $n; }=). This keeps
+  both grammars pure: markdown stays CommonMark; holes stay a
+  markup-context concept. It is also first-paint-correct (the PROJ-007
+  finding: =text <- $sig= beats a static-shell hole).
+- *No new sigil.* The fence info string (=st=, =st src=, =st hidden=) is
+  CommonMark's own extension point, not a Spacetime sigil.
+- *No new directive.* Authors never write =@prose= or =@lit=; the tangler
+  synthesizes =@doc= (existing) and plain elements (existing).
+
+* Elegance bar audit (AGENTS: four gates)
+
+1. /Small extension of existing grammar, no new subsystem?/ PASS — one
+   pure fn + extension registration; output language unchanged.
+2. /Variants are data?/ PASS — fence flags are strings in the info line;
+   no Rust enum grows per case.
+3. /Deletes a special case?/ PARTIAL — it *obsoletes* the hand-wired
+   =[data-doc]/[data-lit-seg]= boilerplate in three sites
+   (spacetime-docs, starter-pack, backdesk /process + /brand can migrate
+   to =.st.md= and shrink materially). No hardcoded compiler case is
+   deleted. Honest score: consolidation, not deletion.
+4. /Testable by the same machinery?/ PASS — (a) unit: snapshot =tangle()=
+   output for a corpus (insta, same rail as compiler snapshot_tests);
+   (b) e2e: tangle the worked example, assert it compiles and serves in
+   the same integration harness; (c) the RED→GREEN first test: a =.st.md=
+   with one prose + one counter fence, asserted to serve =lit-prose=
+   before the counter and count clicks.
+
+Gate 3 is the weakest ∴ v1 ships together with the starter-pack migration
+to =.st.md= — the feature must pay its way immediately by deleting its own
+motivating boilerplate.
+
+* Worked example
+
+** Source — =counter.st.md=
+
+#+begin_example
+# The counter
+
+Press the button; the number after it is **live** — not a screenshot.
+
+```st hidden
+@import "stdlib/md"
+@data inline $n : 0;
+```
+
+```st src
+<div class="demo">
+  <button class="plus">+</button>
+  <span class="out"></span>
+</div>
+
+.plus { @on click { $n <- $n + 1; } }
+.out  { text <- $n; }
+```
+
+That is the whole reactive loop: the event writes the signal, the binding
+renders it. Scroll on — the signal declared above stays live below.
+#+end_example
+
+** Tangled output (what the parser sees)
+
+#+begin_example
+<section class="lit-prose" data-lit-seg="0"></section>
+[data-lit-seg="0"] { @doc(content: "# The counter\n\nPress the button; …") }
+
+@import "stdlib/md"
+@data inline $n : 0;
+
+<pre class="lit-src" data-lit-src="2"><code>&lt;div class="demo"&gt;…</code></pre>
+
+<div class="demo">
+  <button class="plus">+</button>
+  <span class="out"></span>
+</div>
+
+.plus { @on click { $n <- $n + 1; } }
+.out  { text <- $n; }
+
+<section class="lit-prose" data-lit-seg="3"></section>
+[data-lit-seg="3"] { @doc(content: "That is the whole reactive loop: …") }
+#+end_example
+
+This exact shape (minus the =lit-src= block) is
+=tests/fixtures/literate-spikes/interleave.st= — compiled, served, order verified, counter
+verified live across prose boundaries.
+
+* Testing plan
+
+- =src/literate.rs= unit tests: fence scanning (nested backticks, 4-tick
+  fences, unclosed fence → loud diagnostic, CRLF), escape correctness
+  (quotes/backslashes/newlines in prose), flag parsing, LineMap fidelity.
+- Compiler snapshot: =literate_counter.st.md= corpus → insta snapshot of
+  tangled source (same rail as =snapshot_tests=).
+- Integration: tangle→compile→serve the worked example; assert served
+  order and a live click (the interleave spike, promoted to a real test).
+- Doc-driven: a =.st.md= containing an =@test= block runs under
+  =spacetime test= — one fixture proves fences and the test grammar
+  compose.
+
+* Migration and blast radius
+
+- Nothing breaks: =.st= files are untouched; =.st.md= is additive.
+- Wave 1: land =tangle()= + entry-point wiring + tests.
+- Wave 2: migrate =demos/starter-pack/= to =index.st.md= (deletes its
+  hand-wiring; the tutorial becomes the feature's own showcase).
+- Wave 3 (optional): =spacetime-docs= reader and backdesk =/process= —
+  candidates, not obligations.
+- LSP: v1 ships with diagnostics line-mapped; richer editor support
+  (hover inside fences) is a follow-up (FUP), not a gate.
+
+* Rejected alternatives (and why)
+
+- *Chunk reordering* (Knuth =<<name>>=) — Spacetime scopes/templates are
+  already declaration-order-tolerant where it matters; reordering adds a
+  second namespace and an indirection layer for near-zero expressive gain.
+- *Holes in prose* (interpolation inside markdown) — collides with
+  CommonMark code spans; would fork markdown parsing into a Spacetime
+  dialect and violate one-sigil-one-meaning. Live-in-prose is served by a
+  span + binding, which is also first-paint-correct.
+- *Runtime tangling* (ship =.st.md= to the browser) — the =@doc= rail is
+  build-time by design (content inlined, no fetch); literate mode inherits
+  that. Nothing to gain at runtime except drift risk.
+- *A new =@literate= directive in .st* — inverts the host relationship;
+  the point is that *markdown hosts code*, so an essay reads as an essay
+  in any markdown renderer (GitHub shows prose + highlighted fences —
+  graceful degradation for free).
+- *Bare =.md= with no compound extension* — ambiguous with plain docs;
+  =.st.md= states intent, sorts beside its sibling =.st= files, and
+  degrades gracefully everywhere.
+
+* Open questions
+
+1. Should =st src= highlight via a (future) syntax-highlight vendor, or
+   ship v1 as plain =<pre>=? (v1: plain; highlighting is a =lit-src=
+   styling concern, themeable per site.)
+2. Prose segments between two fences with zero blank lines — attach to
+   which fence for LineMap purposes? (v1: standalone segment, always.)
+3. =spacetime init --literate= template? (Nice-to-have, wave 2+.)
+
+* Implementation log (wave 1, 2026-07-24)
+
+** What shipped
+
+| piece | where |
+|-------+-------|
+| =tangle()= / =LineMap= / =is_literate= / =read_source= + 17 unit tests | =src/literate.rs= (new, ~470 lines) |
+| module registration | =src/lib.rs= |
+| THE ingress (serve/check/build/export all ride it) | =Compiler::from_file= — =src/compiler.rs= |
+| diagnostics re-read (spans must match the tangled text) | =src/server.rs= =compile_with_validation= |
+| clean-path candidates =<p>.st.md= / =<p>/index.st.md= | =src/server.rs= =try_serve_st_page= |
+| root entry falls back to =index.st.md= | =src/server.rs= =derive_st_path= |
+| =check= discovery (dir walk + single file) and the dev watcher | =src/main.rs= |
+| e2e coverage (7 tests) | =tests/integration/literate_tangle.rs= |
+| worked fixture (serves, browser-verified) | =tests/fixtures/literate/counter.st.md= |
+
+Wiring the SINGLE central read (=Compiler::from_file=) rather than each command
+is what kept this to one call-site per entry point: serve, check, build and
+export gained =.st.md= support together, with no parallel pipeline.
+
+** Design changes made during implementation
+
+1. *The md import is synthesized.* The spec had authors open with a hidden
+   =@import "stdlib/md"= fence. In practice that is boilerplate AND a silent
+   -failure footgun — forget it and every prose block renders blank with no
+   error. The tangler now prepends the import when a document has prose and
+   does not already import it (code-only documents gain nothing). A literate
+   document is therefore ZERO-boilerplate: markdown + fences, nothing else.
+
+** Two real bugs found by the fixture (both pre-existing, both fixed)
+
+1. *=@doc(content:)= never decoded escape sequences* (=src/compiler.rs=).
+   =.st= string literals are captured RAW, so =@doc(content: "# T\n\nprose")=
+   reached snarkdown with a literal backslash-n and rendered as one line of
+   noise — including the example in =stdlib/md/macros/doc.st='s OWN docstring.
+   =@doc(src:)= was unaffected (it injects file bytes post-parse), so the two
+   spellings silently disagreed. Now both decode; the injection gate widened
+   to fire on escaped =content:= too. Regression tests:
+   =doc_content_decodes_escape_sequences_like_src_does=,
+   =doc_content_preserves_unknown_markdown_escapes= (markdown's own =\*= must
+   survive).
+2. *E0909 false-positive on prose quoting =<-=* (=src/pipeline/mod.rs=).
+   A doc that merely QUOTES a binding (=text <- $count= in a code span)
+   tripped the content-injection check. =@doc= now joins the existing skip
+   list (=handle= / =data= / =test=) — its =content= capture is opaque prose.
+   This also removed an asymmetry: the same prose passed via =src:= but failed
+   via =content:=.
+
+Both were reachable WITHOUT literate mode (any hand-written =@doc(content:)=);
+the fixture simply made them unavoidable. Evidence that the "make the
+boilerplate a feature" move was worth it: the machinery it consolidates was
+quietly broken.
+
+** Verification
+
+- =cargo test --lib= 2787 ok (17 literate unit tests) · =integration_tests=
+  198 ok (7 literate e2e) · =v8_runtime_test= 438 ok.
+- =tests/fixtures/literate/counter.st.md= served at =/=: heading and =**bold**=
+  render, source block shows as escaped data, counter clicks 0→2, document
+  order =prose → src → demo → prose=, no escape leakage, inert
+  =```spacetime= fence displayed but NOT executed. Screenshot:
+  =tests/fixtures/literate/counter-served.png=.
+- =demos/starter-pack/= and =projects/backdesk-new/= still compile unchanged
+  (additive by construction).
+
+** Filed work items
+
+| id | what |
+|----+------|
+| PLAN-114 | wave tracking for this SIP (W1 done, W2 starter-pack migration, W3 optional readers, W4 LSP line-mapping) |
+| BUG-221 | =@doc(content:)= never decoded escape sequences (fixed in W1) |
+| BUG-222 | E0909 false-positive on prose quoting =<-= (fixed in W1) |
+
+** Wave 2 (next)
+
+Migrate =demos/starter-pack/index.st= to =index.st.md= — the elegance-bar gate
+3 debt named in this spec. Its hand-wired =[data-doc]= sections and the
+=docs/*.md= split collapse into one literate document. Tracked as PLAN-114 W2.
+
+** Known v1 limitation
+
+The =LineMap= is produced and threaded through =read_source= but diagnostics do
+NOT yet translate through it — an error inside a fence reports the tangled line
+number. Tracked as PLAN-114 W4.

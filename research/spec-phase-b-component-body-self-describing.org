@@ -1,0 +1,204 @@
+#+TITLE: SPEC — Phase B: component_body Self-Describing (the full metasystem cutover)
+#+AUTHOR: Spacetime platform (PLAN-030)
+#+DATE: 2026-06-08
+#+STARTUP: overview
+#+AUDIENCE: the next agent (post-compaction). Assume NO prior session memory. Read this fully.
+
+* TL;DR
+A `@template` body is captured by the Rust-builtin `CaptureType::ComponentBody`, parsed by a
+~1100-line hand-written Rust function `parse_component_body` (src/syntax/events/form_compiler.rs)
+that hand-codes the grammar of EVERY template-body construct (state decls, injections, class
+toggles, @on directives, &refs, @match, HTML). This is the CENTRAL violation of Spacetime's
+self-describing-metasystem principle (AGENTS.md: "DO NOT write Rust parsers/fallbacks for
+constructs defined in stdlib"; metasystem/ARCHITECTURE.md: "adding a @directive = define
+primitive/macro/capture_type in .st, NO Rust changes"). Phase B replaces `parse_component_body`
+with stdlib `%capture_type` grammar + a generic reifier + html5ever for the HTML parts, so the
+template-body grammar lives in `.st` and NO construct is named in Rust. This is the TRUE full
+cutover (the user's standing directive: maximal convergence, zero deprecated paths).
+
+* WHY THIS MATTERS (the principle)
+Spacetime's design: Rust is a GENERIC engine (Resolve -> Sort -> Expand -> Emit) + a small set
+of structural builtin capture types. EVERY user-facing construct is defined in `.st` via
+`%macro` (grammar via `%form`) + `%capture_type` (sub-grammar) + `%primitive` (`%emit js` =
+the actual logic). Proof: `@if`/`@else`/`@each`/`@for` are ALL pure `.st` (stdlib/macros/each.st).
+The Rust engine should NEVER know what "@match" or "$state" is. Today `parse_component_body`
+breaks this for the entire template-body surface.
+
+* VERIFIED GROUND TRUTH (from code, 2026-06-08 — re-verify before trusting)
+
+** What parse_component_body is + what it produces
+- Entry: form_compiler.rs:1209 `CaptureType::ComponentBody => CapturedValue::ComponentBody(
+  parse_component_body(inner))` where `inner` is the raw body STRING.
+- `parse_component_body` (form_compiler.rs:2133, ~300 lines) + its helpers:
+  - `segment_component_body` (1732): a brace/tag/string-aware SCANNER (the BUG-059 fix) that
+    splits the body into HTML-run vs construct segments. GENERIC, construct-agnostic. KEEP THIS.
+  - `classify_construct_start` (1828), `scan_html_tag` (1959), `scan_to_semicolon[_or_line]`
+    (2020/2048), `scan_brace_block` (2075): segmentation helpers. scan_html_tag is a bespoke
+    HTML scanner (RETIRE \u2014 html5ever does this properly).
+  - per-construct parsers (RETIRE, become .st grammar): `parse_state_decl_typed` (2538),
+    `parse_class_toggle` (2605), `parse_injection` (2628), `parse_self_property_binding` (2673),
+    `parse_on_event_block[_scoped]` (2766/2826), `parse_exports_block` (2980),
+    `parse_selector_ref_header` (3054), `parse_template_ref` (3247), `parse_match_block_via_engine`
+    (2440 \u2014 the @match special-case, BUG-060).
+- Produces `ComponentBodyDef` (src/syntax/form_match.rs:~360): { html:String, states:Vec<
+  ComponentStateDecl>, directives:Vec<ComponentDirective>, injections:Vec<ContentInjection>,
+  exports:Vec<ExportDecl>, css_rules:Vec<String>, refs:Vec<TemplateRef>, selector_refs:Vec<
+  SelectorRef>, matches:Vec<ComponentMatch>, diagnostics, section_transitions }.
+
+** ComponentBodyDef consumers (the migration surface — KEEP the IR, ~9 sites)
+- form_match.rs `component_body_to_js` / `component_body_to_js_with_params` (serialization to
+  the registerTemplate payload + the FEAT-077 reactive `builder:` via component_builder_js).
+- pipeline/expand.rs (ComponentBody arm, resolved_to_primitive_args body threading).
+- pipeline/mod.rs (E0402/E0905/E0918 validation; the body.diagnostics bridge in
+  check_template_ref_issues), pipeline/scope.rs (scope tree).
+STRATEGY: `ComponentBodyDef` STAYS as the IR. The engine+reifier FILL it instead of bespoke
+Rust. This bounds the blast radius to the PRODUCER, not the consumers.
+
+** The generic %capture_type engine (what hosts the grammar) \u2014 PROVEN VIABLE
+- `%capture_type` AST = `CapturePatternAst` (src/parser/meta_ast.rs:~918): a PEG/combinator \u2014
+  Capture{var,type,modifier}, Literal, CharClass, Group(*+?), Sequence, Choice(|).
+- COMPILED to `Box<dyn CaptureExtractor>` over TOKEN slices by `compile_pattern_with_defs`
+  (src/syntax/events/extractors/custom.rs:30, pub). Nested type refs resolve via
+  `compile_custom_ref`. CYCLE-GUARDED: a directly self-referential type compiles its recursive
+  position as `Expr` (custom.rs:~120) \u2014 NOT true recursion. (component_body is FLAT:
+  ( item )*, NESTING is runtime template-ref recursion, so the guard is never hit.)
+- REIFIERS (`wrap_reifier`, custom.rs:~149): map the generic parse record (Named / Array<Named>)
+  into a domain-typed CapturedValue. ONE reify_* fn per reifying type. THE BRIDGE: grammar in
+  .st, a thin generic reifier in Rust maps record -> typed struct.
+- PROVEN (this session's spikes, recorded in @research/phase-b-o2-full-convergence.org):
+  - A full construct-segment body (`$count number:0; .c:$count; text<-$count;`) parses via a
+    composed cb_state|cb_inject|cb_toggle grammar into a discriminated Array record, ALL tokens
+    consumed. Choice branch NAME = the discriminator the reifier dispatches on.
+  - @match already parses via stdlib match_block grammar (stdlib/capture-types/match-block.st)
+    \u2014 but its REIFIER (parse_match_block_via_engine) is still Rust special-case (BUG-060).
+- ENGINE GAP found + FIXED (B-Wave 1, committed): multi-token literals (`=>` lexes as EQUALS+GT,
+  `@match` as AT_SIGN+IDENT) \u2014 LiteralExtractor now matches across contiguous tokens. AUTHORING
+  RULE: use BOUNDED leaf types before a literal (binding/string, not greedy `expr`, which has a
+  fixed boundary set and swallows `{`/`=>`).
+
+** The HTML half (html5ever, ALREADY BUILT)
+- `src/html/treesink.rs::parse_html_skeleton(skeleton, holes) -> Vec<HtmlExpr>` (html5ever
+  fragment parse, spec-correct: void/raw-text/nesting/recovery). The CST already produces
+  skeleton+holes for file-scope HTML; the FEAT-077 `component_html_to_exprs` (src/emit/
+  html_reactive.rs) normalizes a component-body html STRING (bare $x + declared &param ->
+  holes) and parses it via the same path. So the HTML-run -> HtmlExpr path EXISTS.
+
+* DESIGN (the target architecture)
+#+begin_example
+@template &name($p) { BODY }
+        │  CaptureType::Custom("component_body")   (was ::ComponentBody)
+        ▼
+   stdlib %capture_type component_body  { ( $items:component_item )* }
+        │  generic engine (compile_pattern_with_defs over STDLIB_REGISTRY)
+        ▼  Array<Named{ <branch> : record }>  (branch name = construct kind)
+   reify_component_body  (ONE generic reifier in wrap_reifier, NOT per-construct)
+        │   - html-run records  -> component_html_to_exprs/parse_html_skeleton (html5ever)
+        │   - construct records -> ComponentBodyDef.{states,directives,injections,refs,matches,...}
+        ▼
+   CapturedValue::ComponentBody(ComponentBodyDef)   ← UNCHANGED IR; ~9 consumers untouched
+#+end_example
+- The BUG-059 `segment_component_body` scanner STAYS (generic infra: splits HTML-run vs
+  construct-seg). It feeds: HTML-runs -> html5ever, construct-segs -> the engine.
+- The stdlib grammar (NEW file stdlib/capture-types/component-body.st):
+  %capture_type component_body { ( $items:component_item )* }
+  %capture_type component_item {
+      ( $state:cb_state ) | ( $exports:cb_exports ) | ( $inject:cb_inject )
+    | ( $toggle:cb_toggle ) | ( $on:cb_on ) | ( $ref:template_invocation )
+    | ( $sref:cb_selector_ref ) | ( $match:match_block ) | ( $html:cb_html_run ) }
+  + leaf grammars cb_state/cb_inject/cb_toggle/cb_on/cb_exports/cb_selector_ref (match the EXACT
+  forms parse_component_body accepts \u2014 see "construct forms" below). match_block already exists.
+- `reify_component_body`: walks the Array, dispatches each item by its single map key (the Choice
+  branch), and fills the corresponding ComponentBodyDef vec. The @match arm folds in here \u2014
+  RETIRING parse_match_block_via_engine + the Rust @match branch (closes BUG-060). The reifier
+  is GENERIC (dispatches on branch name); it does NOT hardcode construct STRINGS in match arms
+  beyond mapping a branch label to a field \u2014 acceptable if the labels come from the grammar, but
+  the BUG-060 gate is: no "@match"/"match_block"/ComponentMatch-as-special-case logic.
+
+** Construct forms parse_component_body currently accepts (the grammar must match EXACTLY)
+From form_compiler.rs:2190+ classification (verify against the code):
+- state decl:   `$name type: value;`            (is_state_declaration; `${...}` is interp, not decl)
+- exports:      `@exports { $x, $y: mut }`
+- self-prop:    `&self.prop <- $expr;`
+- injection:    `text <- $x;` · `[slot="v"] <- $x;` · `[attr="v"] <- $x;` (Selector, BUG-061) ·
+                `src <- $x;` (own attr) · with `| filter`
+- class toggle: `.cls: $sig;`
+- css/behavior: `.sel { ... }` / `[attr] { ... }` / `#id { ... }` \u2014 inner: @on / .cls:$ /
+                &self.prop<- / prop:$expr (content binding). Mixed @on + siblings (R-wave P1).
+- root directive: `@on ... { ... }` (and other `@name` directives)
+- selector ref: `&name .sel { }` / `&name[] .sel { @each }` (E0920/E0921)
+- template ref: `&name(args)` / `&$dyn(args)` (dynamic dispatch) / `&name &tmpl(args)`
+- @match:       `@match $subj { "p" => &t(args); _ => &t(args); }`  (already stdlib grammar)
+- html runs:    everything else (-> html5ever)
+- diagnostics:  E0900 (unrecognized), E0920/E0921 (selector-ref/@each mismatch), E0922
+                (malformed @match), section_transitions (W0700 interleave). These must be
+                PRESERVED \u2014 either expressible in the grammar/reifier or as a post-parse
+                validation over ComponentBodyDef.
+
+* EXECUTION PLAN (waves; each = spike -> build -> reviewer swarm; gates below)
+- B3a DIFFERENTIAL HARNESS (do FIRST \u2014 the safety net): a test that runs BOTH
+  parse_component_body AND the engine+reifier path on a CORPUS of bodies (the bug059_*/feat071_*/
+  feat073_* fixtures + adversarial) and asserts the ComponentBodyDef outputs are EQUAL. This
+  gates every subsequent wave (parity before deletion).
+- B3b LEAF GRAMMARS: stdlib/capture-types/component-body.st with cb_state/cb_inject/cb_toggle/
+  cb_exports/cb_on/cb_selector_ref + component_item + component_body. Bounded-leaf idiom. Unit:
+  each leaf parses its exact form via the engine.
+- B3c reify_component_body: generic reifier (wrap_reifier) producing the NON-HTML ComponentBodyDef
+  parts. Differential-test vs parse_component_body (B3a) on construct-only bodies.
+- B3d HTML INTERLEAVE: segmenter -> html-runs to html5ever (component_html_to_exprs) +
+  construct-segs to the engine; merge into ComponentBodyDef.html + the construct vecs, preserving
+  ORDER + the data-st-id/data-st-origin provenance injection.
+- B3e DIAGNOSTICS PARITY: E0900/E0920/E0921/E0922/section_transitions reproduced (in the reifier
+  or a validation pass). The body.diagnostics bridge (pipeline/mod.rs check_template_ref_issues)
+  stays.
+- B3f CUTOVER: switch `CaptureType::ComponentBody` dispatch to Custom("component_body") ->
+  engine+reifier. Keep parse_component_body behind a flag until B3a parity is GREEN on the full
+  corpus + fleet, then DELETE parse_component_body + all per-construct parsers + scan_html_tag +
+  parse_match_block_via_engine + the @match Rust branch. ComponentMatch/MatchArm: keep ONLY if
+  still the reifier's typed output AND no @match-named logic remains; prefer a generic record.
+- B3g @match CLEANUP (closes BUG-060): @match is just a component_item arm now; verify the
+  exit gate (below).
+
+* GATES (per wave + final cutover)
+- DIFFERENTIAL (B3a): engine+reifier ComponentBodyDef == parse_component_body ComponentBodyDef
+  across the corpus (byte/structurally identical, or audited differences).
+- cargo test --lib / integration / v8 (no new failures beyond pre-existing media cluster).
+- HEADLESS + a real fleet build (unkn 17pg, ora-ventures.com w/ &links/&body, a project with
+  @match/@each/scoped-state) \u2014 byte-identical or audited dist output.
+- HARD EXIT GATE (BUG-060, user-mandated): `grep -rn '@match\|match_block\|ComponentMatch\|MatchArm\|
+  parse_component_body\|parse_injection\|parse_class_toggle\|parse_on_event\|scan_html_tag' src/`
+  returns NOTHING that is per-construct parsing logic. The template-body grammar lives ENTIRELY
+  in stdlib/capture-types/*.st. No construct name appears in Rust.
+- reviewer swarm per wave: lenses = differential-parity, grammar-edge (adversarial bodies),
+  diagnostics-parity (E09xx fire on the same inputs), provenance (data-st-id preserved),
+  no-construct-name-in-Rust, html5ever-fidelity, regression (snapshots audited).
+
+* RISKS
+- R1 ENGINE WEAKER THAN BESPOKE in spots: mixed @on+sibling dispatch (R-wave P1),
+  section_transitions, E0900 nuance. MITIGATION: move to the reifier or a post-parse validation;
+  where the ENGINE genuinely can't express something, EXTEND THE ENGINE GENERICALLY (e.g.
+  multi-token literals, B-Wave 1), never re-add per-construct Rust.
+- R2 PROVENANCE: parse_component_body output carries data-st-id/data-st-origin (injected for scope
+  selectors). The html5ever path must preserve/inject these. Verify in B3d.
+- R3 ORDER PRESERVATION: interleaved html + constructs must keep source order (the builder + css
+  emission depend on it).
+- R4 BLAST RADIUS: 96 templates. MITIGATION: ComponentBodyDef IR unchanged; differential harness
+  (B3a) is the safety net; fleet build per wave.
+
+* RELATIONSHIP TO OTHER WORK
+- FEAT-077 (DONE): the reactive HtmlExpr->DOM builder. Phase B feeds it the SAME ComponentBodyDef
+  (html + builder via component_builder_js), so templates keep rendering reactively. Phase B
+  changes HOW ComponentBodyDef is PRODUCED, not consumed.
+- BUG-060 (this closes it): the @match Rust reifier/structs/branch.
+- BUG-061 (DONE): InjectionTarget::Selector \u2014 the grammar's cb_inject must reproduce this target
+  model (text/Slot/Selector/Attr).
+- File-scope HTML reactivity (separate spec, @research/spec-file-scope-html-reactivity.org):
+  independent; both share transpile_signal_expr_with + the HtmlExpr lowering.
+- The full O2 convergence (@research/phase-b-o2-full-convergence.org) is the umbrella; this spec
+  is its component_body half.
+
+* WHERE TO START (next agent)
+1. Read this + @research/phase-b-o2-full-convergence.org (the spike results) +
+   metasystem/ARCHITECTURE.md.
+2. Build B3a (the differential harness) FIRST \u2014 it is the safety net for the whole cutover.
+3. Then B3b leaf grammars, proving each against the harness, before touching the dispatch.
+4. NEVER add a construct name to Rust. If the engine can't express something, extend the engine.

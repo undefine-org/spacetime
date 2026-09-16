@@ -1,0 +1,360 @@
+#+TITLE: MCP Builder View + the __mcp__/__admin__/__dev__ Convergence (design)
+#+CUSTOM_ID: mcp-builder-view-and-convergence-2026-06-20
+#+DATE: 2026-06-20
+#+LAYER: mcp
+
+* Why this doc
+PLAN-049 (DONE) made the MCP workbench a DRIVEABLE studio (CRUD + creation +
+frame-switch) and deferred three targets in its "out of scope":
+  1. multi-frame drag-canvas (W4's strip was the non-canvas bridge),
+  2. file-scope page mounts (FUP-061),
+  3. __mcp__/__admin__/__dev__ convergence (north-star, two-consumer rule).
+
+This session re-scoped target (1) at the decision owner's direction. The NEW
+focus is the *builder view* — the Webflow / Squarespace / Wix way of viewing a
+website: a page rendered FRAME-INSIDE-A-FRAME (as the stage does today), wrapped
+by SIDEBARS THAT ARE AUTO-GENERATED FROM CODE INTROSPECTION. The free multi-frame
+canvas is deferred to a FUP (each frame = a page or a page-breakpoint; needs its
+own design).
+
+The central insight this doc turns on: **the builder's introspection sidebars
+ARE the shared substrate that converges the three trees.** Today THREE partial
+"sidebar-from-introspection" surfaces exist independently:
+  - =__admin__= rail + drawer  — a META-RENDERER over the server contract
+    (=/__spacetime/dev/site.json= collections, =types.json= schemas+widgets).
+  - =__dev__= panels           — RUNTIME introspection (=dev-content-tree= reads
+    site.json; =dev-inspect= reads =ST._dataRegistry= / =__ST_DEBUG__=;
+    =st-properties= inspects a selected element).
+  - =__mcp__= contract inspector (FEAT-132) — the mounted guest's bundle CONTRACT
+    (template param rows), plus the M3' selected-frame inspector.
+Three palettes, three drawer models, three navigators, all introspecting code to
+build a sidebar. Building the builder's sidebars AS a hoisted kit and cutting all
+three consumers over to it IS the convergence (two-consumer rule made concrete).
+
+* Decisions locked this session (decision owner)
+- D-CANVAS: builder view first = frame-inside-frame + introspection sidebars
+  (today's stage model + generated chrome). Free multi-frame canvas → FUP
+  (frame = page or breakpoint). [owner, 2026-06-20]
+- D-FUP061: approach A — implicit =&main()= synthesis (reuse the templates-only
+  bundle pipeline; "do whatever is easiest to get the UX"). Future direction:
+  "view files as functions, implicitly." [owner, 2026-06-20]
+- D-CONVERGENCE: approach A — two-consumer ladder (incremental; hoist only
+  PROVEN-duplicated constructs; cut both consumers + delete the dup + harmony
+  grep per rung). [owner, 2026-06-20]
+
+* Source-verified substrate (guess-gate clean, this session)
+All read directly; not inferred.
+
+** The region pipeline is ALREADY multi-region and origin-flexible
+- =InstanceRecord.region_mounts: HashMap<String,String>= (live.rs:218) keys off
+  ARBITRARY region ids → fn id. =region_mount_input: HashMap<region,HashMap<k,v>>=
+  carries per-region param overrides.
+- =mount_into_host(host, region, fn, input)=, =clear_region(host, region)=, and
+  the bundle endpoint =GET /bundles?region=X= (live.rs:1441) all take ANY region.
+  =mcp_compose= defaults region to "stage" but accepts any (dispatch arm
+  live.rs ~1636). ∴ N regions on one host is a SERVER non-issue; the gap is the
+  client topology + which regions the chrome DECLARES.
+- The workbench already declares 5 region roots (=stage=, =drawer-nav=,
+  =drawer-origin=, =drawer-inspector=, =drawer-comms=) — multiple coexisting
+  =data-st-region= roots on one page is PROVEN (env.st).
+
+** Dynamic (data-driven) nodes get behaviors wired
+- =ST.registerSelectorInit(selector, init)= + a MutationObserver (st.js:103-220)
+  apply selector-scoped macros to nodes created later (e.g. by =@each=). The
+  frame-strip already =@each=-renders N rows from =$mcpStageFrames= (lists.st).
+- OPEN keystone (must be the de-risking slice): whether =@view $sig= +
+  =@mcp-region= function correctly INSIDE an =@each=-rendered template body
+  (a region root created per data row). Drawers prove STATIC sibling regions;
+  =@each=-of-regions is unproven. The builder view as designed below AVOIDS this
+  (single stage frame), so it is NOT on the builder's critical path — it is the
+  free-canvas FUP's keystone.
+
+** Introspection data already on hand for a mounted guest
+- =Bundle= (state.rs:477): =templates: Vec<TemplateBundle>=, =css=, =contract:
+  Contract=, =diagnostics=. Each =TemplateBundle= has =name=, =params:
+  Vec<ParamSpec>=, and =body: TemplateBody= with =html= (clean body HTML),
+  =refs: Vec<TemplateRef>= (the &child invocations = STRUCTURE), =states=,
+  =exports=, =serialized=.
+- =contract_params_from_bundle= (live.rs:527) flattens template params to rows
+  ={template,name,kind,type,optional,default}= — the inspector's existing source.
+- ∴ a STRUCTURE TREE (template-ref tree + body HTML element tree) AND a PROPS
+  PANEL (contract params) for ANY mounted guest are derivable from the bundle the
+  server ALREADY compiles. The =stage_mount= snapshot (live.rs ~398) already
+  projects the selected guest's name + params + source; today it is HARDCODED to
+  region "stage".
+
+** The two introspection RAILS (the convergence will unify these)
+- SERVER CONTRACT: =/__spacetime/dev/site.json= → ={ collections[], pages[],
+  dataSources[], dataSourceMap }=; =/__spacetime/dev/types.json= → ={ types: {T:
+  {properties{widget}, display{roles}, required}} }=. Admin is a pure
+  meta-renderer over these (app.st fetches both; rail/list/drawer render from
+  them). dev-content-tree reads site.json too.
+- RUNTIME: =ST._dataRegistry= (data sources + item counts), =window.__ST_DEBUG__=
+  (timelines, errors), =[data-st-*]= attributes on live DOM (st-properties reads
+  a selected element's bindings). dev-inspect polls these at 500ms.
+
+** Existing duplication (the ladder's targets — PROVEN ≥2 consumers)
+- Drawer / rail / summon-glyph model: =__mcp__= (env.st drawers, single =$drawer=
+  signal), =__admin__= (rail + =.ad-drawer= portal), =__dev__= (=dev-panel=
+  shadow-DOM tabbed panel). THREE independent drawer systems.
+- Warm-dark vs editorial-white vs catppuccin-dark: THREE palettes, all hand-rolled.
+- Card/list-from-array: =__mcp__= (=@each= + card templates), =__admin__= (rail
+  =@each=, list =@each=), =__dev__= (innerHTML string builders). Mixed declarative
+  + imperative.
+- Persistence bridge: =dev-ws= / =dev-save= ALREADY SHARED (admin imports them
+  from =__dev__=). This is the EXISTING proof the two-consumer rule works — the
+  ladder extends the same move to the other constructs.
+- Rendering pipeline divergence (the Fork-6 violation): admin embeds a LIVE
+  PREVIEW via =<iframe class="ad-preview-frame" src="/">= (app.st). PLAN-041
+  Fork 6 removed standalone per-instance pages in favor of ONE region pipeline;
+  the admin iframe is a second rendering path. Converging it onto a region mount
+  (a frame, not an iframe) is the ladder's keystone rung — and needs FUP-061.
+
+* PART I — The Builder View (immediate focus)
+The mental model is Webflow/Squarespace/Wix: ONE page under cultivation in a
+central frame, flanked by chrome that is GENERATED by introspecting that page's
+code — not hand-authored per page. The workbench stage already IS the central
+frame (a guest bundle composed into the =stage= region). The builder adds the
+two generated sidebars + the selection spine that ties them to the frame.
+
+** Topology (extends the warm-dark organic chrome, does not replace it)
+#+begin_example
++--------------------------------------------------------------+
+| topbar: wordmark · host pill · live ember · [breakpoint ▾]   |
++-----------+--------------------------------------+-----------+
+| NAVIGATOR | STAGE  (the frame-inside-frame)      | INSPECTOR |
+| (left)    |                                      | (right)   |
+| structure | the guest page renders here, as today| props of  |
+| tree from | (region mount). A device-width FRAME  | selected  |
+| guest     | wraps it (breakpoint preview).        | node:     |
+| template/ |                                      | contract  |
+| DOM       | click an element → selects it →       | params +  |
+| introspn  | navigator + inspector sync.           | element   |
+|           |                                      | bindings  |
++-----------+--------------------------------------+-----------+
+#+end_example
+The navigator + inspector are EXISTING drawer-regions repurposed/pinned, OR new
+pinned side panels — see OQ-B. Both are GENERATED from the mounted guest's
+bundle; neither is authored per guest.
+
+** Builder-1: the device frame (breakpoint preview)
+Webflow/Squarespace core gesture = view the page at a device width. The stage
+guest is wrapped in a width-constrained frame element; a topbar control sets
+=$breakpoint= (desktop | tablet | mobile → a max-width). Pure Spacetime: a single
+=$breakpoint= string signal (mirrors =$drawer=) + reactive width classes on the
+frame wrapper (mirrors the existing =data-drawer= reactive-class pattern). NO new
+server state, NO JS. The frame is a sibling wrapper around the existing
+=.mcp-stage= region root so the region pipeline is untouched.
+  - FUTURE HOOK: the free-canvas FUP makes each breakpoint its OWN frame on a
+    canvas; here they are one frame whose width the control swaps. Same
+    =$breakpoint= vocabulary carries forward.
+
+** Builder-2: the NAVIGATOR (structure tree from introspection)
+The left sidebar is the page's structure, generated from the guest bundle:
+  - SOURCE: the guest's =Bundle.templates= — the =&main= template's =body.refs=
+    (child template invocations) form a tree; within a template body, the
+    =body.html= element tree gives DOM-level structure. v1: render the
+    TEMPLATE-REF tree (main → its &children → theirs), each node labelled by
+    template name + a glyph; this is the cleanest "layers panel" and needs no new
+    parser (refs are already captured).
+  - SERVER: add a =stage_structure= projection to =workbench_snapshot= beside the
+    existing =stage_mount= — walk the selected guest bundle's template graph from
+    =&main= into a flat, depth-tagged node list (server-flatten, like
+    =contract_params=, because nested =@each= in a template body is unsupported).
+    Each row: ={ id, label, kind, depth, template, ref_path }=.
+  - CLIENT: bind =$mcpStructure= with one top-level =@each= → an indented tree
+    (depth drives padding via an inline custom property, the proven pattern).
+    Clicking a row sets =$selected= to that node's id (extends the existing
+    =$selected= signal beyond "stage").
+  - HARMONY: this is the SAME shape as admin's collection rail (=$collections=
+    @each → nav items) and dev's content-tree (sections of items). The kit
+    extracted in PART III (=sidebar-tree=) renders all three.
+
+** Builder-3: the INSPECTOR (props from introspection) — extend FEAT-132
+The right sidebar already exists in embryo: the M3' selected-frame inspector
+(name + editable params + source editor) + FEAT-132 contract rows. Generalize:
+  - When a NAVIGATOR node is selected (not just the whole stage frame), the
+    inspector binds THAT node's contract params (the selected template's param
+    specs) + any element bindings introspected from the live DOM (=data-st-*= on
+    the selected element, the dev =st-properties= rail's data).
+  - Editable params already write back via =mcp_param= (live edit, no agent wake).
+    Extend the target from the stage region's guest to the SELECTED template's
+    instance (v1 may keep it at the frame level if per-node param routing is
+    deferred — see OQ-A).
+  - HARMONY: same shape as admin's entry-editor drawer (form fields from a type
+    schema + widgets) and dev's st-properties (bindings of a selected element).
+    The kit extracted in PART III (=sidebar-props=) renders all three; widget
+    selection reuses the admin =types.json= widget engine.
+
+** Builder-4: the selection spine
+ONE =$selected= string signal already exists (env.st: "" | "stage"). Generalize
+its value space to a node id from the navigator. Selection drives THREE consumers
+reactively (all CSS reactive-class / @each-rebind, no JS):
+  - the navigator row highlights (=.is-selected= when =$selected == row.id=),
+  - the inspector binds the selected node's props,
+  - the stage frame outlines the selected element (a ring via a reactive class on
+    the matched =[data-st-node]= — the guest's rendered elements carry a stable
+    node id so the click maps back to the structure row).
+  Click-on-stage → select: the guest's rendered root elements get a
+  =data-st-node="{id}"= attribute (injected at bundle build, mirroring how
+  =data-st-region= / =data-st-origin= are injected — =inject_region_root_attrs=
+  live.rs:2113 is the existing injection seam). A delegated =@on click
+  [data-st-node]= on the stage sets =$selected= from the clicked node's id. This
+  is the Webflow "click the canvas → it selects in the navigator" loop.
+
+** What the builder DELIBERATELY is NOT (v1 scope discipline)
+- NOT a free canvas (deferred FUP). One frame, breakpoint-swappable.
+- NOT drag-to-reorder structure (a later builder wave; needs structural EditAst
+  through the dev-save bridge — large).
+- NOT a block library / "add element" palette yet (the creation surface from
+  PLAN-049 W3 is the seed; a palette is a later wave).
+v1 = VIEW + SELECT + INSPECT + EDIT-PARAMS the page, with both sidebars generated
+from introspection. That is the Webflow/Squarespace *viewing* experience the
+owner asked to focus on.
+
+* PART II — FUP-061 file-scope page mounts (approach A: implicit &main)
+Locks the FUP design. Lets a REAL page (a demo, ultimately the admin) mount into
+a frame — the builder's "open this project's page" and the convergence endgame
+both need it.
+
+** The move (easiest path to the UX, per owner)
+A guest whose source is file-scope markup (a =<div>…</div>= shell + =body{$sig}=
++ selector behaviors, like =__admin__/app/app.st= or =demos/app-shell=) today
+yields an EMPTY templates bundle → =mount_into_host= REJECTS it ("wrap in
+@template", live.rs:949). Instead:
+  - At =compile_to_bundle=, if the source has file-scope body markup and no
+    =&main= template, SYNTHESIZE a template =&main()= whose body IS the
+    file-scope markup (its HTML + its file-scope =@data=/=body{$sig}= state + its
+    selector behaviors, region-scoped). The EXISTING templates-only bundle then
+    carries it; =mount_into_host= sees a non-empty bundle and mounts it
+    unchanged. DELETES the rejection special-case (elegance bar: one fewer
+    error-state, reuses the one mount path).
+  - Region-scope the file-scope concerns (the real work, per region-model doc §
+    "State isolation" + "CSS isolation"):
+    · file-scope =@data inline $x= / =body{$x ...}= → element-scoped =ST.set(
+      regionRoot, 'x', …)= instead of =document.body= / global =ST.setData=
+      (host.st =setSource= already shows the body-vs-global split; the synthetic
+      main must bind to the region root).
+    · file-scope selector behaviors (=.foo { @on click … }=) already compile to
+      =registerSelectorInit=, which the MutationObserver applies within the
+      mounted subtree — verify they resolve =$sig= against the region root, not
+      a page global.
+    · CSS already wrapped =@scope ([data-st-region="id"])= by registerBundle.
+  - CONSTRAINT (FUP-061 locked): MUST reuse the region pipeline; MUST NOT revive
+    the per-instance standalone page route (Fork 6). A standalone preview, if
+    ever wanted, = mount the bundle into a single full-viewport region on a
+    minimal host page.
+
+** Consumer / acceptance
+Mount =demos/app-shell/index.st= (a file-scope page) into a workbench frame and
+see it render + be selectable, with NO "@template" rejection. Then the admin
+(also file-scope) becomes mountable — the bridge to PART III's endgame.
+
+** Risk
+File-scope =@effect= / =@data fetch= that assume =document.body= or page-global
+singletons may not region-scope cleanly. Mitigation: the synthetic-main slice
+mounts a SIMPLE file-scope page first (app-shell), surfaces the gaps, fixes the
+region-root binding, THEN admin. The implicit-main wrapper is the cheap part;
+the region-scoping is where the work (and the test cases) live.
+
+* PART III — The convergence ladder (approach A: two-consumer, gated rungs)
+North-star: =__mcp__=, =__admin__=, =__dev__= stop being three parallel chrome
+systems and become consumers of ONE shared substrate; the workbench becomes the
+host the other two MOUNT INTO. Each rung hoists only a PROVEN-duplicated
+construct, cuts BOTH consumers over, DELETES the dup, and passes a harmony grep.
+The rungs are ordered by (value delivered) × (1 / blast radius).
+
+** Rung 0 (precondition, already partly true)
+=dev-ws= / =dev-save= are already shared (admin imports them). Document this as
+the pattern; no new work. It proves the rule before we extend it.
+
+** Rung 1 — design tokens (theme as data)
+Hoist the palette/typography/shape tokens to one token module with NAMED THEMES
+(warm-dark organic | editorial-white | dev-dark). Each tree selects a theme; no
+hand-rolled hex per tree. Two-consumer: __mcp__ (warm-dark) + __admin__
+(editorial). Delete the duplicated raw values. Harmony grep: no bespoke palette
+hex outside the token module in the cut-over trees.
+
+** Rung 2 — drawer / rail / summon macro
+Hoist ONE drawer model (the =$drawer= single-signal + summon-glyph + reactive
+=.is-open= pattern from env.st is the cleanest) as a macro/kit. Two-consumer:
+__mcp__ drawers + __admin__ rail-drawer. (dev-panel's shadow-DOM tabbed panel is
+a third consumer but higher-risk — fold it on a later rung.) Delete the dup.
+
+** Rung 3 — the INTROSPECTION-SIDEBAR KIT (the keystone; = PART I's sidebars)
+Hoist =sidebar-tree= (navigator: array → indented selectable tree) +
+=sidebar-props= (inspector: schema/contract → labelled, widget-typed, editable
+prop rows) as a kit, parameterized by its DATA SOURCE (a contract). Consumers:
+  - __mcp__ builder navigator/inspector (bundle introspection) — PART I,
+  - __admin__ rail (collections) + entry-editor drawer (type schema + widgets),
+  - __dev__ content-tree (site structure) + st-properties (element bindings).
+This is the rung that PAYS for the convergence: building PART I correctly = the
+first consumer of the kit; cutting admin + dev over = the convergence. The
+widget engine (admin =types.json=) and the introspection rails (§ substrate) feed
+it. Harmony grep: one navigator impl, one props-panel impl, three consumers.
+
+** Rung 4 — region pipeline as the UNIVERSAL mount (needs FUP-061)
+Cut the admin LIVE PREVIEW from =<iframe src="/">= to a REGION MOUNT (a frame).
+With FUP-061, the previewed page is a file-scope guest mounted into an admin
+preview region — the SAME pipeline the workbench stage uses. Deletes the second
+rendering path (closes the Fork-6 violation). Two-consumer: the workbench stage +
+the admin preview now share registerBundle/region-mount.
+
+** Rung 5 — endgame: admin + dev MOUNT INTO the workbench
+- The admin becomes a GUEST FRAME composed onto a workbench region (it is a
+  file-scope page; FUP-061 + Rung 4 make it mountable). "Open the CMS" = compose
+  the admin bundle into a frame, with the builder's introspection sidebars around
+  it.
+- The dev-panel becomes a DRAWER (an origin-tagged Stdlib drawer bundle, exactly
+  the "an env/agent can contribute a drawer" extensibility the design-language
+  doc names).
+- =/__spacetime/admin/= and =/__spacetime/dev/= become "mount THIS bundle into a
+  full-viewport region on a minimal host page" — FUP-061's named standalone
+  successor. One host page, one rendering pipeline, three former-apps as
+  origin-tagged bundles. The two-consumer rule, fully discharged.
+
+** Ladder gates (every rung)
+- Pure-Spacetime in the chrome trees (AGENTS); JS only inside owned
+  =%primitive=. - Registry/kit-as-DATA; no parallel subsystem. - Cut BOTH
+  consumers, DELETE the dup, pass a harmony grep naming the deleted construct. -
+  Full suite green per rung; each rung its own commit with colocated tests+docs.
+
+* Build order across the three parts
+1. Builder view (PART I) — independent of FUP-061 (uses @template guests today);
+   ships the introspection sidebars as the FIRST consumer of the future kit,
+   authored IN __mcp__ first (extract to the kit at Rung 3).
+2. FUP-061 (PART II) — unblocks real-page frames + Rung 4/5.
+3. Convergence ladder (PART III) — Rungs 1-2 anytime; Rung 3 extracts PART I's
+   sidebars; Rungs 4-5 need FUP-061.
+∴ PART I and PART II proceed in parallel; PART III Rung 3 depends on PART I,
+Rungs 4-5 depend on PART II.
+
+* Open questions for the decision owner (deferred, not blocking the PLAN split)
+- OQ-A (inspector param routing): v1 routes param edits at the FRAME level
+  (the whole stage guest) as today, OR per-selected-NODE? Per-node needs the
+  region/template-instance to carry a node→param map. Recommend frame-level v1,
+  per-node as a builder follow-up.
+- OQ-B (sidebar chrome form): are the navigator/inspector PINNED side panels
+  (always visible, Webflow-style) or the existing summon-DRAWERS pinned open?
+  Webflow/Squarespace = always-visible panels. Recommend: pinned panels for the
+  builder layout, reusing the drawer REGION + bundle model (a "pinned drawer" is
+  a drawer whose open-signal is latched), so Rung 2's drawer kit still applies.
+- OQ-C (structure granularity): navigator shows the TEMPLATE-REF tree (v1) or
+  drills into DOM elements within a template body? Recommend template-ref tree
+  v1; DOM drill-down a follow-up (needs body.html element walking).
+- OQ-D (free-canvas FUP shape): each frame = a page or a breakpoint; pan/zoom;
+  z-order. Filed as a FUP for its own design pass.
+
+* Honesty ledger (what is DESIGN TARGET vs SHIPPED)
+- SHIPPED + verified: region pipeline (any region), region_mounts map, bundle
+  with templates/contract/refs/html, @each dynamic lists, selector-init on
+  dynamic nodes, $drawer/$selected reactive-class pattern, drag/gesture/pointer
+  primitives (pure-Spacetime), dev-ws/dev-save sharing, admin meta-renderer over
+  site.json/types.json, FEAT-132 contract inspector + M3' selected-frame.
+- DESIGN TARGET (this doc): the device frame, the navigator structure tree, the
+  generalized selection spine + data-st-node injection, the stage_structure
+  snapshot projection, FUP-061 implicit-&main + region-scoped file-scope state,
+  the hoisted sidebar kit, the admin-iframe→region cutover, admin-as-frame /
+  dev-as-drawer endgame.
+- UNVERIFIED keystone (free-canvas FUP only): @view + @mcp-region inside an
+  @each-rendered region body. The builder view AVOIDS it (single frame).

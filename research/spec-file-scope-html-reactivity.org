@@ -1,0 +1,164 @@
+#+TITLE: SPEC — File-Scope HTML Reactivity (SSG-first hydration)
+#+AUTHOR: Spacetime platform (PLAN-030 / FEAT-077 follow-on)
+#+DATE: 2026-06-08
+#+STARTUP: overview
+#+AUDIENCE: the next agent (post-compaction). Assume NO prior session memory.
+
+* TL;DR
+File-scope HTML (top-level `<tag>` markup in a `.st` file, NOT inside a `@template`) currently
+compiles to a STATIC HTML string with `<!--st-hole:expr-->` placeholder comments \u2014 no
+reactivity. This spec makes file-scope `$signal` interpolation REACTIVE while preserving the
+static-site-generator (SSG) contract: the served HTML must contain real, correct markup for
+first paint / SEO / no-JS, and JS HYDRATES the holes in place (it must NOT rebuild from empty).
+This is the file-scope analog of the template reactive builder (FEAT-077), but in HYDRATION
+mode, scoped to GLOBAL signals (SpacetimeLocal), not per-instance.
+
+* MUST-READ context (verified from code, 2026-06-08)
+
+** Spacetime is an SSG FIRST
+- `cargo run -- build <dir>/` / the export pipeline (src/export/) produces a static site: per
+  route, an `index.html` page shell + `spacetime.css` + `spacetime.js` bundles
+  (src/export/emit.rs:36-76). `src/export/html.rs::process_html` rewrites the authored route
+  `index.html`: strips dev attrs, injects the bundle <link>/<script> (idempotent).
+- The served `<body>` markup must be REAL HTML (the whole point of an SSG). Hydration adds
+  interactivity on top; it must never blank-then-rebuild (FOUC / SEO / no-JS regressions).
+
+** Where file-scope HTML comes from
+- A `.st` file may contain first-class `<tag>` markup at file scope (PLAN-023 W1). The CST
+  scans it (`scan_html_region`, src/syntax/cst/parser.rs) into an `HtmlBlockAst { skeleton,
+  holes }` where interpolations are pre-extracted as `\u{E000}<idx>\u{E001}` SENTINELS and the
+  hole sources collected (BACKTICK holes `` `$expr` ``; bare `$x` is template-only sugar \u2014 see
+  the component-body normalizer, which file-scope does NOT yet apply).
+- `src/compiler.rs::emit_html_blocks` (line 716): for each block, `treesink::parse_html_skeleton
+  (skeleton, holes)` -> `Vec<HtmlExpr>` (html5ever parse, spec-correct), then
+  `emit::html::emit_all` -> a STATIC string. That string lands in `CompiledSpacetime.html`
+  (compiler.rs ~1163, "PLAN-023 W1: file-scope HTML -> CompiledSpacetime.html").
+
+** The HTML IR + the SSG-only emit (the gap)
+- `src/ir/code.rs:264-310`: `HtmlExpr::{Element{tag,attrs:Vec<(name,Vec<AttrPart>)>,children},
+  Text, Hole(JsExpr), Raw}`; `AttrPart::{Lit, Hole(JsExpr)}`. Holes carry `JsExpr::Raw(src)`.
+- `src/emit/html.rs`: `emit()`/`emit_all()` is ENTIRELY SSG. `emit_hole(JsExpr::Raw(src))` ->
+  `"<!--st-hole:src-->"` (a comment placeholder, line ~31). `emit_attr_parts` -> `{st-hole:src}`
+  for attr holes. There is NO runtime reactivity \u2014 holes are inert placeholder strings.
+  Comment in the code: "The reactive emit phase (PLAN-023 W3/W4) replaces this once an
+  EmitContext is available" \u2014 W3/W4 is the UNBUILT work this spec covers.
+
+** The PROVEN reactive substrate to REUSE (do NOT reinvent)
+- `public/runtime/st.js`: per-element signal store `ST.get/set/watch(el,name,fn)` (WeakMap,
+  microtask-batched); GLOBAL signals via `SpacetimeLocal[name]` (Proxy) + `local:<name>:updated`
+  CustomEvent on mutation.
+- `src/syntax/form_match.rs:~1100-1250`: `transpile_signal_expr_with(expr, SignalScope::{Element,
+  Global})` rewrites `$x` -> `ST.get(__el,'x')` / `SpacetimeLocal['x']`; `collect_signal_deps
+  (expr)` -> ordered dep names. COMPILE-TIME, no runtime eval.
+- `src/compiler.rs:~740-770`: `emit_reactive_binding_js(selector, property, value)` \u2014 the
+  EXISTING, PROVEN file-scope reactive arc for CSS-property/text bindings: builds an `apply()`
+  closure (transpiled expr), `render()` that `querySelectorAll(selector).forEach(... set
+  textContent/setAttribute ...)`, and `document.addEventListener('local:<dep>:updated', render)`
+  per dep. THIS is the file-scope (Global-scope) reactivity pattern; the hydration emit should
+  mirror it.
+- `src/emit/html_reactive.rs` (FEAT-077): `emit_builder(exprs, SignalScope)` already lowers an
+  `HtmlExpr` tree into a reactive JS DOM builder, and supports `SignalScope::Global`
+  (SpacetimeLocal + `local:<dep>:updated` listeners). BUT it BUILDS FRESH DOM \u2014 for file-scope
+  SSG we need HYDRATION (wire holes onto EXISTING server-rendered DOM), a different mode.
+
+** SSG @each is already handled (do not re-solve)
+- `src/html/ssg_unroll.rs`: static `@each` over a compile-time `@data` array is UNROLLED into
+  the served HTML at build time (the "unroll == hydrate" invariant: SSG output == runtime DOM).
+
+* THE PROBLEM, precisely
+A file-scope hole `<span>`$count`</span>` (or in an attr `<div data-n="`$count`">`) emits the
+STATIC string `<span><!--st-hole:$count--></span>`. The served page shows a comment, not the
+value, and nothing updates when `$count` changes. We need:
+1. SSG: the served HTML shows the INITIAL value of `$count` (real text/attr), not a comment.
+2. Hydration: a JS pass finds each hole's position in the EXISTING DOM and wires it reactively
+   to the global signal (re-render on `local:<dep>:updated`).
+
+* DESIGN
+
+** Principle: SSG-correct initial render + in-place hydration
+- BUILD TIME: emit the hole's INITIAL value into the static HTML (compute `$signal`'s declared
+  initial, e.g. from `$count number: 5;` -> "5"), wrapped in a STABLE HYDRATION MARKER so the
+  runtime can find it. The marker must be valid HTML that renders the initial value AND is
+  locatable post-load. Options (decide in spike):
+  - text hole: `<span data-st-hole="count" data-st-expr="$count">5</span>` \u2014 a wrapping element
+    carrying the dep + expr; the initial value is its textContent.
+  - attr hole: emit the computed initial attr value statically (`data-n="5"`) + a sibling
+    marker (`data-st-attr-hole-n="$count"`) OR a per-element hydration manifest.
+  - PREFERRED (cleanest, SSG-faithful): emit initial value inline + a compact per-page HYDRATION
+    MANIFEST (a JSON array of {selector-or-id, kind:text|attr, attr?, expr, deps}) that the
+    runtime walks once to attach reactivity. Keeps the served HTML clean (just real values +
+    minimal data-attrs/ids), no comment placeholders.
+- RUNTIME (hydration): a `Spacetime.hydrateHoles(manifest)` pass (in stdlib runtime or emitted)
+  resolves each entry to its DOM node, computes `apply()` (transpiled Global-scope expr), and
+  subscribes deps via `local:<dep>:updated` (mirroring emit_reactive_binding_js). On first run it
+  may re-apply (idempotent) to reconcile if the initial SSG value drifted.
+
+** Scope = Global
+File-scope holes read GLOBAL signals (`$count number:5;` at file scope -> SpacetimeLocal). So
+`transpile_signal_expr_with(expr, SignalScope::Global)` + `local:<dep>:updated` listeners.
+(Contrast: template holes are Element-scoped via ST.get(__el,...).)
+
+** Reuse, don't fork
+- The hole-expr transpilation + dep collection: REUSE transpile_signal_expr_with /
+  collect_signal_deps.
+- The reactive arc shape: MIRROR emit_reactive_binding_js (apply/render/addEventListener).
+- The HtmlExpr -> reactive lowering: EXTEND emit_html_reactive.rs with a HYDRATION mode
+  (`emit_hydrator(exprs, manifest)`) OR add a `mode: Build|Hydrate` to the builder. In Hydrate
+  mode, instead of createElement, it emits the static HTML (initial values) + the manifest, and
+  the runtime attaches to existing nodes.
+
+** Initial-value computation (SSG correctness)
+To render the initial value statically, the compiler must evaluate the hole expr against the
+COMPILE-TIME-known signal initials (file-scope `$x T: v;` declarations + static `@data`). For a
+simple `$count` this is the declared initial; for `$a + $b` or filters, evaluate what's
+statically knowable, else fall back to empty + hydrate-on-load (document the fallback). The
+`ssg_unroll.rs` static-array evaluation is the precedent for compile-time value resolution.
+
+* IMPLEMENTATION PLAN (waves; each spike -> build -> reviewer swarm; gates below)
+- F0 SPIKE: emit a file-scope `<span>`$count`</span>` with `$count number:5;` as static
+  `<span ...>5</span>` + a hydration manifest entry; in V8/headless, mutate `$count` ->
+  span updates. Pin the marker + manifest shape. Resolve: marker style (wrapping el vs id vs
+  data-attr), attr-hole representation, initial-value evaluator scope.
+- F1 BUILD: hydration emit in emit/html.rs (or html_reactive.rs Hydrate mode): static initial
+  values + manifest; replace emit_hole's comment placeholder. Keep emit_all's SSG output but
+  with REAL initial values, not comments.
+- F2 RUNTIME: Spacetime.hydrateHoles(manifest) in the stdlib runtime; Global-scope apply + deps
+  listeners; idempotent first apply.
+- F3 ATTR HOLES + multi-hole text + filters (`` `$x | currency` ``); the value-fn pipeline.
+- F4 CUTOVER: file-scope HTML reactivity is the DEFAULT; the `<!--st-hole-->` comment path is
+  DELETED (no placeholder-comment output remains).
+- F5 (convergence note): unify with the template reactive builder where possible \u2014 both lower
+  HtmlExpr holes via transpile_signal_expr_with; the difference is Build (templates, fresh DOM,
+  Element scope) vs Hydrate (file-scope, existing DOM, Global scope). Aim for ONE lowering with
+  a scope+mode parameter, not two emitters.
+
+* EDGE CASES (must all be covered)
+- no-JS: the served HTML shows correct initial values (SSG). Disable JS -> page still readable.
+- attr hole that is boolean/absent: initial render omits the attr if the value is false/null.
+- a hole whose deps are NEVER mutated: renders once (the static value), no listener churn.
+- multiple holes sharing a dep: one listener updates all (or N listeners, idempotent).
+- a hole in a `@each`-unrolled row (SSG): the unroll already bakes the value; hydration must not
+  double-wire. Coordinate with ssg_unroll.rs.
+- filters / pipes / dotted paths: `` `$cart.total | currency("$")` `` \u2014 transpile + the value-fn
+  registry (ST.filter). Null-safe dotted (try/catch, like the template builder).
+- escaping: textContent/setAttribute are auto-safe; do NOT manually escape (the DOM API does).
+- locale / SpacetimeLocal not yet initialized at hydration time: guard (the runtime already has
+  `window._localState` fallback).
+
+* GATES (per wave + final)
+- cargo test --lib / --test integration_tests / --test v8_runtime_test (no new failures beyond
+  the pre-existing media cluster) ; emitted-JS asserted, no check-only greens.
+- HEADLESS: a file-scope `$count` page renders the initial value AND updates on mutation.
+- SSG INVARIANT: served HTML contains real initial values, NO `<!--st-hole-->` comments; with JS
+  disabled the page is correct.
+- A real served site (a fixture or projects/*) eyeballed: first paint correct, then reactive.
+- reviewer swarm per wave (lenses: SSG-correctness/no-FOUC, hydration-idempotence, Global-scope
+  reactivity, escaping, @each-unroll non-double-wire, no comment-placeholder residue).
+
+* OPEN QUESTIONS (resolve in F0 spike)
+- Marker shape: wrapping element vs stable id vs data-attr vs page manifest. (Manifest preferred
+  for clean HTML, but needs stable node addressing \u2014 ids or a walk order.)
+- Initial-value evaluator: how much compile-time evaluation (just declared initials? static
+  exprs? data joins?) vs hydrate-on-load fallback. Document the boundary.
+- Build vs Hydrate unification in emit_html_reactive.rs: one lowering with mode+scope, or two.
+- Attr-hole SSG: inline computed initial + manifest, vs a data-attr carrying the expr.

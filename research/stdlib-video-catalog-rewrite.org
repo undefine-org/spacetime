@@ -1,0 +1,224 @@
+#+TITLE: Open decisions resolved + HyperFrames catalog (134 entries) rewritten in @score
+#+DATE: 2026-07-18
+#+STATUS: design v5 — resolves the four opens; pressure-tests the grammar against the real HyperFrames registry (cloned to scratch/hyperframes)
+
+* PART 1 — The four open decisions, resolved
+
+** 1. Multicam take-switch: state-machine vs marks-as-keyframe-anchors
+Q: how does a live take-switch (cam A ↔ B) get expressed?
+Options:
+  (a) state machine inside the scene body — the take is app state, the cut is
+      a state transition. Uses the EXISTING states.st rail. Zero new grammar.
+  (b) `-> at &mark` — promote score marks to keyframe anchor points.
+Evidence: cuts are *discrete selections* (which camera is live), not
+continuous interpolations. Spacetime already has a discrete-state rail
+(states.st, match-render). Keyframes are the *continuous* rail; bolting a
+discrete selector onto `->` overloads the operator (violates one-sigil-one-
+meaning).
+∴ (a). Multicam = a template whose body holds `take` state; cuts are
+`$take <- "b"` events. Marks remain *score-level* placement/chapter refs, NOT
+keyframe anchors. `-> at &mark` rejected. CLOSED — use the state rail.
+
+** 2. `in`/`out` on non-media templates = retime of the @play path?
+Q: does cycle-clip semantics (keyframes.st §clip: window into a repeat,
+retimed) generalize to source-trim on any template?
+Evidence: a media clip's `in 4s out 9s` selects a content window AND retimes
+it into the clip's span. For a non-media template, the "source" is its @play
+motion-path over its natural duration. `in/out` = select a window of that
+path, retime into the span. This is EXACTLY cycle-clip lifted: same words,
+same "window-then-retime" operation, one level up.
+∴ YES. `in/out` is the source-window operator uniformly: media → content
+window; template → motion-path window. One concept, two substrates. CLOSED.
+
+** 3. Adjustment-layer "below" binding: explicit param vs z-order inference
+Q: how does an adjustment/grade layer know which clips it affects?
+Options:
+  (a) explicit `&below` region param — the adjustment takes the layers under
+      it as an argument.
+  (b) infer from stave order (everything visually below the adjustment line).
+Evidence: region-templates ALREADY take `&from/&to` (transitions) or
+`&content` (masks). An adjustment layer is the same shape: it needs its
+*input region* as a param. Inferring from stave order is implicit magic —
+reordering a line would silently change the grade's scope. Explicit is honest,
+compile-checked, and matches the existing region-curry pattern.
+∴ (a). Adjustment layer = a region-template `@template &grade(&content, …)`
+placed on its own line; the score curries `&content` with the lines below.
+CLOSED — explicit param, consistent with transitions/masks.
+
+** 4. EDL/OTIO export — grammar concern or render concern?
+Q: round-trip with desktop NLEs (FCPXML/OTIO) — does the grammar change?
+Evidence: the score IS a structured timeline (typed measures, named spans,
+trim windows, tracks). Export is a *serialization* of that structure to
+OTIO/FCPXML. No grammar surface needed — it's an `@render`/CLI emit target,
+like golden-frame capture.
+∴ render concern, zero grammar. CLOSED — emit OTIO from the compiled score.
+
+* PART 2 — Optimality
+
+HyperFrames block anatomy (measured, registry/blocks/*/​*.html):
+- timing in 3 places at once: `data-start/data-duration` attrs + GSAP
+  absolute offsets + JS `t>=1.0&&t<3.0` guards → drift-prone, un-typed
+- whip-pan: ~400 lines; ~250 are hand-rolled WebGL (compileShader/mkProg/
+  texture upload) + a ~60-line `captureScene` DOM-rasterizer
+- captions: ~63+ lines of per-word canvas measurement + line-splitting
+- every block re-declares 1920x1080, fonts, resets
+
+The syntax is optimal iff it deletes the *mechanism* and keeps only the
+*intent*. Three deletions prove it:
+1. **Transport duplication deleted** — one clock; `data-*`, GSAP offsets, and
+   JS time-guards all collapse into score placement words + @play ranges.
+2. **Hand-rolled GL deleted** — whip-pan's 250 lines of WebGL become a
+   `gl-transitions` GLSL *data* vendored behind the 3d rail; the block keeps
+   only its 2-scene structure + a `@play` edge. captureScene's 60 lines
+   become the framework's region-snapshot (already needed for 3d textures).
+3. **Caption layout deleted** — per-word canvas measurement becomes
+   `stdlib/text` (Pretext) line-breaking + a karaoke =$progress= signal.
+Net: each block → a `@template` (markup) + a `@play` (motion). The registry
+JSON (name/tags/duration/preview) becomes front-matter. ~95% line reduction,
+and the result is *responsive* (HyperFrames blocks are fixed 1920x1080).
+
+* PART 3 — The catalog, rewritten
+
+Registry taxonomy (134 entries) collapses to 6 families. One canonical
+rewrite each; the rest are parametric instances.
+
+** Family A — DOM lower-thirds (lt-*, yt-lower-third: ~14 blocks)
+HyperFrames: lt-kicker-name = markup + GSAP (kicker y:-40→0 back.out; name
+y:34→0; baseline scaleX 0→1; reverse out at 4.25s), data-duration 4.8.
+
+#+begin_src spacetime
+// lt-kicker-name.st
+@template &lt-kicker-name($kicker = "Episode 47", $name = "Maya Chen") {
+  <div class="lt">
+    <div class="lt-kickwrap"><span class="lt-kicker">`$kicker`</span></div>
+    <div class="lt-name">`$name`</div>
+    <div class="lt-baseline"></div>
+  </div>
+}
+@play &lt-kicker-name(4.8s) {
+  .lt-kicker   { translate-y: -40px -> 0 with back(2);  range: 2% to 11% }
+  .lt-name     { opacity: 0 -> 1; translate-y: 34px -> 0 with back(1.5); range: 7% to 16% }
+  .lt-baseline { scale-x: 0 -> 1 with power4();           range: 10% to 21% }
+  // outro — the SAME rails, reversed ranges
+  .lt-baseline { scale-x: 1 -> 0 with power2();           range: 88% to 95% }
+  .lt-name     { opacity: 1 -> 0; translate-y: 0 -> -16px; range: 89% to 96% }
+  .lt-kicker   { translate-y: 0 -> -40px;                 range: 90% to 96% }
+}
+#+end_src
+GSAP's absolute offsets become =range:= percentages of the clip span —
+driver-independent (same lower-third scores under time OR scroll). All 14
+lt-* are parametric restyles of this shape (kicker/name/role/bar variants).
+
+** Family B — transitions (transitions-* 13 packs + whip-pan etc: ~25)
+HyperFrames whip-pan = 400-line GL demo. In ST a transition is a REGION
+template (v3 §transitions); the GLSL is vendored DATA, not per-block code.
+
+#+begin_src spacetime
+// transitions/whip-pan.st
+@import "stdlib/3d"
+@template &whip-pan(&from, &to, $d duration = 300ms) {
+  <canvas class="st-transition"></canvas>
+}
+@play &whip-pan($d) {
+  .st-transition { @stage { @post gl-transition("whip-pan.glsl", &from, &to)
+                              progress: 0 -> 1 with power2() } }
+}
+#+end_src
+The 13 transitions-* packs (blur/cover/dissolve/grid/push/radial/scale…) are
+the SAME block with a different =gl-transition("…")= name — kinds-as-data.
+DOM-tier transitions (light-leak, cross-warp-morph) keep the v3 CSS form:
+=@play= keyframing =&from/&to= translate/opacity/filter. ONE grammar, two
+render tiers, chosen by the easing/GL expressibility — the %if dispatch.
+
+** Family C — code snippets (code-snippet-* ~30 + code-* ~10)
+These are static styled <pre><code> with a reveal (typing/highlight/morph).
+The *styling* is theme CSS (solarized/monokai/vs-dark = a theme template
+param); the *motion* is one of a few reveals.
+
+#+begin_src spacetime
+@template &code-snippet($code, $lang = "rust", $theme = &theme-monokai) {
+  <pre class="code `&theme`"><code data-lang="`$lang`">`$code`</code></pre>
+}
+// reveal variants — pick one @play per block
+@play &code-snippet { .code { opacity: 0 -> 1; translate-y: 20px -> 0; range: 0 to 15% } }       // fade-up
+@play &code-typing  { .code code { @typewriter cps: 40 } }                                       // typing
+@play &code-highlight { .tok { opacity: 0.25 -> 1; stagger: 0.02 } }                            // highlight
+#+end_src
+30 theme blocks collapse to ONE template + 30 theme *values* (kinds-as-data);
+the reveal blocks are 3-4 @play shapes. syntax-highlight = the md/text rail.
+
+** Family D — maps (us-map*, world-map, spain-map, nyc-paris-flight: ~8)
+SVG/GeoJSON map + animated overlays (bubbles/flows/hex/route).
+
+#+begin_src spacetime
+@template &us-map($data, $projection = "albersUsa") {
+  <svg class="map" viewBox="0 0 960 600">
+    @geo $projection { @each($data as $d) { <circle class="bubble"
+        cx="`$d.x`" cy="`$d.y`" r="`$d.v`"/> } }
+  </svg>
+}
+@play &us-map-bubble { .bubble { scale: 0 -> 1 with back(); stagger: 0.05; range: 5% to 40% } }
+@play &nyc-paris-flight { .route { stroke-dashoffset: 100% -> 0; range: 10% to 70% } }
+#+end_src
+Geo data + route draw-on (stroke-dashoffset) are CSS/SVG through @play.
+(=@geo= is a stdlib/geo projection macro — a vendored d3-geo data rail.)
+
+** Family E — VFX (vfx-*, grain, motion-blur, parallax-*, glitch: ~25)
+Full-frame shader/post effects = region-templates over &content (like masks/
+adjustment layers — Open-3). GLSL vendored.
+
+#+begin_src spacetime
+@template &vfx-liquid-background($color = #1C1E1D) {
+  <canvas class="vfx"></canvas>
+}
+@play &vfx-liquid-background { .vfx { @stage { @post glsl("liquid.glsl") progress: 0 -> 1 loop } } }
+@template &grain-overlay(&content, $amount = 0.08) { <div class="grain">`&content`</div> }
+@play &grain-overlay { .grain { filter: grain($amount) } }   // CSS filter rail
+#+end_src
+
+** Family F — caption styles (caption-* 16 + morph-text etc: ~25)
+HyperFrames: 63+ lines of per-word canvas measurement. ST: captions are a
+TEMPLATE family fed by a VTT-compiled span (v3); word karaoke = a =$word=
+signal + text layout from stdlib/text (Pretext), NOT canvas measureText.
+
+#+begin_src spacetime
+@template &caption-pill-karaoke($cues) {       // $cues from @captions VTT compile
+  <div class="caption-layer">
+    @each($cues as $cue) {
+      <div class="caption-pill">
+        @each($cue.words as $w) { <span class="caption-word">`$w.text`</span> }
+      </div>
+    }
+  </div>
+}
+@play &caption-pill-karaoke {
+  .caption-word { color: $inactive -> $active when $w.active }  // per-word karaoke
+}
+#+end_src
+The 16 caption styles are parametric variants (pill/neon/glitch/kinetic) —
+same =$cue/$w= data, different theme CSS + a per-style @play accent.
+Line-splitting/measurement (HyperFrames' hardest code) = stdlib/text.
+
+* Coverage verdict
+
+| Family | Entries | ST rewrite | New grammar needed |
+|--------+---------+------------+--------------------|
+| A lower-thirds | ~14 | @template + @play ranges | none |
+| B transitions | ~25 | region-template + vendored GLSL | none (gl-transition data) |
+| C code | ~40 | 1 template + theme values + 3 @play reveals | none (@typewriter macro) |
+| D maps | ~8 | SVG + @geo data rail | @geo macro (vendored d3-geo) |
+| E vfx | ~25 | region-template/post + vendored GLSL | none |
+| F captions | ~25 | VTT-span + $cue/$w + stdlib/text | none |
+
+134 entries → 6 shapes. Only ONE new macro surfaces: =@geo= (and even that is
+a vendored data rail, not score grammar). The @template/@play/@score triad +
+region-templates + vendored-GLSL-as-data closes over the ENTIRE catalog.
+Grammar is sufficient; no construct added for the catalog's sake.
+
+* What the pressure-test CONFIRMED vs v3/v4
+- region-templates carry transitions AND vfx AND adjustment-layers AND masks —
+  one shape, four HyperFrames concepts. (Validates Open-3 explicit-param choice.)
+- GLSL-as-vendored-data replaces the biggest code mass in the registry.
+- =range:= percentages replace ALL GSAP absolute offsets → driver-independence.
+- stdlib/text replaces the caption measurement mass.
+- theme-as-value collapses 30 near-duplicate code-snippet blocks into 1.

@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>inspect Layer Provenance</title>
+  <style>body{max-width:1200px;margin:0 auto;padding:2rem;font:16px/1.5 system-ui,sans-serif}.diagram,pre{overflow-x:auto;padding:1rem;border:1px solid #bbb;border-radius:8px}table{border-collapse:collapse;width:100%}th,td{border:1px solid #bbb;padding:.65rem;text-align:left;vertical-align:top}code,pre{font-family:ui-monospace,monospace}.note{border-left:4px solid #1683c5;padding-left:1rem}</style>
+    <style>:not(:defined){visibility:hidden}</style>
+</head>
+<body><main>
+  <h1><code>inspect</code> Layer Provenance</h1>
+  <p><code>cargo run -- inspect --layer &lt;layer&gt; [file]</code> exposes views at and around the meta-compiler pipeline. This map shows the input that creates every view and whether it is a compiler artifact or a source projection.</p>
+  <pre class="diagram mermaid">flowchart TD
+    CLI["cargo run -- inspect --layer L [file]"] --&gt; Pick{L}
+    Stdlib["stdlib/runtime + stdlib/macros + stdlib/primitives"] --&gt; Registry["registry output: macros + primitives"]
+    Stdlib --&gt; Dispatch["dispatch output: forms by directive + probe"]
+    Pick --&gt;|file-backed layers| Source["source text"] --&gt; Parse["parse(): StFile"]
+    Parse --&gt; ParseView["parse output: raw, unmerged summary"]
+    Parse --&gt; Imports["resolve_imports()"] --&gt; Rematch["rematch_with_user_macros()"]
+    Rematch --&gt; Keyframes["keyframes: timeline body captures"]
+    Rematch --&gt; Expansion["expansion: %binds / %derives / %states blueprint"]
+    Rematch --&gt; Scopes["scopes: build_scope_tree()"]
+    Rematch --&gt; State["state: analyze_state()"]
+    Rematch --&gt; IRCompile["compile_verbose(): evaluate → resolve → sort → expand_typed"] --&gt; IR["ir: typed JS/CSS fragments"]
+    Rematch --&gt; Compiler["Compiler::from_ast().compile()"] --&gt; Emit["emit: final CSS + JS"]</pre>
+  <h2>Layer source of truth</h2>
+  <table><thead><tr><th>Layer</th><th>Input → producer</th><th>Output / relation</th></tr></thead><tbody>
+<tr><td><code>registry</code></td><td>stdlib → <code>create_registry_with_stdlib()</code> → <code>MetaRegistry</code></td><td>Macros and primitives; fileless bootstrap view.</td></tr>
+<tr><td><code>dispatch</code></td><td><code>MetaRegistry</code> forms → <code>build_dispatch_output()</code></td><td>Overloads by directive and optional probe; fileless bootstrap view.</td></tr>
+<tr><td><code>parse</code></td><td>entry text → <code>parse()</code> → <code>StFile</code></td><td>Raw parse summary, definitions, scopes, matches; before imports.</td></tr>
+<tr><td><code>keyframes</code></td><td>assembled scopes + body captures → <code>build_keyframes_output()</code></td><td>Timeline names, selectors, properties; source projection.</td></tr>
+<tr><td><code>expansion</code></td><td>scope matches + macro definitions → <code>build_expansion_output()</code></td><td>Declared <code>%binds</code>, <code>%derives</code>, <code>%states</code>; blueprint, not expanded primitives.</td></tr>
+<tr><td><code>scopes</code></td><td><code>StFile.matches</code> + <code>StFile.scopes</code> → <code>build_scope_tree()</code></td><td>Global state and template scopes; compiler-context projection.</td></tr>
+<tr><td><code>state</code></td><td>assembled <code>StFile</code> → <code>analyze_state()</code></td><td>Declaration/read/write provenance and const/reactive/dead verdict.</td></tr>
+<tr><td><code>ir</code></td><td>matches + definitions → <code>compile_verbose()</code> → expanded primitives</td><td>Typed JS/CSS fragments; before emission.</td></tr>
+<tr><td><code>emit</code> (<code>emission</code>)</td><td>assembled <code>StFile</code> → <code>Compiler::from_ast().compile()</code></td><td>Final CSS + JS; full compiler path.</td></tr>
+</tbody></table>
+  <h2>Production stages vs. inspect names</h2>
+  <pre class="diagram mermaid">flowchart LR
+    A["MetaRegistry bootstrap"] --&gt; B["parse"] --&gt; C["import resolution + macro rematch"] --&gt; D["evaluate"] --&gt; E["resolve"] --&gt; F["sort"] --&gt; G["expand_typed"] --&gt; H["emit_typed"]
+    A -. "registry, dispatch" .-&gt; A
+    B -. "parse" .-&gt; B
+    C -. "keyframes, expansion, scopes, state" .-&gt; C
+    G -. "ir" .-&gt; G
+    H -. "emit" .-&gt; H</pre>
+  <p class="note"><code>keyframes</code> and <code>expansion</code> are source-level views, not one-for-one production pipeline boundaries. Use <code>ir</code> to see typed per-invocation expansion.</p>
+  <h2>Commands</h2><pre><code>cargo run -- inspect --layer registry
+cargo run -- inspect --layer dispatch --probe '@scroll hero(start: 0, end: 1) { opacity: 0 -&gt; 1; }'
+cargo run -- inspect --layer parse path/to/page.st
+cargo run -- inspect --layer keyframes path/to/page.st
+cargo run -- inspect --layer expansion path/to/page.st
+cargo run -- inspect --layer scopes path/to/page.st
+cargo run -- inspect --layer state path/to/page.st
+cargo run -- inspect --layer ir path/to/page.st
+cargo run -- inspect --layer emit path/to/page.st</code></pre>
+</main><script type="module">import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs'; mermaid.initialize({startOnLoad:true,securityLevel:'strict'});</script>    <link rel="stylesheet" href="../spacetime.css" />
+    <script src="../spacetime.js"></script>
+</body>
+</html>

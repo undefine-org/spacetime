@@ -1,0 +1,287 @@
+#+TITLE: @scene / @play / @timeline+@score — nesting model pressure-tested against real ST
+#+DATE: 2026-07-18
+#+STATUS: design v2 — supersedes the "construct triad" nesting in stdlib-video-timeline-language-design.org (constructs kept; nesting corrected against real code)
+
+* Method
+
+Compared the draft against real ST anatomy:
+- =stdlib/showcases/hero/motion.st= — @template body is PURE markup (HTML
+  literals + holes); style/behavior attach in selector blocks below.
+- =examples/mobile-tasks/= — the idiom is a *layered* project:
+  =index.st= (markup) / =animations.st= (selector → =@on visible
+  name(600ms) { .child { keyframes; stagger; range: 0.3 to 1 } }=) /
+  =states.st= / styles. Behavior attaches BY SELECTOR, cascade-style.
+- =stdlib/editable=: =@editable-block &columns(&left, &right) { … }= —
+  top-level @-declaration with &-entity head. Precedent for @play &scene.
+- =stdlib/3d=: directives nest inside selector blocks (=canvas.hero {
+  @stage { @object … } }=).
+
+Findings that correct the draft:
+1. Markup NEVER appears inside selector/directive keyframe bodies; the draft's
+   =@scene &intro { h1 { "Spacetime" @in fade-up } }= was not ST. Scene bodies
+   must be =template= blocktype (HTML literals + holes), like @template.
+2. Within-clip sub-spans ALREADY have syntax: =range: X to Y= inside keyframe
+   bodies. The scene choreography layer is today's =@on=-body shape verbatim —
+   only the driver changes (scene span instead of visibility event).
+3. =stagger=, =easing: &ease-out-expo=, multi-selector bodies — all reusable
+   as-is. The choreography language costs ZERO new grammar.
+
+* The nesting decision (with rejected alternatives)
+
+| Decision | Chosen | Rejected | Why |
+|----------+--------+----------+-----|
+| scenes vs timeline | scenes TOP-LEVEL (like @template); timeline references them | scenes nested inside @timeline | nesting forces one-file monoliths; kills catalog reuse (a lower-third must drop into any score) and re-scoring (same scenes, scroll vs time) |
+| markup vs choreography | markup in scene body; keyframes in @play blocks (selector→keyframes) | inline animation directives in markup | violates the content/behavior layering every real project uses; keeps scenes pure content = reusable, stylable |
+| score vs timeline body | explicit @score block inside @timeline | timeline body = score lines directly | timeline body also hosts media/caption decls + options; separate blocktype keeps the line grammar unambiguous |
+| arrangement vs content | placement ONLY in score (at/after/for/during) | scenes self-place | a scene must not know where it sits; same scene, many scores |
+| choreography vs score | keyframes ONLY in @play | keyframes on score lines | score stays a readable arrangement; motion detail lives with the selectors it targets |
+
+∴ Four layers, mirroring the proven project anatomy:
+
+| Video layer | Construct | mobile-tasks analog |
+|-------------+-----------+---------------------|
+| content | =@scene &name(params) { markup }= | index.st @template |
+| choreography | =@play &scene { sel { keyframes } }= | animations.st @on blocks |
+| arrangement | =@timeline &film(driver) { @score { … } }= | (new — the layer HTML never had) |
+| mount | =`&film`= in page markup | template invocation |
+
+One-file is still legal (catalog block = scene + inline @play + defaults in a
+single =.st=); layering is idiomatic for projects.
+
+* Final grammar
+
+** =@scene= — content (a template with a span calling convention)
+
+#+begin_src spacetime
+@scene &intro($title = "Spacetime", for: 3s) {
+  <hgroup class="intro">
+    <span class="intro__kicker">A language for the web's spacetime</span>
+    <h1 class="intro__title">`$title`</h1>
+  </hgroup>
+}
+#+end_src
+
+- Literally sugar over =@template=: adds a default span (=for:=) and yields
+  clip-local signals to its subtree: =$t=, =$progress=, =$phase=.
+- ∴ ANY component can be scored (span args at the score line); =@scene= just
+  bundles the default duration + signal scope. Catalog blocks are plain
+  components — imported, typed params, no copy-install.
+
+** =@play= — choreography (today's @on body, scene-driven)
+
+#+begin_src spacetime
+@play &intro {
+  .intro__title  { opacity: 0 -> 1; translate-y: 40px -> 0;
+                   easing: &ease-out-expo; range: 0 to 40% }
+  .intro__kicker { opacity: 0 -> 1; range: 20% to 60%; stagger: 0.06 first }
+}
+#+end_src
+
+- Top-level with =&scene= head (precedent: =@editable-block &name=), or bare
+  =@play { … }= inside a scene body (self-scoped) for one-file blocks.
+- Body IS the existing keyframes blocktype: selectors, =->= chains,
+  =range: X to Y= sub-spans, =stagger=, =easing: &ref=, =with spring(…)=.
+  Zero new grammar in the body.
+- Enter/exit presets remain sugar: =@in fade-up(400ms)= ≡ a range-pinned
+  =@play= fragment riding =:entering/:exiting=.
+
+** =@timeline= + =@score= — arrangement
+
+#+begin_src spacetime
+@audio &bgm(src: "assets/bgm.mp3")
+@audio &voice(src: "assets/vo.mp3")
+@captions &subs(src: "assets/vo.vtt", style: &caption-karaoke, follow: &voice)
+
+@timeline &film(time, size: 1920x1080) {
+  @score {
+    &intro -> whip-pan(300ms) -> &features(for: 6s) -> fade(400ms) -> &outro
+    &lower-third(name: "Ada Lovelace", role: "Analyst", at: 2s, for: 3s)
+    &bgm(gain: 0.6, duck: &voice, during: &intro to &outro)
+    &voice(at: 1s)
+    &subs
+  }
+}
+#+end_src
+
+- line = track (stave); vertical order = z-order; no track indices.
+- step = =&entity(args)= | transition | =gap(d)= | =hold(until: …)=.
+- placement: =at:= absolute · =after: &x= · =for:= override · =during: A to B=
+  (score-level) vs =range:= (clip-local, existing). Same =to= keyword as today.
+- =fps= is a *render* parameter (CLI/@render config), not a timeline property —
+  live playback is rAF; capture rate is the encoder's business. =time= is bare.
+- =size:= optional design aspect; scenes are responsive CSS ∴ one composition
+  renders 16:9 AND 9:16 (HyperFrames comps are fixed-dimension — real edge).
+
+** Mount
+
+#+begin_src spacetime
+<main>
+  <section class="hero">`&film`</section>
+</main>
+#+end_src
+
+A timeline is an entity; placing it mounts transport + scenes. Video-only
+projects use the timeline file as entry (render CLI needs no mount page).
+
+* Pressure tests
+
+** 1. Launch film → §grammar above. Full anatomy:
+scenes.st (content) · motion.st (@play blocks) · film.st (@timeline) ·
+index.st (mount). Same layering as mobile-tasks.
+
+** 2. Scrollytelling — same scenes, different driver
+
+#+begin_src spacetime
+@timeline &story(scroll(cover)) {
+  @score {
+    &fact-income(for: 30%) -> &fact-mobility(for: 40%) -> &fact-map
+    &chart-race(during: &fact-income to &fact-mobility)
+  }
+}
+<article class="scrolly" style="height: 400vh">`&story`</article>
+#+end_src
+
+Durations in =%= (measure-typed: =3s= under scroll = compile error, suggesting
+=%=). Scroll length comes from the mount element's height — standard CSS.
+Sticky positioning inside scenes is plain CSS. Native rail:
+CSS Scroll-Driven Animations (=animation-timeline: scroll()=) when easing is
+CSS-expressible, JS scroll-driver fallback — same =%if= dispatch as animate.st.
+
+** 3. Deck / slideshow — steps driver + holds
+
+#+begin_src spacetime
+@timeline &deck(steps(advance: click | key(" "))) {
+  @score {
+    &title-slide -> &problem -> &solution -> &pricing -> &close
+    &presenter-notes
+  }
+}
+#+end_src
+
+Fragments = =range:= sub-spans within the step's =@play= (a fragment is a
+sub-span reveal — the existing =range= concept, no new syntax). Branching
+lives in scene bodies via existing state machines (=states.st= layer), NOT in
+the score — score stays a DAG. Presenter notes = a scene on its own track that
+the presenter-mode mount shows and the audience mount hides (plain CSS/@when).
+
+** 4. Interactive pauses in time — =hold=
+
+#+begin_src spacetime
+&intro -> hold(until: click) -> &demo -> hold(until: $form.valid) -> &outro
+#+end_src
+
+=hold= is a score step: transport pauses until predicate. Render policy:
+=--holds collapse= (default) or =--holds duration=2s=. Unifies interactive
+video + guided product tours with the same score language.
+
+** 5. Music video — media driver, beat units
+
+#+begin_src spacetime
+@audio &track(src: "assets/song.mp3", bpm: 128)
+@timeline &mv(media(&track)) {
+  @score {
+    &cover(for: beat(16)) -> cut -> &verse-type(for: beat(32)) -> &chorus-burst
+    &flash(at: beat(48), for: beat(1))
+  }
+}
+#+end_src
+
+=beat(n)= is a measure unit unlocked by the driver (bpm declared on the
+media entity) — the unit-typing rail demonstrating itself. (Impl: beats →
+seconds at compile; live beat-detection deferred.)
+
+** 6. Karaoke captions — data-driven scene
+
+=@captions= compiles VTT cues → spans; =style: &caption-karaoke= is a catalog
+component receiving =$word/$progress=. Native rail: =<track>= + ::cue where the
+style fits; DOM overlay tier otherwise (fidelity-laddered, like everything).
+
+** 7. Batch / template video — @each in score
+
+#+begin_src spacetime
+@data fetch $reps : "/api/reps.json";
+
+@timeline &per-rep(time) {
+  @score {
+    &intro-card(name: $rep.name)
+    @each $slide in $rep.wins { &win-slide($slide, for: 3s) -> fade(200ms) }
+    &outro-card(cta: $rep.cta_url)
+  }
+}
+#+end_src
+
+=@each= already exists; allowing it in @score = data-driven arrangement.
+=render --data reps.json= → one MP4 per row. (HyperFrames needs Lambda +
+--variables machinery; we get it from the data system.)
+
+** 8. 3D choreography — score addresses stage entities
+
+#+begin_src spacetime
+@scene &product-spin(for: 4s) {
+  <canvas class="stage3d"></canvas>
+}
+.stage3d { @stage(fov: 32) { @object &phone gltf("assets/phone.glb") } }
+
+@play &product-spin {
+  &phone { pose: flat() -> tumble(0,0,1, 60deg); range: 10% to 90% }
+}
+#+end_src
+
+=@play= bodies accept 3d entity heads (=&phone=) with pose keyframes —
+kills =@pose-track objectIndex= (entities are named). One choreography
+language over DOM + 3D + audio.
+
+** 9. Testing — inherited
+
+#+begin_src spacetime
+@test "intro title fully revealed by 40%" {
+  @mount { `&film` }
+  @clock install
+  @clock advance 1200          // 40% of 3s
+  @then .intro__title { opacity_is(1); }
+}
+#+end_src
+
+=@clock advance= means virtual time / virtual scroll / virtual steps uniformly.
+Golden frames: seek transport, capture on paint rung (CDP), diff.
+
+* Standards-compliance map
+
+| Driver / feature | Native rail (preferred) | Fallback |
+|------------------+-------------------------+----------|
+| time | WAAPI =document.timeline=, framework-owned =Animation.currentTime= | rAF driver |
+| scroll | CSS Scroll-Driven Animations (=animation-timeline: scroll()/view()=) | existing scroll-driver JS |
+| media | =HTMLMediaElement= as timebase (=currentTime=, =seeked=) | — |
+| captions | WebVTT =<track>= + =::cue= | DOM overlay tier |
+| keyframes (linear, numeric) | pure CSS (existing =%if= in animate.st) | JS interpolation |
+| holds | =Animation.pause()= | driver gate |
+
+The compiler picks the native rail per driver exactly the way animate.st
+already picks CSS vs JS — same dispatch pattern, extended. Markup stays valid
+HTML; scenes are responsive CSS components; nothing requires custom JS
+(AGENTS rule holds).
+
+* What changed vs design v1 (delta record)
+
+1. Scenes moved OUT of @timeline body → top-level decls. (Reuse/catalog.)
+2. In-scene markup is =template= blocktype — HTML literals, not the fake
+   nested-DSL of the v1 sketch.
+3. Choreography extracted to =@play &scene= — the @on body shape verbatim;
+   =range/stagger/easing= reused; =@in/@out= demoted to presets over it.
+4. =fps= moved to render config; =time= driver is bare.
+5. =hold(until:)= added as a score step (interactive video, tours, decks).
+6. =beat(n)= noted as driver-unlocked measure unit.
+7. =@each= allowed in @score (batch/template video).
+8. =@play= accepts 3d entity heads → one choreography language, pose-track
+   footgun deleted.
+
+* Still open (carried from v1, refined)
+
+1. DOM transition snapshots: CSS cross-fade tier vs GPU snapshot tier —
+   fidelity-ladder them; shader transitions require the 3d rail. (Unchanged.)
+2. =$phase= variant type vs string — prefer variant via match-render rail.
+3. =&scene { }= as selector-block head (styling a scene root from outside):
+   NOT needed by this design (@play carries the head; styles target classes) —
+   dropped from the proposal.
+4. Nested timeline clock parenting default-on: confirmed default; opt-out
+   param name TBD at impl.

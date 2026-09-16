@@ -1,0 +1,466 @@
+#+TITLE: SIP-001 W3.6 — Signal-Subject Syntax Showcase (pre-approval)
+#+DATE: 2026-07-26
+#+STATUS: DESIGN PROPOSAL — nothing in this document compiles yet. Approval gate for PLAN-126.
+
+* 0. What this is
+
+Every surface PLAN-126 proposes, shown with its behavior and its edge cases,
+BEFORE implementation. Approval of this document = approval of the syntax.
+Anything not shown here is not in the wave.
+
+Decisions already made (implementation report D24–D26): timelines are signals
+(`as $name`); `.` = typed facet access (one meaning); `.done` is a PROPERTY
+of progress bindings, edges come from the existing arms machinery;
+`@wscroll/@wload/@wloop` delete; FUP-153→152 after W4; BUG-247/248/249 after
+syntax settles.
+
+* 1. THE CORRECTION this showcase forced (read first)
+
+The implementation report's Q2 framed `@value-change` as
+"signal-driven inline keyframes":
+
+#+begin_src
+@value-change count(duration: 500ms) { font-size: 14px -> 24px; }
+#+end_src
+
+**That shape does not exist in the repo.** Measured (all 6 uses — zeystudios
+×5, ora-ventures ×1):
+
+#+begin_src
+.zey-print__qty-value {
+  @value-change(duration: 250ms, stagger: 30ms, from: "center") {
+    :entering { translate-y: -50% -> 0;  opacity: 0 -> 1; }
+    :exiting  { translate-y: 0 -> 50%;   opacity: 1 -> 0.5 -> 0; }
+  }
+}
+#+end_src
+
+The real `@value-change`:
+- has NO signal subject — it observes the ELEMENT'S TEXT CONTENT (the text
+  changes because of `@cycle` or a text binding elsewhere);
+- has a TWO-SLOT consequence body (`:entering` / `:exiting`), not keyframes;
+- is a CHARACTER-LEVEL animator (stagger per character, DOM diffing).
+
+∴ It is an ELEM-subject driver, not a signal-subject one, and the generic
+"signal drives inline keyframes" case has ZERO measured usage. §7 presents
+both the corrected migration and what this does to the approved `.change`
+facet (re-decision point, flagged honestly).
+
+* 2. The model in one page
+
+**Subjects** are things you observe. Sigil = resolution rail:
+- `&name` — element rail (ST.ref). `&self`/bare = the scope owner.
+- `$name` — signal rail (scope / ST.resolve).
+
+**Facets** are what `.` means — the ONLY thing it means. A facet is a typed,
+registry-declared member of a subject type:
+
+| facet        | declared on        | type              | meaning                        |
+|--------------|--------------------|-------------------|--------------------------------|
+| visible      | elem               | driver<progress>  | intersection ratio as progress |
+| scroll       | elem               | driver<progress>  | scroll position as progress    |
+| hover/click/… | elem              | driver<event>     | DOM events                     |
+| text-change  | elem  (NEW)        | driver<event>     | text content changed           |
+| change       | signal (NEW)       | driver<event>     | value changed                  |
+| done         | progress-signal (NEW) | bool           | progress reached 1             |
+| prev         | signal (NEW)          | value          | previous value (mount: initial)|
+| running      | progress-signal (NEW, planned:) | bool | 0 < progress < 1     |
+| <data props> | any value          | value             | `$user.name`, `$brand.rule`    |
+
+**Types are inferred, never annotated.** `as $reveal` on a
+`value_type: progress` driver binds a progress-signal. Plain `state`/bound
+signals are `signal`. progress-signal <: signal (inherits `change`).
+
+**Body-less statements carry `:` before the consequence (D28, D30):**
+=@on &hero.visible(threshold: 0.2): --rise(distance: 8px);= — `:` introduces
+a VALUE (the sigil discipline), `{ }` is choreography. No braces => colon.
+The convention PREDATES the ruling: =:entering { } / :exiting { }= already
+used colon-slots — D28 generalizes it (params, statement consequences,
+named body slots: one sigil, one meaning). Consequences after `:`: a form
+application OR a mutation — =@on &.click: $open <- !$open;= (D30, reuses
+the body mutation dispatcher). Naming binds BEFORE the colon:
+=@on &.scroll(start: 0.2) as $reveal: --parallax;=.
+
+**Bool subjects in statement position desugar (D30):**
+=@on $reveal.done: --rise;= ≡ =@on $reveal.done { true => --rise; }= — a
+COMPILE-TIME desugar onto the arms path (one mechanism, two spellings; no
+second dispatcher). The sugar is the LATCH shape: fires on false->true, no
+auto-reverse — gates need both arms explicit in braces. Generalizes to any
+bool signal: =@on $open: --slide-down;=. Other type mismatches in statement
+position still error (E0950, teaching message).
+
+**Grammar positions are type-checked consumers:**
+- `@on <head>` wants a driver (bare `$sig` ⇒ arms surface, unchanged)
+- arms heads and reactive CSS want values
+
+Uninferrable or mismatched ⇒ compile-time error. Never a silent default.
+
+* 3. Core syntax — the happy paths
+
+** 3.1 Naming a timeline (typed publication)
+
+#+begin_src
+.hero {
+  @on &.scroll(start: 0.2) as $reveal {
+    opacity: 0 -> 1;
+    translateY: 24px -> 0;
+  }
+}
+#+end_src
+
+The head grammar is UNIFORM: =& <subject?> . <facet> ( <params?> )= — the dot
+is always present, only the subject is optional. =&.scroll= = the host
+element's scroll facet; =&hero.scroll= = hero's scroll facet (W3.5
+cross-element observation). =&scroll= is NOT a driver — =&x= always names an
+element; observing is always =.facet= on one. The parens CONFIGURE the
+observation (params flow to the registry entry's primitive); nothing is
+"called" on the element.
+
+Behavior: the driver publishes its progress into the scope as the signal
+`reveal`. The publication rail ALREADY EXISTS (W3 driver-only bodies emit
+`ST.set(el, "page", progress)`) — `as` names it and enables it alongside a
+full body. Type: progress-signal (inferred from scroll's
+`value_type: progress`).
+
+** 3.2 Progress as data
+
+#+begin_src
+.progress-bar { width: $reveal; }              /* 0..1 → 0%..100% via a form */
+.reading-time { opacity: $reveal > 0.5 ? 1 : 0.4; }
+#+end_src
+
+Reads flow through the existing reactive-signal machinery (the path BUG-250
+hardened). Nothing new here — that is the point.
+
+** 3.3 Sequencing — `@after` replaced
+
+#+begin_src
+.subtitle {
+  @on $reveal.done { true => --rise(distance: 12px); }
+}
+#+end_src
+
+`.done` is a bool PROPERTY (lowering: `progress >= 1`). The EDGE comes from
+the existing arms runtime — no new driver, no new primitive, no
+ST.timelines. Gate semantics (W3.3): fires when done flips true, reverses
+when it flips false. Latch variant (fire once, on the transition only):
+
+#+begin_src
+.subtitle {
+  @on $reveal.done { false -> true => --rise; }
+}
+#+end_src
+
+The arm SHAPE chooses gate vs latch — W3.3's existing distinction, not a
+declaration.
+
+** 3.4 `.done` in expressions
+
+#+begin_src
+.badge { opacity: $reveal.done ? 1 : 0; }
+#+end_src
+
+** 3.5 Signal-driven keyframes — `.change` (BUT see §7)
+
+#+begin_src
+.badge {
+  @on $count.change(duration: 500ms) {
+    font-size: 14px -> 24px;
+  }
+}
+.cart {
+  @on $total.change: --pulse;             /* statement shape, same driver */
+}
+#+end_src
+
+`change` is a driver<event> facet of every signal; driver params ride the
+head. The one-shot replay subscribes via ST.watch; on each change it plays
+the body over `duration:`.
+
+** 3.6 Element subjects — unchanged
+
+#+begin_src
+.card {
+  @on &hero.visible(threshold: 0.2): --rise(distance: 8px);
+  @on &.scroll(start: 0.1) { translateY: 40px -> 0; }
+  @on &.click { $open <- !$open; }
+}
+#+end_src
+
+** 3.6b One-liner mutations and the bool sugar (D30)
+
+#+begin_src
+.menu  { @on &.click: $open <- !$open; }
+.toast { @on $saved: --flash; }          /* bool signal: when saved flips true */
+.intro-done-badge {
+  @on $reveal.done: --pop;               /* ≡ { true => --pop; } — latch shape */
+}
+#+end_src
+
+** 3.7 Naming a NON-time driver
+
+#+begin_src
+@on &hero.visible(threshold: 0.5) as $seen {
+  opacity: 0 -> 1;
+}
+.analytics-dot { opacity: $seen > 0 ? 1 : 0; }
+#+end_src
+
+`visible` is `value_type: progress` (intersection ratio) — it publishes too.
+`$seen.done` = "fully visible at least once / currently fully intersecting".
+
+** 3.8 Arms — untouched
+
+#+begin_src
+.panels {
+  @on $tab { "a" => --show-a; "b" => --show-b; _ => --show-fallback; }
+}
+#+end_src
+
+** 3.9 `.prev` — the previous value, anywhere expressions live (D31-ii)
+
+#+begin_src
+@data derive $dir : $price > $price.prev ? "up" : "down";
+
+.ticker { color: $price > $price.prev ? #16a34a : #dc2626; }   /* direction as DATA */
+.stock  { @on $dir { "up" => --flash-up; "down" => --flash-down; } }
+#+end_src
+
+At mount, `.prev` = the initial value (mirrors the arms primed-guard — no
+phantom "undefined" previous). Value-typed: legal in reactive CSS, derives,
+guards, and (post-FUP) fire-time consequences. NOT legal in driver
+position: `@on $price.prev { }` => E0950.
+
+** 3.10 Arm guards + binding patterns — value-reactive dispatch (D31-iii)
+
+#+begin_src
+.stock {
+  @on $price {
+    $old -> $new where $new > $old      => --flash-up;
+    $old -> $new where $new - $old > 10 => --flash-big;
+    _                                   => --flash-neutral;
+  }
+}
+#+end_src
+
+Patterns extend: `$old -> $new` BINDS the pre/post values (usable in the
+guard); `where <expr>` filters at MATCH time (the arms runtime already
+tracks prev). `$` in pattern position INTRODUCES a binding — a documented
+positional extension (everywhere else `$x` reads). Guards do NOT change
+consequence resolution: form args still bake at compile time (dynamic args
+= FUP, §8). All matching arms play (status quo); guards only filter. The
+`$old -> $new` guard form composes with the D30 bool sugar: it desugars to
+a true-arm, guards still apply on top.
+
+* 4. Admissibility — what errors, and the diagnostic shape
+
+All errors are compile-time, registry-driven, and list the registered
+alternatives. (Codes: E0948 unknown facet, E0949 wrong subject type, E0950
+NEW wrong facet-type-for-position / unbound timeline.)
+
+| # | you write                        | error  | because |
+|---|----------------------------------|--------|---------|
+| 1 | `@on &hero.change { }`           | E0949  | `change` is declared on signal, not elem |
+| 2 | `@on $count.visible { }`         | E0949  | `visible` is declared on elem, not signal |
+| 3 | `@on $brand.rule: --x;`            | E0950  | `rule` is entity DATA (not bool, not driver) — only bools get the D30 sugar |
+| 4 | `width: &hero.visible;`          | E0950  | driver-typed facet in value position |
+| 5 | `@on $reveal.done { }` (no `as $reveal` in scope) | E0950 | uninferrable subject type — declare the binding |
+| 6 | `@on $reveal.doen { }`           | E0948  | unknown facet; message lists facets valid for progress-signal (`done`, `running`, `change`, + data properties) |
+| 7 | `@on $count.done { }` (`$count` a plain signal) | E0949 | `done` is declared on progress-signal; `$count` is signal |
+| 8 | `@on $count.change { "a" => --x; }` | E0950 | arms bodies consume VALUES; `.change` yields a driver. Use `{ … keyframes … }` or `--form;` |
+| 9 | `@on $count { font-size: 14px -> 24px; }` | E0950 | keyframes bodies consume DRIVERS; a bare signal takes arms. (This is the old @value-change-shaped mistake, caught.) |
+| 10 | `@on $reveal.running: --x;` | E0950 | `running` is planned: — known word, loud refusal until its wave (D2) |
+| 11 | `@on $price.prev { }` | E0950 | `prev` is value-typed; arms need a SIGNAL, drivers need a DRIVER. Use `@on $price { … }` |
+| 12 | `@on $price { $old -> $new where }` | parse | empty guard expression — the grammar requires `where <expr>` |
+
+* 5. The namespace-collision rule (the deepest edge)
+
+`.done` is a language facet; `.name` in `$user.name` is user data. One rule
+decides which:
+
+**The subject's KNOWN type decides. Unknown type ⇒ data property (status
+quo, backwards compatible).**
+
+#+begin_src
+$user.done        /* $user untyped, holds an object → member access, as today */
+$reveal.done      /* $reveal progress-typed via `as` → FACET, lowers to >= 1 */
+$brand.rule       /* entity data → member access, as today */
+#+end_src
+
+Consequences:
+- User objects with a `done` field are UNAFFECTED (untyped ⇒ property).
+- The sharp edge: an untyped signal that actually holds progress has no
+  facets — by design. Facets require the type; the type requires `as`.
+- Reserved-name hazard is bounded to progress-typed subjects, which never
+  have user-defined fields (they publish a number).
+
+* 6. Semantic edge cases
+
+** 6.1 Scrub reversal (the latch question, dissolved)
+A scroll timeline can scrub BACK: progress drops below 1 → `done` flips
+false → a `true =>` gate arm reverses (subtitle un-rises). INTENDED:
+reversible storytelling. Want latch? `false -> true =>` (fires on the
+transition only). Time drivers clamp at 1 → natural latch. Verified:
+scroll-driver clamps progress to [0,1] exactly (drivers.st:96).
+
+** 6.2 Initial evaluation — arms do NOT fire at mount
+Verified (signal-arms.st: the `primed` guard): the previous value starts at
+the CURRENT value; an arm fires on the NEXT genuine change. Consequence: a
+page restored mid-scroll with `done` already true does NOT fire
+`true => --rise` until done re-flips. For scroll drivers this self-heals
+(the next scroll frame re-evaluates). For a latch chain that MUST fire when
+the predecessor is already complete at mount: out of v1 scope; documented.
+
+** 6.3 `.change` re-trigger during playback
+A change arriving while the one-shot replay runs RESTARTS the replay from
+the current visual state (matches the retired driver's behavior). No
+queueing.
+
+** 6.4 Reduced motion
+A driver with `reduced_motion: skip` publishes progress = 1 immediately.
+Chains still fire (`done` becomes true) — choreography preserved, motion
+skipped. This is a DESIGN POINT, not an accident: dependent content must
+never be stranded by reduced motion.
+
+** 6.5 Multiple consumers
+One publication, many readers: a progress bar (`width: $reveal`), an
+expression (`opacity: $reveal > 0.5 ? …`), and an arm
+(`@on $reveal.done { … }`) all read the same signal. No fan-out cost beyond
+the existing signal store.
+
+** 6.6 Duplicate binding
+Two `as $reveal` in one scope ⇒ compile error (duplicate binding), same
+class as a duplicate `state $x`.
+
+** 6.7 Scope
+`as` publishes into the @on's scope (selector scope ⇒ that subtree; file
+scope ⇒ the page). Readers outside the scope ⇒ unknown signal ⇒ the
+existing unknown-signal error. Cross-FILE timeline references: not in v1
+(§8).
+
+** 6.8 `@on $reveal { 1 => --x; }` — float-equality trap
+Patterns match by STRICT equality (signal-arms.st: `v === m`). Progress is
+a float; exact `1` matches only at the clamp. Legal but almost never what
+you want — the linter suggests `.done`. Not an error: pattern-matching on
+floats is the author's foot-gun to keep (consistent with arms on any
+number signal).
+
+** 6.9 `.change` on a progress-signal (inherited facet)
+`@on $reveal.change { … }` fires PER PROGRESS TICK (per frame while
+scrubbing). Legal — the type lattice says progress-signal <: signal — but
+the linter warns: you almost always want `.done` or a threshold arm.
+
+** 6.11 The bool sugar is a LATCH, not a gate
+=@on $open: --slide;= fires when $open becomes true; nothing plays on
+becoming false. For reversible behavior write both arms:
+=@on $open { true => --slide-down; false => --slide-up; }=. The sugar never
+generates an implicit reverse — no silent behavior.
+
+** 6.12 `.prev` at mount and in rapid succession
+At mount `.prev` = the initial value. Two changes within one watch flush:
+`.prev` is the last FLUSHED value, matching the arms runtime's own prev
+tracking — one memory, one definition, no divergence between what guards
+see and what expressions see.
+
+** 6.13 Guard specificity is declaration-flat
+All matching arms play; guards filter, they do not rank. `$old -> $new
+where $new > 10` AND `_` both matching = BOTH consequences play (status quo
+for overlapping patterns). Authors wanting exclusivity write exclusive
+guards. No silent "first match wins".
+
+** 6.10 `running` is planned:
+`%registers driver(running) { primitive: planned:running … }` — the word is
+reserved and refuses loudly until its wave (D2 precedent), because "0 < p <
+1" for a scrub driver flickers per frame and its semantics deserve their
+own measurement.
+
+* 7. The `@value-change` migration, and the mechanism that implements all three facets
+
+The real directive (§1) is an ELEM text animator. Its mechanical target:
+
+#+begin_src
+.zey-print__qty-value {
+  @on &.text-change(duration: 250ms, stagger: 30ms, from: "center") {
+    :entering { translate-y: -50% -> 0;  opacity: 0 -> 1; }
+    :exiting  { translate-y: 0 -> 50%;   opacity: 1 -> 0.5 -> 0; }
+  }
+}
+#+end_src
+
+=text-change= = elem facet, driver<event>, with a TWO-SLOT consequence
+grammar. Cost honesty: the =:entering=/=:exiting= body is a consequence
+shape `@on` does not currently have — the facet's registry entry declares
+its body kind (=body: entering-exiting=), keeping variant-as-data. The
+existing =value-change-driver= primitive (pretext layout, grapheme
+segmentation, stagger) re-homes UNCHANGED as =text-change-driver=. Zero
+runtime rewrite.
+
+** The mechanism (implementation-verified): listener → transport → PUBLISHED SIGNAL
+
+Measured from the actual primitives:
+
+| facet         | observation                                | consequence              | new code |
+|---------------+--------------------------------------------+--------------------------+----------|
+| =done=        | NONE — lowering: =resolve('reveal') >= 1= as a derived signal | arms runtime (exists) | a lowering rule |
+| =change=      | =ST.watch(node, name, cb)= (~3 lines)      | one-shot transport -> body replay | thin primitive over the shared transport |
+| =text-change= | =MutationObserver{characterData…}= (drivers.st:940, 5 lines) | char choreography | re-home existing primitive UNCHANGED |
+
+Every driver is =listener -> transport -> progress=. The rot the mechanism
+deletes: the ST.timelines complex exists ONLY to serve @after — measured
+10 =ST.timelines.register= copies + 8 =handle.setProgress/complete= calls
+across driver primitives, plus =after-driver= itself (drivers.st:1520),
+plus the =name:= param threaded through every driver's %binds. Making the
+publication first-class (=as $name= names the EXISTING %yield/ST.set rail)
+deletes all 19+ sites at once.
+
+** Elegance-bar verdict (the §7 decision, resolved)
+
+=.change= individually deletes nothing — but the bar applies to MECHANISMS,
+and the mechanism here (publication + facets) deletes the 19-site
+timelines-registry complex. =change= is an INSTANCE of that mechanism (one
+registry row + one thin listener primitive), not a new subsystem; =done= is
+a pure lowering; =text-change= is a re-homing. ∴ ALL THREE ship in
+PLAN-126 — (alpha′), with the justification corrected from "completes the
+lattice" (speculative) to "instance of the deleting mechanism" (measured).
+
+* 8. Deferred (explicitly NOT this wave)
+
+- Cross-file timeline references (needs import-visible bindings)
+- `running` facet (planned: marker, §6.10)
+- User-defined facets (the registry is open in principle; stdlib-only v1)
+- Facet chaining (`$a.b.c` beyond data properties)
+- Elem value-facets (`&hero.bounds` — needs an observer-backed readable
+  facet class; attractive, unprobed)
+- Mount-time latch chains (§6.2)
+- DYNAMIC consequence args / keyframe endpoints (fire-time evaluation —
+  `$old -> $new => --flash(strength: $new - $old)`,
+  `scale: $zoom.prev -> $zoom;`): FUP-156, the SIP candidate
+- Compositor eligibility (post-W4 research spike; `@w*` deleted regardless)
+
+* 9. What deletes (net accounting)
+
+| deleted | subsumed by |
+|---|---|
+| ST.timelines string registry | `as $name` publication (existing rail) |
+| `@after` + `after-driver` (drivers.st:1520) | `@on $x.done { true => … }` |
+| ST.timelines blocks: 10 register copies + 8 handle calls | `as $name` publication (existing %yield rail) |
+| `name:` param threaded through every driver's %binds | gone with the registry |
+| `@value-change` | `@on &.text-change` (elem facet) |
+| `@wscroll/@wload/@wloop` | — (deleted outright) |
+| `.` overload (data vs observation) | typed facet access — ONE meaning |
+
+Added: `as` clause grammar · subject sigil in driver_expr · facet-type
+checking (one analysis pass, mirrors drivers.rs) · 2 registry entries
+(`text-change`, `change` as planned:) · 1 re-homed primitive · the
+arms-head grammar accepting facet paths (`$signal:binding` → facet path).
+
+* 10. Approval checklist
+
+- [ ] The facet lattice (§2) — types inferred, positions type-checked
+- [ ] The collision rule (§5) — known type decides, unknown ⇒ property
+- [ ] Scrub-reversal semantics (§6.1) — gate by default, latch by arm shape
+- [ ] Arms-no-mount-fire documented limitation (§6.2)
+- [ ] Reduced-motion chains fire (§6.4)
+- [x] The `.change` re-decision (§7): (α′) — all three facets ship, justified as instances of the deleting mechanism (implementation-verified)
+- [ ] `text-change` two-slot body as a registered body kind (§7)
+- [x] Value-reaction (D31): `.prev` facet AND arm guards both ship; dynamic args/endpoints deferred to FUP-156

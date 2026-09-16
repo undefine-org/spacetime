@@ -1,0 +1,662 @@
+#+TITLE: Spacetime Comments Pill — Design
+#+DATE: 2026-07-27
+#+STATUS: design proposal (pre-implementation)
+
+* Goal
+
+A "comments" pill in the =spacetime serve= dev dock: structured, typed
+comments that humans (pill UI) and agents (MCP / =check=) can create, read,
+update, and resolve — designed so the future agency tier (hosted, multi-user)
+reuses the SAME model, contract, and pill UX with a different transport.
+
+* Non-goals (v1)
+
+- No live multi-user collaboration (presence/CRDT) — that is the agency tier's
+  transport concern, not the model's.
+- No source rewriting from the pill (no prune, no inline-insert) in wave 1.
+- No rendered-element pinning (wave 2; reuses the inspector's pick mode).
+- Comments have zero compile effect — they are never part of the emitted page.
+
+* Ground truth (verified 2026-07-27)
+
+** Dev dock
+- The dock is MANUALLY assembled, not registry-driven:
+  =src/server.rs::host_widget_inject= (~L2928-2995) concatenates exactly three
+  widget HTML blobs (migrations, inspector, host), one =<link>= + one
+  =<script>= per widget, plus =DEV_DOCK_CSS= / =DEV_DOCK_EXCLUSIVE_PANELS_JS=.
+- Routes are registered in =src/server.rs::create_router_raw= (~L145-228).
+- Each pill is a pure .st file compiled at serve time by
+  =compile_*_widget_raw= (migrations L2425, inspector L2466) → (js, css, html).
+- Panel exclusivity is GENERIC: any element whose own class ends in =__pill=
+  inside =.st-dev-dock=, paired with =__panel=, gets the open/close policy for
+  free (=DEV_DOCK_EXCLUSIVE_PANELS_JS= L2379-2420, locked by
+  =dock_panel_policy_tests= L8058-8135). A fourth pill needs NO new policy code.
+- Pill anatomy (stdlib/migrations/__dev__/pill.st): =@data fetch= against a
+  status.json route with =refresh:= poll; derived signals; =@host= +
+  =@data signal= POST for mutations (apply pattern); CSS classes
+  =st-<name>-widget__pill= / =__panel=. Root markup MUST be file-scope HTML —
+  =compile_*_widget_raw= injects =compiled.html=; a template-only pill
+  compiles fine but injects empty HTML (documented in
+  stdlib/__inspector__/index.st L101-109).
+- Global reactive scope is shared across widgets → signal names must carry a
+  unique prefix (=$com…=).
+- Source write-back exists as a guarded dev-WebSocket rail (EditAst/EditJson,
+  =src/sync/handlers.rs= L163/L535, driven from
+  =stdlib/__inspector__/primitives/inspect-write.st=) with =source_hash= +
+  =span_text= expectations — wave 2 reuse for prune/inline-insert.
+
+** Comments in the compiler
+- The Rowan CST keeps COMMENT tokens losslessly (=src/syntax/cst/lexer.rs=
+  L310-332); the public AST drops them except =///= doc comments
+  (=src/parser/mod.rs::collect_doc_comment= L3549-3604).
+- =src/parser/comments.rs::extract_comments= is a standalone LEXICAL scanner:
+  text/start/end/1-based line/is_block, string-aware for double quotes. This
+  is the harvest primitive — no full parse needed to index comments.
+
+** MCP
+- Tools = descriptor in =src/mcp/tools.rs::list= (L23-231) + dispatch arm in
+  =call= (L233-258) + handler returning =Result<(String, Value), String>= with
+  access to =McpState= (workspace root, envs). No protocol.rs change needed.
+- Resources (=src/mcp/resources.rs=) are read-only JSON snapshots — good for a
+  comments resource + subscribe later; mutations must be tools.
+
+** Registry-as-data
+- =%migration= entries are parsed from .st into =MigrationDefAst=
+  (=src/parser/meta_ast.rs= L1170-1218 via =parse_migration_def=
+  src/parser/mod.rs L3874-3988) and registered as DATA
+  (=src/metasystem/registry.rs::register_migration= L291-364).
+- =%registers= records are queryable by category
+  (=registry.rs::entries_of= L701-789) — kinds-as-data, no closed Rust enums.
+- STDLIB_DIRS (=registry.rs= L123) is a fixed dir list; =__dev__= pill widgets
+  are deliberately excluded from registry loading (migrations carve-out:
+  only =stdlib/migrations/entries= is listed).
+- The default registry load is stdlib-scoped; project-scoped meta data needs
+  an EXPLICIT merge path — it does not exist today.
+
+** Single-scanner precedent (migrations)
+=PendingMigration= rows are recorded on =CompiledSpacetime= at compile time;
+the pill status route, =check=, and the CLI all read that ONE source
+(src/migrate.rs module doc, src/compiler.rs L1241-1276). No parallel scanners.
+
+** Agency tier
+research/spacetime-host-architecture.org L525-663: hosted v2 is an
+Elixir/Ash service owning orgs/groups/RBAC; Phoenix Channels/Presence (+CRDT
+later) for concurrent editing; Rust host stays system-of-record. src/sync is
+LOCAL dev-edit WS only — no auth/persistence/tenancy.
+
+* Decisions
+
+** D1 — Storage: hybrid, split by ROLE (not either/or)
+Two stores with distinct responsibilities:
+
+- INLINE in .st source: a typed comment FORM (D2) authored next to the code it
+  concerns. Content (text, type, meta) lives in source → reviewable in PRs,
+  greppable, travels with the code.
+- SIDECAR on disk: =<project>/.comments/<id>.json=, one file per comment.
+  Holds (a) workflow STATE for inline comments (status, claim, thread) keyed
+  by content-hash id, and (b) FULL records for comments that have no inline
+  home: non-.st files (JSON/CSS/assets — the user's edge case), page-anchored
+  notes, pill-created comments.
+
+Rationale: inline-only fails JSON (no comment syntax at all) and makes every
+status flip a source diff; sidecar-only loses in-context authorship and makes
+source-adjacent review comments second-class. One-file-per-comment mirrors
+the repo's own =!tasks= convention and is git-merge-friendly (ULID filenames
+never collide; thread appends rarely conflict).
+
+NOT gitignored (user's lean, confirmed here): comment state is team data —
+the agency tier needs it shared; PR review of comments is a feature. A
+=local: true= flag for scratch notes is a possible follow-up, not v1.
+
+** D2 — Inline form: a literal comment with directive grammar, =//@=
+#+BEGIN_SRC
+//@todo: replace this placeholder with real photography
+//@question: is this headline final? — asked by client 07-26
+//@agent-task(acceptance: "passes tests/hero.test.st"): swap hero image
+#+END_SRC
+Grammar: =//@= <type> [=(= key: value, … =)= ] =:= <text>, multiline via
+=//@>= body lines (see syntax section).
+
+Why a comment and not a new macro/@directive:
+- Zero grammar change — the lexer already yields COMMENT tokens; harvest is
+  the lexical scanner; old compilers ignore it gracefully.
+- Valid EVERYWHERE comments are (inside HTML, between attributes) where
+  directives cannot appear.
+- Learnable by pattern: it reads as the directive it requests
+  (=@type(meta): text= obeys the sigil rules — space introduces type,
+  colon introduces value). A macro would imply compile-time behavior, which
+  comments must NOT have.
+The =@= inside a comment is inert to the compiler; it is the tooling sigil
+for "actionable comment". (Decision point D-Q1 for the user.)
+
+** D3 — Identity: content-addressed for inline, ULID for sidecar
+- Inline: id = hash(file + normalized text). Survives line moves; a text edit
+  = a new comment. The previous sidecar record becomes ORPHANED → surfaced in
+  pill/=check= with re-anchor/dismiss actions. No source writes at scan time.
+- Sidecar-originated: ULID assigned at creation.
+
+** D4 — Anchors: tagged union
+#+BEGIN_SRC json
+{ "kind": "inline",  "file": "index.st", "line": 42 }
+{ "kind": "file",    "file": "data/site.json", "json_path": ".hero.title" }
+{ "kind": "page",    "route": "/" }
+{ "kind": "element", "route": "/", "selector": ".hero > h1" }   // wave 2
+#+END_SRC
+=json_path= reuses the sync EditJson path vocabulary (src/sync/protocol.rs).
+=element= reuses the inspector's pick mode + selector projection (wave 2).
+
+** D5 — Comment types are DATA declared in syntax: =%comment_type=
+Defaults ship as stdlib entries (=stdlib/comments/entries/*.st=), projects
+declare their own in =_prelude.st= (the auto-loaded project overlay — see
+Modularity). Adding a type = it appears in the pill
+type picker, the MCP tool schema/validation, and =check= validation — the
+"features from syntax for free" the user asked for.
+
+Form (parsed with the SAME meta_ast machinery as =%migration= — extended with
+a =CommentTypeDefAst=, never a bespoke regex parser; AGENTS rule):
+#+BEGIN_SRC
+%comment_type agent-task {
+  %label "Agent task"
+  %docs "Work item for an agent: do it, then mark resolved."
+  %field acceptance string      // space introduces a TYPE — sigil harmony
+  %field priority string?
+  %color "#e8a13d"
+  %agent_hint "Implement the requested change in place, run the acceptance
+               check, then set status: resolved with a reply describing the diff."
+}
+#+END_SRC
+
+Default roster (stdlib):
+| type       | shape                    | follow-up contract                          |
+|------------+--------------------------+---------------------------------------------|
+| =note=     | —                        | none (pure annotation)                      |
+| =todo=     | —                        | human/agent: do it, then resolve            |
+| =question= | —                        | answer in a reply; asker resolves           |
+| =bug=      | =severity string?=       | reproduce → fix → resolve with evidence     |
+| =design=   | —                        | design decision needed; reply with decision |
+| =agent-task= | =acceptance string=    | do it → verify acceptance → resolve w/ diff |
+
+Where types live mechanically (UPGRADED 2026-07-27): =%comment_type= is
+registry DATA from day one, loaded by the SAME path as stdlib — the compiler
+gains ONE general mechanism, the PROJECT OVERLAY: =<project>/_prelude.st=
+is auto-loaded into the MetaRegistry before any page compile (never routed,
+never a page; the =_= prefix matches the existing =_helpers.st= de-facto
+convention). The roster is a plain registry query — compiler, =check=, and
+MCP all read the same merged registry. No scanner substring-gate, no special
+file handling. The overlay is THE home for all project-scoped declarations:
+=%comment_type= today; project capture-types, =%role= (agency tier), and
+future kinds ride the same mechanism. Decomposition when _prelude.st grows:
+=@import= inside it (existing mechanism, no new convention).
+
+** D6 — ONE scanner, three readers (migrations pattern)
+New module =src/comments.rs=:
+=scan(project_root) -> { types: Vec<CommentTypeDef>, comments: Vec<CommentRecord> }=
+1. Lexically scan all project .st files (extend =parser/comments.rs= to parse
+   the =//@= payload) → inline records.
+2. Read =.comments/*.json= → sidecar records + state.
+3. Type roster = registry query on the merged registry (stdlib entries via
+   STDLIB_DIRS + project overlay =_prelude.st=); validate each record's type
+   + meta shape against it.
+4. Merge inline + sidecar state by id; flag orphans (sidecar id with no live
+   anchor) and stale anchors (file gone).
+
+Readers: the pill's status route, =spacetime check=, the MCP tools. NO second
+scanner anywhere — same invariant as migrations.
+
+** D7 — The pill (fourth dock widget)
+- =stdlib/comments/__dev__/pill.st=, classes =st-comments-widget__pill= /
+  =__panel= → dock exclusivity for free. Signals prefixed =$com=.
+- Routes (registered in create_router_raw, injected in host_widget_inject):
+  - =GET  /__spacetime/comments/status.json= — merged, filterable
+    (?route= / ?file= / ?status= / ?type=)
+  - =GET  /__spacetime/comments/types.json= — the roster (drives the picker)
+  - =POST /__spacetime/comments/add=     {type, anchor, text, meta?, author}
+  - =POST /__spacetime/comments/update=  {id, status?, reply?, text?}
+  - =…/runtime.js=, =…/styles.css= + =compile_comments_widget_raw=
+- v1 panel: open-count badge; list w/ type chips + status flow
+  (open → in-progress → resolved | wontfix) + =claimed_by=; reply thread;
+  add-form with type picker (page/file anchor). Orphan section.
+- Writes ride the migrations-apply pattern (=@host= + =@data signal= POST) —
+  no WebSocket needed since v1 never rewrites source.
+- Dock order: comments LEFTMOST (communication hub; migrations/inspector/
+  host keep their established rightward order — resolved D-Q3).
+
+** D8 — Agent pickup: MCP first, check second
+MCP tools (src/mcp/tools.rs, descriptor+dispatch+handler pattern; state via
+McpState workspace root, env → project dir):
+- =st_comments_list=   {env?, file?, status?, type?} → records + each type's
+  =agent_hint= INLINE (the follow-up instructions travel with the data)
+- =st_comments_add=    {env, type, anchor, text, meta?} (author.kind="agent")
+- =st_comments_update= {id, status?, reply?}
+- =st_comments_types=  {env?} → roster
+A read-only =comments://= resource (+subscribe) is wave 2.
+
+=spacetime check= gains a comments section: counts by status/type, one row
+per open comment (id · type · anchor · text · agent_hint), plus VALIDATION
+diagnostics (unknown type, meta shape mismatch, orphan, stale anchor).
+Informational — never fails the build.
+
+** D9 — Author + status model (agency-tier-ready from day one)
+#+BEGIN_SRC json
+{
+  "id": "01J…",
+  "type": "agent-task",
+  "status": "open | in-progress | resolved | wontfix",
+  "claimed_by": {"kind": "agent", "name": "spell"},
+  "author":  {"kind": "human|agent", "name": "…"},
+  "created_at": "…", "updated_at": "…",
+  "anchor": { "kind": "…" },
+  "text": "…",
+  "meta": { "acceptance": "…" },
+  "thread": [ {"author": …, "at": …, "text": …} ]
+}
+#+END_SRC
+Status is a closed 4-state enum — the runtime enforces every transition, so
+the enum earns its arms (AGENTS corollary). Everything else (types, anchors)
+is data.
+
+** D10 — Agency-tier mapping (designed-in, not retrofitted)
+| local v1                       | agency tier                              |
+|--------------------------------+------------------------------------------|
+| =.comments/*.json= sidecar     | Ash =Comment= resource (Postgres)        |
+| =/__spacetime/comments/*= JSON | hosted API, SAME shapes                  |
+| scanner merge                  | server-side query                        |
+| author.kind human/agent        | RBAC actor (org/group/permission)        |
+| type roster from syntax        | same — team types declared in project    |
+| pill talks to localhost URLs   | SAME pill .st, different base URL        |
+| git merge of one-file-per-id   | CRDT/presence only for live co-editing   |
+The pill being pure Spacetime (=@data fetch= / =@data signal=) is what makes
+UX parity free: the contract is the URLs + JSON shapes, nothing
+Rust-specific. ∴ keep the route shapes clean and versioned-feeling from v1.
+
+* Implementation waves
+
+- W1 — project overlay (_prelude.st hook in src/compiler.rs) + model +
+  scanner: src/comments.rs, parser/comments.rs payload parse, meta_ast
+  CommentTypeDefAst, stdlib default types (+ embedded-stdlib entry), sidecar
+  IO, merge + validation. Unit tests (parse/scan/merge/orphan/overlay).
+- W2 — serve surfaces: routes + status.json + types.json + add/update;
+  pill.st + compile/inject wiring; dock policy tests extended to 4 widgets;
+  integration tests for routes.
+- W3 — agent surfaces: 4 MCP tools; =check= comments section; integration
+  tests (MCP call round-trip, check output snapshot).
+- W4 — hardening: orphan/re-anchor UX, comments:// resource+subscribe,
+  prune-resolved (guarded WS write rail reuse), element anchoring (inspector
+  pick mode reuse), docs (docs/language/comments.md + AGENTS.md command list).
+
+Each wave colocates tests + docs in its commit (repo rule).
+
+* Decision points — RESOLVED 2026-07-27 (user-confirmed)
+
+- D-Q1 inline sigil: =//@type(meta): text= ✓
+- D-Q2 sidecar: =<project>/.comments/<id>.json=, one file per comment, ULID ✓
+- D-Q3 dock order: comments LEFTMOST; migrations/inspector/host keep order ✓
+- D-Q4 v1 anchors: inline + page + file; element-pin → W4 (inspector pick mode) ✓
+
+* Surface syntax (pending final approval)
+
+Every form below mirrors an existing Spacetime pattern — nothing invented.
+
+** Inline comments (=//@=) — valid anywhere a =//= comment is valid
+
+#+BEGIN_SRC
+//@: bare form defaults to type "note"
+//@note: this easing matches the brand motion spec §3
+//@todo: replace placeholder with real photography (assets/hero.jpg)
+//@question: is this headline final? — client review 07-26
+//@bug(severity: high): nav overlaps the CTA below 380px
+//@design: hero type scale intentionally breaks the 8pt grid — see tokens.st
+//@agent-task(acceptance: "cargo test --test integration_tests passes", priority: high): swap hero image to assets/hero-final.jpg
+#+END_SRC
+
+In context:
+#+BEGIN_SRC html
+<section class="hero">
+  //@agent-task(acceptance: "headless tests pass"): swap this image to assets/hero-final.jpg
+  //@> keep the 16:9 crop; check LCP after — the final is 800KB
+  //@>
+  //@> consider srcset while you're in there
+  <image src="assets/placeholder.jpg" alt="Placeholder hero — awaiting final photography" />
+  <h1>We build <em>quiet</em> software</h1>
+</section>
+
+// plain comment — unmarked lines are never absorbed
+#+END_SRC
+
+Grammar: =//@= <type-ident> [=(= key: value, … =)=] =:= <text> (+ =//@>= body lines).
+- Bare =//@:= = type =note=.
+- Meta parens mirror directive args (@doc(src: "…"), @bind(text: x)) — key: value,
+  colon introduces the VALUE. Values: string / number / bool / ident (small tooling
+  grammar, documented in the doc; the language grammar is untouched).
+- Unknown keys → rejected at add-time against the type's %field shape, warned by =check=.
+- Text: everything after the first =: = on line 1 is literal text (colons,
+  =//= fine). MULTILINE: body lines carry the explicit =//@>= marker — an
+  unmarked =//= line NEVER belongs to the comment (zero absorption). A bare
+  =//@>= line = paragraph break. A =//@>= line with no live header above it
+  (blank line / non-comment / another =//@= in between) is an ORPHAN → =check=
+  warns "continuation without header" — self-diagnosing under agent edits.
+- Identity: id = hash(file + type + meta + FIRST text line) — body edits never
+  orphan sidecar state; header edits (changing the ask) do.
+
+** Comment types — =%comment_type= (clause shape mirrors =%migration=)
+
+Stdlib default (=stdlib/comments/entries/agent-task.st=):
+#+BEGIN_SRC
+/// Work item for an agent: implement, verify acceptance, resolve with a diff reply.
+%comment_type agent-task {
+  %label "Agent task"
+  %docs  "Work item for an agent: do it, run the acceptance check, resolve with a reply describing the diff."
+
+  %field acceptance string   // space introduces a TYPE — sigil harmony; required
+  %field priority   string?  // `?` = optional (param_list / %form convention)
+
+  %color "#e8a13d"
+  %agent_hint "Implement the change in place, run the acceptance command, then st_comments_update(status: resolved) with a reply describing the diff."
+}
+#+END_SRC
+
+Project-scoped (=<project>/_prelude.st= — the auto-loaded overlay):
+declare it and it joins the pill picker, MCP validation, and =check= roster:
+#+BEGIN_SRC
+// _prelude.st — project-scoped declarations (auto-loaded, never a page)
+%comment_type client-request {
+  %label "Client request"
+  %docs  "Change requested by the client in review."
+  %field quote_needed bool?
+  %agent_hint "Confirm scope in a reply BEFORE starting; set in-progress while working."
+}
+#+END_SRC
+
+Default roster: =note= · =todo= · =question= · =bug(severity string?)= · =design= · =agent-task(acceptance string)=
+
+** Sidecar — =<project>/.comments/<id>.json= (one file per comment, ULID)
+
+Full record (page/file-anchored, pill- or MCP-created):
+#+BEGIN_SRC json
+{
+  "id": "01J9ZK3Q8F7N2V4W6E1R0T5Y8A",
+  "type": "client-request",
+  "status": "open",
+  "author": { "kind": "human", "name": "ada" },
+  "created_at": "2026-07-27T14:03:11Z",
+  "updated_at": "2026-07-27T14:03:11Z",
+  "anchor": { "kind": "page", "route": "/pricing" },
+  "text": "Client wants the annual toggle more prominent",
+  "meta": { "quote_needed": true },
+  "thread": []
+}
+#+END_SRC
+
+State-only record (inline =//@= comment — text + anchor stay in source, keyed by
+content-hash id = hash(file + normalized text)):
+#+BEGIN_SRC json
+{
+  "id": "h_9f2c7a1e",
+  "type": "agent-task",
+  "status": "in-progress",
+  "claimed_by": { "kind": "agent", "name": "spell" },
+  "thread": [
+    { "author": { "kind": "agent", "name": "spell" },
+      "at": "2026-07-27T14:20:02Z", "text": "starting — image found, updating src" }
+  ]
+}
+#+END_SRC
+
+** Serve routes (=/__spacetime/comments/*=)
+
+#+BEGIN_SRC
+GET  /__spacetime/comments/types.json          → { "types": [ {id,label,docs,fields,color,agent_hint} … ] }
+GET  /__spacetime/comments/status.json?route=/ → { "open": 4, "comments": [ <merged records> ], "orphans": [ … ] }
+POST /__spacetime/comments/add     { type, anchor, text, meta?, author }     → record | 4xx validation
+POST /__spacetime/comments/update  { id, status?, reply?, text? }            → record | 4xx
+#+END_SRC
+
+** MCP tools (=src/mcp/tools.rs= descriptor+dispatch+handler)
+
+#+BEGIN_SRC
+st_comments_types  { env? }
+st_comments_list   { env?, file?, status?, type? }
+  → each row carries its type's agent_hint INLINE (instructions travel with data)
+st_comments_add    { env, type, anchor, text, meta? }   // author.kind = "agent"
+st_comments_update { id, status?, reply? }
+#+END_SRC
+
+** =spacetime check= section
+
+#+BEGIN_SRC
+Comments: 4 open · 1 agent-task · 2 todo · 1 question
+  h_9f2c  agent-task  index.st:42   swap hero image to assets/hero-final.jpg
+          ↳ hint: implement, run acceptance, resolve with diff reply
+  h_31bd  todo        index.st:87   replace placeholder with real photography
+  01J9…   question    /pricing      client: annual toggle more prominent?
+Warnings: 1 orphan (h_77ab — source text edited/deleted near index.st:18)
+          1 unknown type "idea" (projects/acme/index.st:55) — declare %comment_type idea in _prelude.st
+#+END_SRC
+
+** Pill (leftmost dock widget — v1 panel sketch, text chips not emoji)
+
+#+BEGIN_SRC
+┌ .st-dev-dock ────────────────────────────────────────────────┐
+│ [comments ·4] [migrations] [inspector] [host]                │
+└──────────────────────────────────────────────────────────────┘
+┌─ comments ─ 4 open ──────────────────────────────── [+ add] ─┐
+│ ● agent-task   index.st:42   swap hero image to hero-final   │
+│   acceptance: headless tests pass          [claim][resolve]  │
+│   spell · in-progress · “starting — image found…”            │
+│ ○ todo         index.st:87   replace placeholder photography │
+│ ? question     /pricing      annual toggle more prominent?   │
+│   └ ada: “confirmed with client 07-26”                       │
+│ ⚠ orphans (1) ─ h_77ab · source changed near index.st:18     │
+│   [re-anchor] [dismiss]                                      │
+└──────────────────────────────────────────────────────────────┘
+#+END_SRC
+
+
+** Design dialogue 2026-07-27 (multiline + sigil choice)
+
+Q: multiline syntax? → A: =//@>= MARKED CONTINUATION (user-confirmed
+2026-07-27): body lines carry the explicit marker; unmarked =//= lines never
+belong (zero absorption); a =//@>= with no live header = orphan → =check=
+warns "continuation without header" (self-diagnosing under agent edits).
+Alternatives considered: unmarked continuation lines (absorption wart),
+=::= opens body (silent degradation on header delete), =/*@ … */= block form
+(ragged in HTML, unterminated-block risk, second carrier — dropped),
+=///@= doc-style (collides with collect_doc_comment's =///= runs).
+
+Q: should the type declaration be =@comment_type=? → A: NO, keep
+=%comment_type=:
+- Sigil semantics: =%= = metasystem declaration → registry DATA that never
+  renders; a roster entry is exactly that. =@= = author directive that acts
+  on the page's compile/render — a comment type does neither.
+- Machinery: reuses =%migration= nearly verbatim (AST, parse_migration_def,
+  =%docs= clause, validation) → materially smaller W1.
+- Clauses: =%field/%label/%agent_hint= live in the established =%=-clause
+  namespace; an =@= form would invent a SECOND clause namespace = parallel
+  implementation (AGENTS violation).
+- The author-level intuition is about LOCATION, not sigil: project-scoped
+  types already live in the project's own .st files.
+- W1 gate: a =%comment_type= block inside a COMPILED page file must parse
+  cleanly; fallback = dedicated non-imported .st file (scanner reads it, the
+  compile pipeline never sees it).
+
+
+** Modularity: capsule + THE general mechanism (2026-07-27)
+
+Two halves, one load path:
+
+#+BEGIN_SRC
+stdlib/comments/              ← THE capsule (stdlib side)
+  entries/                    ← registry-loaded (joins STDLIB_DIRS)
+    note.st todo.st question.st bug.st design.st agent-task.st
+  __dev__/
+    pill.st                   ← never registry-loaded; dev-server-compiled
+
+<project>/_prelude.st        ← THE project overlay (project side)
+                              auto-loaded into the registry before any page
+                              compile; never routed; @import to decompose
+src/comments.rs               ← the ONE scanner / model / sidecar IO
+#+END_SRC
+
+The overlay is the GENERAL mechanism for project-scoped declarations —
+=%comment_type= is its first citizen, not a comment-specific special case
+(future: project capture-types, agency-tier =%role=, any new roster kind).
+Grounding: the =_= not-a-page convention already exists de-facto
+(projects/animations/_helpers.st, manually @imported per page); the overlay
+makes the load automatic for DECLARATIONS (helpers stay import-based —
+auto-overlaying existing _*.st would double-register their macros, so the
+overlay loads exactly ONE file: _prelude.st).
+
+Convention enforcement: a =%comment_type= in a PAGE file (not _prelude.st,
+not stdlib entries) → compiler warning diagnostic "project declarations live
+in _prelude.st" (page compiles; the type does NOT join the roster).
+Duplicate type id across stdlib/project → load error (mirror migration id
+uniqueness).
+
+Verification stack (each layer tested by the machinery it extends):
+1. LOAD-TIME roster validation (unique ids, field types ∈ {string, number,
+   bool, ident}, required-before-optional, label+docs present) — mirrors
+   migration_chain_load_errors; bad types fail loudly in =check=.
+2. RED→GREEN per layer: parser unit tests → scanner unit tests → route
+   integration fixtures → MCP round-trip → headless .st pill compile test.
+3. Capsule discipline: every entry file carries a /// contract header.
+4. Docs: docs/language/comments.md (same shelf as migrations.md), W4,
+   renderable in-project via @doc(src:).
+
+Agency-tier mapping: the Ash service reads the same comments.st declarations
++ .comments/ records; team-defined kinds = project declarations + RBAC on
+write.
+
+
+Q: is a comments-only convention the right modularity? → A: NO — generalized
+2026-07-27 (user pushback): the mechanism is the PROJECT OVERLAY,
+=<project>/_prelude.st=, auto-loaded into the MetaRegistry before any page
+compile. =%comment_type= is its first citizen; future project-scoped kinds
+(capture-types, =%role=, any roster) ride the same load path. Alternatives
+considered: =_config.st= (conflates kinds with settings), =meta/*.st= dir
+(scatters the standard place), auto-load ALL =_*.st= (breaks existing
+import-based _helpers.st — double registration), per-feature files
+(comments.st — N conventions), toml (two grammars). Name: =_prelude.st=
+(user chose Rust/Haskell vocabulary over =_preamble.st=).
+
+** Evolution (migrations) + generics of =//@= (2026-07-27)
+
+Three layers, three migration stories, one protecting invariant:
+
+| layer | change | migration story |
+|---|---|---|
+| =//@= payload syntax | rename marker, meta grammar | NO =%migration= waves — comments are trivia (=\%match= can't see them; growing the engine to match comments fails the elegance bar). The ONE scanner is the compat layer: lenient old+new parse, =check= flags deprecated forms, rewrites ride the W4 guarded write rail (same rail as prune). |
+| =%comment_type= grammar | clause grammar evolves | STANDARD =%migration= machinery — _prelude.st is real metasystem source; waves + @version apply unchanged. Stdlib entries ship with the toolchain (atomic with release). |
+| sidecar schema | record fields change | ="v": N= per record; lenient read, upgrade-on-write; =check= reports pending schema upgrades (compiler.rs L283 pattern). |
+
+INVARIANT: comment syntax is NEVER load-bearing for compilation → any
+evolution degrades to a warning, never a broken build. Design rule: never
+let a comment become compile-relevant.
+
+Genericity: the payload grammar =//@<ident>(<directive-args>): <text>= is
+already generic — type + shape are DATA (the roster), not grammar. The
+syntax is "typed tooling annotation, inert to the compiler"; one scanner,
+N readers (pill renders workflow types; =check= reads suppression types;
+editors read region types; agents read context/agent-task). Future citizens
+with zero new syntax: =//@context=, =//@see=, =//@owner=, =//@region=,
+=//@ignore=, =//@review=. The only narrow name is =%comment_type= — kept
+deliberately: its declared semantics (status flow, threads, anchors, hints)
+ARE comment semantics; a second consumer class (linter suppression — with
+its compiler-reading-comments coupling cost) earns its own declaration form
+when a real requirement arrives, as a new registry category, not a rewrite.
+HARD BOUNDARY: anything needing compile semantics (emit/transform/bind) is
+not a =//@= citizen — that is what real directives are for.
+
+
+** IMPLEMENTATION FINDING (W1, 2026-07-31): `//` in HTML markup is LITERAL
+
+D2 claimed the inline form is "valid anywhere `//` is valid". Implementing the
+parse gate proved that claim FALSE for one scope, and the correction is now
+pinned by two tests.
+
+MEASURED (cargo run -- build on a fixture page): inside an HTML markup block,
+a `//` line is NOT a comment — it is literal text that RENDERS to the visitor:
+
+#+BEGIN_SRC
+<div class="stage">
+  // this renders on the page
+</div>
+#+END_SRC
+
+This is pre-existing language behavior and consistent with the sigil rules (a
+bare `$x` in HTML is likewise literal). It was NOT introduced by this feature
+and this feature does not change it.
+
+CONSEQUENCE for comments:
+- The invariant holds where `//` IS a comment — file scope and CSS scope
+  bodies. `compiler::tests::inline_comments_have_zero_compile_effect` asserts
+  byte-identical HTML/CSS/JS across both scopes.
+- HTML markup blocks are OUT of the surface. `scan_source_excluding(file, src,
+  exclusions)` takes caller-supplied byte ranges; `scan_source` is the
+  no-exclusion convenience. The ranges come from the CALLER's parse — the
+  scanner never re-derives structure lexically (that is how two notions of
+  "inside HTML" get born).
+- WHY it matters beyond correctness: harvesting an in-markup `//@todo` would
+  file VISIBLE PAGE COPY as a private work item and let the pill offer to
+  "resolve" text the reader can see. An excluded header also must not open a
+  continuation run, or a later `//@>` would attach to a comment that does not
+  exist — both cases are tested.
+- `compiler::tests::double_slash_in_html_markup_is_literal_text_not_a_comment`
+  pins the language behavior itself, so a future change to it is a DELIBERATE
+  language decision rather than silent drift in the comments feature.
+
+W2 OBLIGATION: the pill's add-form must refuse an inline anchor that lands
+inside an HTML markup block (offer page/file anchor instead) — the surface
+cannot host the comment there.
+
+
+* SHIPPED (2026-07-31) — where the design met reality
+
+This document proposed the design; the implementation corrected it in four
+places. Recorded here because the corrections are the load-bearing part for
+anyone extending the feature.
+
+** 1. D2 was wrong about scope: `//` in HTML markup is LITERAL
+
+Measured, not reasoned: inside a markup block a `//` line RENDERS to the
+visitor (same rule that makes a bare `$x` literal there). So the inline
+surface is file scope + CSS scope, and the scanner takes caller-supplied
+exclusion ranges. Harvesting in-markup markers would file visible page copy as
+a private work item and let the pill offer to "resolve" the page's own text.
+
+** 2. Identity needed a SPECIFIED hash, not a convenient one
+
+D3 said "content-hash". The first cut used DefaultHasher \u2014 whose algorithm
+Rust explicitly reserves the right to change between releases \u2014 as the sidecar
+FILENAME. A toolchain upgrade would have re-identified every comment in every
+project at once. Now BLAKE3, length-prefixed per field, with a test that fails
+if the algorithm drifts.
+
+** 3. Authorization belongs at the RAIL, not at the caller
+
+D-prune assumed the route could own eligibility. It cannot: the guarded write
+rail is reachable from the public dev websocket, so the check had to move into
+the rail itself. GENERAL LESSON, worth carrying to the agency tier: an
+authorization check that only one caller performs is not an authorization
+check \u2014 it is a convention the next caller will not know about. The next
+caller was already in this codebase.
+
+** 4. "One store" is a claim that must be TESTED, not asserted
+
+D6 said one scanner, N readers. The readers still diverged five separate
+times: `check` read the cwd rather than the checked project; MCP forked
+CommentRecord by injecting a transport field; orphan rows carried a different
+shape than record rows and ignored filters; literate `.st.md` files were
+scanned by agents and skipped by the pill; and the same literate files needed
+TANGLING before scanning, which only one reader did. Every fix was made at the
+shared point. The parity claim now has tests
+(`comments_resource_matches_the_comment_list_contract`, the doc-accuracy
+suite) because an invariant nobody checks is a wish.
+
+** What the agency tier inherits unchanged
+
+The record shape, the route JSON, the four statuses, the anchor union, and the
+author/claimed_by actor split all survived implementation without alteration \u2014
+D10's bet that the hosted tier is a transport swap still holds. The two things
+it must own that this tier cannot: cross-process transactions (dismiss and
+prune are serialized only within one server process) and change notifications
+(subscriptions are accepted but nothing pushes).

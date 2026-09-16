@@ -1,0 +1,287 @@
+#+TITLE: Editable-Everything: on-website editing via introspection (D0 design)
+#+DATE: 2026-06-10
+#+STATUS: DESIGN / BRAINSTORM (no code this turn)
+
+* The question (user)
+"What about integration points with stdlib/__admin__? I'd LOVE automatic content
+editing on the website directly. Most Spacetimey way? Show me editing blogs.
+Set up a default editable flow, leverage Spacetime's introspection to auto-augment
+the admin with editable-everything, optionally improvable with something akin to
+the @cms block."
+
+Two surfaces are being conflated; the design keeps them distinct but unified:
+  (A) ADMIN editing      — /__spacetime/admin/, a drawer FORM per entry (exists, rich)
+  (B) ON-PAGE editing    — edit the live site in place, WYSIWYG (the new ask)
+
+* TL;DR — the seam already (mostly) exists
+Spacetime is *already* introspective end-to-end. Three rails are built and load-bearing:
+
+  1. PROVENANCE on rendered DOM. The compiler injects `data-st-id` + `data-st-origin`
+     (`{file}::{scope} §{directive} {tag}`) onto every text-bearing element, plus
+     `data-st-bind` / `data-st-source` for data-bound nodes
+     (src/syntax/form_match.rs:1614, :1681).
+  2. dev-editable PRIMITIVE (stdlib/__dev__/primitives/dev-editable.st). In dev mode it
+     reads that provenance, makes any `[data-st-bind]/[data-t]/[data-st-id][data-st-origin]`
+     node click-to-edit (contenteditable), hover-affords ("Click to edit"), gated behind
+     `html[data-st-edit-mode]`. Emits edits on `window.__stDevEditable.onEdit(...)`.
+  3. EditAst / EditJson WRITE-BACK (src/sync/handlers.rs). dev-save (dev-save.st) takes a
+     dev-editable edit → EditAst patch (DOM `data-st-origin` selector → byte span in the
+     `.st` file) → disk. Provenance is stripped before write (handlers.rs:973). HTML is
+     sanitized (sync/richtext.rs allow-list). Round-trips to source — the AST stays truth.
+
+  ∴ "editable-everything on the website" is ALREADY THE ARCHITECTURE for *plain text/HTML*
+  fields. What's missing is: (a) STRUCTURED rich-text (the @editable region surface we just
+  built) wired into the ON-PAGE path, not just the admin drawer; (b) a first-class, NON-dev
+  toggle + auth story; (c) the introspection that makes it DEFAULT (zero-config) and the
+  `@cms`-style OPT-IN that improves it.
+
+* Map of what exists (so we extend, never re-add — AGENTS rule)
+
+** Introspection / contract endpoints (server.rs)
+  - /__spacetime/dev/site.json        → { collections, pages, dataSourceMap }
+  - /__spacetime/dev/types.json       → { types: { T: { properties{widget}, display{roles} } } }
+                                         widgets assigned by annotate_widgets() / widget_for()
+  - /__spacetime/dev/editable-schema.json → @editable-mark/@editable-block schema
+  - /__spacetime/dev/brand.json       → editable SINGLETON (typed @data inline + @cms inline)
+  ∴ the system can already DESCRIBE every type, field, widget, and which fields are richtext
+    (`x-st-richtext` → widget "richtext", widget_for() server.rs:3180).
+
+** @cms macro (stdlib/__admin__/cms-hint.st) — the opt-in improver, already real
+  - `@cms(Type) { title:..; subtitle:..; thumbnail:..; chips:..; }` — DISPLAY hints (admin rows)
+  - `@cms(Type) { editable: inline; }` — marks a type EDITABLE-INLINE (build_brand_json,
+    server.rs:3354). Already the hook the user is imagining ("akin to the @cms block")!
+  - Produces NO runtime JS/CSS (pure metadata, like @type). Convention-fallback when absent.
+
+** The widget renderer (drawer.st) — one template per widget, dynamic dispatch
+  - &fld-text / -textarea / -richtext / -color / -number / -toggle / -media / -select /
+    -chips / -relation / -group … dispatched by `&$f.tpl($f)` (FEAT-073 dynamic name).
+  - &fld-richtext ALREADY mounts `@editable(bind:`$f.value`, marks:[...], blocks:[...])`.
+    The region surface (FUP-045) flows through here once a type has a region-doc field.
+
+** Persistence rails
+  - EditJson  — patch a JSON data row (admin form fields). dev-save.st.
+  - EditAst   — patch an `.st` source span by provenance selector (on-page text/html).
+  - Both over the dev-ws WebSocket; Ack/Reject; optimistic; toast on reject.
+
+* The gap (precise)
+  | capability                         | admin (A)        | on-page (B)               |
+  |------------------------------------+------------------+---------------------------|
+  | plain text/string field            | ✓ &fld-text      | ✓ dev-editable contentedit |
+  | rich-text (flat doc)               | ✓ &fld-richtext  | ✗ NOT wired on page        |
+  | rich-text REGIONS (FUP-045)        | ✓ (via drawer)   | ✗ NOT wired on page        |
+  | structured entry (object/list)     | ✓ drawer form    | ✗ (no on-page form)        |
+  | media/relation/chips               | ✓ widgets        | ~ media only (picker)      |
+  | DEFAULT-ON (zero @cms)             | ✓ convention     | ✓ provenance (dev only)    |
+  | non-dev / prod auth                | dev-only         | dev-only                   |
+
+The on-page surface today is dev-only and TEXT-only. The two real builds:
+  (B1) wire the @editable region surface into the ON-PAGE editable path (reuse provenance
+       + EditAst), so a `data-st-richtext` region block becomes click-to-edit in place;
+  (B2) make EDITABLE-EVERYTHING the default via introspection, opt-in-improvable via @cms.
+
+* Design — "editable-everything", most-Spacetimey
+
+** Principle: the DOM already carries its own provenance; editing = decorate + write-back
+No new client state model. The page is rendered from the AST; provenance says which AST
+node each DOM node came from; editing mutates that node and EditAst writes the span. This
+is the SAME invariant the region surface preserves ("DOM is a render target; AST is truth").
+
+** Layer 1 — DEFAULT editable (zero config), introspection-driven
+Make every PROVENANCED node editable with the RIGHT surface, chosen by the type contract:
+  - node has `data-st-source` + field is widget=richtext  → mount @editable (marks/blocks
+    from editable-schema.json for that field) — STRUCTURED, not contenteditable-soup.
+  - node is widget=text/textarea/number/toggle/select/media → the matching inline control
+    (reuse the drawer widget templates, rendered as a popover/inline, not a drawer).
+  - node is plain bound text (`data-st-bind`, no richtext)  → contenteditable (today's path).
+The widget is read from types.json — already computed. So "editable-everything" is just:
+*for each provenanced node, look up its field's widget, mount that widget inline.* No per-site
+config. This is the introspection win the user asked for.
+
+** Layer 2 — @cms as the IMPROVER (opt-in, additive)
+Extend the existing @cms vocabulary (no new macro — it already carries `editable: inline`):
+  - `@cms(Post) { editable: inline; }`          → whole type editable on-page (already parses)
+  - `@cms(Post) { body: richtext(marks:[bold,italic,link], blocks:[p,h2,quote,columns]); }`
+        → field-level surface config (which marks/blocks; region showpieces like &columns).
+  - `@cms(Post) { readonly: [slug, id]; }`       → exclude fields from editing.
+  - `@cms(Post) { editable: off; }`              → opt OUT (when default-on is too much).
+These are DISPLAY/EDIT hints — pure metadata, NO runtime emit, convention-fallback. Exactly
+the @cms contract today; we add keys, not mechanism.
+
+** Layer 3 — the toggle + auth (the genuinely-new infra)
+Today edit-mode is `html[data-st-edit-mode]` set by dev-editable, dev-only. For real
+on-website editing:
+  - a `@editable-site` (or `@cms-site { auth: ... }`) file-scope directive that, in
+    PRODUCTION, mounts a minimal edit-mode toggle GATED by an auth check (session cookie /
+    bearer / the dev-ws equivalent). Out of scope to design the auth backend here, but the
+    SEAM is: edit-mode is a single documentElement attribute; gating it is one predicate.
+  - persistence in prod ≠ EditAst-to-disk (no source on a deployed box). Two options:
+      (i)  content lives in a DATA file (collections) → EditJson to a content store/db;
+      (ii) keep EditAst but only in a "content branch" / headless-CMS adapter.
+    Recommend (i): on-page editing edits DATA (the blog post row), not source — matches the
+    collections model and the admin's EditJson path. Source-editing stays a dev affordance.
+
+* Worked example — editing a BLOG, the Spacetime way
+
+Project shape (what an author writes):
+#+begin_src spacetime
+  @type Post {
+    title: string;
+    slug: string;
+    cover: string;          // media
+    tags: string[];         // chips
+    body: richtext;         // structured rich-text (the FUP-045 surface)
+    published: bool;
+  }
+  @cms(Post) {              // OPT-IN improver (optional)
+    title: title; subtitle: slug; thumbnail: cover; chips: tags;
+    editable: inline;       // ← turns ON on-page editing for Post
+    body: richtext(blocks: [p, h2, blockquote, columns], marks: [bold, italic, link]);
+    readonly: [slug];
+  }
+  @data fetch $posts : "/content/posts.json";
+
+  // the PUBLIC page — author writes normal Spacetime, no editing code:
+  @each($posts as $p) {
+    <article>
+      <h1>`$p.title`</h1>            // provenance → data-st-source=posts[i].title
+      <img src="`$p.cover`">         // provenance → media widget inline
+      <div class="tags">`$p.tags`</div>
+      @richtext(bind: `$p.body`)     // the structured surface, region-aware
+    </article>
+  }
+#+end_src
+
+Author experience:
+  1. visits the live blog, authenticated → an "Edit" pill appears (Layer 3 toggle).
+  2. clicks Edit → every provenanced node hover-affords; the AST is truth, DOM decorated.
+  3. clicks the H1 → inline text control (widget=text). Types → EditJson patches posts[i].title.
+  4. clicks the body → the @editable region surface activates IN PLACE (not a drawer);
+     bold/italic/link toolbar (from editable-schema), columns region editing (FUP-045) —
+     the EXACT surface we just proved, now on the public page.
+  5. clicks cover → media picker (exists). Tags → chips widget.
+  6. every edit → optimistic in-memory + EditJson to the content store; toast on reject.
+  7. no reload, no custom JS in the blog project — ALL behavior from stdlib introspection.
+
+Admin (A) is then the SAME widgets in a drawer for power editing / bulk / new-entry /
+relations — the on-page surface and the admin drawer SHARE the widget templates and the
+types.json contract. One widget vocabulary, two mounts (inline vs drawer).
+
+* Why this is "most Spacetimey"
+  - NO custom JS in the website (AGENTS rule): editing is a stdlib primitive keyed off
+    compiler-emitted provenance + the type contract. The blog author writes only @type/@cms/
+    @each/@richtext.
+  - SELF-DESCRIBING: add a field to @type → it's editable (default widget). Add a @cms key →
+    it improves. Remove @cms → convention fallback. No editing-specific wiring per project.
+  - ONE truth: AST/data is truth; DOM is a render target; provenance is the bridge; EditAst/
+    EditJson is the write-back. Identical invariant to the region surface.
+  - REUSE over parallel: extends @cms (don't add a macro), reuses dev-editable provenance,
+    reuses the drawer widget templates, reuses EditJson/EditAst. The only NEW code is:
+    (B1) mount-richtext-inline-on-provenanced-region, (B2) widget-lookup-driven inline mount,
+    (L3) the prod toggle+auth+content-store adapter.
+
+* Build sequence (proposed waves — for a future arc, not this turn)
+  W1  inline widget mount: given a provenanced node + its field widget (from types.json),
+      mount the matching drawer widget inline (popover) instead of only contenteditable.
+      Reuses every &fld-* template. Default-on in dev. (gap row: rich-text/structured on page)
+  W2  @cms editable vocabulary: parse `editable: inline|off`, `body: richtext(...)`,
+      `readonly: [...]` (grammar in cms-hint.st — metasystem, no Rust special-case). Server
+      reads them into types.json `editable` roles (build_brand_json already reads `editable`).
+  W3  on-page region surface: wire @richtext / widget=richtext provenanced nodes to activate
+      the FUP-045 surface in place; EditJson carries the doc AST (the admin path already does
+      this via adFieldInput → EditJson). (closes the two ✗ richtext rows of the gap table)
+  W4  prod toggle + auth + content-store adapter (the genuinely-new infra; needs a design
+      sub-arc of its own — auth is a real decision, not a stdlib default).
+  Floor: every wave keeps the admin drawer + dev-editable text path byte-identical; on-page
+  is ADDITIVE.
+
+* Open questions (for the user, before any build)
+  Q1 PROD editing target: edit DATA rows (EditJson → content store) [recommended] vs edit
+     SOURCE (EditAst → .st, dev-style)? Determines W4 entirely.
+  Q2 AUTH: who may edit on a deployed site? (cookie session / bearer / single shared secret /
+     defer prod entirely and ship dev-only on-page first?)
+  Q3 DEFAULT scope: editable-everything ON by default in dev (opt-OUT via @cms editable:off),
+     or OFF by default and opt-IN via @cms editable:inline? (recommend: ON in dev, opt-in for
+     prod.)
+  Q4 First deliverable: (i) on-page rich-text in DEV against the blog demo [smallest, proves
+     the seam, reuses everything], vs (ii) the full prod toggle+auth (largest).
+
+* AS-BUILT (W1 delivered — on-page rich-text in dev)
+The first deliverable from the build sequence is DONE (commit 7b2fb1ba), as the user's
+chosen slice ((d)(i): on-page rich-text in DEV against a blog demo). What shipped:
+
+  - `@richtext(bind, marks, blocks)` — the PUBLISHED surface macro (stdlib/macros/
+    editable.st). Binds editable-surface with gate:"edit-mode".
+  - editable-surface `gate` param (stdlib/editable/primitives/editable-surface.st):
+    gate='edit-mode' → contenteditable mirrors html[data-st-edit-mode] (MutationObserver);
+    gate=null → always-on (admin/forms, unchanged). Same change taught the surface to
+    resolve a `$`-PATH bind ($post.body) against SpacetimeLocal + re-seed on data load
+    (a page binds a data field, not an inlined object — the admin inlines via backtick).
+  - `@edit-toggle` (new stdlib/editable/edit-toggle.st): the floating Edit/Done pill,
+    flips data-st-edit-mode via __stDevEditable.toggle(). Local-dev only (no auth — the
+    user confirmed the server is single-user localhost).
+  - EDITABLE SCHEMA BAKE (src/compiler.rs): a real gap found mid-build — @editable-mark/
+    -block register only a template factory, never the ST.editable schema registry, so a
+    standalone page projected marks as <bold> not <strong> (only the admin fetched the
+    schema JSON at runtime). The page compile now bakes the schema (collect_schemas_from_
+    matches → a projection of the registered constructs) into the bundle, gated on surface
+    use. Self-describing; non-editable pages ship none of it. **This means on-page @editable
+    was effectively never functional before W1 — the admin masked it.**
+  - Demo: projects/editable-blog/ (gitignored) — an editorial blog that reads as a blog
+    and edits in place. Proven live under real Chromium (puppeteer): read-only by default,
+    Edit → contenteditable in place, typing into the h2 routes beforeinput → AST op →
+    reproject (doc + DOM in lockstep). Screenshots: scratch/editable-blog-{readonly,editmode}.png.
+  - Gate: stdlib/editable/tests/surface.test.st "@richtext is edit-mode-gated and seeds
+    from a data path" (6 surface tests, --headless). lib 2252, editable_model 38.
+
+Deferred from this slice (filed): W2 (@cms editable vocabulary parse), W3 (provenance-
+driven inline widget mount for non-richtext fields: text/media/chips on page), W4 (prod
+toggle + content-store — N/A while local-dev-only, but the EditJson persistence of an
+on-page @richtext edit back to the data file is the next concrete step). Plain-text
+click-to-edit on a page already works via dev-editable; what W1 added is the STRUCTURED
+rich-text rung + the gate + the schema bake that makes any on-page surface correct.
+
+* AS-BUILT (W3 delivered — whole-page inline editing)
+W3 done (commit 49b5027c). The WHOLE published page is now editable, not just the
+@richtext body: plain bound fields (title `$post.title`, dateline `$post.dateline`)
+click-to-edit in edit-mode and persist to disk, alongside the structured @richtext body.
+Proven live under real Chromium: click the blog title → edit → blur → EditJson{file:
+'content/post.json', path:'.title'} → server ok → reload survives.
+
+The gap (root-caused): data-st-source/index are emitted ONLY by @each (each.st) — they tag
+COLLECTION ROWS. A single-object bind outside any loop had source=null → dev-editable
+built a garbage persist path. Same collection-shape assumption FUP-047 fixed in the
+surface, one layer out (plain text vs the rich-text doc). Fix: dev-editable.readProvenance
+parses the BIND ITSELF into {source, path} ($post.title→'post'+'.title'; $posts[2].body→
+'posts'+'[2].body') when no source ancestor; carries `path` through to the data edit event;
+dev-save already routes {source, path} (FUP-047). One provenance change, every persistence
+rail reused.
+
+What editable-everything now covers (the gap table, updated):
+  | capability                  | admin | on-page |
+  |-----------------------------+-------+---------|
+  | plain text/string field     | ✓     | ✓ (W3)  |
+  | rich-text (flat + regions)  | ✓     | ✓ (W1)  |
+  | persist to disk             | ✓     | ✓ (FUP-047) |
+  | default-on (zero @cms)      | ✓     | ✓ (dev) |
+  | image (media) field         | ✓     | ✓ (W3b) |
+  | number/toggle/select INLINE | ✓     | ✗ (W3c: reuse drawer &fld-* inline) |
+  | declarative @cms editable   | ✗     | ✗ (W2) |
+
+W3b done (commit 9d37f0ff): a data-bound `<img data-st-bind="$post.cover">` now persists its
+upload through the SAME {source, path} rail (dev-media-picker parses the $-bind like W3 and
+routes via __stDevSave). Fixed a silent no-op — the picker required data-st-origin, which a
+data-bound <img> never has (not text-bearing). The blog is now wholly editable: title +
+dateline (text, W3), cover (image, W3b), body (richtext, W1), one persistence rail for all.
+
+Deferred: W3c (number/toggle/select/chips INLINE widgets — reuse the drawer &fld-* templates
+as inline popovers; today only text + image + richtext), W2 (@cms editable vocabulary).
+Test-harness note: BUG-101 filed (legacy dev-editable .test.st `var el` eval-scope
+collision — pre-existing, orthogonal to W3; the new single-object test uses the fixed
+IIFE pattern).
+
+* Provenance of this design
+Read this turn: cms-hint.st, __admin__/{index,app/app,app/drawer}.st, __dev__/index.st,
+dev-editable.st, dev-save.st, server.rs (annotate_widgets/widget_for/build_brand_json/
+collect_derived_tokens/dev_editable_inline, routes), sync/handlers.rs (EditAst selector +
+provenance strip), sync/richtext.rs (sanitize allow-list), form_match.rs (provenance inject).
+No code written — design only, per the user's "DESIGN and BRAINSTORM" framing.

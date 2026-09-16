@@ -1,0 +1,101 @@
+#+TITLE: directives & injections disposition — (a)/(b)/(c) resolved by research
+#+DATE: 2026-06-12
+#+STATUS: ANALYSIS (answers the clean-break field-mapping question for PLAN-039)
+
+* The question
+For the clean break, the factory payload has 10 fields. Most map to scope-matches. The two
+in doubt: `directives` (ComponentDirective: OnEvent/ClassToggle/ContentBinding) and `injections`
+(ContentInjection: text/slot/attr `<-`). Decide: (a) confirm each maps to an existing
+selector-scope construct before deleting; (b) treat any unmapped field as itself dead; (c) a
+scope-model improvement that subsumes them more elegantly.
+
+* What directives & injections ARE (verified)
+ComponentDirective + ContentInjection are the TEMPLATE-BODY representation of three behaviors:
+  - OnEvent       — `@on click { $x <- … }` (state-mutating event handler)
+  - ClassToggle   — `.cls: $cond;`           (reactive class)
+  - ContentBinding— `text: $x;` / prop binding (reactive content/attr, block-inner form)
+  - ContentInjection — `text <- $x;` / `[slot] <- $x;` / `[attr] <- $x;` (arrow injection)
+At runtime the factory (template.st) walks bodyDirectives/bodyInjections in forEach loops and
+wires addEventListener / classList.toggle / textContent / setAttribute against the instance root.
+
+* THE DECISIVE FINDING — these are a PARALLEL DUPLICATE, not unique behavior
+The SAME three behaviors exist at SELECTOR/FILE scope through a DIFFERENT, independent emitter:
+  - `.ora-faq__q0 { @on click { $activeQ <- … } }` with `body { $activeQ … }` COMPILES TODAY to
+    a real `_localState["activeQ"]` mutation + listener (verified: built /tmp test, emitted
+    `_localState["count"]` mutation; production proof: projects/ora-ventures.com/.../_faq.st).
+  - `.sel { .open: $flag; }` and `text <- $x` at selector scope lower via emit_reactive_binding_js
+    (the Global/Element-scope reactive arc, src/emit/html_hydrate.rs + html_reactive.rs) — the
+    SAME arc the doc calls "proven."
+So OnEvent/ClassToggle/ContentBinding/ContentInjection are NOT template-only behaviors. They are
+the THREE core reactive constructs, and the template body carries a SECOND implementation of them
+(ComponentDirective + the factory forEach) parallel to the selector/file-scope emitter. This is
+the exact duplication the whole PLAN-039 refactor targets — `directives`/`injections` are not a
+special case, they are MORE OF THE SAME PARALLEL PARSER, one layer down.
+
+∴ ANSWER: not (a), not (b) — it is (a)-VIA-(c). The fields are NOT dead (the behaviors are
+real and used), but they must NOT be "mapped field-by-field" to a preserved ComponentDirective.
+The clean break is: a template body is a SCOPE, so `@on`/`.cls:`/`<-` inside it are matched +
+lowered by the SAME selector-scope emitter as everywhere else. ComponentDirective +
+ContentInjection + the factory forEach loops + component_body_to_js's directive/injection
+serialization ALL DELETE. The behavior survives because the ONE selector-scope emitter now
+serves template-body scopes too (that is the entire point of body-as-scope). No field mapping —
+field ELIMINATION, behavior PRESERVED by the unified emitter.
+
+* The (c) improvement the user intuited — PARAMETERISED / NAMED SCOPES
+The user: "an improvement led from understanding what else from the scope path we can handle,
+such as parameterised scopes — e.g. let certain %macro scopes only apply within other named
+scopes."
+
+This is real and elegant, and it is EXACTLY what body-as-scope needs anyway:
+- TODAY scope is binary: macro_scope_matches keys on None→File / Some(selector)→Selector
+  (src/metasystem/registry.rs:764). A macro declares `%scope file | selector`. There is NO way
+  to say "this macro is valid ONLY inside an @each body" or "only inside a template scope" or
+  "only inside a named scope X".
+- A template body NEEDS a richer scope identity than "Selector": it has a PARAMETER ENVIRONMENT
+  ($p, &el) and a SCOPE KIND (template vs plain selector). The minimal version of this is the W1
+  scope-thread. The GENERAL version is PARAMETERISED SCOPES: a scope has (kind, name, params),
+  and a %macro can declare it applies within a given scope kind/name.
+- Why it ADDS to refactor cleanliness (not scope-creep): the clean break must give a template
+  body a scope identity ANYWAY. If that identity is a first-class (kind,name,params) instead of a
+  bolted-on "template flag," then:
+    · @exports (template-only today, a component_body special field) becomes "a macro scoped to
+      `template` scope-kind" — DELETING another special case instead of porting it.
+    · `&ref.$count` cross-instance access, `&cards[]` collection refs (template-component-model.org)
+      become "macros valid in template/each scopes" — grammar, not bespoke fields.
+    · @each's item scope, @match's arm scope, a template's param scope all become NAMED scopes in
+      the same containment tree the matcher already walks — one model, not N.
+  i.e. parameterised scopes let MORE of the component_body special fields (exports, refs,
+  collection-refs) die into the general scope mechanism, making the break CLEANER, not wider.
+
+* Recommendation
+- directives/injections: DELETE (option (a)-via-(c)). Behavior preserved by the unified
+  selector-scope emitter serving template-body scopes; no ComponentDirective, no field mapping.
+  This is IN-SCOPE for PLAN-039 (it IS the refactor) and REMOVES code.
+- Parameterised/named scopes: the MINIMAL form (a template body has a scope kind + param env) is
+  REQUIRED for PLAN-039 W1 and is in-scope. The GENERAL form (%macro declares "valid within
+  scope-kind/name X"; @exports/refs/collection-refs become scope-gated macros) is a STRONGER
+  refactor that would let even MORE special cases die — but it is bigger and wants its own
+  design + test surface. FILE IT AS AN FUP, with the explicit note: adopt it INTO PLAN-039 only
+  if a clean, testable design emerges that REDUCES net complexity (the user's bar: "elegant,
+  only adds to cleanliness"). Otherwise PLAN-039 ships with the minimal template-scope identity
+  and the FUP generalises later.
+
+* Elegance test for the FUP (the bar to clear before folding it into PLAN-039)
+A parameterised-scope design is worth doing in THIS pass ONLY if ALL hold:
+  1. It is expressible in the EXISTING %scope grammar with a small extension (e.g.
+     `%scope within(template)` / `%scope within(each)`), no new subsystem.
+  2. macro_scope_matches generalises from a 2-case match to a containment-tree query WITHOUT a
+     special case per scope kind (the kinds are data, not code).
+  3. It DELETES at least @exports's component_body special field (proof it reduces complexity).
+  4. It is testable by the SAME scope-assignment machinery (a macro scoped to `each` matches
+     inside an @each scope and is REFUSED outside — a parse diagnostic, gated by a unit test).
+If any fails, it is a separate arc (FUP), not part of the clean break.
+
+* Provenance
+Verified: stdlib/macros/on-event.st (@on animation drivers), src/pipeline/mod.rs:1152-1170,1596-1609
+(ComponentDirective used for validation), stdlib/primitives/template.st:297-410 (factory forEach
+runtime for directives/injections), src/emit/html_hydrate.rs + html_reactive.rs
+(emit_reactive_binding_js — the selector/file-scope emitter), src/metasystem/registry.rs:764
+(macro_scope_matches binary), projects/ora-ventures.com/landing/modules/_faq.st (production
+selector-scope state-@on), a /tmp build proving file-scope @on emits _localState mutation.
+Cross-ref: research/template-component-model.org (exports/refs/collection-refs model).

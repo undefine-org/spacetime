@@ -1,0 +1,237 @@
+#+TITLE: Spacetime App Platform — Reactive/Modular Constructs for Real Apps
+#+AUTHOR: Research synthesis (approach B: empirical, compiler-verified)
+#+DATE: 2026-06-06
+#+STARTUP: overview
+
+* Why this exists
+
+The CMS admin (=stdlib/__admin__/admin-app.st=) is 1349 lines of =%emit js=. It
+is the single largest violation of the project's first law ("Spacetime websites
+should NOT have custom javascript"). It survives only because it lives in the
+toolchain (=__admin__/=), not user space — but it is the loudest possible signal
+of what the language cannot yet express declaratively.
+
+Approach B: instead of theorizing, we tried to rebuild the admin multi-file in
+*today's* Spacetime and let the compiler tell us where the walls are. The probes
+([[*Empirical findings][Empirical findings]]) overturned the roadmap's belief that the
+component model is "done."
+
+* Empirical findings (compiler-verified, 2026-06-06)
+
+Probes compiled via =cargo run -- check= on minimal =.st= fixtures.
+
+| Feature                         | Design status   | EMPIRICAL truth                                            |
+|---------------------------------+-----------------+-----------------------------------------------------------|
+| =@exports { $x: mut }=          | PROJ-104 DONE   | ✓ parses + validates                                       |
+| =&x &c()= named ref             | PROJ-104 DONE   | ✓                                                         |
+| =&x.$count= cross-ref read      | PROJ-106 DONE   | ✓                                                         |
+| =text <- $v= injection          | PROJ-103 DONE   | ✓ (top-level + in template)                               |
+| =.c--on: $v > 0= class toggle   | PROJ-103 DONE   | ✓                                                         |
+| scoped =$count= in 1-line body  | PROJ-101/102    | ✓ set + read both lower to =ST.set/get(rootEl,…)=         |
+| *scoped state, MULTILINE body*  | PROJ-101/102    | *✗ BROKEN — bogus E0905/E0806 "undefined state variable"* |
+| =[slot="v"] <- $x= in body      | PROJ-103        | *✗ PARSE ERROR "expected '{' after selector"*             |
+| dynamic dispatch =&$name(…)=    | —               | ✗ absent                                                  |
+| =@match= as a RENDER construct  | —               | ✗ exists only inside state-machine.st                     |
+| recursive templates             | —               | ✗ flat factory registry, no self-invocation               |
+| =@portal=                       | —               | ✗ absent                                                  |
+| =@effect=                       | —               | ✗ absent (only animation drivers react to signals)        |
+| =@editable= rich text           | PROJ-107 design | ✗ admin uses contenteditable+execCommand JS               |
+
+** Root cause of the keystone bug
+
+=parse_component_body()= (=src/syntax/events/form_compiler.rs:1701=) segments a
+template body with *line-oriented heuristics*, not the brace-aware tokenizer used
+everywhere else. It walks =inner.lines()=, classifying each line by its first
+token (=$=, =.=, =[=, =@=, =<=). A multiline HTML element:
+
+#+begin_example
+  <div class="c">
+    <button class="b">+</button>
+  </div>
+  .b { @on click { $count <- $count + 1; } }
+#+end_example
+
+desyncs =html_tag_depth=, so the trailing =.b { … }= behavior block is consumed
+as HTML, and =$count= is never registered as referenced-in-scope → it reports
+=$count … references an undefined state variable=. *Single-line bodies work; no
+real component is single-line.* This is why nobody noticed: the test fixtures and
+demos are toy one-liners, and the admin sidestepped the whole path with =%emit js=.
+
+∴ The component model is *built but only survives toy inputs*. The first deliverable
+is not new features — it is making the keystone real.
+
+* The construct list (target surface)
+
+Grouped by layer. ★ = new/changed in this initiative. ✓ = exists & verified.
+
+** Layer 0 — Types & data (DONE, reused as-is)
+- ✓ =@type Name { field: T }=
+- ✓ =@data inline|fetch|derive|fold|query=
+- ✓ =@fn=, =@compute=
+
+** Layer 1 — Scoped reactive state ★ (fix + complete PROJ-101/102)
+- ✓ global: =$x T: v;= in =body {}= → =SpacetimeLocal=
+- ★ instance: =$x T: v;= in =@template= body → =ST.set(rootEl,…)= (fix multiline)
+- ✓ =@exports { $x, $y: mut }= access control
+- ✓ =&ref.$x= cross-instance read; =&ref.$x <- v= write (mut only)
+- ✓ =&cards[]= collection refs + =&cards.sum(.$x)= / =.each(…)= / =.length=
+- ★ =--layer scopes= must reflect multiline reality (regression coverage)
+
+** Layer 2 — Reactive properties ★ (PROJ-103 + KILL @bind, #2)
+Two operators, one mental model — replaces all of =@bind=/=@show=/=@input=:
+| syntax                   | operator | domain | lowers to                          |
+|--------------------------+----------+--------+------------------------------------|
+| =.open: $flag;=          | =:=      | CSS    | =classList.toggle('open', v)=      |
+| =--accent: $c;=          | =:=      | CSS    | =style.setProperty('--accent',v)=  |
+| =color: red;=            | =:=      | CSS    | static stylesheet (passthrough)    |
+| =text <- $v;=            | =<-=     | DOM    | =el.textContent = v=               |
+| =[slot="x"] <- $v;=      | =<-=     | DOM    | =slotEl.textContent = v=  ★fix parse|
+| =src <- $.url;=          | =<-=     | DOM    | =el.setAttribute('src', …)=        |
+| =@input= two-way         | —        | —      | becomes =value <- $x= + =$x <- value= sugar |
+
+** Layer 3 — Composition ★ (the two MISSING primitives, #4 + #5)
+- ★ *dynamic dispatch*: =&$expr(args)= — invoke a template whose NAME is a value
+- ★ *match-as-render*: general =@match= that emits a template per arm
+  #+begin_example
+  @match $node.widget {
+    "media"    => &media-field($node, $value)
+    "relation" => &relation-field($node, $value)
+    _          => &text-field($value)
+  }
+  #+end_example
+- ★ *recursion*: a template may invoke itself (directly or mutually); registry
+  factories resolved lazily by name so the cycle is legal.
+- ✓ =@each($s as $i, key:, when:)= keyed list (reused)
+- ✓ =@if/@else=, =@for=, =@repeat= (reused)
+
+** Layer 4 — App shell / orchestration ★ (#6, #7, #9)
+- ★ =@view $active : "list" { … }= — a named view signal + =@show(when:)=, or a
+  =@router= primitive binding history/hash → signal
+- ★ =@portal { … }= — render subtree at =document.body=, escape grid/stacking;
+  ships focus-trap + scroll-lock + Esc-to-close
+- ★ =@effect(on: $sig, debounce: t) { … }= — run a side-effect when a signal
+  changes (the home for "after save → reload preview")
+
+** Layer 5 — Mutable collections ★ (#8)
+- ★ =@data collection $rows T[] from "/x.json" via dev-ws { … }= → exposes
+  =$rows.insert(x)= / =.delete(i)= / =.reorder(a,b)= with optimistic
+  apply + ack/reject + revert. Wraps the ONE legitimate JS primitive (the WS
+  bridge) so the 4× hand-wired CRUD call-sites collapse to one construct.
+
+** Layer 6 — Structured input ★ (#10, its own multi-phase project)
+- ★ =@editable(bind: $html) { marks: &bold &italic &link(&href);
+  blocks: &h2 &p &quote &list }= — see [[file:spacetime-editable-spec.org]]
+  Marks/blocks are *element-ref functions* (=&bold(&sel)=), not opaque enums.
+
+* File hierarchy
+
+** Compiler (Rust) — where each construct is built
+#+begin_example
+src/syntax/events/form_compiler.rs   ★ parse_component_body: replace line-heuristics
+                                       with a brace-aware mini-tokenizer (KEYSTONE FIX)
+src/syntax/events/extractors/blocks.rs ComponentBodyExtractor (unchanged surface)
+src/parser/meta_ast.rs               CaptureType (+ MatchArms if @match-render needs it)
+src/pipeline/scope.rs                ★ scope tree: multiline correctness + dispatch refs
+src/pipeline/mod.rs                  ★ check_undefined_state_refs (E0905/E0917) reuse
+src/pipeline/expand.rs               ★ lower dispatch/@match/recursion/@portal/@effect
+src/emit/js.rs                       ★ resolve_var_ref already does ST.get/set; extend for
+                                       dynamic template name + portal mount + effect watch
+src/cli/inspect.rs                   --layer scopes (regression); maybe --layer composition
+src/diagnostics/codes.rs             new E-codes: dispatch arity, recursion depth, portal misuse
+#+end_example
+
+** Stdlib (.st) — author surface, self-describing per AGENTS.md
+#+begin_example
+stdlib/syntax/local-state.st         ✓ (scoped variant already routes here)
+stdlib/macros/reactive-props.st      ★ NEW — the : / <- surface (replaces bindings.st @bind)
+stdlib/macros/bindings.st            ★ keep localStorage(); REMOVE @bind/@show/@input bodies
+stdlib/macros/data.st                ★ @bind/@show/@input/@if-block macros DELETED (cutover)
+stdlib/macros/match.st               ★ NEW — @match render form (distinct from state-machine)
+stdlib/macros/dispatch.st            ★ NEW — &$expr(args) dynamic invocation
+stdlib/macros/view.st                ★ NEW — @view + @show(when:)
+stdlib/macros/portal.st              ★ NEW — @portal
+stdlib/macros/effect.st              ★ NEW — @effect
+stdlib/macros/data-kind.st           ★ + @data collection … via <bridge>
+stdlib/primitives/portal.st          ★ NEW — mount/unmount/focus-trap/scroll-lock primitive
+stdlib/primitives/effect.st          ★ NEW — signal-watch side-effect primitive
+stdlib/primitives/template.st        ★ register-template: lazy-by-name (recursion) + dispatch
+stdlib/editable/                     ★ NEW MODULE — see editable spec
+  MODULE.st  index.st  primitives/…  macros/editable.st  marks/  blocks/
+#+end_example
+
+** The admin, rebuilt multi-file (the proof / acceptance harness)
+#+begin_example
+stdlib/__admin__/
+  MODULE.st                manifest, public surface = @admin
+  index.st                 @import graph + mount
+  types.st                 @type Collection/TypeMeta/Motion/Token/Template/Asset
+  data.st                  @data fetch site/types/motion/theme/templates/assets
+                           @data derive collections ; @data collection … via dev-ws
+  app.st                   shell: rail | center | drawer | preview (3-col grid + @portal)
+  rail/rail.st             @each collections → &nav-item ; theme/components/motion nav
+  collection/
+    list.st                @each(rows, when filter) → &row  (search + reorder)
+    row.st                 @template &row($item, $disp)
+    graph.st               relation SVG view
+  drawer/
+    drawer.st              schema-generated form host (@portal)
+    field.st               @template &field($name,$node,$value) — RECURSIVE + @match dispatch
+    widgets/               &text-field &textarea-field &number-field &toggle-field
+                           &select-field &media-field &chips-field &relation-field
+                           &relation-multi-field &fieldset-field(RECURSE) &list-field(RECURSE)
+                           &richtext-field (=@editable=)
+  theme/theme.st           @each tokens → &token-control → @effect persist
+  motion/motion.st         @each motions → sliders → persist
+  palette/palette.st       @each templates → &palette-card (typed sig)
+  media/library.st         @portal modal grid picker
+  persist.st               the ONE %primitive kept: window.__stDevWs / __stDevSave bridge
+#+end_example
+
+This decomposition is the acceptance test: when =stdlib/__admin__/admin-app.st='s
+1349 JS lines are gone and replaced by the tree above (only =persist.st= keeps
+=%emit js=), the platform work is done.
+
+* Build order (waves)
+
+Each wave ends green on: =cargo test --lib=, =--test integration_tests=,
+=--test v8_runtime_test=, =cargo run --features headless -- test tests/=, plus a
+real site served and eyeballed.
+
+** Wave 0 — Keystone: make scoped state real ★ HIGHEST PRIORITY
+- Fix =parse_component_body= multiline (brace-aware segmentation)
+- Fix =[slot] <- $x= injection parse in template body
+- Regression fixtures: multiline counter, nested element, behavior-after-HTML
+- Migrate ONE real stdlib component to scoped state; serve + verify
+- *Gate*: the toy probes AND a multiline real component both compile & run
+
+** Wave 1 — Kill @bind (#2)
+- Land =reactive-props.st= as the sole : / <- surface
+- Cutover ALL 68 =@bind= occurrences (20 files) → : / <-
+- Delete =@bind/@show/@input/@if-block= macro bodies
+- *Gate*: zero =@bind= in repo; all migrated sites pass headless + visual
+
+** Wave 2 — Composition: dispatch + match + recursion (#4, #5)
+- =@match= render macro + =&$expr()= dispatch + lazy-by-name registry
+- Recursion depth guard diagnostic
+- *Gate*: =&field= renders a 3-level nested schema (fieldset>list>field)
+
+** Wave 3 — App shell (#6, #7, #9)
+- =@view=, =@portal=, =@effect=
+- *Gate*: a 3-pane demo app with a modal swaps views, traps focus, persists
+
+** Wave 4 — Mutable collections (#8)
+- =@data collection … via dev-ws=
+- *Gate*: optimistic insert/delete/reorder with ack/reject/revert
+
+** Wave 5 — Rebuild the admin (the proof)
+- Replace admin-app.st with the multi-file tree
+- *Gate*: feature parity, only persist.st keeps JS
+
+** Wave 6 — @editable (#10, multi-phase, own spec)
+- See [[file:spacetime-editable-spec.org]]
+
+* Open questions
+- =@match= render arms: reuse =CaptureType::Template= per arm, or new =MatchArms=?
+- dispatch =&$expr=: restrict NAME expr to =$item.field= shape (static-ish) or any expr?
+- recursion: cap depth at compile time (schema depth known) or runtime guard only?
+- =@view= vs =@router=: ship view signal first; router as Wave-3 stretch.

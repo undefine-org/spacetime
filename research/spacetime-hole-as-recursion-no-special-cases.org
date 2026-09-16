@@ -1,0 +1,156 @@
+#+TITLE: The hole as a scope-threaded recursion into the compiler — no Rust special cases
+#+DATE: 2026-06-12
+#+STATUS: ANALYSIS (the deepest framing; supersedes the "4th hole mode" design)
+
+* The principle (user)
+"The recursive hole should admit *any* valid Spacetime construct, and work perfectly with
+scope matching. No special cases in Rust code."
+
+This rejects my "4th hole mode" design (empty | &param | @directive | text — a Rust match).
+That is STILL special-casing. The true design: a hole's inner source is COMPILED BY THE SAME
+PIPELINE as everything else, in the ENCLOSING SCOPE, and whatever construct(s) it yields are
+mounted at the hole's position. The hole is a recursion point, not a typed enum of cases.
+
+* What I found verifying this (the decisive discovery)
+There are TWO parallel worlds for "body content," and only ONE is broken:
+
+** World A — scope blocks `.sel { … }` (WORKS, no special cases)
+The CST parses `.sel { }` as a SCOPE_BLOCK (src/syntax/cst/ast.rs: ScopeBlock, nested_scopes).
+The WHOLE-FILE matcher finds every construct (@each, @editable, @on, nested `.x{}`) by the
+normal grammar, ANYWHERE in the source. Then cst_to_stfile assigns each FormMatch to the
+MOST-SPECIFIC containing scope by SPAN CONTAINMENT (parser/mod.rs:414, assign_match_to_nested_
+scopes, recursive). Scope-matching is structural + already correct: a match inside `.sel{}`
+gets selector=Some(".sel"); macro_scope_matches then admits Selector-scope macros there.
+∴ a nested @each/@editable inside a `.sel { }` ALREADY compiles correctly. No reify, no
+special grammar, no swallow.
+
+** World B — @template bodies `@template &x($p){ … }` (BROKEN)
+@template is parsed as a DIRECTIVE (cst/parser.rs:522 parse_directive) whose body is captured
+as an OPAQUE STRING via the `$body:component_body` capture. That string is then RE-PARSED by
+reify_component_body with its OWN, INCOMPLETE construct grammar (the component_item Choice) +
+Rust reify_* adapters + the silent-drop fallthrough. This SECOND parser is the entire source
+of BUG-103 (@editable), BUG-085 (@each), BUG-063/064 (parity/drop). It exists ONLY because a
+template body is a capture, not a scope.
+
+* The real fix (the user's principle, made concrete)
+A @template body is a SCOPE. Treat it as one — like `.sel { }` — so the ONE whole-file matcher
++ span-containment assignment handles its nested constructs, with scope-matching for free.
+Then reify_component_body, the component_item parallel grammar, the silent-drop fallthrough,
+ssg_unroll's hand-rolled @each, and cb_nested_each ALL become unnecessary and DELETE.
+
+Concretely:
+1. CST: a @template (and &name(){} inline, editable-mark/block) body block is a SCOPE_BLOCK
+   (or a scope-like node), NOT an opaque component_body capture. Its element/HTML content +
+   nested directives are children the matcher already walks. The template's PARAMS define the
+   scope's signal environment ($p, &el), exactly as a `.sel{}` scope owns its element signals.
+2. SCOPE CONTEXT: extend the scope model so a template body carries Template/Selector scope +
+   its param environment. macro_scope_matches already keys on "is there an enclosing scope";
+   the only refinement is THREADING the param/element environment into hole resolution so a
+   nested construct's holes resolve against the template instance (ST.get(__el,'p')), not the
+   page. (Today scope is binary None→File / Some→Selector; the param environment is the new
+   thread, not a new special case — it's the same data a `.sel{}` already has.)
+3. BUILDER: the reactive builder consumes the template scope's HTML + its nested matches
+   (the editable-surface/each-inline primitives the matcher already produced) — mounting each
+   at its span position via the EXISTING anchor mechanism (emit_element_hole's anchor+apply is
+   the precedent; a nested match mounts the same way). The builder no longer re-parses a string.
+4. HOLES: a `` `expr` `` hole stays exactly what it is — a Spacetime EXPRESSION compiled in the
+   enclosing scope. A NESTED CONSTRUCT (@editable/@each) is NOT a hole at all — it is a child of
+   the body scope, found by the matcher, like it is in `.sel{}`. (So the earlier "directive
+   hole" framing was itself a special case; the truer model is: constructs are scope children,
+   holes are expressions. Both already exist for `.sel{}`; @template just needs to BE a scope.)
+
+* Why this is the no-special-case design
+- No reify_component_body second grammar — the ONE matcher handles template bodies.
+- No component_item Choice that must enumerate constructs — constructs are matched globally.
+- No silent-drop fallthrough — an unmatched construct is a normal parse diagnostic, same as
+  anywhere else in the file.
+- No ssg_unroll hand-rolled @each, no cb_nested_each special case — @each in a body is the
+  SAME @each as in a `.sel{}`.
+- Scope-matching "works perfectly" because it is the SAME span-containment + macro_scope_matches
+  the rest of the compiler uses; a template body is just another scope in the containment tree.
+- ANY valid Spacetime construct admitted: whatever the matcher recognizes at Selector/Template
+  scope is automatically valid in a template body, forever, with zero per-construct Rust.
+
+* Honesty: this is bigger than the recursive-hole patch, and that's the point
+The recursive-hole / 4th-mode design would have made @editable work with a contained change.
+The user's principle demands the STRUCTURAL fix: collapse World B into World A. That is a
+larger refactor (template bodies become scopes; reify_component_body + its grammar + the
+hand-rolled parsers retire), but it removes an entire parallel parser and a class of bugs
+PERMANENTLY, and it is the only design with NO Rust special cases. It is the right ambition.
+
+** Migration risk (eyes open)
+- ComponentBodyDef is consumed widely (factory serialization, SSG, scope tree). Collapsing it
+  means the template factory consumes scope-matches instead of a ComponentBodyDef string-IR.
+  This touches: cst (template body → scope), parser/mod.rs (assignment already handles nested
+  scopes — the win), the factory contract (template.st + component_body_to_js), SSG
+  (ssg_unroll), and every @template (the regression floor: byte-identical render).
+- Sequence it so the matcher-driven path runs ALONGSIDE the reify path first (differential:
+  both produce the same factory contract for the existing corpus), then cut over, then delete
+  reify. The component_body_corpus (43 cases + 25 fleet bodies) is the differential harness.
+
+* Revised waves (replaces PLAN-039's recursive-hole waves)
+  W1  Make a @template body a SCOPE in the CST (or a scope-equivalent node) carrying its param
+      environment; the whole-file matcher + span-containment assign nested constructs to it.
+      Run ALONGSIDE reify_component_body; differential-assert identical factory contract over
+      the component_body_corpus (43+25). No cutover yet. Floor: every template byte-identical.
+  W2  Builder consumes the body scope's matches (mount nested primitives at span anchors) for
+      @editable/@richtext FIRST. GATE: cms-testbed admin Post body richtext mounts + persists
+      (BUG-103). Cut these constructs over from reify to the scope path.
+  W3  @each + remaining constructs over the scope path; DELETE ssg_unroll's find/expand_nested_
+      each + cb_nested_each (BUG-085 closed; hand-rolled parser gone).
+  W4  DELETE reify_component_body + the component_item parallel grammar + the silent-drop
+      fallthrough. ComponentBodyDef either retires or becomes a thin view over scope-matches.
+      An unknown construct in a body is now a normal parse diagnostic. BUG-063 family closed.
+  Floor each wave: component_body_corpus differential green; v8 template suite green; every
+  demo byte-identical; admin richtext gate green from W2.
+
+* Verdict
+The hole is an EXPRESSION recursion (compile inner in enclosing scope) — already true. The
+NESTED CONSTRUCT problem is not a hole problem at all: it is "@template bodies aren't scopes."
+Make them scopes; the ONE matcher + scope-matching handle every construct with no Rust special
+cases, and an entire parallel parser (reify_component_body) + two hand-rolled parsers retire.
+This is the structurally truest version of the user's instinct.
+
+* ADDENDUM — @template is extraneous ceremony; the body-as-scope unifies both forms (user)
+User: "@template is normally extraneous; bare &(…){ } should work on its own. I may remove
+the need for @template here (cf. how the test infra defines functions that show their own
+code)."
+
+This SHARPENS the scope-collapse, it doesn't conflict with it:
+- The bare `&name($p){ … }` form (template-inline, stdlib/macros/template.st) ALREADY exists
+  and uses the SAME `$body:component_body` capture as `@template` — so it inherits the SAME
+  brokenness (BUG-103/085). @template-the-directive is just a prefixed alias; both forms route
+  through the parallel parser. Making the BODY a scope fixes BOTH at once, and makes @template
+  droppable later (a bare `&name(){}` IS the construct; the `@template` keyword adds nothing).
+- Contrast the THREE body models now visible:
+    .sel { … }            → TRUE SCOPE: matcher-walked, span-assigned, scope-matched. WORKS.
+    @test "n" { … }        → OPAQUE BLOCK: `$body:block` + `%$body.js` — the body is captured
+                            VERBATIM and emitted; no construct classification at all. WORKS
+                            (because it never tries to parse constructs — it just preserves +
+                            re-emits the source, which is also why a test can "show its own
+                            code": the macro has the raw `%$body`).
+    @template / &x(){ … }  → PARTIAL PARSER: `$body:component_body` — a SECOND, incomplete
+                            construct grammar. The broken middle. BUG-103/085 live here.
+  The lesson the test infra teaches: a body should EITHER be a true scope (matcher-walked,
+  World A) OR an opaque preserved block (World B-as-`block`) — NEVER a bespoke partial parser.
+  `component_body` is the partial parser; it must go. Per the user's instinct, a template body
+  is content + nested constructs + scoped signals = exactly a SCOPE. So: World A.
+- The param environment ($p, &el) is the only thing a template scope has that a `.sel{}` scope
+  doesn't — and the doc research/template-component-model.org already specifies the COMPILE-TIME
+  scope-resolution model for it (element scope → parent template scope → … → body → SpacetimeLocal,
+  resolved statically to direct ST.get(__el,…) refs). That model IS the scope-thread W1 needs;
+  it is already designed, just not unified with the .sel{} scope machinery.
+
+∴ final shape: a `&name($p){ … }` body is a SCOPE whose signal environment is its params +
+declared state (per template-component-model.org's compile-time resolution); its HTML + nested
+constructs flow through the ONE matcher with scope-matching; `@template` becomes optional sugar
+and can be retired. No component_body, no reify, no special cases.
+
+* Provenance
+Verified: src/metasystem/registry.rs (macro_scope_matches, MacroScope), src/parser/mod.rs:414
+(span-containment assignment incl. assign_match_to_nested_scopes — the existing nested-scope
+machinery), src/syntax/cst/ast.rs (ScopeBlock + nested_scopes vs directive bodies),
+src/syntax/cst/parser.rs (@template parsed as a directive with a component_body capture),
+src/syntax/events/form_compiler.rs (reify_component_body — the parallel parser to retire),
+src/emit/html_reactive.rs (emit_element_hole anchor+apply — the mount precedent),
+src/html/ssg_unroll.rs (hand-rolled @each). Supersedes the "recursive hole / 4th mode" design.
