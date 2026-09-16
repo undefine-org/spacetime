@@ -1,0 +1,791 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Spacetime Data Binding Runtime Tests</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      padding: 2rem;
+      background: #f5f5f5;
+      line-height: 1.6;
+    }
+
+    h1 {
+      margin-bottom: 2rem;
+      color: #333;
+    }
+
+    h2 {
+      margin: 2rem 0 1rem;
+      color: #555;
+      border-bottom: 2px solid #ddd;
+      padding-bottom: 0.5rem;
+    }
+
+    .test-section {
+      background: white;
+      padding: 1.5rem;
+      margin-bottom: 1.5rem;
+      border-radius: 8px;
+      box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    }
+
+    .test-result {
+      padding: 1rem;
+      margin: 0.5rem 0;
+      border-radius: 4px;
+      font-family: 'Courier New', monospace;
+      font-size: 0.9rem;
+    }
+
+    .test-result.pass {
+      background: #d4edda;
+      border: 1px solid #c3e6cb;
+      color: #155724;
+    }
+
+    .test-result.fail {
+      background: #f8d7da;
+      border: 1px solid #f5c6cb;
+      color: #721c24;
+    }
+
+    .test-result.info {
+      background: #d1ecf1;
+      border: 1px solid #bee5eb;
+      color: #0c5460;
+    }
+
+    .summary {
+      position: fixed;
+      top: 1rem;
+      right: 1rem;
+      background: white;
+      padding: 1rem 1.5rem;
+      border-radius: 8px;
+      box-shadow: 0 4px 8px rgba(0,0,0,0.2);
+      min-width: 200px;
+    }
+
+    .summary h3 {
+      margin-bottom: 0.5rem;
+      color: #333;
+    }
+
+    .summary .count {
+      display: flex;
+      justify-content: space-between;
+      padding: 0.25rem 0;
+    }
+
+    .summary .pass-count {
+      color: #28a745;
+      font-weight: bold;
+    }
+
+    .summary .fail-count {
+      color: #dc3545;
+      font-weight: bold;
+    }
+
+    pre {
+      background: #f8f9fa;
+      padding: 1rem;
+      border-radius: 4px;
+      overflow-x: auto;
+      margin: 0.5rem 0;
+    }
+
+    .demo-container {
+      margin-top: 1rem;
+      padding: 1rem;
+      border: 2px dashed #ddd;
+      border-radius: 4px;
+    }
+
+    .product-card {
+      background: #fff;
+      border: 1px solid #ddd;
+      border-radius: 8px;
+      padding: 1rem;
+      margin: 0.5rem;
+      display: inline-block;
+      min-width: 200px;
+    }
+
+    .product-card img {
+      width: 100%;
+      height: 150px;
+      object-fit: cover;
+      border-radius: 4px;
+    }
+
+    .product-card [slot="name"] {
+      font-weight: bold;
+      margin: 0.5rem 0;
+      display: block;
+    }
+
+    .product-card [slot="price"] {
+      color: #28a745;
+      font-size: 1.2rem;
+    }
+  </style>
+    <style>:not(:defined){visibility:hidden}</style>
+</head>
+<body>
+  <h1>Spacetime Data Binding Runtime Tests</h1>
+
+  <div class="summary">
+    <h3>Test Summary</h3>
+    <div class="count">
+      <span>Passed:</span>
+      <span class="pass-count" id="pass-count">0</span>
+    </div>
+    <div class="count">
+      <span>Failed:</span>
+      <span class="fail-count" id="fail-count">0</span>
+    </div>
+    <div class="count">
+      <span>Total:</span>
+      <span id="total-count">0</span>
+    </div>
+  </div>
+
+  <div id="test-output"></div>
+
+  <!-- Test templates -->
+  <template id="product-card">
+    <div class="product-card">
+      <img slot="image" src="" alt="">
+      <span slot="name"></span>
+      <span slot="price"></span>
+      <span slot="stock"></span>
+    </div>
+  </template>
+
+  <template id="simple-item">
+    <div class="simple-item">
+      <span slot="text"></span>
+    </div>
+  </template>
+
+  <!-- Load the runtime -->
+  <script src="data-binding.js"></script>
+
+  <!-- Test suite -->
+  <script>
+    // Enable debug mode
+    localStorage.setItem('spacetime-debug', 'true');
+
+    // Test utilities
+    let passCount = 0;
+    let failCount = 0;
+    const output = document.getElementById('test-output');
+
+    function createSection(title) {
+      const section = document.createElement('div');
+      section.className = 'test-section';
+      section.innerHTML = `<h2>${title}</h2>`;
+      output.appendChild(section);
+      return section;
+    }
+
+    function log(message, type = 'info', section = output) {
+      const div = document.createElement('div');
+      div.className = `test-result ${type}`;
+      div.textContent = message;
+      section.appendChild(div);
+    }
+
+    function assert(condition, message, section) {
+      if (condition) {
+        passCount++;
+        log(`✓ ${message}`, 'pass', section);
+      } else {
+        failCount++;
+        log(`✗ ${message}`, 'fail', section);
+      }
+      updateSummary();
+    }
+
+    function assertEqual(actual, expected, message, section) {
+      const match = JSON.stringify(actual) === JSON.stringify(expected);
+      assert(match, message + (match ? '' : ` (got ${JSON.stringify(actual)}, expected ${JSON.stringify(expected)})`), section);
+    }
+
+    function updateSummary() {
+      document.getElementById('pass-count').textContent = passCount;
+      document.getElementById('fail-count').textContent = failCount;
+      document.getElementById('total-count').textContent = passCount + failCount;
+    }
+
+    // =============================================================================
+    // Test 1: Filter Functions
+    // =============================================================================
+
+    (function testFilters() {
+      const section = createSection('1. Filter Functions');
+
+      // json filter
+      const obj = { a: 1, b: 2 };
+      assertEqual(
+        SpacetimeFilters.json(obj),
+        '{"a":1,"b":2}',
+        'json filter serializes objects',
+        section
+      );
+
+      // currency filter
+      assertEqual(
+        SpacetimeFilters.currency(95),
+        '$95.00',
+        'currency filter with default symbol',
+        section
+      );
+      assertEqual(
+        SpacetimeFilters.currency(195, '€'),
+        '€195.00',
+        'currency filter with euro symbol',
+        section
+      );
+      assertEqual(
+        SpacetimeFilters.currency(95, 'dhs'),
+        '95.00 dhs',
+        'currency filter with dhs',
+        section
+      );
+
+      // default filter
+      assertEqual(
+        SpacetimeFilters.default(null, 'fallback'),
+        'fallback',
+        'default filter uses fallback for null',
+        section
+      );
+      assertEqual(
+        SpacetimeFilters.default('value', 'fallback'),
+        'value',
+        'default filter keeps existing value',
+        section
+      );
+
+      // count filter
+      assertEqual(
+        SpacetimeFilters.count([1, 2, 3]),
+        3,
+        'count filter returns array length',
+        section
+      );
+
+      // truncate filter
+      assertEqual(
+        SpacetimeFilters.truncate('Hello World', 5),
+        'Hello...',
+        'truncate filter shortens string',
+        section
+      );
+
+      // if filter
+      assertEqual(
+        SpacetimeFilters.if(true, 'yes', 'no'),
+        'yes',
+        'if filter returns true value',
+        section
+      );
+      assertEqual(
+        SpacetimeFilters.if(false, 'yes', 'no'),
+        'no',
+        'if filter returns false value',
+        section
+      );
+
+      // uppercase filter
+      assertEqual(
+        SpacetimeFilters.uppercase('hello'),
+        'HELLO',
+        'uppercase filter works',
+        section
+      );
+
+      // lowercase filter
+      assertEqual(
+        SpacetimeFilters.lowercase('HELLO'),
+        'hello',
+        'lowercase filter works',
+        section
+      );
+
+      // capitalize filter
+      assertEqual(
+        SpacetimeFilters.capitalize('hello world'),
+        'Hello world',
+        'capitalize filter works',
+        section
+      );
+
+      // pluralize filter
+      assertEqual(
+        SpacetimeFilters.pluralize(1, 'item', 'items'),
+        'item',
+        'pluralize returns singular for 1',
+        section
+      );
+      assertEqual(
+        SpacetimeFilters.pluralize(5, 'item', 'items'),
+        'items',
+        'pluralize returns plural for 5',
+        section
+      );
+    })();
+
+    // =============================================================================
+    // Test 2: Filter Chaining
+    // =============================================================================
+
+    (function testFilterChaining() {
+      const section = createSection('2. Filter Chaining');
+
+      const filters = [
+        { name: 'truncate', args: [10] },
+        { name: 'uppercase', args: [] }
+      ];
+
+      const result = applyFilters('hello world test', filters);
+      assertEqual(
+        result,
+        'HELLO WORL...',
+        'Filter chain applies truncate then uppercase',
+        section
+      );
+    })();
+
+    // =============================================================================
+    // Test 3: Data Loader - Mock fetch
+    // =============================================================================
+
+    (async function testDataLoader() {
+      const section = createSection('3. Data Loader');
+
+      // Mock fetch
+      const originalFetch = window.fetch;
+      window.fetch = async (url) => {
+        if (url === '/test/products') {
+          return {
+            ok: true,
+            json: async () => [
+              { id: 1, name: 'Product 1', price: 100 },
+              { id: 2, name: 'Product 2', price: 200 }
+            ]
+          };
+        }
+        return { ok: false, status: 404 };
+      };
+
+      const loader = new SpacetimeDataLoader('testProducts', {
+        src: '/test/products',
+        cache: '5m'
+      });
+
+      let loadedData = null;
+      document.addEventListener('data:testProducts:loaded', (e) => {
+        loadedData = e.detail;
+      });
+
+      const data = await loader.load();
+
+      assert(data !== null, 'Loader returns data', section);
+      assertEqual(data.length, 2, 'Correct number of items loaded', section);
+      assertEqual(data[0].name, 'Product 1', 'First item has correct name', section);
+      assert(loadedData !== null, 'data:loaded event was fired', section);
+
+      // Test cache
+      const cachedData = await loader.load();
+      assert(loader._isCacheValid(), 'Cache is valid after load', section);
+
+      // Restore fetch
+      window.fetch = originalFetch;
+    })();
+
+    // =============================================================================
+    // Test 4: Data Loader - localStorage
+    // =============================================================================
+
+    (async function testLocalStorageLoader() {
+      const section = createSection('4. Data Loader - localStorage');
+
+      // Setup test data
+      const testData = [{ id: 1, text: 'Test item' }];
+      localStorage.setItem('test-storage', JSON.stringify(testData));
+
+      const loader = new SpacetimeDataLoader('testStorage', {
+        src: { type: 'localStorage', key: 'test-storage' },
+        default: []
+      });
+
+      const data = await loader.load();
+      assertEqual(data.length, 1, 'Loaded data from localStorage', section);
+      assertEqual(data[0].text, 'Test item', 'Data has correct content', section);
+
+      // Test default value
+      const loaderNoData = new SpacetimeDataLoader('emptyStorage', {
+        src: { type: 'localStorage', key: 'nonexistent-key' },
+        default: []
+      });
+
+      const emptyData = await loaderNoData.load();
+      assertEqual(emptyData.length, 0, 'Uses default when key not found', section);
+
+      // Cleanup
+      localStorage.removeItem('test-storage');
+    })();
+
+    // =============================================================================
+    // Test 5: Template Engine - Basic instantiation
+    // =============================================================================
+
+    (async function testTemplateEngine() {
+      const section = createSection('5. Template Engine');
+
+      const container = document.createElement('div');
+      section.appendChild(container);
+
+      const engine = new SpacetimeTemplateEngine();
+
+      const testData = [
+        { name: 'Item 1' },
+        { name: 'Item 2' },
+        { name: 'Item 3' }
+      ];
+
+      const bindings = {
+        slots: {
+          text: '$.name'
+        }
+      };
+
+      engine.instantiate('simple-item', testData, bindings, container);
+
+      assertEqual(
+        container.children.length,
+        3,
+        'Created correct number of instances',
+        section
+      );
+
+      const firstItem = container.children[0].querySelector('[slot="text"]');
+      assertEqual(
+        firstItem.textContent,
+        'Item 1',
+        'First item has correct text',
+        section
+      );
+    })();
+
+    // =============================================================================
+    // Test 6: Template Engine - Attribute binding
+    // =============================================================================
+
+    (async function testAttributeBinding() {
+      const section = createSection('6. Template Engine - Attributes');
+
+      const container = document.createElement('div');
+      section.appendChild(container);
+
+      const engine = new SpacetimeTemplateEngine();
+
+      const testData = [
+        {
+          name: 'Product A',
+          image: '/images/product-a.jpg',
+          price: 99.99
+        }
+      ];
+
+      const bindings = {
+        slots: {
+          name: '$.name'
+        },
+        slotAttrs: {
+          image: {
+            src: '$.image',
+            alt: '$.name'
+          }
+        }
+      };
+
+      engine.instantiate('product-card', testData, bindings, container);
+
+      const img = container.querySelector('[slot="image"]');
+      assertEqual(
+        img.getAttribute('src'),
+        '/images/product-a.jpg',
+        'Image src attribute set correctly',
+        section
+      );
+      assertEqual(
+        img.getAttribute('alt'),
+        'Product A',
+        'Image alt attribute set correctly',
+        section
+      );
+    })();
+
+    // =============================================================================
+    // Test 7: Template Engine - @let variables
+    // =============================================================================
+
+    (async function testLetVariables() {
+      const section = createSection('7. Template Engine - @let');
+
+      const container = document.createElement('div');
+      section.appendChild(container);
+
+      const engine = new SpacetimeTemplateEngine();
+
+      const testData = [
+        { price: 100 }
+      ];
+
+      const bindings = {
+        let: {
+          discountPrice: (ctx) => ctx.$.price * 0.9
+        },
+        slots: {
+          price: 'discountPrice'
+        }
+      };
+
+      engine.instantiate('product-card', testData, bindings, container);
+
+      const priceSlot = container.querySelector('[slot="price"]');
+      assertEqual(
+        priceSlot.textContent,
+        '90',
+        '@let variable computed correctly',
+        section
+      );
+    })();
+
+    // =============================================================================
+    // Test 8: Template Engine - Special variables
+    // =============================================================================
+
+    (async function testSpecialVariables() {
+      const section = createSection('8. Template Engine - Special Variables');
+
+      const engine = new SpacetimeTemplateEngine();
+
+      const context = {
+        $: { name: 'Test' },
+        _index: 2,
+        _first: false,
+        _last: false,
+        _count: 5
+      };
+
+      assertEqual(
+        engine._resolvePath('$._index', { _index: 2 }),
+        2,
+        '_index resolves correctly',
+        section
+      );
+
+      assertEqual(
+        engine._resolvePath('$._first', { _first: true }),
+        true,
+        '_first resolves correctly',
+        section
+      );
+    })();
+
+    // =============================================================================
+    // Test 9: Runtime - Integration test
+    // =============================================================================
+
+    (async function testRuntimeIntegration() {
+      const section = createSection('9. Runtime Integration');
+
+      // Register data source with inline data
+      SpacetimeRuntime.registerData('products', {
+        src: {
+          type: 'inline',
+          value: [
+            { id: 1, name: 'Product 1', price: 100 },
+            { id: 2, name: 'Product 2', price: 200 }
+          ]
+        }
+      });
+
+      // Load data
+      await SpacetimeRuntime.loadData('products');
+
+      const products = SpacetimeRuntime.getData('products');
+      assertEqual(products.length, 2, 'Runtime stores loaded data', section);
+
+      // Test resolve (cross-reference)
+      const context = { $: { id: 1 } };
+      const found = SpacetimeRuntime.resolve(
+        context,
+        'products.find(p => p.id === $.id)'
+      );
+
+      assertEqual(found.name, 'Product 1', 'Resolve finds correct item', section);
+    })();
+
+    // =============================================================================
+    // Test 10: State Machine Integration
+    // =============================================================================
+
+    (async function testStateMachineIntegration() {
+      const section = createSection('10. State Machine Integration');
+
+      const testEl = document.createElement('div');
+      testEl.className = 'test-state-machine';
+      section.appendChild(testEl);
+
+      // Setup transition
+      SpacetimeRuntime.transitionOnDataEvent(
+        'data:stateTest:loaded',
+        '.test-state-machine',
+        'ready'
+      );
+
+      // Register and load data
+      SpacetimeRuntime.registerData('stateTest', {
+        src: { type: 'inline', value: [1, 2, 3] }
+      });
+
+      await SpacetimeRuntime.loadData('stateTest');
+
+      // Wait for event to process
+      await new Promise(resolve => setTimeout(resolve, 100));
+
+      assert(
+        testEl.hasAttribute('data-state'),
+        'State attribute was added',
+        section
+      );
+      assertEqual(
+        testEl.getAttribute('data-state'),
+        'ready',
+        'State transitioned to ready',
+        section
+      );
+    })();
+
+    // =============================================================================
+    // Test 11: Complete workflow demo
+    // =============================================================================
+
+    (async function testCompleteWorkflow() {
+      const section = createSection('11. Complete Workflow Demo');
+
+      const container = document.createElement('div');
+      container.className = 'demo-container';
+      section.appendChild(container);
+
+      // Register data
+      SpacetimeRuntime.registerData('demoProducts', {
+        src: {
+          type: 'inline',
+          value: [
+            {
+              id: 1,
+              name: 'Moroccan Print',
+              price: 95,
+              image: 'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" width="200" height="150"%3E%3Crect fill="%23d4a574" width="200" height="150"/%3E%3C/svg%3E',
+              inStock: true
+            },
+            {
+              id: 2,
+              name: 'Desert Sunset',
+              price: 195,
+              image: 'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" width="200" height="150"%3E%3Crect fill="%23e67e22" width="200" height="150"/%3E%3C/svg%3E',
+              inStock: true
+            }
+          ]
+        }
+      });
+
+      await SpacetimeRuntime.loadData('demoProducts');
+
+      const products = SpacetimeRuntime.getData('demoProducts');
+
+      // Setup bindings with filters
+      const bindings = {
+        slots: {
+          name: '$.name'
+        },
+        slotAttrs: {
+          image: {
+            src: '$.image',
+            alt: '$.name'
+          },
+          price: {},
+          stock: {}
+        },
+        host: {
+          'data-id': '$.id'
+        }
+      };
+
+      // Custom binding with filters
+      const instances = SpacetimeRuntime.engine.instantiate(
+        'product-card',
+        products,
+        bindings,
+        container
+      );
+
+      // Apply filters manually for price and stock
+      instances.forEach((instance, i) => {
+        const product = products[i];
+        const priceSlot = instance.querySelector('[slot="price"]');
+        const stockSlot = instance.querySelector('[slot="stock"]');
+
+        priceSlot.textContent = SpacetimeFilters.currency(product.price, '$');
+        stockSlot.textContent = SpacetimeFilters.if(
+          product.inStock,
+          'In Stock',
+          'Out of Stock'
+        );
+      });
+
+      assertEqual(
+        container.children.length,
+        2,
+        'Demo rendered 2 products',
+        section
+      );
+
+      log('Demo: Check the rendered products above', 'info', section);
+    })();
+
+    // =============================================================================
+    // Final summary
+    // =============================================================================
+
+    setTimeout(() => {
+      const summarySection = createSection('Test Results Summary');
+      log(`Total tests: ${passCount + failCount}`, 'info', summarySection);
+      log(`Passed: ${passCount}`, 'pass', summarySection);
+      log(`Failed: ${failCount}`, failCount > 0 ? 'fail' : 'pass', summarySection);
+
+      if (failCount === 0) {
+        log('All tests passed!', 'pass', summarySection);
+      }
+    }, 500);
+  </script>
+    <link rel="stylesheet" href="../../spacetime.css" />
+    <script src="../../spacetime.js"></script>
+</body>
+</html>
