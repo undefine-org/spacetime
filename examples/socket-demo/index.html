@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Socket Demo Test</title>
+    <style>
+        body { font-family: system-ui; background: #1a1a2e; color: #fff; padding: 40px; }
+        .socket-demo {
+            background: #16213e; border-radius: 16px; padding: 24px;
+            max-width: 500px; margin: 0 auto;
+        }
+        .status {
+            padding: 12px 20px; border-radius: 8px; font-weight: 600;
+            text-align: center; margin-bottom: 16px; background: gray;
+            transition: background 300ms;
+            display: flex; align-items: center; justify-content: center; gap: 8px;
+        }
+        .chat-area {
+            background: #0f1629; border-radius: 8px; padding: 16px;
+            min-height: 200px; max-height: 300px; overflow-y: auto;
+            transition: opacity 300ms;
+        }
+        .message { margin: 8px 0; padding: 8px 12px; border-radius: 8px; }
+        .message.sent { background: #3b82f6; margin-left: 40px; }
+        .message.received { background: #374151; margin-right: 40px; }
+        .message .time { font-size: 10px; opacity: 0.6; margin-top: 4px; }
+        .spinner {
+            display: inline-block; width: 16px; height: 16px;
+            border: 2px solid transparent; border-top-color: white;
+            border-radius: 50%; opacity: 0; transition: opacity 200ms;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        .input-row {
+            display: flex; gap: 8px; margin-top: 16px;
+        }
+        .message-input {
+            flex: 1; padding: 12px 16px; border: none; border-radius: 8px;
+            background: #0f1629; color: white; font-size: 14px;
+        }
+        .message-input:focus { outline: 2px solid #3b82f6; }
+        .send-btn, .reconnect-btn {
+            padding: 12px 24px; border: none; border-radius: 8px;
+            font-weight: 600; cursor: pointer; transition: opacity 200ms;
+        }
+        .send-btn { background: #3b82f6; color: white; }
+        .send-btn:hover { background: #2563eb; }
+        .send-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+        .reconnect-btn { background: #6b7280; color: white; opacity: 0; pointer-events: none; }
+        .reconnect-btn:hover { background: #4b5563; }
+        .error-message {
+            background: #ef4444; padding: 12px; border-radius: 8px;
+            margin-bottom: 16px; opacity: 0; transition: opacity 200ms;
+        }
+        .debug { margin-top: 20px; background: #0f1629; padding: 16px; font-family: monospace; font-size: 12px; border-radius: 8px; }
+        .empty-state { color: #6b7280; text-align: center; padding: 40px 0; }
+    </style>
+    <style>:not(:defined){visibility:hidden}</style>
+</head>
+<body>
+    <h1>Socket Pattern Matching Demo</h1>
+    <div class="socket-demo">
+        <div class="status">
+            <span class="status-text">Initializing...</span>
+            <div class="spinner"></div>
+        </div>
+        <div class="error-message"></div>
+        <div class="chat-area">
+            <div class="empty-state">Send a message to get started</div>
+        </div>
+        <div class="input-row">
+            <input type="text" class="message-input" placeholder="Type a message..." />
+            <button class="send-btn">Send</button>
+            <button class="reconnect-btn">Reconnect</button>
+        </div>
+    </div>
+    <div class="debug">
+        <div>State: <span id="state">-</span></div>
+        <div>Attr: <span id="attr">-</span></div>
+    </div>
+
+    <!-- Full socket demo functionality -->
+    <script>
+        (function() {
+            function init() {
+                const demo = document.querySelector('.socket-demo');
+                const statusText = demo.querySelector('.status-text');
+                const chatArea = demo.querySelector('.chat-area');
+                const messageInput = demo.querySelector('.message-input');
+                const sendBtn = demo.querySelector('.send-btn');
+                const reconnectBtn = demo.querySelector('.reconnect-btn');
+                const errorMessage = demo.querySelector('.error-message');
+                const stateDebug = document.getElementById('state');
+                const attrDebug = document.getElementById('attr');
+
+                let sendFn = null;
+                let messages = [];
+                let lastReceivedText = null;
+
+                function formatTime() {
+                    return new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+                }
+
+                function renderMessages() {
+                    if (messages.length === 0) {
+                        chatArea.innerHTML = '<div class="empty-state">Send a message to get started</div>';
+                        return;
+                    }
+                    chatArea.innerHTML = messages.map(m => `
+                        <div class="message ${m.type}">
+                            <div>${m.text}</div>
+                            <div class="time">${m.time}</div>
+                        </div>
+                    `).join('');
+                    chatArea.scrollTop = chatArea.scrollHeight;
+                }
+
+                function addMessage(text, type) {
+                    messages.push({ text, type, time: formatTime() });
+                    renderMessages();
+                }
+
+                // Watch socket state
+                ST.watch(demo, 'ws', (state) => {
+                    if (!state || !state.type) return;
+
+                    statusText.textContent = state.type;
+                    stateDebug.textContent = JSON.stringify(state).slice(0, 60);
+                    attrDebug.textContent = demo.getAttribute('data-st-ws-type');
+
+                    // Handle Connected state - get send function and received messages
+                    if (state.type === 'Connected') {
+                        sendFn = state.send;
+                        sendBtn.disabled = false;
+
+                        // Check for new received message (compare against last received, not last sent)
+                        if (state.received && state.received !== lastReceivedText) {
+                            lastReceivedText = state.received;
+                            addMessage(state.received, 'received');
+                        }
+                    } else {
+                        sendFn = null;
+                        sendBtn.disabled = true;
+                    }
+
+                    // Handle Error state
+                    if (state.type === 'Error') {
+                        errorMessage.textContent = state.error || 'Connection error';
+                    }
+                });
+
+                // Send button click
+                sendBtn.addEventListener('click', () => {
+                    const text = messageInput.value.trim();
+                    if (!text || !sendFn) return;
+
+                    addMessage(text, 'sent');
+                    sendFn(text);
+                    messageInput.value = '';
+                });
+
+                // Enter key to send
+                messageInput.addEventListener('keypress', (e) => {
+                    if (e.key === 'Enter') {
+                        sendBtn.click();
+                    }
+                });
+
+                // Reconnect button
+                reconnectBtn.addEventListener('click', () => {
+                    // Dispatch reconnect event that the socket primitive listens for
+                    demo.dispatchEvent(new CustomEvent('socket.reconnect', { bubbles: false }));
+                });
+
+                renderMessages();
+            }
+
+            // Handle both cases: ST loaded before or after this script
+            if (typeof ST !== 'undefined') {
+                ST.onReady(init);
+            } else {
+                document.addEventListener('spacetime:ready', init, { once: true });
+            }
+        })();
+    </script>
+    <link rel="stylesheet" href="../../spacetime.css" />
+    <script src="../../spacetime.js"></script>
+</body>
+</html>

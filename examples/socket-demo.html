@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Socket Pattern Matching Demo</title>
+    <link rel="stylesheet" href="../spacetime.css">
+    <style>
+        * { box-sizing: border-box; }
+        body {
+            font-family: system-ui, -apple-system, sans-serif;
+            background: #1a1a2e;
+            color: #eee;
+            min-height: 100vh;
+            margin: 0;
+            padding: 40px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+        h1 { margin-bottom: 8px; }
+        .subtitle { color: #888; margin-bottom: 32px; }
+
+        .socket-demo {
+            background: #16213e;
+            border-radius: 16px;
+            padding: 24px;
+            width: 100%;
+            max-width: 500px;
+            box-shadow: 0 4px 24px rgba(0,0,0,0.3);
+        }
+
+        .status {
+            padding: 12px 20px;
+            border-radius: 8px;
+            font-weight: 600;
+            text-align: center;
+            margin-bottom: 16px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            transition: background 300ms ease-out;
+        }
+
+        .spinner {
+            width: 16px;
+            height: 16px;
+            border: 2px solid transparent;
+            border-top-color: white;
+            border-radius: 50%;
+            opacity: 0;
+            transition: opacity 200ms;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        .chat-area {
+            background: #0f1629;
+            border-radius: 8px;
+            padding: 16px;
+            min-height: 200px;
+            max-height: 300px;
+            overflow-y: auto;
+            margin-bottom: 16px;
+            transition: opacity 300ms ease-out;
+        }
+
+        .message {
+            padding: 8px 12px;
+            margin: 4px 0;
+            border-radius: 6px;
+            font-size: 14px;
+        }
+        .message.sent { background: #3b82f6; margin-left: 40px; }
+        .message.received { background: #374151; margin-right: 40px; }
+
+        .input-row {
+            display: flex;
+            gap: 8px;
+        }
+
+        input {
+            flex: 1;
+            padding: 12px;
+            border: none;
+            border-radius: 8px;
+            background: #0f1629;
+            color: white;
+            font-size: 14px;
+        }
+
+        button {
+            padding: 12px 24px;
+            border: none;
+            border-radius: 8px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: opacity 200ms, transform 200ms;
+        }
+
+        .send-btn {
+            background: #3b82f6;
+            color: white;
+        }
+
+        .reconnect-btn {
+            background: #6b7280;
+            color: white;
+            opacity: 0;
+            pointer-events: none;
+        }
+
+        .error-message {
+            background: #ef4444;
+            padding: 12px;
+            border-radius: 8px;
+            margin-bottom: 16px;
+            opacity: 0;
+            transform: translateY(-10px);
+            transition: opacity 200ms, transform 200ms;
+        }
+
+        .state-debug {
+            margin-top: 24px;
+            padding: 16px;
+            background: #0f1629;
+            border-radius: 8px;
+            font-family: monospace;
+            font-size: 12px;
+        }
+    </style>
+</head>
+<body>
+    <h1>Socket Pattern Matching</h1>
+    <p class="subtitle">CSS-driven state UI via <code>data-st-ws-type</code> attributes</p>
+
+    <div class="socket-demo" data-url="wss://echo.websocket.org">
+        <div class="status">
+            <span class="status-text">Disconnected</span>
+            <div class="spinner"></div>
+        </div>
+
+        <div class="error-message"></div>
+
+        <div class="chat-area"></div>
+
+        <div class="input-row">
+            <input type="text" placeholder="Type a message..." id="msgInput">
+            <button class="send-btn">Send</button>
+            <button class="reconnect-btn">Reconnect</button>
+        </div>
+    </div>
+
+    <div class="state-debug">
+        <div>Current state: <span id="stateType">-</span></div>
+        <div>Attribute: <span id="attrValue">-</span></div>
+    </div>
+
+    <script src="../spacetime.js"></script>
+    <script>
+    (function() {
+        const demo = document.querySelector('.socket-demo');
+        const statusText = demo.querySelector('.status-text');
+        const errorMsg = demo.querySelector('.error-message');
+        const chatArea = demo.querySelector('.chat-area');
+        const input = document.getElementById('msgInput');
+        const sendBtn = demo.querySelector('.send-btn');
+        const reconnectBtn = demo.querySelector('.reconnect-btn');
+        const stateTypeEl = document.getElementById('stateType');
+        const attrValueEl = document.getElementById('attrValue');
+
+        let ws = null;
+        let sendFn = null;
+
+        // Set state and update data-st-ws-type attribute
+        function setState(type, extra = {}) {
+            const state = { type, ...extra };
+
+            // Update the attribute that CSS selectors target
+            demo.setAttribute('data-st-ws-type', type);
+
+            // Update status text
+            statusText.textContent = type;
+
+            // Update debug display
+            stateTypeEl.textContent = JSON.stringify(state);
+            attrValueEl.textContent = demo.getAttribute('data-st-ws-type');
+
+            // Handle error message
+            if (type === 'Error') {
+                errorMsg.textContent = extra.error || 'Unknown error';
+            }
+
+            // Store send function
+            if (extra.send) {
+                sendFn = extra.send;
+            } else if (type !== 'Connected') {
+                sendFn = null;
+            }
+        }
+
+        function addMessage(text, type) {
+            const msg = document.createElement('div');
+            msg.className = `message ${type}`;
+            msg.textContent = text;
+            chatArea.appendChild(msg);
+            chatArea.scrollTop = chatArea.scrollHeight;
+        }
+
+        function connect() {
+            const url = demo.dataset.url || 'wss://echo.websocket.org';
+
+            setState('Connecting');
+            addMessage(`Connecting to ${url}...`, 'received');
+
+            try {
+                ws = new WebSocket(url);
+
+                ws.onopen = () => {
+                    const send = (msg) => {
+                        if (ws.readyState === WebSocket.OPEN) {
+                            ws.send(msg);
+                            addMessage(msg, 'sent');
+                        }
+                    };
+                    setState('Connected', { send });
+                    addMessage('Connected!', 'received');
+                };
+
+                ws.onmessage = (e) => {
+                    addMessage(`Echo: ${e.data}`, 'received');
+                };
+
+                ws.onclose = () => {
+                    setState('Disconnected');
+                    addMessage('Disconnected', 'received');
+                };
+
+                ws.onerror = () => {
+                    setState('Error', { error: 'Connection failed' });
+                };
+            } catch (e) {
+                setState('Error', { error: e.message });
+            }
+        }
+
+        // Event handlers
+        sendBtn.addEventListener('click', () => {
+            const msg = input.value.trim();
+            if (msg && sendFn) {
+                sendFn(msg);
+                input.value = '';
+            }
+        });
+
+        input.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') sendBtn.click();
+        });
+
+        reconnectBtn.addEventListener('click', () => {
+            if (ws) ws.close();
+            connect();
+        });
+
+        // Initial state
+        setState('Disconnected');
+
+        // Auto-connect after a short delay
+        setTimeout(connect, 500);
+    })();
+    </script>
+</body>
+</html>

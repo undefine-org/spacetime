@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Real-time Todo List</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      min-height: 100vh;
+      padding: 40px 20px;
+    }
+
+    .todo-app {
+      max-width: 500px;
+      margin: 0 auto;
+      background: white;
+      border-radius: 16px;
+      box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+      overflow: hidden;
+    }
+
+    header {
+      background: #5a67d8;
+      color: white;
+      padding: 24px;
+      text-align: center;
+    }
+
+    header h1 { font-size: 24px; margin-bottom: 8px; }
+    header p { opacity: 0.8; font-size: 14px; }
+
+    form {
+      display: flex;
+      padding: 16px;
+      gap: 12px;
+      border-bottom: 1px solid #e2e8f0;
+    }
+
+    input[type="text"] {
+      flex: 1;
+      padding: 12px 16px;
+      border: 2px solid #e2e8f0;
+      border-radius: 8px;
+      font-size: 16px;
+      transition: border-color 0.2s;
+    }
+
+    input[type="text"]:focus {
+      outline: none;
+      border-color: #5a67d8;
+    }
+
+    button[type="submit"] {
+      padding: 12px 24px;
+      background: #5a67d8;
+      color: white;
+      border: none;
+      border-radius: 8px;
+      font-size: 16px;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+
+    button[type="submit"]:hover { background: #4c51bf; }
+
+    .todos-container {
+      min-height: 200px;
+      max-height: 400px;
+      overflow-y: auto;
+    }
+
+    .todo-item {
+      display: flex;
+      align-items: center;
+      padding: 16px;
+      border-bottom: 1px solid #e2e8f0;
+      transition: background 0.2s;
+    }
+
+    .todo-item:hover { background: #f7fafc; }
+
+    .todo-item[data-done="true"] [slot="text"] {
+      text-decoration: line-through;
+      color: #a0aec0;
+    }
+
+    .todo-item [slot="text"] {
+      flex: 1;
+      cursor: pointer;
+      padding: 4px 0;
+    }
+
+    .todo-item .delete {
+      width: 32px;
+      height: 32px;
+      border: none;
+      background: #fed7d7;
+      color: #c53030;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 18px;
+      opacity: 0;
+      transition: opacity 0.2s;
+    }
+
+    .todo-item:hover .delete { opacity: 1; }
+    .todo-item .delete:hover { background: #fc8181; }
+
+    .empty-state {
+      text-align: center;
+      padding: 40px;
+      color: #a0aec0;
+    }
+
+    .sync-indicator {
+      position: fixed;
+      top: 20px;
+      right: 20px;
+      padding: 8px 16px;
+      background: rgba(0,0,0,0.7);
+      color: white;
+      border-radius: 20px;
+      font-size: 12px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .sync-indicator .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #48bb78;
+      animation: pulse 2s infinite;
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.5; }
+    }
+  </style>
+    <style>:not(:defined){visibility:hidden}</style>
+</head>
+<body>
+  <div class="sync-indicator">
+    <span class="dot"></span>
+    Real-time sync active
+  </div>
+
+  <div class="todo-app">
+    <header>
+      <h1>Collaborative Todos</h1>
+      <p>Open in multiple tabs to see real-time sync</p>
+    </header>
+
+    <form>
+      <input type="text" id="input" placeholder="What needs to be done?" autocomplete="off">
+      <button type="submit">Add</button>
+    </form>
+
+    <div class="todos-container">
+      <!-- Todo items will be inserted here by Spacetime -->
+    </div>
+  </div>
+
+  <template id="todo-item-template">
+    <div class="todo-item">
+      <span slot="text"></span>
+      <button class="delete">×</button>
+    </div>
+  </template>
+
+  <script src="/runtime/st.js"></script>
+  <script src="/runtime/realtime.js"></script>
+  <script>
+    // Initialize the app
+    document.addEventListener('DOMContentLoaded', () => {
+      const app = document.querySelector('.todo-app');
+      const container = app.querySelector('.todos-container');
+      const form = app.querySelector('form');
+      const input = document.getElementById('input');
+      const template = document.getElementById('todo-item-template');
+
+      // Connect to realtime
+      const conn = SpacetimeRealtime.connect();
+      let todos = [];
+
+      // Subscribe to todos channel
+      conn.subscribe('todos', {
+        onSnapshot: (data) => {
+          todos = data;
+          render();
+        },
+        onInsert: (item) => {
+          todos.push(item);
+          render();
+        },
+        onUpdate: (id, patch) => {
+          const idx = todos.findIndex(t => t.id === id);
+          if (idx >= 0) {
+            todos[idx] = { ...todos[idx], ...patch };
+            render();
+          }
+        },
+        onDelete: (id) => {
+          todos = todos.filter(t => t.id !== id);
+          render();
+        }
+      });
+
+      function render() {
+        container.innerHTML = '';
+
+        if (todos.length === 0) {
+          container.innerHTML = '<div class="empty-state">No todos yet. Add one above!</div>';
+          return;
+        }
+
+        todos.forEach(todo => {
+          const clone = template.content.cloneNode(true);
+          const item = clone.querySelector('.todo-item');
+          const text = clone.querySelector('[slot="text"]');
+          const deleteBtn = clone.querySelector('.delete');
+
+          item.dataset.id = todo.id;
+          item.dataset.done = todo.done;
+          text.textContent = todo.text;
+
+          text.addEventListener('click', () => {
+            conn.update('todos', todo.id, { done: !todo.done });
+          });
+
+          deleteBtn.addEventListener('click', () => {
+            conn.delete('todos', todo.id);
+          });
+
+          container.appendChild(clone);
+        });
+      }
+
+      form.addEventListener('submit', (e) => {
+        e.preventDefault();
+        const text = input.value.trim();
+        if (text) {
+          conn.insert('todos', { text, done: false });
+          input.value = '';
+        }
+      });
+    });
+  </script>
+    <link rel="stylesheet" href="../../spacetime.css" />
+    <script src="../../spacetime.js"></script>
+</body>
+</html>

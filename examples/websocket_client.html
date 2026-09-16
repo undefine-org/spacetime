@@ -1,0 +1,308 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Spacetime Dev Server - WebSocket Client</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #1a1a1a;
+            color: #e0e0e0;
+            padding: 2rem;
+            line-height: 1.6;
+        }
+
+        .container {
+            max-width: 900px;
+            margin: 0 auto;
+        }
+
+        h1 {
+            color: #6366f1;
+            margin-bottom: 1rem;
+        }
+
+        .status {
+            display: inline-block;
+            padding: 0.5rem 1rem;
+            border-radius: 4px;
+            margin-bottom: 2rem;
+            font-weight: 600;
+        }
+
+        .status.connected {
+            background: #10b981;
+            color: white;
+        }
+
+        .status.disconnected {
+            background: #ef4444;
+            color: white;
+        }
+
+        .controls {
+            display: flex;
+            gap: 1rem;
+            margin-bottom: 2rem;
+        }
+
+        button {
+            padding: 0.75rem 1.5rem;
+            background: #6366f1;
+            color: white;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-weight: 600;
+            transition: background 0.2s;
+        }
+
+        button:hover {
+            background: #4f46e5;
+        }
+
+        button:disabled {
+            background: #4b5563;
+            cursor: not-allowed;
+        }
+
+        .log {
+            background: #2d2d2d;
+            border: 1px solid #404040;
+            border-radius: 8px;
+            padding: 1.5rem;
+            max-height: 500px;
+            overflow-y: auto;
+            font-family: 'Monaco', 'Courier New', monospace;
+            font-size: 0.9rem;
+        }
+
+        .log-entry {
+            padding: 0.5rem;
+            border-bottom: 1px solid #404040;
+            display: flex;
+            gap: 1rem;
+        }
+
+        .log-entry:last-child {
+            border-bottom: none;
+        }
+
+        .log-time {
+            color: #6b7280;
+            min-width: 80px;
+        }
+
+        .log-type {
+            font-weight: 600;
+            min-width: 80px;
+        }
+
+        .log-type.reload {
+            color: #10b981;
+        }
+
+        .log-type.error {
+            color: #ef4444;
+        }
+
+        .log-type.ping {
+            color: #3b82f6;
+        }
+
+        .log-type.test {
+            color: #f59e0b;
+        }
+
+        .log-message {
+            flex: 1;
+        }
+
+        .info {
+            background: #1e3a5f;
+            border-left: 4px solid #3b82f6;
+            padding: 1rem;
+            margin-bottom: 2rem;
+            border-radius: 4px;
+        }
+    </style>
+    <style>:not(:defined){visibility:hidden}</style>
+</head>
+<body>
+    <div class="container">
+        <h1>Spacetime Dev Server</h1>
+        <p class="status disconnected" id="status">Disconnected</p>
+
+        <div class="info">
+            <strong>WebSocket Client Demo</strong><br>
+            This page connects to the dev server's WebSocket endpoint and displays
+            real-time file change notifications and test results.
+        </div>
+
+        <div class="controls">
+            <button id="connect">Connect</button>
+            <button id="pause" disabled>Pause Tests</button>
+            <button id="resume" disabled>Resume Tests</button>
+            <button id="stepForward" disabled>Step Forward</button>
+            <button id="stepBackward" disabled>Step Backward</button>
+            <button id="clear">Clear Log</button>
+        </div>
+
+        <h2>Event Log</h2>
+        <div class="log" id="log">
+            <div class="log-entry">
+                <span class="log-time">--:--:--</span>
+                <span class="log-type">INFO</span>
+                <span class="log-message">Click "Connect" to start...</span>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let ws = null;
+
+        const statusEl = document.getElementById('status');
+        const logEl = document.getElementById('log');
+        const connectBtn = document.getElementById('connect');
+        const pauseBtn = document.getElementById('pause');
+        const resumeBtn = document.getElementById('resume');
+        const stepForwardBtn = document.getElementById('stepForward');
+        const stepBackwardBtn = document.getElementById('stepBackward');
+        const clearBtn = document.getElementById('clear');
+
+        function log(type, message) {
+            const time = new Date().toLocaleTimeString();
+            const entry = document.createElement('div');
+            entry.className = 'log-entry';
+            entry.innerHTML = `
+                <span class="log-time">${time}</span>
+                <span class="log-type ${type.toLowerCase()}">${type}</span>
+                <span class="log-message">${message}</span>
+            `;
+            logEl.appendChild(entry);
+            logEl.scrollTop = logEl.scrollHeight;
+        }
+
+        function updateStatus(connected) {
+            if (connected) {
+                statusEl.textContent = 'Connected';
+                statusEl.className = 'status connected';
+                connectBtn.textContent = 'Disconnect';
+                pauseBtn.disabled = false;
+                resumeBtn.disabled = false;
+                stepForwardBtn.disabled = false;
+                stepBackwardBtn.disabled = false;
+            } else {
+                statusEl.textContent = 'Disconnected';
+                statusEl.className = 'status disconnected';
+                connectBtn.textContent = 'Connect';
+                pauseBtn.disabled = true;
+                resumeBtn.disabled = true;
+                stepForwardBtn.disabled = true;
+                stepBackwardBtn.disabled = true;
+            }
+        }
+
+        function connect() {
+            if (ws) {
+                ws.close();
+                return;
+            }
+
+            const wsUrl = 'ws://localhost:3030/ws';
+            log('INFO', `Connecting to ${wsUrl}...`);
+
+            ws = new WebSocket(wsUrl);
+
+            ws.onopen = () => {
+                log('INFO', 'WebSocket connected!');
+                updateStatus(true);
+            };
+
+            ws.onmessage = (event) => {
+                const msg = JSON.parse(event.data);
+
+                switch (msg.type) {
+                    case 'Reload':
+                        const files = msg.files.join(', ');
+                        log('RELOAD', `Files changed: ${files}`);
+                        // In a real app, you'd reload the page or hot-reload resources
+                        break;
+
+                    case 'TestResults':
+                        log('TEST', `Results: ${msg.results.substring(0, 100)}...`);
+                        break;
+
+                    case 'Error':
+                        log('ERROR', msg.message);
+                        break;
+
+                    case 'Ping':
+                        // Respond to keepalive
+                        ws.send(JSON.stringify({ type: 'Pong' }));
+                        log('PING', 'Heartbeat received');
+                        break;
+
+                    default:
+                        log('INFO', `Unknown message type: ${msg.type}`);
+                }
+            };
+
+            ws.onerror = (error) => {
+                log('ERROR', 'WebSocket error occurred');
+                console.error('WebSocket error:', error);
+            };
+
+            ws.onclose = () => {
+                log('INFO', 'WebSocket disconnected');
+                updateStatus(false);
+                ws = null;
+            };
+        }
+
+        function sendMessage(msg) {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify(msg));
+                log('SEND', `Sent: ${JSON.stringify(msg)}`);
+            } else {
+                log('ERROR', 'Not connected to server');
+            }
+        }
+
+        // Event listeners
+        connectBtn.addEventListener('click', connect);
+
+        pauseBtn.addEventListener('click', () => {
+            sendMessage({ type: 'Pause' });
+        });
+
+        resumeBtn.addEventListener('click', () => {
+            sendMessage({ type: 'Resume' });
+        });
+
+        stepForwardBtn.addEventListener('click', () => {
+            sendMessage({ type: 'Step', direction: 'forward' });
+        });
+
+        stepBackwardBtn.addEventListener('click', () => {
+            sendMessage({ type: 'Step', direction: 'backward' });
+        });
+
+        clearBtn.addEventListener('click', () => {
+            logEl.innerHTML = '';
+        });
+
+        // Auto-connect on load
+        setTimeout(connect, 500);
+    </script>
+    <link rel="stylesheet" href="../spacetime.css" />
+    <script src="../spacetime.js"></script>
+</body>
+</html>

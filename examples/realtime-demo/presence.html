@@ -1,0 +1,322 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Collaborative Cursors</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      overflow: hidden;
+    }
+
+    .canvas {
+      width: 100vw;
+      height: 100vh;
+      background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+      position: relative;
+      cursor: none;
+    }
+
+    .canvas::before {
+      content: '';
+      position: absolute;
+      inset: 0;
+      background-image:
+        radial-gradient(circle at 20% 80%, rgba(120, 119, 198, 0.3) 0%, transparent 50%),
+        radial-gradient(circle at 80% 20%, rgba(255, 119, 198, 0.3) 0%, transparent 50%);
+    }
+
+    .instructions {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      text-align: center;
+      color: rgba(255,255,255,0.7);
+      pointer-events: none;
+      z-index: 1;
+    }
+
+    .instructions h1 {
+      font-size: 48px;
+      margin-bottom: 16px;
+      background: linear-gradient(90deg, #667eea, #764ba2, #f093fb);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+
+    .instructions p {
+      font-size: 18px;
+      opacity: 0.8;
+    }
+
+    .cursor {
+      position: fixed;
+      pointer-events: none;
+      z-index: 1000;
+      transition: transform 0.05s linear;
+    }
+
+    .cursor-pointer {
+      width: 20px;
+      height: 20px;
+      border-radius: 50% 50% 50% 0;
+      transform: rotate(-45deg);
+      box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+    }
+
+    .cursor-name {
+      position: absolute;
+      left: 24px;
+      top: 16px;
+      padding: 4px 10px;
+      border-radius: 12px;
+      font-size: 12px;
+      font-weight: 600;
+      white-space: nowrap;
+      color: white;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+    }
+
+    .my-cursor {
+      position: fixed;
+      pointer-events: none;
+      z-index: 999;
+    }
+
+    .my-cursor .cursor-pointer {
+      background: white;
+      border: 2px solid currentColor;
+    }
+
+    .user-count {
+      position: fixed;
+      top: 20px;
+      right: 20px;
+      padding: 12px 20px;
+      background: rgba(255,255,255,0.1);
+      backdrop-filter: blur(10px);
+      border-radius: 30px;
+      color: white;
+      font-size: 14px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .user-count .avatars {
+      display: flex;
+    }
+
+    .user-count .avatar {
+      width: 24px;
+      height: 24px;
+      border-radius: 50%;
+      margin-left: -8px;
+      border: 2px solid rgba(255,255,255,0.2);
+    }
+
+    .user-count .avatar:first-child { margin-left: 0; }
+
+    .connection-status {
+      position: fixed;
+      bottom: 20px;
+      left: 20px;
+      padding: 8px 16px;
+      background: rgba(0,0,0,0.5);
+      border-radius: 20px;
+      color: white;
+      font-size: 12px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .connection-status .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #48bb78;
+    }
+
+    .connection-status.disconnected .dot { background: #f56565; }
+  </style>
+    <style>:not(:defined){visibility:hidden}</style>
+</head>
+<body>
+  <div class="canvas">
+    <div class="instructions">
+      <h1>Move your cursor</h1>
+      <p>Open this page in another browser tab to see collaborative cursors</p>
+    </div>
+  </div>
+
+  <div class="user-count">
+    <div class="avatars"></div>
+    <span class="count">1 user online</span>
+  </div>
+
+  <div class="connection-status">
+    <span class="dot"></span>
+    <span class="status-text">Connected</span>
+  </div>
+
+  <div class="my-cursor" style="display: none;">
+    <div class="cursor-pointer"></div>
+  </div>
+
+  <script src="/runtime/st.js"></script>
+  <script src="/runtime/realtime.js"></script>
+  <script>
+    // Random name and color for this user
+    const names = ['Alice', 'Bob', 'Charlie', 'Diana', 'Eve', 'Frank', 'Grace', 'Henry'];
+    const colors = ['#667eea', '#f093fb', '#4fd1c5', '#f6ad55', '#fc8181', '#68d391', '#63b3ed', '#b794f4'];
+
+    const myName = names[Math.floor(Math.random() * names.length)];
+    const myColor = colors[Math.floor(Math.random() * colors.length)];
+
+    document.addEventListener('DOMContentLoaded', () => {
+      const canvas = document.querySelector('.canvas');
+      const myCursor = document.querySelector('.my-cursor');
+      const userCount = document.querySelector('.user-count');
+      const avatars = userCount.querySelector('.avatars');
+      const countText = userCount.querySelector('.count');
+      const connectionStatus = document.querySelector('.connection-status');
+
+      // Set my cursor color
+      myCursor.style.color = myColor;
+      myCursor.style.display = 'block';
+
+      // Connect to presence
+      const conn = SpacetimeRealtime.connect();
+      let users = [];
+      let myId = null;
+      let cursors = new Map(); // userId -> cursor element
+
+      // Throttle function
+      function throttle(fn, ms) {
+        let lastCall = 0;
+        return (...args) => {
+          const now = Date.now();
+          if (now - lastCall >= ms) {
+            lastCall = now;
+            fn(...args);
+          }
+        };
+      }
+
+      // Join presence room
+      conn.joinPresence('demo-room', { name: myName, color: myColor, x: 0, y: 0 }, {
+        onState: (state) => {
+          users = state.users;
+          myId = state.myId;
+          updateUsers();
+          renderCursors();
+        },
+        onJoin: (user) => {
+          users.push(user);
+          updateUsers();
+          renderCursors();
+        },
+        onLeave: (userId) => {
+          users = users.filter(u => u.id !== userId);
+          removeCursor(userId);
+          updateUsers();
+        },
+        onUpdate: (userId, state) => {
+          const user = users.find(u => u.id === userId);
+          if (user) {
+            Object.assign(user, state);
+            updateCursor(userId, user);
+          }
+        }
+      });
+
+      function updateUsers() {
+        const otherUsers = users.filter(u => u.id !== myId);
+        countText.textContent = `${users.length} user${users.length !== 1 ? 's' : ''} online`;
+
+        avatars.innerHTML = '';
+        users.slice(0, 5).forEach(user => {
+          const avatar = document.createElement('div');
+          avatar.className = 'avatar';
+          avatar.style.background = user.color || '#667eea';
+          avatar.title = user.name || 'Anonymous';
+          avatars.appendChild(avatar);
+        });
+      }
+
+      function createCursor(user) {
+        const cursor = document.createElement('div');
+        cursor.className = 'cursor';
+        cursor.innerHTML = `
+          <div class="cursor-pointer" style="background: ${user.color}"></div>
+          <div class="cursor-name" style="background: ${user.color}">${user.name}</div>
+        `;
+        canvas.appendChild(cursor);
+        return cursor;
+      }
+
+      function renderCursors() {
+        users.forEach(user => {
+          if (user.id === myId) return;
+
+          if (!cursors.has(user.id)) {
+            cursors.set(user.id, createCursor(user));
+          }
+          updateCursor(user.id, user);
+        });
+      }
+
+      function updateCursor(userId, user) {
+        if (userId === myId) return;
+
+        let cursor = cursors.get(userId);
+        if (!cursor) {
+          cursor = createCursor(user);
+          cursors.set(userId, cursor);
+        }
+
+        cursor.style.transform = `translate(${user.x || 0}px, ${user.y || 0}px)`;
+      }
+
+      function removeCursor(userId) {
+        const cursor = cursors.get(userId);
+        if (cursor) {
+          cursor.remove();
+          cursors.delete(userId);
+        }
+      }
+
+      // Track my cursor
+      const updatePresence = throttle((x, y) => {
+        conn.updatePresence('demo-room', { x, y });
+      }, 30);
+
+      canvas.addEventListener('mousemove', (e) => {
+        // Update my local cursor
+        myCursor.style.transform = `translate(${e.clientX}px, ${e.clientY}px)`;
+
+        // Broadcast to others
+        updatePresence(e.clientX, e.clientY);
+      });
+
+      // Handle connection status
+      conn.on('connected', () => {
+        connectionStatus.classList.remove('disconnected');
+        connectionStatus.querySelector('.status-text').textContent = 'Connected';
+      });
+
+      conn.on('disconnected', () => {
+        connectionStatus.classList.add('disconnected');
+        connectionStatus.querySelector('.status-text').textContent = 'Reconnecting...';
+      });
+    });
+  </script>
+    <link rel="stylesheet" href="../../spacetime.css" />
+    <script src="../../spacetime.js"></script>
+</body>
+</html>
