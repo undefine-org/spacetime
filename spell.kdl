@@ -1,0 +1,33 @@
+// Project-level Spell config for the Spacetime repo.
+//
+// Registers Spacetime's own MCP server (PLAN-037): a stdio JSON-RPC live-coding
+// environment. Spell spawns this command from the project root, so the MCP
+// process's cwd — and thus its default environment-discovery root — is the repo.
+//
+// `cargo run` recompiles on demand (cargo's build chatter goes to stderr, never
+// stdout, so it can't corrupt the protocol stream). `--quiet` keeps it tidy.
+// After editing this file, reload Spell; the st_* tools appear under `tools/list`.
+//
+// ISOLATED TARGET DIR (--target-dir) — load-bearing, do not remove:
+// The server binary IS `<target>/debug/spacetime` (cargo run), so it shares one
+// target dir with every `cargo` command the agent runs in this repo. OBSERVED
+// 2026-06-18: a confirm-kit edit (pulled in via include_str!) + a follow-up
+// `cargo test --lib mcp` relinked `debug/spacetime` at 18:54:21 and the live
+// server (pid 1055251) died at that instant — port + stdio transport dropped
+// mid-session. INFERRED cause: a verification build rewrote the running server's
+// own binary / its mmap'd V8 snapshot+icudata artifacts under it. Either way the
+// ROOT is the shared target dir. Pinning the server to its OWN target dir makes
+// the agent's builds (default dir) physically unable to touch the server's
+// binary or artifacts. Independent build trees; reloads stay hot.
+mcp {
+	// timeout=600000 (10 min): the connect window wraps `cargo run`, so a COLD
+	// compile of the debug/spacetime binary must finish inside it (default 30s
+	// is far too short and marks the transport failed for the whole session).
+	// Warm connects still return in <1s, so the high ceiling costs nothing at
+	// steady state; it also covers the recompile triggered by the first call
+	// after a server-source edit.
+	server "spacetime" type=stdio timeout=600000 {
+		command "cargo"
+		args "run" "--quiet" "--target-dir" "/home/user/.cache/cargo-target-mcp" "--" "mcp"
+	}
+}
