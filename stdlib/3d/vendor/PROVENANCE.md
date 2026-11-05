@@ -9,7 +9,7 @@
 |-------|-------|
 | name | `three` |
 | source | git submodule → https://github.com/mrdoob/three.js |
-| pinned commit | `281815cbebe8c3bd48cde7f2cca6d2fced26141e` (r0.184.0) |
+| pinned commit | `c54d2bcbaead5fc2a60c727e93ee74ac55d02904` (r0.184.0) |
 | license | MIT — © 2010-2026 three.js authors |
 | entry wrapper | `three-entry.ts` (imports core + addons → `globalThis.THREE` / `THREE.addons`) |
 | resolver config | `tsconfig.json` (`paths`: `three` → `build/three.module.js`, `three/addons/*` → `examples/jsm/*`) |
@@ -63,3 +63,11 @@ unit-tested under the headless V8 runtime (no WebGL context) — structural trut
 (scene graph built, object/light/particle counts, material params) test on the V8
 `logic` rung, while actual rendered pixels / FPS / interaction test on the `--cdp`
 real-Chromium `paint` rung. See `docs/testing/FIDELITY_LADDER.md`.
+
+### Local HTML preservation (2026-11-05)
+
+This local pin preserves the existing Spacetime CSS/JS references and
+`:not(:defined)` visibility styles in upstream HTML pages. Its upstream base is
+`281815cbebe8c3bd48cde7f2cca6d2fced26141e`. The library source and bundled engine bytes
+are unchanged. The commit is local; the move-to-work helper transfers its Git
+history alongside the parent repository.

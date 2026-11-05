@@ -9,7 +9,7 @@
 |-------|-------|
 | name | `@chenglou/pretext` |
 | source | git submodule → https://github.com/chenglou/pretext |
-| pinned commit | `796b4691ca782ec44df9eb5d470abeca4d25732f` |
+| pinned commit | `b045955e1b6ae9d1e71e44206b140f3ff1785eff` |
 | version | v0.0.7 (+3 commits) |
 | license | MIT — © 2026 Pretext contributors |
 | entry wrapper | `pretext-entry.ts` (re-exports onto `globalThis.pretext`) |
@@ -43,3 +43,11 @@ cargo run -- vendor build text        # rebundle from the new pin
 `Intl.Segmenter` + Canvas 2D `measureText`. Present in browsers; absent in the V8
 headless test runtime — text-module tests therefore run via the **playwright_st**
 harness (real Chromium), not the headless V8 path.
+
+### Local HTML preservation (2026-11-05)
+
+This local pin preserves the existing Spacetime CSS/JS references and
+`:not(:defined)` visibility styles in upstream HTML pages. Its upstream base is
+`796b4691ca782ec44df9eb5d470abeca4d25732f`. The library source and bundled engine bytes
+are unchanged. The commit is local; the move-to-work helper transfers its Git
+history alongside the parent repository.
