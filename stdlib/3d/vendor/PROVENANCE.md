@@ -68,6 +68,6 @@ real-Chromium `paint` rung. See `docs/testing/FIDELITY_LADDER.md`.
 
 This local pin preserves the existing Spacetime CSS/JS references and
 `:not(:defined)` visibility styles in upstream HTML pages. Its upstream base is
-`281815cbebe8c3bd48cde7f2cca6d2fced26141e`. The library source and bundled engine bytes
-are unchanged. The commit is local; the move-to-work helper transfers its Git
+`281815cbebe8c3bd48cde7f2cca6d2fced26141e`. The library source is unchanged. Cargo rebuilt `three.bundle.js` from this
+pin using Bun 1.3.0 during the focused test run (822,359 bytes). The commit is local; the move-to-work helper transfers its Git
 history alongside the parent repository.
