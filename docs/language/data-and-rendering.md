@@ -132,6 +132,7 @@ kind IS the macro (no hidden switch). Every kind shares the shape:
 | `derive` | `@data derive $n T? : <scalar-expr> ;` | derived-signal | false |
 | `fold` | `@data fold $n T? from $src : <step> ;` | derived-signal (reduce) | false |
 | `query` | `@data query $n T? from $src { where?; sort?; dir?; limit?; map?; reduce?; initial? }` | computed-source | false |
+| `stored` | `@data stored $n T? : <value> ;` | local state + localStorage (`st.<name>`) | false |
 
 The `static` fact drives [SSG unrolling](#6-ssg-static-unroll-vs-hydrate). Today only
 `inline` array sources are SSG-unrolled; every other kind hydrates at runtime. (A future
@@ -147,6 +148,17 @@ refinement may propagate staticity transitively — e.g. a `derive`/`query` over
 
 A compile-time-constant value. Writable at runtime (`$seats <- 4`). Static, so a
 list reading it can be SSG-unrolled.
+
+### stored — local state that outlives the page
+
+```st
+@data stored $lens string : "Read";
+```
+
+Exactly `inline`, plus the browser remembers it: restored from localStorage
+(key `st.lens`) when the page loads, saved on every write. For a reader's
+choices that should follow them across pages and visits. Not static: the
+served HTML cannot know what a visitor stored.
 
 ### fetch — remote / async
 

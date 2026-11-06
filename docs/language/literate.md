@@ -160,3 +160,28 @@ program, *weave* → a printable document. Spacetime already guarantees that the
 served page and the running program are one artifact (**unroll == hydrate**),
 so **weave == tangle**: the woven document *is* the running program. Its demos
 cannot drift from its prose, because they are the same source.
+
+## Org as host (`.st.org`)
+
+A **`.st.org`** file is the same idea with Org as the host: `#+begin_src st`
+blocks are the program (`src` / `hidden` flags as for fences), everything
+else is prose. The compiler rewrites the Org document into the Markdown host
+**one line per line** (`org_to_markdown` in `src/literate.rs`) and tangles
+that, so a diagnostic still points at the Org line you wrote.
+
+| Org | becomes |
+|---|---|
+| `#+title:` | `# Title` |
+| `#+subtitle:` / `#+kicker:` / `#+status:` | `<p class="org-subtitle">` (etc.) |
+| `* Heading` | a Markdown heading of the same depth (tags dropped) |
+| `#+begin_src st [flags]` | a ```` ```st [flags] ```` fence (header args like `:results` ignored) |
+| `#+begin_src LANG` | an inert fence |
+| `#+begin_quote` | `>` lines |
+| `#+begin_NAME label` | `<div class="org-block org-NAME" data-label="label">` |
+| `:PROPERTIES:` / `:LOGBOOK:` drawers, `# comment` lines | blank |
+| `=code=` `~code~` `*b*` `/i/` `+s+` `[[url][text]]` `- term :: desc` | the Markdown equivalents |
+
+Special blocks are the semantic surface: a page styles `.org-hole`,
+`.org-ask`, `.org-decision` and so on, so a document can mark what it does
+not know as plainly as what it does. `/<name>` resolves `<name>.st.org`
+after `.st` and `.st.md`.

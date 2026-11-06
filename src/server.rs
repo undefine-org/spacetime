@@ -446,7 +446,7 @@ fn derive_st_path(html_path: &Path) -> PathBuf {
 /// `index.st` / `index.st.md` / `index.edn` that exists, else `index.st`
 /// (so the "nothing here" error still names the reference syntax).
 pub(crate) fn default_entry(site_dir: &Path) -> PathBuf {
-    ["index.st", "index.st.md", "index.edn"]
+    ["index.st", "index.st.md", "index.st.org", "index.edn"]
         .into_iter()
         .map(|name| site_dir.join(name))
         .find(|p| p.exists())
@@ -1674,6 +1674,7 @@ fn st_entry_for_route(path: &str, site_dir: &Path) -> Option<PathBuf> {
         return [
             site_dir.join("index.st"),
             site_dir.join("index.st.md"),
+            site_dir.join("index.st.org"),
             site_dir.join("index.edn"),
         ]
         .into_iter()
@@ -1691,9 +1692,11 @@ fn st_entry_for_route(path: &str, site_dir: &Path) -> Option<PathBuf> {
     let candidates = [
         site_dir.join(format!("{clean}.st")),
         site_dir.join(format!("{clean}.st.md")),
+        site_dir.join(format!("{clean}.st.org")),
         site_dir.join(format!("{clean}.edn")),
         site_dir.join(clean).join("index.st"),
         site_dir.join(clean).join("index.st.md"),
+        site_dir.join(clean).join("index.st.org"),
         site_dir.join(clean).join("index.edn"),
     ];
     candidates.into_iter().find(|p| p.exists())
@@ -2974,7 +2977,7 @@ fn collect_literate_sources(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
                 continue;
             }
             collect_literate_sources(&path, out);
-        } else if name.ends_with(".st.md") {
+        } else if name.ends_with(".st.md") || name.ends_with(".st.org") {
             out.push(path);
         }
     }

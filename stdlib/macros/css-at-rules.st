@@ -56,3 +56,31 @@
         property-registration-emit($name, styles: $styles) -> {}
     }
 }
+
+
+/// View Transition Macro
+///
+/// Opts the page into cross-document view transitions: navigating between
+/// two pages of the same site animates instead of flashing. Plain links, no
+/// router, no JavaScript: the browser snapshots the old page, loads the new
+/// one, and cross-fades every element carrying a `view-transition-name`.
+/// Style the pair with `::view-transition-old(name)` / `::view-transition-new(name)`.
+/// Browsers without support simply navigate.
+///
+/// @example
+/// @view-transition { navigation: auto; }
+///
+/// .masthead { view-transition-name: masthead; }
+/// ::view-transition-old(root) { animation: 300ms ease both fade-out; }
+
+%macro view-transition {
+    %form {
+        @view-transition {
+            $styles:properties
+        }
+    }
+
+    %binds {
+        view-transition-emit(styles: $styles) -> {}
+    }
+}
