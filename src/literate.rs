@@ -552,7 +552,9 @@ pub fn org_to_markdown(input: &str) -> String {
     let mut in_src = false;
     let mut in_quote = false;
     let mut in_drawer = false;
-    for raw in input.split('\n') {
+    let all: Vec<&str> = input.split('\n').collect();
+    let is_table = |l: &str| l.trim_start().starts_with('|');
+    for (idx, raw) in all.iter().enumerate() {
         let line = raw.trim_end_matches('\r');
         let trimmed = line.trim_start();
         let lower = trimmed.to_ascii_lowercase();
@@ -645,6 +647,29 @@ pub fn org_to_markdown(input: &str) -> String {
                 _ => text,
             };
             out.push(format!("{} {}", "#".repeat(stars.min(6)), org_inline(text)));
+            continue;
+        }
+        if is_table(line) && !in_quote {
+            // A table row becomes one HTML row on the SAME line; the first
+            // row opens the table and the last one closes it. A rule line
+            // (`|---+---|`) marks the rows above it as the header.
+            let first = idx == 0 || !is_table(all[idx - 1]);
+            let last = idx + 1 >= all.len() || !is_table(all[idx + 1]);
+            let rule = trimmed.starts_with("|-");
+            let open = if first { "<table class=\"org-table\">" } else { "" };
+            let close = if last { "</table>" } else { "" };
+            if rule {
+                out.push(format!("{open}{close}"));
+                continue;
+            }
+            let header = idx + 1 < all.len() && all[idx + 1].trim_start().starts_with("|-") && first;
+            let cell = if header { "th" } else { "td" };
+            let cells: Vec<String> = trimmed
+                .trim_matches('|')
+                .split('|')
+                .map(|c| format!("<{cell}>{}</{cell}>", org_inline(c.trim())))
+                .collect();
+            out.push(format!("{open}<tr>{}</tr>{close}", cells.join("")));
             continue;
         }
         let body = org_list_item(line);
@@ -759,6 +784,19 @@ mod tests {
         assert!(lines[9].contains("org-block org-hole") && lines[9].contains("LinkedIn about"));
         assert_eq!(lines[11], "</div>");
         assert_eq!(lines[12], "- **Spell** — the harness");
+    }
+
+
+    #[test]
+    fn org_tables_become_html_rows_line_for_line() {
+        let org = "| a | b |\n|---+---|\n| =x= | y |\nafter";
+        let md = org_to_markdown(org);
+        let lines: Vec<&str> = md.split('\n').collect();
+        assert_eq!(lines.len(), 4);
+        assert_eq!(lines[0], "<table class=\"org-table\"><tr><th>a</th><th>b</th></tr>");
+        assert_eq!(lines[1], "");
+        assert_eq!(lines[2], "<tr><td>`x`</td><td>y</td></tr></table>");
+        assert_eq!(lines[3], "after");
     }
 
     #[test]

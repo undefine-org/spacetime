@@ -433,6 +433,10 @@ fn derive_st_path(html_path: &Path) -> PathBuf {
     if literate.exists() {
         return literate;
     }
+    let literate_org = PathBuf::from(format!("{}.org", st.display()));
+    if literate_org.exists() {
+        return literate_org;
+    }
     // PLAN-148: an EDN page is a peer entry — `foo.edn` drives `foo.html`
     // exactly like `foo.st` does.
     let edn = html_path.with_extension("edn");
