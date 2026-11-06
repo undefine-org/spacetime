@@ -45,6 +45,17 @@ frame's time, then lays out and paints the page.
 Both engines tick the same virtual instants, so a frame at `t` shows the same
 picture: the promo's frame counter reads `698 / 1800` at 20 s on both.
 
+A virtual tick is a whole frame: what it changed reaches its dependents before
+the next tick runs (`ST._clock` settles the runtime's signal batch,
+`ST._settleSignals`). Without that, a still's single `advance()` of hundreds of
+ticks delivered every change after the last one, and a `@stage` showed the
+previous still's 3D (gate: `stdlib/3d/tests/stage-seek.test.st`).
+
+The Chromium engine serves the staged page over loopback HTTP (a browser will
+not `fetch()` from `file://`, so a glTF model never loaded) and starts the clock
+once the score's drivers are mounted, models are loaded (`ST._loading`) and the
+page's fonts are ready.
+
 ## Measured (2026-11-06, Work: Intel UHD 630 via Mesa, 1280×720 @ 30 fps)
 
 Wall clock for the whole command, same harness for both engines:

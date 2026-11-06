@@ -184,9 +184,19 @@ fn init_infra() -> Result<Infra, String> {
             // flags turn it on; `--use-gl=angle --use-angle=swiftshader` is the
             // supported modern spelling, with the legacy alias as fallback.
             .arg("--use-gl=angle")
-            .arg("--use-angle=swiftshader")
-            .arg("--enable-unsafe-swiftshader")
             .arg("--disable-dev-shm-usage");
+        // PLAN-152: `SPACETIME_CHROME_GL=vulkan` draws WebGL on the machine's
+        // GPU through ANGLE's Vulkan backend (same picture; on Work's Intel UHD
+        // 630 it was no faster than SwiftShader for stills, 37 s vs 19 s).
+        // SwiftShader stays the default: deterministic and present everywhere,
+        // what a gate wants.
+        builder = match std::env::var("SPACETIME_CHROME_GL").as_deref() {
+            Ok("vulkan") => builder
+                .arg("--use-angle=vulkan")
+                .arg("--enable-features=Vulkan,DefaultANGLEVulkan,VulkanFromANGLE")
+                .arg("--ignore-gpu-blocklist"),
+            _ => builder.arg("--use-angle=swiftshader").arg("--enable-unsafe-swiftshader"),
+        };
         if let Some(chrome) = find_chrome() {
             builder = builder.chrome_executable(chrome);
         }

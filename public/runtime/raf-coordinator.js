@@ -130,6 +130,10 @@
       while (this.now < target) {
         this.now = Math.min(target, this.now + this.frameMs);
         ST._raf.tickAll(this.now);
+        // a tick is a whole frame: what it changed reaches its dependents
+        // before the next tick (else a 1300-tick advance() would show every
+        // signal's dependents one advance() late)
+        if (ST._settleSignals) ST._settleSignals();
         frames++;
         if (frames > 100000) break; // safety
       }
@@ -142,6 +146,7 @@
       for (let i = 0; i < (n || 1); i++) {
         this.now += this.frameMs;
         ST._raf.tickAll(this.now);
+        if (ST._settleSignals) ST._settleSignals();
       }
       return this.now;
     },
@@ -156,6 +161,7 @@
       while (this.now < end) {
         this.now += this.frameMs;
         ST._raf.tickAll(this.now);
+        if (ST._settleSignals) ST._settleSignals();
         // Stop once no callbacks remain (all drivers self-removed on complete).
         if (ST._raf.callbacks.size === 0) { stable++; if (stable >= 2) break; }
         else stable = 0;

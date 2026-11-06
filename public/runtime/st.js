@@ -422,7 +422,28 @@
           }
         }
       };
-      if (isSeed) notify(); else queueMicrotask(notify);
+      if (isSeed) notify();
+      else {
+        // Batched, and also flushable: a virtual clock's tick is a whole frame,
+        // so `ST._clock` settles each tick's batch before the next tick runs
+        // (`ST._settleSignals`) instead of letting every tick's writes land
+        // after the last one. Each batch still runs exactly once.
+        let done = false;
+        const run = () => { if (!done) { done = true; ST._pendingNotifies.delete(run); notify(); } };
+        ST._pendingNotifies.add(run);
+        queueMicrotask(run);
+      }
+    }
+  };
+
+  ST._pendingNotifies = new Set();
+  // Run every batched signal change now, including the changes those cause,
+  // in the order they were made (the order their microtasks would have run).
+  ST._settleSignals = function() {
+    let guard = 0;
+    while (ST._pendingNotifies.size > 0 && guard++ < 100000) {
+      const next = ST._pendingNotifies.values().next().value;
+      next();
     }
   };
 

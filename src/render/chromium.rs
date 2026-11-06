@@ -433,7 +433,9 @@ async fn wait_for_driver(page: &Page) -> Result<(), String> {
         let ready = page
             // PLAN-152: and every asset a stage is loading (a glTF model) has
             // arrived, so frame 0 is the scene, not the scene minus its cast
-            .evaluate("typeof ST !== 'undefined' && ST._raf && ST._raf.callbacks && ST._raf.callbacks.size > 0 && !(ST._loading > 0)")
+            // (a `@stage`'s own loop, marked `_stStage`, is not a driver; a
+            // film's fonts and models are part of its first frame)
+            .evaluate("typeof ST !== 'undefined' && ST._raf && ST._raf.callbacks && [...ST._raf.callbacks].some((cb) => !cb._stStage) && !(ST._loading > 0) && (!document.fonts || document.fonts.status === 'loaded')")
             .await
             .ok()
             .and_then(|r| r.into_value::<bool>().ok())

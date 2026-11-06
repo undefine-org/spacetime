@@ -12,6 +12,11 @@
 // The robot is RobotExpressive (Tomás Laulhé / Quaternius, CC0 1.0).
 // ═══════════════════════════════════════════════════════════════════════════
 
+
+// Fonts ship with the film (SIL OFL 1.1, Google Fonts), so every engine draws the same letters.
+@font("Space Grotesk") { src: url("fonts/SpaceGrotesk.woff2") format("woff2"); font-weight: 300 700; font-style: normal; font-display: block; }
+@font("Syne") { src: url("fonts/Syne.woff2") format("woff2"); font-weight: 400 800; font-style: normal; font-display: block; }
+
 <div class="reel">
   <div class="shot">
     <canvas class="world"></canvas>
@@ -40,8 +45,8 @@ body { margin: 0; background: #000; }
 
 // ═══ The world ═══════════════════════════════════════════════════════════════
 canvas.world {
-  @stage(fov: 34, camX: 0, camY: 3.2, camZ: 14, shadows: "soft", background: "#1d1a2a", bloom: 0.6) {
-    @light &sky (type: "ambient", intensity: 0.35, color: #b9b3ff)
+  @stage(fov: 34, camX: 0, camY: 3.2, camZ: 14, shadows: "soft", background: "#1d1a2a", bloom: 0.6, exposure: 4.8) {
+    @light &sky (type: "ambient", intensity: 0.055, color: #b9b3ff)
     @light &sun (type: "directional", intensity: 2.4, color: #ffb47a, posX: -6, posY: 5, posZ: 3)
     @fog(color: #1d1a2a, near: 12, far: 34)
     @object &ground (shape: "plane", size: 18, rotateX: -90, color: #3a3448, roughness: 0.92, metalness: 0)
@@ -101,15 +106,15 @@ canvas.world {
     &camera { posZ: 14 -> 9 at 25% -> 6.5 at 62% -> 7.8; posY: 3.2 -> 2.2 at 25% -> 1.6 at 62% -> 2.6; posX: 0 -> 0.12 at 64% -> -0.1 at 64.6% -> 0 at 65.4% -> 1.4; lookY: 1 -> 1.1 at 62% -> 0.6; fov: 34 -> 30 at 60% -> 36; }
     &robot  { clip: "Idle" -> "Walking" at 25% --steps(1) -> "Wave" at 46% --steps(1) -> "Walking" at 58% --steps(1) -> "Death" at 63.5% --steps(1) -> "Idle" at 77% --steps(1) -> "ThumbsUp" at 86% --steps(1); posZ: -7 -> -7 at 25% -> -1 at 46% -> -1 at 58% -> 0.4 at 63.5%; }
     &sun    { intensity: 2.4 -> 0.25 at 80%; }
-    &sky    { intensity: 0.35 -> 0.22 at 80%; }
-    &lamp1  { intensity: 0 -> 0 at 78% -> 2.6 at 80%; }
-    &globe1 { emissive: 0 -> 0 at 78% -> 2.5 at 80%; }
-    &lamp2  { intensity: 0 -> 0 at 81% -> 2.6 at 83%; }
-    &globe2 { emissive: 0 -> 0 at 81% -> 2.5 at 83%; }
-    &lamp3  { intensity: 0 -> 0 at 84% -> 2.6 at 86%; }
-    &globe3 { emissive: 0 -> 0 at 84% -> 2.5 at 86%; }
-    &lamp4  { intensity: 0 -> 0 at 84% -> 2.6 at 86%; }
-    &globe4 { emissive: 0 -> 0 at 84% -> 2.5 at 86%; }
+    &sky    { intensity: 0.055 -> 0.035 at 80%; }
+    &lamp1  { intensity: 0 -> 0 at 78% -> 23 at 80%; }
+    &globe1 { emissive: 0 -> 0 at 78% -> 0.312 at 80%; }
+    &lamp2  { intensity: 0 -> 0 at 81% -> 23 at 83%; }
+    &globe2 { emissive: 0 -> 0 at 81% -> 0.312 at 83%; }
+    &lamp3  { intensity: 0 -> 0 at 84% -> 23 at 86%; }
+    &globe3 { emissive: 0 -> 0 at 84% -> 0.312 at 86%; }
+    &lamp4  { intensity: 0 -> 0 at 84% -> 23 at 86%; }
+    &globe4 { emissive: 0 -> 0 at 84% -> 0.312 at 86%; }
   }
 }
 

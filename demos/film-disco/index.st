@@ -11,6 +11,11 @@
 // The dancer is RobotExpressive (Tomás Laulhé / Quaternius, CC0 1.0).
 // ═══════════════════════════════════════════════════════════════════════════
 
+
+// Fonts ship with the film (SIL OFL 1.1, Google Fonts), so every engine draws the same letters.
+@font("Space Grotesk") { src: url("fonts/SpaceGrotesk.woff2") format("woff2"); font-weight: 300 700; font-style: normal; font-display: block; }
+@font("Syne") { src: url("fonts/Syne.woff2") format("woff2"); font-weight: 400 800; font-style: normal; font-display: block; }
+
 <div class="reel">
   <div class="shot"><canvas class="world"></canvas></div>
   <h1 class="t1">ONE MORE</h1>
@@ -29,16 +34,16 @@ body { margin: 0; background: #000; }
 .end p { margin: 1.2vw 0 0; font: 500 1.4vw/1 "Space Grotesk", sans-serif; letter-spacing: 0.3em; text-transform: uppercase; color: #3ef0ff; }
 
 canvas.world {
-  @stage(fov: 40, camX: 0, camY: 2.6, camZ: 9, shadows: "soft", background: "#07040c", bloom: 0.8) {
-    @light(type: "ambient", intensity: 0.25, color: #8a7bff)
-    @light &key (type: "spot", intensity: 30, color: #ffffff, posX: 0, posY: 9, posZ: 2, angle: 28, castShadow: true)
-    @light &pink (type: "point", intensity: 14, color: #ff3ea5, posX: -4, posY: 2.5, posZ: 2, distance: 14)
-    @light &cyan (type: "point", intensity: 14, color: #3ef0ff, posX: 4, posY: 2.5, posZ: -2, distance: 14)
+  @stage(fov: 40, camX: 0, camY: 2.6, camZ: 9, shadows: "soft", background: "#07040c", bloom: 0.8, exposure: 4.8) {
+    @light(type: "ambient", intensity: 0.039, color: #8a7bff)
+    @light &key (type: "spot", intensity: 268, color: #ffffff, posX: 0, posY: 9, posZ: 2, angle: 28, castShadow: true)
+    @light &pink (type: "point", intensity: 125, color: #ff3ea5, posX: -4, posY: 2.5, posZ: 2, distance: 14)
+    @light &cyan (type: "point", intensity: 125, color: #3ef0ff, posX: 4, posY: 2.5, posZ: -2, distance: 14)
     @fog(color: #07040c, near: 10, far: 26)
-    @grid &floor (cols: 12, rows: 12, tile: 0.9, gap: 0.08, pattern: "ripple", glow: 1.1, speed: 1.96)
-    @object &ring1 (shape: "torus", size: 0.2, rotateX: 90, posY: 0.08, color: #000000, emissive: #ff3ea5, emissiveIntensity: 3, roughness: 0.4, metalness: 0)
-    @object &ring2 (shape: "torus", size: 0.2, rotateX: 90, posY: 0.08, color: #000000, emissive: #3ef0ff, emissiveIntensity: 3, roughness: 0.4, metalness: 0)
-    @object &ring3 (shape: "torus", size: 0.2, rotateX: 90, posY: 0.08, color: #000000, emissive: #ffe23e, emissiveIntensity: 3, roughness: 0.4, metalness: 0)
+    @grid &floor (cols: 12, rows: 12, tile: 0.9, gap: 0.08, pattern: "ripple", glow: 0.14, speed: 1.96)
+    @object &ring1 (shape: "torus", size: 0.2, rotateX: 90, posY: 0.08, color: #000000, emissive: #ff3ea5, emissiveIntensity: 0.375, roughness: 0.4, metalness: 0)
+    @object &ring2 (shape: "torus", size: 0.2, rotateX: 90, posY: 0.08, color: #000000, emissive: #3ef0ff, emissiveIntensity: 0.375, roughness: 0.4, metalness: 0)
+    @object &ring3 (shape: "torus", size: 0.2, rotateX: 90, posY: 0.08, color: #000000, emissive: #ffe23e, emissiveIntensity: 0.375, roughness: 0.4, metalness: 0)
     @gltf &dancer (src: "models/robot.glb", clip: "Idle", scale: 0.5)
   }
 }
@@ -83,7 +88,7 @@ canvas.world {
     &ring3  { scale: 0.2 -> 0.2 at 27.13% -> 5.5 at 35.77% -> 0.2 at 37.30% -> 5.5 at 45.94% -> 0.2 at 47.47% -> 5.5 at 56.11% -> 0.2 at 57.64% -> 5.5 at 66.28% -> 0.2 at 67.81% -> 5.5 at 76.45% -> 0.2 at 77.98% -> 5.5 at 86.62% -> 0.2 at 88.15% -> 5.5 at 96.79%; opacity: 0 -> 1 at 27.13% -> 0 at 35.77% -> 1 at 37.30% -> 0 at 45.94% -> 1 at 47.47% -> 0 at 56.11% -> 1 at 57.64% -> 0 at 66.28% -> 1 at 67.81% -> 0 at 76.45% -> 1 at 77.98% -> 0 at 86.62% -> 1 at 88.15% -> 0 at 96.79%; }
     &pink   { posX: -4 -> 4 at 50% -> -4; posZ: 2 -> -2 at 50% -> 2; }
     &cyan   { posX: 4 -> -4 at 50% -> 4; posZ: -2 -> 2 at 50% -> -2; }
-    &key    { intensity: 3 -> 3 at 19% -> 16 at 20.4%; }
+    &key    { intensity: 27 -> 27 at 19% -> 143 at 20.4%; }
   }
 }
 

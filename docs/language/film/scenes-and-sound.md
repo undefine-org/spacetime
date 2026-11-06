@@ -124,12 +124,34 @@ the canvas.
   scene rows, draws them with Bevy, and lays the page over the result
   (`stdlib/film/vendor/raea/runtime/export/src/html3d.rs`).
 
+## One set of units, both engines
+
+A stage's numbers are three.js's, the units the 3D websites are tuned in. raea
+reads its own (`core/scene/src/props.rs` in the vendored engine), so the stage
+converts what it hands raea:
+
+| | three.js | raea |
+|---|---|---|
+| directional light `intensity` | 1 | 1 (8000 lux) |
+| point / spot light `intensity` (candela) | I | I / 8.95 (lumens) |
+| ambient light `intensity` | I | I × 6.37 (8000/π ÷ 400 cd/m²) |
+| `@stage(exposure: E)` | ACES after a 1/0.6 gain | `log2(E) − 2.26` stops, ACES |
+| `emissiveIntensity` | exposed | unexposed, so × the exposure gain |
+| `@fog` colour, `background` with bloom | divided by the exposure gain | as written |
+
+A film lit for raea's daylight sits near `exposure: 4.8` (raea's 0 stops), with
+point lights in the tens of candela. The demo films are written that way and
+render alike on both engines. Fonts ship with each film (`@font("Syne") { src:
+url("fonts/Syne.woff2") … }`): raea fetches named families, Chromium only loads
+what the page declares.
+
 ## Limits
 
 - On raea the world lies under the whole page: the stage must be full-frame and
   back-most. Its ancestors' backgrounds are cleared there.
 - A clip switches; it does not crossfade.
-- Engines differ in look (three.js vs Bevy lighting units and materials). Tune
-  lights against the engine you ship.
-- Under Chromium a glTF model loaded from `file://` may not show (seen with
-  RobotExpressive: shadow drawn, mesh not). raea is the film engine for 3D today.
+- Shading still differs at the extremes: a hard spot on a metallic surface
+  reads hotter in three.js, and three.js's bloom adds light above a threshold
+  where Bevy's blends (calibrated on `demos/film-disco`, not identical).
+- A clip's age is exact to the virtual tick; a scrub in a live page restarts it
+  from the frame it is seen.

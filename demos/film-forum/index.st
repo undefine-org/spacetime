@@ -9,6 +9,12 @@
 //   cargo run -- render demos/film-forum/ --engine raea -o forum.mp4
 // ═══════════════════════════════════════════════════════════════════════════
 
+
+// Fonts ship with the film (SIL OFL 1.1, Google Fonts), so every engine draws the same letters.
+@font("Space Grotesk") { src: url("fonts/SpaceGrotesk.woff2") format("woff2"); font-weight: 300 700; font-style: normal; font-display: block; }
+@font("Cormorant Garamond") { src: url("fonts/CormorantGaramond.woff2") format("woff2"); font-weight: 300 700; font-style: normal; font-display: block; }
+@font("Cormorant Garamond") { src: url("fonts/CormorantGaramond-Italic.woff2") format("woff2"); font-weight: 300 700; font-style: italic; font-display: block; }
+
 <div class="reel">
   <div class="shot"><canvas class="world"></canvas></div>
   <div class="card"><p class="k">Rome · the fifteenth of March, 44 BC</p><h1>IDES OF MARCH</h1></div>
@@ -30,8 +36,8 @@ body { margin: 0; background: #000; }
 .coin-card span { font: italic 400 1.4vw/1 "Cormorant Garamond", Georgia, serif; color: #e0b46a; }
 
 canvas.world {
-  @stage(fov: 36, camX: 0, camY: 1.7, camZ: 6, shadows: "soft", background: "#2b1c22", bloom: 0.5) {
-    @light &sky (type: "ambient", intensity: 0.3, color: #9fa7ff)
+  @stage(fov: 36, camX: 0, camY: 1.7, camZ: 6, shadows: "soft", background: "#2b1c22", bloom: 0.5, exposure: 4.8) {
+    @light &sky (type: "ambient", intensity: 0.047, color: #9fa7ff)
     @light &sun (type: "directional", intensity: 2.2, color: #ff9d5c, posX: 7, posY: 3.2, posZ: -6)
     @fog(color: #2b1c22, near: 10, far: 40)
     @object (shape: "plane", size: 30, rotateX: -90, posZ: -12, color: #8d7b66, roughness: 0.95, metalness: 0)
@@ -87,10 +93,10 @@ canvas.world {
     @object (shape: "box", size: 1, scaleX: 3, scaleY: 4, scaleZ: 1.3, posY: 2.6, posZ: -25.0, color: #20161a, roughness: 1, metalness: 0)
     @object (shape: "cylinder", size: 0.3, scaleY: 1.6, posX: -1.6, posY: 0.5, posZ: -8, color: #3b2c22, roughness: 0.8, metalness: 0.3)
     @object (shape: "cylinder", size: 0.3, scaleY: 1.6, posX: 1.6, posY: 0.5, posZ: -8, color: #3b2c22, roughness: 0.8, metalness: 0.3)
-    @object &fire1 (shape: "sphere", size: 0.22, posX: -1.6, posY: 1.1, posZ: -8, color: #000000, emissive: #ff8a2a, emissiveIntensity: 5)
-    @object &fire2 (shape: "sphere", size: 0.22, posX: 1.6, posY: 1.1, posZ: -8, color: #000000, emissive: #ff8a2a, emissiveIntensity: 5)
-    @light &blaze1 (type: "point", intensity: 3, color: #ff8a3c, posX: -1.6, posY: 1.4, posZ: -8, distance: 8)
-    @light &blaze2 (type: "point", intensity: 3, color: #ff8a3c, posX: 1.6, posY: 1.4, posZ: -8, distance: 8)
+    @object &fire1 (shape: "sphere", size: 0.22, posX: -1.6, posY: 1.1, posZ: -8, color: #000000, emissive: #ff8a2a, emissiveIntensity: 0.625)
+    @object &fire2 (shape: "sphere", size: 0.22, posX: 1.6, posY: 1.1, posZ: -8, color: #000000, emissive: #ff8a2a, emissiveIntensity: 0.625)
+    @light &blaze1 (type: "point", intensity: 27, color: #ff8a3c, posX: -1.6, posY: 1.4, posZ: -8, distance: 8)
+    @light &blaze2 (type: "point", intensity: 27, color: #ff8a3c, posX: 1.6, posY: 1.4, posZ: -8, distance: 8)
     @object &coin (shape: "coin", size: 0.42, rotateX: 90, posY: 1.5, posZ: 3.2, color: #d6a73c, roughness: 0.22, metalness: 1)
     @light &glint (type: "point", intensity: 0, color: #fff0c8, posX: 0.8, posY: 2.2, posZ: 4.6, distance: 5)
   }
@@ -122,12 +128,12 @@ canvas.world {
   @on &.clip {
     &camera { posZ: 6 -> 2 at 22% -> -12 at 62% -> 6.4 at 76% -> 5.6; posY: 1.7 -> 2.6 at 22% -> 1.4 at 62% -> 1.55 at 76%; posX: 0 -> 0.8 at 40% -> 0 at 76%; lookZ: -10 -> -14 at 40% -> -24 at 62% -> 3.2 at 76%; lookY: 2 -> 3 at 40% -> 2.4 at 62% -> 1.5 at 76%; fov: 36 -> 32 at 62% -> 24 at 78% -> 20; }
     &coin   { rotateZ: 0 -> 1080 at 88% -> 1080; posY: 1.5 -> 1.5 at 70% -> 1.55; easing: --ease-out-cubic; }
-    &glint  { intensity: 0 -> 0 at 74% -> 6 at 80% -> 3; }
+    &glint  { intensity: 0 -> 0 at 74% -> 54 at 80% -> 27; }
     &sun    { intensity: 2.2 -> 1.2; }
-    &fire1  { emissive: 5 -> 6.5 at 5% -> 4.2 at 11% -> 6 at 17% -> 4.6 at 26% -> 6.2 at 34% -> 4.4 at 45% -> 6.4 at 58% -> 4.8 at 70% -> 6 at 85% -> 5; }
-    &fire2  { emissive: 5 -> 4.4 at 7% -> 6.2 at 14% -> 4.6 at 22% -> 6.4 at 31% -> 4.8 at 41% -> 6 at 52% -> 4.2 at 63% -> 6.3 at 77% -> 5; }
-    &blaze1 { intensity: 3 -> 3.8 at 5% -> 2.6 at 11% -> 3.6 at 17% -> 2.8 at 26% -> 3.7 at 34% -> 2.7 at 45% -> 3.8 at 58% -> 2.9 at 70% -> 3.5 at 85% -> 3; }
-    &blaze2 { intensity: 3 -> 2.6 at 7% -> 3.7 at 14% -> 2.8 at 22% -> 3.8 at 31% -> 2.9 at 41% -> 3.6 at 52% -> 2.6 at 63% -> 3.7 at 77% -> 3; }
+    &fire1  { emissive: 0.625 -> 0.812 at 5% -> 0.525 at 11% -> 0.75 at 17% -> 0.575 at 26% -> 0.775 at 34% -> 0.55 at 45% -> 0.8 at 58% -> 0.6 at 70% -> 0.75 at 85% -> 0.625; }
+    &fire2  { emissive: 0.625 -> 0.55 at 7% -> 0.775 at 14% -> 0.575 at 22% -> 0.8 at 31% -> 0.6 at 41% -> 0.75 at 52% -> 0.525 at 63% -> 0.787 at 77% -> 0.625; }
+    &blaze1 { intensity: 27 -> 34 at 5% -> 23 at 11% -> 32 at 17% -> 25 at 26% -> 33 at 34% -> 24 at 45% -> 34 at 58% -> 26 at 70% -> 31 at 85% -> 27; }
+    &blaze2 { intensity: 27 -> 23 at 7% -> 33 at 14% -> 25 at 22% -> 34 at 31% -> 26 at 41% -> 32 at 52% -> 23 at 63% -> 33 at 77% -> 27; }
   }
 }
 

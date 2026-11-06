@@ -129,6 +129,12 @@
     }
     const bg = String(%background || '');
     if (scene && bg) scene.background = new THREE.Color(bg);
+    const EXPOSURE_GAIN = String(%tone) === 'none' ? 1 : %exposure / (String(%tone) === 'aces' ? 0.6 : 1);
+    // A colour the world shows as it is — the fog, a tone-mapped clear colour.
+    // three.js exposes everything it tone-maps (ACES after a 1/0.6 gain), while
+    // raea exposes only its lights; so such a colour enters three.js divided by
+    // that gain, and the two engines paint the same fog and the same sky.
+    const shown = (c) => new THREE.Color(c).multiplyScalar(1 / EXPOSURE_GAIN);
 
     // --- Sizing (DPR-aware, ResizeObserver-driven) --------------------------
     const sizeState = { width: 1, height: 1, dpr: renderer ? renderer.getPixelRatio() : 1 };
@@ -376,7 +382,8 @@
       roughness: (p, k, part) => { if (part.mat) part.mat.roughness = num(k, 0.5); },
       clip: (p, k, part) => {
         const name = String(k).replace(/^["']|["']$/g, '');
-        if (name !== p.animation) { p.animation = name; part.clipFrom = sceneTime; }
+        // a clip plays from the frame the score switched to it
+        if (name !== p.animation) { p.animation = name; part.clipFrom = part.since.clip != null ? part.since.clip : sceneTime; }
       },
       rate: (p, k, part) => { part.rate = num(k, 1); },
       near: (p, k) => { p.near = num(k, p.near); },
@@ -392,7 +399,7 @@
       const pt = { kind, props: Object.assign({}, props), shape: o.shape, geom: o.geom, mat: o.material ? Object.assign({}, o.material) : null,
                    matKind: o.materialKind || 'MeshStandardMaterial', name: o.name || '', parent: o.parent || null, kids: [],
                    baseScale: props.scale != null ? props.scale : 1, el: document.createElement('i'), obj: null,
-                   clipFrom: 0, rate: 1, pulse: 0, phase: 0, update: o.update || null, text: '' };
+                   clipFrom: 0, since: {}, rate: 1, pulse: 0, phase: 0, update: o.update || null, text: '' };
       if (pt.name) pt.props.name = pt.name;
       pt.el.setAttribute('data-3d', kind);
       if (pt.shape) pt.el.setAttribute('data-shape', pt.shape);
@@ -412,11 +419,14 @@
     const nameable = (name, pt) => {
       const channels = {};
       const proxy = { _stChannels: channels, _stPart: pt };
+      // a write lands at once (a reader after the score sees the score's
+      // frame); the draw waits for the frame to settle
+      const write = (k, v) => { if (channels[k] !== v) { channels[k] = v; pt.since[k] = sceneTime; fold(pt); publish(pt); requestSettle(); } };
       proxy.style = new Proxy({
-        setProperty: (k, v) => { channels[k] = v; },
-        removeProperty: (k) => { delete channels[k]; },
+        setProperty: write,
+        removeProperty: (k) => { delete channels[k]; fold(pt); publish(pt); requestSettle(); },
         getPropertyValue: (k) => channels[k] != null ? String(channels[k]) : '',
-      }, { set: (o, k, v) => { channels[k] = v; return true; }, get: (o, k) => o[k] });
+      }, { set: (o, k, v) => { write(k, v); return true; }, get: (o, k) => o[k] });
       pt.channels = channels;
       pt.proxy = proxy;
       canvas._stStageObjects = canvas._stStageObjects || {};
@@ -424,12 +434,31 @@
       canvas._stStageObjects[name] = proxy;
     };
 
+    // Units. A stage's numbers are three.js's (the websites are tuned in
+    // them); raea reads its own (stdlib/film/vendor/raea core/scene/src/props.rs:
+    // a directional light of 1 is 8000 lux, a point light of 1 is 900,000 lm,
+    // an ambient of 1 is 400 cd/m², seen at EV100 9.7). Against a directional
+    // light — the shared yardstick — a three.js point light of I candela
+    // matches raea's I / 8.95, and three.js ambient (irradiance, divided by π
+    // like any diffuse light) matches raea's 8000/π/400 = 6.37 times it. Both
+    // tone-map with the same fitted ACES, three.js's after a 1/0.6 gain, so
+    // exposure E is raea's log2(E · 1.2 · 2^9.7 / (0.6 · 8000)) = log2(E) - 2.26
+    // stops. raea leaves emissive unexposed (Bevy's emissive_exposure_weight
+    // 0) where three.js exposes it, so raea's is three.js's times that gain.
+    const RAEA_UNITS = { PointLight: 1 / 8.95, SpotLight: 1 / 8.95, AmbientLight: 8000 / Math.PI / 400 };
+    const RAEA_EV = Math.log2(1.2 * Math.pow(2, 9.7) / (0.6 * 8000));
+    const raeaProps = (pt) => {
+      const k = RAEA_UNITS[pt.kind];
+      return k && pt.props.intensity != null ? Object.assign({}, pt.props, { intensity: pt.props.intensity * k }) : pt.props;
+    };
+    const raeaMat = (m) => m.emissiveIntensity != null ? Object.assign({}, m, { emissiveIntensity: m.emissiveIntensity * EXPOSURE_GAIN }) : m;
+
     // The part's props as raea reads them (data-props), and to three.js.
     const publish = (pt) => {
-      const text = JSON.stringify(pt.props);
+      const text = JSON.stringify(raeaProps(pt));
       if (text !== pt.text) { pt.text = text; pt.el.setAttribute('data-props', text); }
       if (pt.matEl) {
-        const mt = JSON.stringify(pt.mat);
+        const mt = JSON.stringify(raeaMat(pt.mat));
         if (mt !== pt.matText) { pt.matText = mt; pt.matEl.setAttribute('data-props', mt); }
       }
       if (pt.obj && REALIZE[pt.kind].update) REALIZE[pt.kind].update(pt);
@@ -494,8 +523,29 @@
       DirectionalLight: light((p) => new THREE.DirectionalLight(p.color || '#ffffff', p.intensity)),
       PointLight: light((p) => new THREE.PointLight(p.color || '#ffffff', p.intensity, p.distance || 0, 2)),
       SpotLight: light((p) => new THREE.SpotLight(p.color || '#ffffff', p.intensity, p.distance || 0, p.angle || Math.PI / 6, p.penumbra || 0.3, 2)),
-      Fog: { make: (pt) => { scene.fog = new THREE.Fog(pt.props.color, pt.props.near, pt.props.far); return scene.fog; },
-             update: (pt) => { scene.fog.color.set(pt.props.color); scene.fog.near = pt.props.near; scene.fog.far = pt.props.far; } },
+      // bloom: three's composer (a render pass, the bloom, the output transform) in place of the plain draw
+      Bloom: {
+        make: (pt) => {
+          const A = THREE.addons, sz = sizeFn();
+          const composer = new A.EffectComposer(renderer);
+          composer.addPass(new A.RenderPass(scene, camera));
+          // the glow at half resolution: it is soft anyway, and a software GL (Chromium's SwiftShader) pays per pixel.
+          // three.js ADDS what passes a threshold (before exposure); raea's Bevy bloom blends without one. The
+          // strength and threshold are measured against raea on demos/film-disco (an emissive floor, point lights)
+          const pass = new A.UnrealBloomPass(new THREE.Vector2(sz.width / 2, sz.height / 2), pt.props.intensity * 0.15, 0.5, 4.0);
+          composer.addPass(pass);
+          composer.addPass(new A.OutputPass());
+          composer.setSize(sz.width, sz.height);
+          sizeListeners.push((w, h) => { composer.setSize(w, h); pass.setSize(w / 2, h / 2); });
+          setRender(() => composer.render());
+          // the output pass tone-maps the clear colour too
+          if (bg) scene.background = shown(bg);
+          return pass;
+        },
+        update: (pt) => { pt.obj.strength = pt.props.intensity * 0.15; },
+      },
+      Fog: { make: (pt) => { scene.fog = new THREE.Fog(shown(pt.props.color), pt.props.near, pt.props.far); return scene.fog; },
+             update: (pt) => { scene.fog.color.copy(shown(pt.props.color)); scene.fog.near = pt.props.near; scene.fog.far = pt.props.far; } },
       Group: { make: (pt) => { const g = new THREE.Group(); (pt.parent && pt.parent.obj ? pt.parent.obj : scene).add(g); return g; }, update: (pt) => place(pt.obj, pt.props) },
       Mesh: {
         make: (pt) => {
@@ -548,6 +598,8 @@
     const rest = { position: cam.props.position.slice(), lookAt: [0, 0, 0], fov: %fov };
     // the lens: bloom (raea draws it; a browser's bloom is `@post`)
     if (%bloom > 0) part('Bloom', { intensity: %bloom }, {});
+    // the exposure: the same picture on raea (stops; see RAEA_UNITS)
+    part('ToneMapping', { mode: String(%tone) === 'linear' ? 'none' : String(%tone), exposure: Math.log2(%exposure) + RAEA_EV }, {});
     const track = (name) => {
       for (let n = canvas; n && n.style; n = n.parentElement) {
         const v = n.style.getPropertyValue && n.style.getPropertyValue(name);
@@ -585,23 +637,41 @@
     let fpsFrames = 0;
     let fpsLast = performance.now();
     let lastT = null;
+    let drawQueued = false;
     let revealed = false;
     if (renderer) canvas.style.opacity = '0';
 
+    // Settle (fold, publish, draw) once per frame, after the score has spoken.
+    // A signal's changes reach its dependents in microtask batches, several
+    // hops deep (score -> clip window -> @on body), so the channels a tick
+    // sees are the previous frame's (a virtual clock settles each tick's batch
+    // before the next, `ST._settleSignals`). So a channel write folds its part
+    // at once, and a tick AND every write ask for one draw when the frame has
+    // settled: an advance() of ~800 ticks draws once (a bloom composer drawn
+    // every tick on a software GL cost minutes).
+    const requestSettle = () => {
+      if (!drawQueued) { drawQueued = true; queueMicrotask(settle); }
+    };
+    const settle = () => {
+      drawQueued = false;
+      camFold();
+      for (const pt of parts) fold(pt);
+      for (const pt of parts) publish(pt);
+      renderFn();
+    };
     const tick = (ts) => {
       const t = (typeof ts === 'number' ? ts : performance.now()) / 1000;
       const dt = lastT === null ? 0 : Math.max(0, t - lastT);
       lastT = t;
       sceneTime = t;
       frameCount++;
-      camFold();
       for (const pt of parts) fold(pt);
       for (const cb of frameCbs) cb(t, dt);
-      for (const pt of parts) publish(pt);
-      renderFn();
+      requestSettle();
       if (renderer && !revealed) {
         revealed = true;
-        canvas.style.transition = 'opacity 0.5s ease';
+        // a film being rendered shows its first frame at once (a CSS fade runs on the wall clock)
+        if (!(typeof ST !== 'undefined' && ST._clock && ST._clock.virtual)) canvas.style.transition = 'opacity 0.5s ease';
         canvas.style.opacity = '1';
       }
       %yield frameCount -> $frame;
@@ -613,6 +683,10 @@
         fpsLast = now;
       }
     };
+    // a stage's loop is not a score's driver: a renderer waiting for the
+    // drivers to mount must not take this one for them (it would start the
+    // clock before the score's driver exists, and the film would run late)
+    tick._stStage = true;
     const raf = (typeof ST !== 'undefined' && ST._raf) ? ST._raf : null;
     let stopLoop = null;
     let rafId = null;
