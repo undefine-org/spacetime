@@ -10,6 +10,9 @@
 ///   h1.title { @on &.clip { --focus-pull; } }
 ///   .stage   { @post --cinema; @on &.clip { --shake; } }
 
+// The score synthesizer behind `@sound` (PLAN-152), demand-injected.
+@import "./vendor.st"
+
 // --- Motion moves ----------------------------------------------------------
 
 /// Rack-focus in: blur resolves, letter-spacing tightens, a small rise + fade.

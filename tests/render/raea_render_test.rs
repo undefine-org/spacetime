@@ -19,6 +19,8 @@
 //!   7. MASK VAR        a mask reading an animated custom property grows
 //!   8. COUNTER         a CSS counter reset from an animated property ticks
 //!   9. STILLS          `--stills` writes `still-<ms>ms.png` per timestamp
+//!  10. STAGE           a scored 3D stage moves a named part (PLAN-152 bridge)
+//!  11. SOUND           `@sound` notes reach the mp4: silent before, loud in its window
 //!
 //! These need the raea binary and a Vulkan GPU, so they are `#[ignore]`d by
 //! default — run them explicitly (and READ the count: an ignored gate proves
@@ -210,3 +212,51 @@ fn raea_stills_are_written_per_timestamp() {
     assert!(rgb_of(&paths[0], 0) != rgb_of(&paths[1], 0), "0.5s and 1.5s of a moving score must differ");
     std::fs::remove_dir_all(&out_dir).ok();
 }
+
+/// The red part's mean column (0..1 of the width), or None if no red is drawn.
+fn red_centroid_x(rgb: &[u8], width: usize) -> Option<f64> {
+    let (mut sum, mut n) = (0.0, 0usize);
+    for (i, p) in rgb.chunks_exact(3).enumerate() {
+        if p[0] > 150 && p[1] < 90 && p[2] < 90 {
+            sum += (i % width) as f64;
+            n += 1;
+        }
+    }
+    (n > 50).then(|| sum / n as f64 / width as f64)
+}
+
+// 10. STAGE — the stage's parts reach raea's 3D world, and the score moves them.
+#[test]
+#[ignore = "needs the raea binary and a Vulkan GPU: cargo test --test raea_render_test -- --ignored"]
+fn raea_draws_a_scored_3d_stage() {
+    let shots = stills("raea_stage.st", &[0.1, 0.9], "stage");
+    let a = red_centroid_x(&shots[0], 480).expect("the box must be drawn at 0.1s (the stage's parts reach raea's world)");
+    let b = red_centroid_x(&shots[1], 480).expect("the box must be drawn at 0.9s");
+    assert!(b - a > 0.3, "the score must slide the box across the frame (centroid {a:.2} -> {b:.2})");
+}
+
+/// Mean absolute amplitude of `[from, to)` seconds of a file's audio (mono, 48 kHz s16), via ffmpeg.
+fn loudness(path: &Path, from: f64, to: f64) -> f64 {
+    let out = Command::new("ffmpeg")
+        .args(["-v", "error", "-i"])
+        .arg(path)
+        .args(["-ss", &from.to_string(), "-to", &to.to_string(), "-ac", "1", "-ar", "48000", "-f", "s16le", "-"])
+        .output()
+        .unwrap_or_else(|e| panic!("ffmpeg audio extract failed: {e}"));
+    assert!(out.status.success(), "ffmpeg errored: {}", String::from_utf8_lossy(&out.stderr));
+    let s: Vec<i16> = out.stdout.chunks_exact(2).map(|b| i16::from_le_bytes([b[0], b[1]])).collect();
+    s.iter().map(|&x| (x as f64).abs()).sum::<f64>() / s.len().max(1) as f64
+}
+
+// 11. SOUND — the score's notes are synthesized into the film.
+#[test]
+#[ignore = "needs the raea binary and a Vulkan GPU: cargo test --test raea_render_test -- --ignored"]
+fn raea_films_carry_their_score_s_sound() {
+    let (path, _) = render("raea_sound.st", 30, "sound");
+    let quiet = loudness(&path, 0.05, 0.45);
+    let loud = loudness(&path, 0.55, 0.95);
+    assert!(loud > 500.0, "the beat must be heard in its window (mean |x| {loud:.0})");
+    assert!(quiet < loud / 20.0, "nothing plays before the sound's `at` (before {quiet:.0}, in {loud:.0})");
+    std::fs::remove_file(&path).ok();
+}
+

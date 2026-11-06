@@ -17,6 +17,23 @@
 /// against the handle, never re-create a renderer. The vendored `THREE` global is
 /// emitted into the page only because this primitive references it (lean law).
 ///
+/// PLAN-152: the SCENE is data. Every stage child (`@object`, `@light`, `@gltf`,
+/// `@fog`, `@grid`, the camera) is a PART: a kind and its props in raea's 3D
+/// vocabulary (the TSX `node3d` markup: `PerspectiveCamera`, `DirectionalLight`,
+/// `Mesh` + `MeshStandardMaterial`, `Model`, `Fog`, …), mirrored as a hidden
+/// `<i data-3d data-props>` element inside the canvas. A score animates a named
+/// part's CHANNELS (`&sun { intensity: 0 -> 3; }`); each frame the channels are
+/// folded into the part's props and the part is realized:
+///
+///   - in a browser, by the REALIZE table below (one three.js builder + updater
+///     per kind — data, not a switch in each primitive);
+///   - under `spacetime render --engine raea` (`ST._stage3d.renderer === "none"`),
+///     by raea itself, which reads the `data-3d` markup every frame and draws it
+///     with Bevy under the page. No WebGL is touched.
+///
+/// The frame loop ticks through `ST._raf`, so under a virtual clock (`render`,
+/// `@clock`) the 3D moves on the same instants as the DOM.
+///
 /// @param &el       - the <canvas> to render into
 /// @param fov       - perspective vertical field of view (degrees)
 /// @param near      - camera near plane
@@ -25,6 +42,9 @@
 /// @param exposure  - tone-mapping exposure
 /// @param tone      - tone-mapping: "aces" | "linear" | "reinhard" | "none"
 /// @param alpha     - transparent canvas background
+/// @param shadows   - "" (off) | "soft" | "hard": shadow maps for every light that casts and every part
+/// @param background - the 3D's clear colour (hex); "" keeps the canvas transparent
+/// @param bloom     - glow around bright and emissive parts (0 none, 1 natural, 2 strong); raea's `Bloom`
 ///
 /// @yields $ready   - true once the renderer + loop are live
 /// @yields $frame   - frame counter (reactive)
@@ -40,7 +60,10 @@
   camZ: number = 5,
   exposure: number = 1.0,
   tone: string = "aces",
-  alpha: bool = true
+  alpha: bool = true,
+  shadows: string = "",
+  background: string = "",
+  bloom: number = 0
 ) {
   %emit js {
     const canvas = %&el;
@@ -59,14 +82,17 @@
         canvas.tagName.toLowerCase() + '>, but a <canvas> is required.');
       return;
     }
-    if (typeof THREE === 'undefined') {
+    // PLAN-152: under raea the page has no WebGL; the scene's parts are drawn by
+    // raea from their `data-3d` markup. Nothing below that needs a renderer runs.
+    const headless3d = typeof ST !== 'undefined' && ST._stage3d && ST._stage3d.renderer === 'none';
+    if (typeof THREE === 'undefined' && !headless3d) {
       console.warn('[Spacetime] three-stage: three.js engine not loaded.');
       return;
     }
 
     // --- Renderer -----------------------------------------------------------
-    let renderer;
-    try {
+    let renderer = null;
+    if (!headless3d) try {
       renderer = new THREE.WebGLRenderer({
         canvas,
         antialias: true,
@@ -77,27 +103,35 @@
       console.error('[Spacetime] three-stage: WebGL unavailable.', e);
       return;
     }
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
-
-    const toneMap = {
-      aces: THREE.ACESFilmicToneMapping,
-      linear: THREE.LinearToneMapping,
-      reinhard: THREE.ReinhardToneMapping,
-      none: THREE.NoToneMapping,
-    };
-    renderer.toneMapping = toneMap[%tone] ?? THREE.ACESFilmicToneMapping;
-    renderer.toneMappingExposure = %exposure;
+    const shadowMode = String(%shadows || '');
+    if (renderer) {
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+      const toneMap = {
+        aces: THREE.ACESFilmicToneMapping,
+        linear: THREE.LinearToneMapping,
+        reinhard: THREE.ReinhardToneMapping,
+        none: THREE.NoToneMapping,
+      };
+      renderer.toneMapping = toneMap[%tone] ?? THREE.ACESFilmicToneMapping;
+      renderer.toneMappingExposure = %exposure;
+      if (shadowMode) {
+        renderer.shadowMap.enabled = true;
+        renderer.shadowMap.type = shadowMode === 'hard' ? THREE.BasicShadowMap : THREE.PCFSoftShadowMap;
+      }
+    }
 
     // --- Scene + camera -----------------------------------------------------
-    const scene = new THREE.Scene();
-    const camera = new THREE.PerspectiveCamera(%fov, 1, %near, %far);
-    camera.position.set(%camX, %camY, %camZ);
-    camera.lookAt(0, 0, 0);
-
-    const clock = new THREE.Clock();
+    const scene = renderer ? new THREE.Scene() : null;
+    const camera = renderer ? new THREE.PerspectiveCamera(%fov, 1, %near, %far) : null;
+    if (camera) {
+      camera.position.set(%camX, %camY, %camZ);
+      camera.lookAt(0, 0, 0);
+    }
+    const bg = String(%background || '');
+    if (scene && bg) scene.background = new THREE.Color(bg);
 
     // --- Sizing (DPR-aware, ResizeObserver-driven) --------------------------
-    const sizeState = { width: 1, height: 1, dpr: renderer.getPixelRatio() };
+    const sizeState = { width: 1, height: 1, dpr: renderer ? renderer.getPixelRatio() : 1 };
     const resize = () => {
       const rect = canvas.getBoundingClientRect();
       const w = Math.max(1, Math.floor(rect.width));
@@ -105,15 +139,17 @@
       if (w === sizeState.width && h === sizeState.height) return;
       sizeState.width = w;
       sizeState.height = h;
-      renderer.setSize(w, h, false);
-      camera.aspect = w / h;
-      camera.updateProjectionMatrix();
+      if (renderer) {
+        renderer.setSize(w, h, false);
+        camera.aspect = w / h;
+        camera.updateProjectionMatrix();
+      }
       // notify any size listeners (e.g. post-processing composer)
       for (const cb of sizeListeners) cb(w, h, sizeState.dpr);
     };
     const sizeListeners = [];
-    const resizeObs = new ResizeObserver(resize);
-    resizeObs.observe(canvas);
+    const resizeObs = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(resize) : null;
+    if (resizeObs) resizeObs.observe(canvas);
 
     // --- Frame loop ---------------------------------------------------------
     const frameCbs = [];
@@ -126,7 +162,7 @@
     };
 
     // Default render = straight scene draw. Post-processing overrides via setRender.
-    let renderFn = () => renderer.render(scene, camera);
+    let renderFn = () => { if (renderer) renderer.render(scene, camera); };
     const setRender = (fn) => { renderFn = fn; };
 
     const sizeFn = () => ({ ...sizeState });
@@ -153,6 +189,7 @@
     // `lookAt(0,0,0)`, so forward.z is always meaningfully non-zero toward the
     // origin plane).
     const boundsFn = (z) => {
+        if (!camera) return { halfW: 0, halfH: 0 };
         const targetZ = typeof z === 'number' ? z : 0;
         const forward = new THREE.Vector3();
         camera.getWorldDirection(forward); // unit vector, camera's REAL look direction
@@ -208,8 +245,8 @@
     // IDENTITY (not a rebuilt intersection list per call) so @object/@gltf
     // primitives opt in without knowing about each other.
     const pickHandlers = new Map(); // THREE.Object3D -> { click, hover }
-    const raycaster = new THREE.Raycaster();
-    const pointer = new THREE.Vector2();
+    const raycaster = renderer ? new THREE.Raycaster() : null;
+    const pointer = renderer ? new THREE.Vector2() : null;
     let hoveredMesh = null;
 
     const setPointerFromEvent = (e) => {
@@ -231,7 +268,7 @@
     };
 
     const intersectRegistered = () => {
-      if (pickHandlers.size === 0) return null;
+      if (pickHandlers.size === 0 || !raycaster) return null;
       raycaster.setFromCamera(pointer, camera);
       const hits = raycaster.intersectObjects(scene.children, true);
       for (const hit of hits) {
@@ -279,10 +316,255 @@
       };
     };
 
+    // --- PLAN-152: the scene as data -----------------------------------------
+    //
+    // A PART is one node of the scene: `kind` and `props` in raea's 3D
+    // vocabulary, optional `shape` (raea's geometry string, `box(1, 1, 1)`),
+    // `kids` (a Mesh's material), and a `geom` the three.js realizer reads. Its
+    // markup lives in a hidden world element right AFTER the canvas, which is
+    // what raea reads each frame. (Not inside it: a canvas re-rasterizes when
+    // its subtree changes, so parts rewritten every tick inside one cost a
+    // fresh picture per tick.)
+    const world = document.createElement('div');
+    world.setAttribute('data-st-world', '');
+    world.hidden = true;
+    world.style.display = 'none';
+    // (a canvas not yet in the document, a test fixture's, keeps it inside)
+    if (canvas.parentNode) canvas.parentNode.insertBefore(world, canvas.nextSibling);
+    else canvas.appendChild(world);
+    const parts = [];
+    // Under raea the world is drawn UNDER the whole page (a full-frame,
+    // back-most stage), so the backgrounds a browser paints behind the canvas
+    // must not cover it there. The stage background is the clear colour.
+    if (headless3d) {
+      let up = canvas.parentElement;
+      while (up) {
+        if (up.style) up.style.setProperty('background', 'transparent');
+        up = up.parentElement;
+      }
+    }
+    const num = (v, d) => { const n = parseFloat(v); return isNaN(n) ? d : n; };
+    const hex = (v) => {
+      const h2 = (x) => Math.round(Math.max(0, Math.min(1, x)) * 255).toString(16).padStart(2, '0');
+      if (Array.isArray(v)) return '#' + h2(v[0]) + h2(v[1]) + h2(v[2]);
+      if (typeof v !== 'string') return v;
+      const t = v.trim();
+      if (t[0] === '#') return t.length === 4 ? '#' + t[1] + t[1] + t[2] + t[2] + t[3] + t[3] : t.slice(0, 7);
+      const c = (typeof ST !== 'undefined' && ST.parseColor) ? ST.parseColor(t) : null;
+      if (!c) return t;
+      const h = (x) => Math.round(Math.max(0, Math.min(1, x > 1 ? x / 255 : x)) * 255).toString(16).padStart(2, '0');
+      return '#' + h(c.r) + h(c.g) + h(c.b);
+    };
+    const deg = (v) => num(v, 0) * Math.PI / 180;
+
+    // How a score channel lands in a part's props: data, one entry per channel.
+    // `k` is the channel's value; each writer mutates the props (or the material).
+    const vec = (key, i, f) => (p, k) => { const a = (p[key] || [0, 0, 0]).slice(); a[i] = f ? f(k) : num(k, 0); p[key] = a; };
+    const CHANNELS = {
+      posX: vec('position', 0), posY: vec('position', 1), posZ: vec('position', 2),
+      // the camera's aim and lens (`&camera { lookY: 1 -> 2; fov: 40 -> 28; }`)
+      lookX: vec('lookAt', 0), lookY: vec('lookAt', 1), lookZ: vec('lookAt', 2),
+      fov: (p, k) => { p.fov = num(k, p.fov); },
+      rotateX: vec('rotation', 0, deg), rotateY: vec('rotation', 1, deg), rotateZ: vec('rotation', 2, deg),
+      spin: vec('rotation', 1),
+      scale: (p, k, part) => { const b = part.baseScale; p.scale = Array.isArray(b) ? b.map((x) => x * num(k, 1)) : num(k, 1) * (b || 1); },
+      intensity: (p, k) => { p.intensity = num(k, p.intensity); },
+      color: (p, k, part) => { if (part.mat) part.mat.color = hex(k); else p.color = hex(k); },
+      opacity: (p, k, part) => { if (part.mat) { part.mat.opacity = num(k, 1); part.mat.transparent = true; } },
+      emissive: (p, k, part) => { if (part.mat) part.mat.emissiveIntensity = num(k, 1); },
+      metalness: (p, k, part) => { if (part.mat) part.mat.metalness = num(k, 0); },
+      roughness: (p, k, part) => { if (part.mat) part.mat.roughness = num(k, 0.5); },
+      clip: (p, k, part) => {
+        const name = String(k).replace(/^["']|["']$/g, '');
+        if (name !== p.animation) { p.animation = name; part.clipFrom = sceneTime; }
+      },
+      rate: (p, k, part) => { part.rate = num(k, 1); },
+      near: (p, k) => { p.near = num(k, p.near); },
+      far: (p, k) => { p.far = num(k, p.far); },
+      pulse: (p, k, part) => { part.pulse = num(k, 0); },
+      phase: (p, k, part) => { part.phase = num(k, 0); },
+    };
+
+    let sceneTime = 0;
+    // part(kind, props, {name, shape, geom, material, parent}) -> the part
+    const part = (kind, props, opts) => {
+      const o = opts || {};
+      const pt = { kind, props: Object.assign({}, props), shape: o.shape, geom: o.geom, mat: o.material ? Object.assign({}, o.material) : null,
+                   matKind: o.materialKind || 'MeshStandardMaterial', name: o.name || '', parent: o.parent || null, kids: [],
+                   baseScale: props.scale != null ? props.scale : 1, el: document.createElement('i'), obj: null,
+                   clipFrom: 0, rate: 1, pulse: 0, phase: 0, update: o.update || null, text: '' };
+      if (pt.name) pt.props.name = pt.name;
+      pt.el.setAttribute('data-3d', kind);
+      if (pt.shape) pt.el.setAttribute('data-shape', pt.shape);
+      if (pt.mat) { pt.matEl = document.createElement('i'); pt.matEl.setAttribute('data-3d', pt.matKind); pt.el.appendChild(pt.matEl); }
+      (pt.parent ? pt.parent.el : world).appendChild(pt.el);
+      if (pt.parent) pt.parent.kids.push(pt);
+      parts.push(pt);
+      if (pt.name) nameable(pt.name, pt);
+      if (renderer && REALIZE[kind]) pt.obj = REALIZE[kind].make(pt);
+      publish(pt);
+      return pt;
+    };
+
+    // A named part answers to `&name` in an `@on` body: the score's keyframe
+    // engine writes channels into a proxy (apply-animations' stage-object
+    // rail); the frame loop folds them into the part's props.
+    const nameable = (name, pt) => {
+      const channels = {};
+      const proxy = { _stChannels: channels, _stPart: pt };
+      proxy.style = new Proxy({
+        setProperty: (k, v) => { channels[k] = v; },
+        removeProperty: (k) => { delete channels[k]; },
+        getPropertyValue: (k) => channels[k] != null ? String(channels[k]) : '',
+      }, { set: (o, k, v) => { channels[k] = v; return true; }, get: (o, k) => o[k] });
+      pt.channels = channels;
+      pt.proxy = proxy;
+      canvas._stStageObjects = canvas._stStageObjects || {};
+      canvas._stStageObjects['&' + name] = proxy;
+      canvas._stStageObjects[name] = proxy;
+    };
+
+    // The part's props as raea reads them (data-props), and to three.js.
+    const publish = (pt) => {
+      const text = JSON.stringify(pt.props);
+      if (text !== pt.text) { pt.text = text; pt.el.setAttribute('data-props', text); }
+      if (pt.matEl) {
+        const mt = JSON.stringify(pt.mat);
+        if (mt !== pt.matText) { pt.matText = mt; pt.matEl.setAttribute('data-props', mt); }
+      }
+      if (pt.obj && REALIZE[pt.kind].update) REALIZE[pt.kind].update(pt);
+    };
+
+    const fold = (pt) => {
+      if (pt.channels) {
+        const tf = pt.proxy._stTransforms || {};
+        for (const k of new Set([...Object.keys(pt.channels), ...Object.keys(tf)])) {
+          const w = CHANNELS[k];
+          if (w) w(pt.props, k in pt.channels ? pt.channels[k] : tf[k], pt);
+        }
+      }
+      // a model's clip plays from when it began (its own seconds, at its rate)
+      if (pt.kind === 'Model') pt.props.time = Math.max(0, (sceneTime - pt.clipFrom) * pt.rate);
+      if (pt.update) pt.update(pt, sceneTime);
+    };
+
+    // --- three.js realizers: one builder + updater per kind (data) ---------
+    const place = (o, p) => {
+      if (p.position) o.position.set(p.position[0], p.position[1], p.position[2]);
+      if (p.rotation) o.rotation.set(p.rotation[0], p.rotation[1], p.rotation[2]);
+      if (p.scale != null) { if (Array.isArray(p.scale)) o.scale.set(p.scale[0], p.scale[1], p.scale[2]); else o.scale.setScalar(p.scale); }
+    };
+    const shadowed = (o, p) => { if (shadowMode) { o.castShadow = p.castShadow !== false; o.receiveShadow = p.receiveShadow !== false; } };
+    const light = (make) => ({
+      make: (pt) => { const l = make(pt.props); if (l.target) scene.add(l.target); scene.add(l); if (shadowMode && pt.props.castShadow && l.shadow) { l.castShadow = true; l.shadow.mapSize.set(2048, 2048); if (l.shadow.camera.isOrthographicCamera) Object.assign(l.shadow.camera, { left: -12, right: 12, top: 12, bottom: -12, far: 60 }); } return l; },
+      update: (pt) => { const l = pt.obj, p = pt.props; l.intensity = p.intensity; if (p.color) l.color.set(p.color); if (p.position) l.position.set(...p.position); if (l.target && p.target) l.target.position.set(...p.target); },
+    });
+    const GEOM = {
+      box: (a) => new THREE.BoxGeometry(a[0], a[1], a[2]),
+      sphere: (a) => new THREE.SphereGeometry(a[0], 48, 32),
+      plane: (a) => new THREE.PlaneGeometry(a[0], a[1]),
+      cylinder: (a) => new THREE.CylinderGeometry(a[0], a[1], a[2], 48),
+      cone: (a) => new THREE.ConeGeometry(a[0], a[1], 48),
+      torus: (a) => new THREE.TorusGeometry(a[0], a[1], 32, 96),
+      icosahedron: (a) => new THREE.IcosahedronGeometry(a[0], a[1] || 0),
+      torusknot: (a) => new THREE.TorusKnotGeometry(a[0], a[1], 160, 24),
+    };
+    const material = (m) => {
+      const M = m.kind === 'MeshPhysicalMaterial' ? THREE.MeshPhysicalMaterial : m.kind === 'MeshBasicMaterial' ? THREE.MeshBasicMaterial : THREE.MeshStandardMaterial;
+      return new M({});
+    };
+    const syncMaterial = (mm, m) => {
+      if (m.color) mm.color.set(m.color);
+      for (const k of ['roughness', 'metalness', 'opacity', 'transmission', 'ior', 'thickness', 'clearcoat', 'emissiveIntensity']) if (m[k] != null && k in mm) mm[k] = m[k];
+      if (m.emissive && mm.emissive) mm.emissive.set(m.emissive);
+      mm.transparent = !!m.transparent || (m.opacity != null && m.opacity < 1);
+    };
+    const REALIZE = {
+      PerspectiveCamera: {
+        make: () => camera,
+        update: (pt) => {
+          const p = pt.props;
+          camera.position.set(...p.position);
+          camera.up.set(...(p.up || [0, 1, 0]));
+          camera.lookAt(...p.lookAt);
+          if (camera.fov !== p.fov) { camera.fov = p.fov; camera.updateProjectionMatrix(); }
+        },
+      },
+      AmbientLight: light((p) => new THREE.AmbientLight(p.color || '#ffffff', p.intensity)),
+      DirectionalLight: light((p) => new THREE.DirectionalLight(p.color || '#ffffff', p.intensity)),
+      PointLight: light((p) => new THREE.PointLight(p.color || '#ffffff', p.intensity, p.distance || 0, 2)),
+      SpotLight: light((p) => new THREE.SpotLight(p.color || '#ffffff', p.intensity, p.distance || 0, p.angle || Math.PI / 6, p.penumbra || 0.3, 2)),
+      Fog: { make: (pt) => { scene.fog = new THREE.Fog(pt.props.color, pt.props.near, pt.props.far); return scene.fog; },
+             update: (pt) => { scene.fog.color.set(pt.props.color); scene.fog.near = pt.props.near; scene.fog.far = pt.props.far; } },
+      Group: { make: (pt) => { const g = new THREE.Group(); (pt.parent && pt.parent.obj ? pt.parent.obj : scene).add(g); return g; }, update: (pt) => place(pt.obj, pt.props) },
+      Mesh: {
+        make: (pt) => {
+          const g = pt.geom ? GEOM[pt.geom.type](pt.geom.args) : new THREE.BoxGeometry(1, 1, 1);
+          const mesh = new THREE.Mesh(g, material({ kind: pt.matKind }));
+          shadowed(mesh, pt.props);
+          (pt.parent && pt.parent.obj ? pt.parent.obj : scene).add(mesh);
+          return mesh;
+        },
+        update: (pt) => { place(pt.obj, pt.props); if (pt.mat) syncMaterial(pt.obj.material, pt.mat); },
+      },
+      Model: {
+        make: (pt) => {
+          const holder = new THREE.Group();
+          scene.add(holder);
+          new THREE.addons.GLTFLoader().load(pt.props.src, (gltf) => {
+            holder.add(gltf.scene);
+            gltf.scene.traverse((o) => { if (o.isMesh) shadowed(o, pt.props); });
+            pt.mixer = new THREE.AnimationMixer(gltf.scene);
+            pt.clips = gltf.animations;
+            publish(pt);
+          }, undefined, (e) => console.error('[Spacetime] @gltf: load failed', pt.props.src, e));
+          return holder;
+        },
+        update: (pt) => {
+          place(pt.obj, pt.props);
+          if (!pt.mixer) return;
+          const p = pt.props;
+          if (p.animation !== pt.playing) {
+            pt.mixer.stopAllAction();
+            const clip = (pt.clips || []).find((c) => c.name === p.animation);
+            pt.action = clip ? pt.mixer.clipAction(clip).play() : null;
+            pt.playing = p.animation;
+          }
+          // seek, don't step: the pose is a function of the clip's own time
+          if (pt.action) { const d = pt.action.getClip().duration || 1; pt.action.time = p.time % d; pt.mixer.update(0); }
+        },
+      },
+    };
+
+    // --- the camera: a part like any other, its rest pose the stage's params,
+    // its axes the score's camera tracks (`@on &.clip --crane;` writes
+    // --cam-x/y/z, --cam-tx/ty/tz, --cam-fov, --cam-roll on the consumer) or a
+    // `&camera { posZ: … }` block. Axes a score doesn't drive keep the rest.
+    const cam = part('PerspectiveCamera', { position: [%camX, %camY, %camZ], lookAt: [0, 0, 0], fov: %fov, near: %near, far: %far, ...(bg ? { background: hex(bg) } : {}) }, { name: 'camera' });
+    const rest = { position: cam.props.position.slice(), lookAt: [0, 0, 0], fov: %fov };
+    // the lens: bloom (raea draws it; a browser's bloom is `@post`)
+    if (%bloom > 0) part('Bloom', { intensity: %bloom }, {});
+    const track = (name) => {
+      for (let n = canvas; n && n.style; n = n.parentElement) {
+        const v = n.style.getPropertyValue && n.style.getPropertyValue(name);
+        if (v !== '' && v != null) { n.style.setProperty('--cam-rig-off', 'none'); return num(v, NaN); }
+      }
+      return NaN;
+    };
+    const camFold = () => {
+      const p = cam.props;
+      const axes = [['--cam-x', 'position', 0], ['--cam-y', 'position', 1], ['--cam-z', 'position', 2],
+                    ['--cam-tx', 'lookAt', 0], ['--cam-ty', 'lookAt', 1], ['--cam-tz', 'lookAt', 2]];
+      for (const [t, key, i] of axes) { const v = track(t); if (!isNaN(v)) { p[key] = p[key].slice(); p[key][i] = v; } }
+      const fv = track('--cam-fov'); if (!isNaN(fv)) p.fov = fv;
+      const rl = track('--cam-roll'); if (!isNaN(rl)) { const r = rl * Math.PI / 180; p.up = [Math.sin(r), Math.cos(r), 0]; }
+    };
+
     // Shared handle every child primitive composes against.
     canvas._stThree = {
-      THREE, scene, camera, renderer, clock,
+      THREE: typeof THREE !== 'undefined' ? THREE : null, scene, camera, renderer,
       registerFrame, setRender,
+      part, headless: headless3d, shadows: shadowMode, hex, num,
       onResize: (cb) => { sizeListeners.push(cb); },
       size: sizeFn,
       bounds: boundsFn,
@@ -290,30 +572,34 @@
       registerPick,
     };
 
-    // --- FPS + tick ---------------------------------------------------------
+    // --- The frame loop: one tick per runtime frame, through ST._raf --------
+    //
+    // Under a virtual clock (`spacetime render`, `@clock`) ST._raf's ticks carry
+    // the virtual time, so the 3D moves on the same instants as the DOM. In a
+    // plain browser ST._raf runs on requestAnimationFrame as before.
     let frameCount = 0;
     let fpsFrames = 0;
     let fpsLast = performance.now();
-    let rafId = null;
+    let lastT = null;
     let revealed = false;
+    if (renderer) canvas.style.opacity = '0';
 
-    // Avoid first-frame flash: keep canvas hidden until something renders.
-    canvas.style.opacity = '0';
-
-    const tick = () => {
-      const dt = clock.getDelta();
-      const t = clock.elapsedTime;
+    const tick = (ts) => {
+      const t = (typeof ts === 'number' ? ts : performance.now()) / 1000;
+      const dt = lastT === null ? 0 : Math.max(0, t - lastT);
+      lastT = t;
+      sceneTime = t;
       frameCount++;
-
+      camFold();
+      for (const pt of parts) fold(pt);
       for (const cb of frameCbs) cb(t, dt);
+      for (const pt of parts) publish(pt);
       renderFn();
-
-      if (!revealed) {
+      if (renderer && !revealed) {
         revealed = true;
         canvas.style.transition = 'opacity 0.5s ease';
         canvas.style.opacity = '1';
       }
-
       %yield frameCount -> $frame;
       fpsFrames++;
       const now = performance.now();
@@ -322,37 +608,30 @@
         fpsFrames = 0;
         fpsLast = now;
       }
-      rafId = requestAnimationFrame(tick);
+    };
+    const raf = (typeof ST !== 'undefined' && ST._raf) ? ST._raf : null;
+    let stopLoop = null;
+    let rafId = null;
+    const start = () => {
+      if (raf) stopLoop = raf.add(tick);
+      else { const loop = (ts) => { tick(ts); rafId = requestAnimationFrame(loop); }; rafId = requestAnimationFrame(loop); }
     };
 
-    // Pause when tab hidden (battery + correctness).
-    const onVisibility = () => {
-      if (document.hidden) {
-        if (rafId) { cancelAnimationFrame(rafId); rafId = null; }
-      } else if (!rafId) {
-        clock.getDelta(); // discard the gap so dt doesn't spike
-        rafId = requestAnimationFrame(tick);
-      }
-    };
-    document.addEventListener('visibilitychange', onVisibility);
-
-    // Context-loss recovery.
-    const onLost = (e) => { e.preventDefault(); if (rafId) { cancelAnimationFrame(rafId); rafId = null; } };
-    const onRestored = () => { if (!rafId && !document.hidden) rafId = requestAnimationFrame(tick); };
+    // Context-loss recovery (the loop keeps ticking; drawing resumes on restore).
+    const onLost = (e) => { e.preventDefault(); };
     canvas.addEventListener('webglcontextlost', onLost);
-    canvas.addEventListener('webglcontextrestored', onRestored);
 
     // Go.
     resize();
     %yield true -> $ready;
-    rafId = requestAnimationFrame(tick);
+    start();
 
     %cleanup {
+      if (stopLoop) stopLoop();
       if (rafId) cancelAnimationFrame(rafId);
-      resizeObs.disconnect();
-      document.removeEventListener('visibilitychange', onVisibility);
+      if (resizeObs) resizeObs.disconnect();
       canvas.removeEventListener('webglcontextlost', onLost);
-      canvas.removeEventListener('webglcontextrestored', onRestored);
+      world.remove();
       canvas.removeEventListener('pointerdown', onPointerDown);
       canvas.removeEventListener('pointermove', onPointerMove);
       if (renderer && renderer.dispose) renderer.dispose();

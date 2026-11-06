@@ -31,7 +31,7 @@
 /// @object(shape: "icosahedron", detail: 6, size: 1.4,
 ///   material: "glass", roughness: 0.04, transmission: 1, ior: 1.5, thickness: 1.2)
 ///
-/// @param shape       - icosahedron|sphere|box|torus|torusknot|cone|cylinder|plane
+/// @param shape       - icosahedron|sphere|box|torus|torusknot|cone|cylinder|plane|coin
 /// @param size        - overall scale (default 1)
 /// @param detail      - subdivision level (default 3)
 /// @param material    - standard|physical|glass|basic (default standard)
@@ -41,6 +41,8 @@
 /// @param emissive/emissiveIntensity     - emission
 /// @param spinX/Y/Z   - auto-rotation speed (radians/second)
 /// @param posX/Y/Z    - position offset
+/// @param rotateX/Y/Z - rest rotation (degrees): `rotateX: -90` lays a plane flat as a floor
+/// @param scaleX/Y/Z  - rest stretch per axis: a lamp post is a cylinder with `scaleY: 12`
 
 %macro object {
 
@@ -79,6 +81,12 @@
       posX: $posX:number = 0,
       posY: $posY:number = 0,
       posZ: $posZ:number = 0,
+      rotateX: $rotateX:number = 0,
+      rotateY: $rotateY:number = 0,
+      rotateZ: $rotateZ:number = 0,
+      scaleX: $scaleX:number = 1,
+      scaleY: $scaleY:number = 1,
+      scaleZ: $scaleZ:number = 1,
       flatShading: $flatShading:bool = false
     ) {
       $children*
@@ -109,6 +117,12 @@
       posX: $posX,
       posY: $posY,
       posZ: $posZ,
+      rotateX: $rotateX,
+      rotateY: $rotateY,
+      rotateZ: $rotateZ,
+      scaleX: $scaleX,
+      scaleY: $scaleY,
+      scaleZ: $scaleZ,
       flatShading: $flatShading
     ) -> {
       $added

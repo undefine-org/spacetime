@@ -32,50 +32,28 @@
   distance: number = 0,
   decay: number = 2,
   angle: number = 30,
-  penumbra: number = 0.3
+  penumbra: number = 0.3,
+  name: string = "",
+  castShadow: bool = false
 ) {
   %emit js {
     const canvas = %&el;
     const ctx = canvas && canvas._stThree;
     if (!ctx) { console.warn('[Spacetime] three-light: no @stage on this canvas.'); return; }
-    const { THREE, scene } = ctx;
-
-    const rgba = %color.rgba;
-    const col = new THREE.Color().setRGB(rgba[0], rgba[1], rgba[2]);
-    const I = %intensity;
-
-    let light;
-    switch (%type) {
-      case 'ambient':
-        light = new THREE.AmbientLight(col, I);
-        break;
-      case 'point':
-        light = new THREE.PointLight(col, I, %distance, %decay);
-        light.position.set(%posX, %posY, %posZ);
-        break;
-      case 'spot':
-        light = new THREE.SpotLight(col, I, %distance, (%angle * Math.PI) / 180, %penumbra, %decay);
-        light.position.set(%posX, %posY, %posZ);
-        light.target.position.set(%targetX, %targetY, %targetZ);
-        scene.add(light.target);
-        break;
-      case 'directional':
-      default:
-        light = new THREE.DirectionalLight(col, I);
-        light.position.set(%posX, %posY, %posZ);
-        light.target.position.set(%targetX, %targetY, %targetZ);
-        scene.add(light.target);
-        break;
-    }
-    scene.add(light);
+    // PLAN-152: a light is a PART in raea's vocabulary; a named light answers to
+    // `&name { intensity: …; color: …; posX: …; }` in an `@on` body.
+    const KIND = { ambient: 'AmbientLight', directional: 'DirectionalLight', point: 'PointLight', spot: 'SpotLight' };
+    const type = %type;
+    const kind = KIND[type] || 'DirectionalLight';
+    const props = { intensity: %intensity, color: ctx.hex(%color.rgba) };
+    if (kind !== 'AmbientLight') props.position = [%posX, %posY, %posZ];
+    if (kind === 'DirectionalLight' || kind === 'SpotLight') props.target = [%targetX, %targetY, %targetZ];
+    if (kind === 'PointLight' || kind === 'SpotLight') props.distance = %distance;
+    if (kind === 'SpotLight') { props.angle = %angle * Math.PI / 180; props.penumbra = %penumbra; }
+    if (ctx.shadows && (kind === 'DirectionalLight' || kind === 'SpotLight' || %castShadow)) props.castShadow = true;
+    ctx.part(kind, props, { name: String(%name || '').replace(/^&/, '') });
 
     %yield true -> $added;
-
-    %cleanup {
-      scene.remove(light);
-      if (light.target && light.target.parent) scene.remove(light.target);
-      if (light.dispose) light.dispose();
-    }
   }
 
   %exports {

@@ -42,7 +42,10 @@
       camZ: $camZ:number = 5,
       exposure: $exposure:number = 1.0,
       tone: $tone:string = "aces",
-      alpha: $alpha:bool = true
+      alpha: $alpha:bool = true,
+      shadows: $shadows:string = "",
+      background: $background:string = "",
+      bloom: $bloom:number = 0
     ) {
       $children*
     }
@@ -58,7 +61,10 @@
       camZ: $camZ,
       exposure: $exposure,
       tone: $tone,
-      alpha: $alpha
+      alpha: $alpha,
+      shadows: $shadows,
+      background: $background,
+      bloom: $bloom
     ) -> {
       $ready,
       $frame,

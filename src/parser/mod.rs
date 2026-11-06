@@ -5433,9 +5433,12 @@ fn parse_vendor_def(
     };
 
     // `source: submodule "path"` — strip the leading `submodule` keyword if present.
+    // PLAN-152: `source: local "path"` is a FIRST-PARTY file kept in the module
+    // (no submodule pin, nothing to bundle: `bundle: direct`, `out` is the file).
     let source_raw = get("source")?;
     let source = source_raw
         .strip_prefix("submodule")
+        .or_else(|| source_raw.strip_prefix("local"))
         .unwrap_or(&source_raw)
         .trim()
         .trim_matches('"')

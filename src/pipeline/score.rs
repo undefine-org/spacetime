@@ -1133,6 +1133,24 @@ pub fn expand_score_binds(
                     span: decl.span,
                 });
             }
+            // PLAN-152: `@sound(--form) at <t> [for <d>];` entries — notes as
+            // data. All of a score's sounds and the instrument/pattern forms
+            // they name become ONE synth program, bound once: the browser plays
+            // it in step with the score's progress (score-synth), and `render`
+            // writes the same samples into the film (render/soundtrack.rs).
+            if let Some(program) = synth_program(captures.get("entries"), matches, registry, total) {
+                expanded.push(BindDecl {
+                    primitive: "score-synth".to_string(),
+                    args: vec![
+                        BindArg::Element { name: "self".to_string(), child_selector: None },
+                        BindArg::Named { name: "program".to_string(), value: BindValue::String(program.to_string()) },
+                        BindArg::Named { name: "total".to_string(), value: BindValue::Number(total) },
+                        BindArg::Named { name: "progress".to_string(), value: BindValue::String(driver_signal_name.clone()) },
+                    ],
+                    outputs: Vec::new(),
+                    span: decl.span,
+                });
+            }
         }
         // Consumed WITHOUT replacement: nothing may resolve this match —
         // the empty-decls fallback must not bring the score bind back.
@@ -1668,6 +1686,144 @@ fn first_measure_ms(v: &CapturedValue) -> Option<f64> {
         CapturedValue::Array(items) => items.iter().find_map(first_measure_ms),
         _ => None,
     }
+}
+
+/// PLAN-152: one `@sound(...)` score entry.
+#[derive(Debug, Clone, PartialEq)]
+struct SoundEntry {
+    form: String,
+    name: String,
+    at_ms: f64,
+    for_ms: Option<f64>,
+    notes: Option<String>,
+}
+
+fn sound_entries(entries: Option<&CapturedValue>) -> Vec<SoundEntry> {
+    fn walk(v: &CapturedValue, out: &mut Vec<SoundEntry>) {
+        match v {
+            CapturedValue::Array(items) => items.iter().for_each(|i| walk(i, out)),
+            CapturedValue::Named(map) => {
+                if let Some(CapturedValue::Named(snd)) = map.get("sound") {
+                    let form = snd.get("form").and_then(|v| text_of(v.clone())).unwrap_or_default();
+                    let pick = |key: &str, field: &str| -> Option<CapturedValue> {
+                        match snd.get(key) {
+                            Some(CapturedValue::Named(m)) => m.get(field).cloned(),
+                            _ => None,
+                        }
+                    };
+                    let name = pick("named", "name")
+                        .and_then(|v| match v {
+                            CapturedValue::Element(e) => Some(e),
+                            other => text_of(other),
+                        })
+                        .map(|n| n.trim_start_matches('&').to_string())
+                        .unwrap_or_default();
+                    let notes = pick("notes", "notes").and_then(text_of);
+                    let at_ms = snd.get("at").and_then(first_measure_ms).unwrap_or(0.0);
+                    let for_ms = snd.get("for").and_then(first_measure_ms);
+                    if !form.is_empty() {
+                        out.push(SoundEntry { form, name, at_ms, for_ms, notes });
+                    }
+                }
+                let mut keys: Vec<&String> = map.keys().collect();
+                keys.sort();
+                for k in keys {
+                    if k != "sound" {
+                        walk(&map[k], out);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    if let Some(e) = entries {
+        walk(e, &mut out);
+    }
+    out
+}
+
+/// A declared `@form instrument|pattern --name` as the synth reads it:
+/// `{kind, params: {tempo: "118bpm"}, props: {wave: ["sine"], gain: ["1", "0"]}}`.
+fn sound_form(matches: &[crate::syntax::FormMatch], registry: &MetaRegistry, name: &str) -> Option<serde_json::Value> {
+    let bare = name.trim_start_matches("--");
+    let decl = matches.iter().find(|m| {
+        m.matched_macro
+            .as_deref()
+            .and_then(|mm| registry.get_macro(mm))
+            .and_then(|def| def.registers.as_ref())
+            .is_some_and(|r| r.name == "form")
+            && m.captures.get("name").and_then(|v| text_of(v.clone())).map(|n| n.trim_start_matches("--").to_string()).as_deref() == Some(bare)
+    })?;
+    let kind = decl.captures.get("kind").and_then(|v| text_of(v.clone()))?;
+    if kind != "instrument" && kind != "pattern" {
+        return None;
+    }
+    let mut props = serde_json::Map::new();
+    if let Some(CapturedValue::Keyframes(kfs)) = decl.captures.get("body") {
+        for kf in kfs {
+            props.insert(kf.property.clone(), serde_json::Value::from(kf.values.clone()));
+        }
+    }
+    let mut params = serde_json::Map::new();
+    if let Some(CapturedValue::ParamList(ps)) = decl.captures.get("params") {
+        for p in ps {
+            if let Some(d) = &p.default {
+                params.insert(p.name.trim_start_matches('$').to_string(), serde_json::Value::from(d.trim().trim_matches('"').to_string()));
+            }
+        }
+    }
+    Some(serde_json::json!({ "kind": kind, "params": params, "props": props }))
+}
+
+/// The synth program for a score's `@sound` entries (None when it has none):
+/// the sounds placed in score time, and every instrument/pattern form they
+/// reach (a pattern's rows name instruments). One program per score.
+fn synth_program(
+    entries: Option<&CapturedValue>,
+    matches: &[crate::syntax::FormMatch],
+    registry: &MetaRegistry,
+    total: f64,
+) -> Option<serde_json::Value> {
+    let sounds = sound_entries(entries);
+    if sounds.is_empty() {
+        return None;
+    }
+    let mut forms = serde_json::Map::new();
+    let mut todo: Vec<String> = sounds.iter().map(|s| s.form.clone()).collect();
+    while let Some(f) = todo.pop() {
+        if forms.contains_key(&f) {
+            continue;
+        }
+        let Some(def) = sound_form(matches, registry, &f) else { continue };
+        if def["kind"] == "pattern" {
+            if let Some(rows) = def["props"].as_object() {
+                todo.extend(rows.keys().cloned());
+            }
+        }
+        forms.insert(f, def);
+    }
+    let sounds: Vec<serde_json::Value> = sounds
+        .iter()
+        .map(|s| serde_json::json!({ "form": s.form, "name": s.name, "at": s.at_ms, "dur": s.for_ms, "notes": s.notes }))
+        .collect();
+    Some(serde_json::json!({ "total": total, "sounds": sounds, "forms": forms }))
+}
+
+/// Every `@score`'s synth program on the page (PLAN-152) — what `render`
+/// writes into the film's soundtrack, read from the SAME merged tree the
+/// compiler emits from (as [`declared_score_totals`] reads lengths).
+pub fn declared_soundtracks(matches: &[crate::syntax::FormMatch], registry: &MetaRegistry) -> Vec<serde_json::Value> {
+    let mut out = Vec::new();
+    for m in matches {
+        if m.matched_macro.as_deref() == Some("score-block") {
+            let total = driver_duration(&m.captures).unwrap_or(0.0);
+            if let Some(p) = synth_program(m.captures.get("entries"), matches, registry, total) {
+                out.push(p);
+            }
+        }
+    }
+    out
 }
 
 /// PLAN-150 W8: a transition placed on a score `->` between two clips.

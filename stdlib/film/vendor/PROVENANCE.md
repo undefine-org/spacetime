@@ -77,13 +77,37 @@ and is a genuine engine gap, not a Spacetime special case:
    inline style cannot change what a rule matches, so style-only mutations now
    mark it stale and it re-runs when computed style is next read. Measured on
    `demos/promo/`: 702 → 44 ms per frame.
-7. **`vendor/blitz-dom` (`layout/construct.rs`, `resolve.rs`) — CSS counters.**
+7. **`vendor/blitz-dom` (`layout/construct.rs`, `resolve.rs`) — CSS counters**
+   (a nested counter keeps its text while construction has a container's
+   children out of the tree, and is re-synced with its ancestors marked damaged;
+   `systems/page/tests/vars.rs` `nested_counter_follows_its_reset`).
    Blitz drew only the strings of `content`. `counter()` / `counters()` now
    resolve by CSS Lists 3's scoping (`counter-reset` scoped to the element and
    its following siblings, `counter-increment` on the innermost instance), with
    the common counter styles; pseudo-elements that use counters are re-synced
    after every restyle, since their value depends on the whole document.
    (`counter-set` is gecko-only in Stylo and stays unparsed.)
+
+8. **The page→world bridge (PLAN-152): an HTML composition can describe a 3D
+   world.** `sdk/ui/src/html/page/load.ts` reports each seek's `[data-3d]` tree
+   (`sceneAt`, raea's own TSX `node3d` markup) and `has3d`;
+   `engine/page/src/html.rs` keeps it; `runtime/export/src/html3d.rs` reads every
+   frame's scene into raea-render's rows (`program`), opens the live engine, and
+   draws each frame's page over its 3D (a second, fresh page: a page's clock may
+   only run forward), mixing the page's `<audio>`; `--at` writes chosen frames as
+   PNGs. `engine/cli/src/cli.rs` sends a page naming `data-3d` there (falling back
+   to the direct path when it built none).
+9. **`runtime/scene/src/models.rs` — a model whose clip changes.** A row's `anim`
+   was the first frame's, so a model that went from "Walking" to "Death" kept
+   walking. Distinct clips over the film become a blend (`mix`), each weighted 1
+   while it plays, at its own time.
+10. **`sdk/ui/src/dom/selectors.ts` — a selector that reads nothing.** A compound
+    that consumes no character (CSS nesting's `&`) looped forever, pushing empty
+    compounds until memory ran out (10 GB on one page). It is now an invalid
+    selector, which callers skip.
+11. **`sdk/ui/src/html/page/load.ts` — `data-props` costs no cascade.** A 3D part
+    rewritten every frame re-ran the TS cascade (40 s for 15 frames); it changes
+    what the world draws, not what a rule matches.
 
 These are offered back upstream in spirit; until upstream lands them they live
 in the local commit. Updating: rebase the local commit onto the new base, rebuild,

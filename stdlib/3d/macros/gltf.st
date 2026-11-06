@@ -27,21 +27,34 @@
 
   %scope selector
 
+  // PLAN-152: a model MAY be named (`@gltf &robot (src: …, clip: "Idle")`) so a
+  // score can drive it: `&robot { clip: "Walking" -> "Wave" at 70% --steps(1); posZ: -8 -> 0; }`.
+  %capture_type model_name { $name:element }
+
   %form {
-    @gltf(
+    @gltf $named:model_name? (
       src: $src:expr = "",
+      clip: $clip:string = "",
       size: $size:number = 2,
+      scale: $scale:number = 0,
+      rotateY: $rotateY:number = 0,
       posX: $posX:number = 0,
       posY: $posY:number = 0,
       posZ: $posZ:number = 0,
       spinY: $spinY:number = 0
-    )
+    ) {
+      $children*
+    }
   }
 
   %binds {
     three-gltf(&self,
+      name: $named,
       src: $src,
+      clip: $clip,
       size: $size,
+      scale: $scale,
+      rotateY: $rotateY,
       posX: $posX,
       posY: $posY,
       posZ: $posZ,
@@ -51,5 +64,9 @@
       $progress,
       $error
     }
+  }
+
+  %template {
+    $children
   }
 }

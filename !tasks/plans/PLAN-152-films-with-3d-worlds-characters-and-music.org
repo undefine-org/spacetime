@@ -1,0 +1,73 @@
+#+TITLE: Films with 3D worlds, characters and music — one stage vocabulary, both engines
+#+STATE: DONE
+#+SESSION_ID: 66d34658-41aa-4590-9582-7d36b409cd80
+#+TRANSCRIPT_PATH: [[file:/home/othman/.claude/projects/-home-othman-code-undefine-spacetime/66d34658-41aa-4590-9582-7d36b409cd80.jsonl]]
+#+CUSTOM_ID: PLAN-152-films-with-3d-worlds-characters-and-music
+#+EFFORT: 2d
+#+PRIORITY: #A
+#+LAYER: language
+
+* Initial Message
+
+bro make demo videos as impressive as the tweet demos. Extend any needed API to do it elegantly
+
+(The tweet demos — raea's showcase, PLAN-151: lit 3D scenes with shadows, a rigged character walking and falling, a
+cat dancing on a light-up grid, title cards and subtitles, music and SFX from raea's DAW.)
+
+* Decisions (asked, answered)
+- One 3D vocabulary lowered to BOTH engines: three.js (website, Chromium render) and raea's Bevy world through a
+  page→world bridge patched into raea.
+- Music as NOTES AS DATA in the score, synthesized deterministically, offline, no ML models.
+
+* What was missing (verified)
+- A score could animate only `@object` meshes; lights/models/particles could not be named.
+- Camera forms only moved the canvas with CSS; =three-stage= never read the tracks (film.st.md §4 overclaimed).
+- =three-stage= ran its own rAF + THREE.Clock: 3D ignored the render's virtual clock.
+- No shadows, fog, glTF animation clips; no soundtrack reached a rendered mp4 on either engine.
+- raea's HTML path never built a 3D world (pages always took the direct GpuView path).
+
+* Design (as shipped)
+- *The scene is data.* Every stage child is a PART: a kind + props in raea's 3D vocabulary (=Mesh= + material,
+  =DirectionalLight=, =Model=, =Fog=, =Group=, =Bloom=, =PerspectiveCamera=), mirrored as hidden =<i data-3d
+  data-props>= beside the canvas (=stdlib/3d/primitives/three-stage.st=: =ctx.part=). Score channels are a data table
+  (CHANNELS); three.js realizers are a data table (REALIZE). =@object=, =@light=, =@gltf=, =@fog= and the new =@grid=
+  are nameable; =&camera= is a part. The loop ticks through =ST._raf=.
+- *raea bridge.* The runtime is told before it boots that there is no WebGL (=ST._stage3d.renderer = "none"=); raea
+  reads each seek's =data-3d= tree, builds its scene rows over the film, draws them with Bevy and lays the page over
+  them (=runtime/export/src/html3d.rs=). raea patches 8–11 in =stdlib/film/vendor/PROVENANCE.md=.
+- *Sound as notes.* =@form instrument= (keyframes body: wave/pitch/gain/cutoff/…) and =@form pattern= (rows of
+  =x . C2= per instrument, =$tempo=, =$step=) are two new form kinds (data in =form.st=); =@sound(--form [, notes:])
+  [as &name] at <t> [for <d>];= is a score entry. =src/pipeline/score.rs= builds ONE synth program per score; the
+  synthesizer is ONE first-party file, =stdlib/film/synth/synth.js= (=%vendor STSynth { source: local … }=), played
+  live by =score-synth= and run in V8 by =src/render/soundtrack.rs= to write the soundtrack both engines mux.
+
+* Bugs found and fixed on the way (each with a gate seen RED)
+- *Named stage args were all dropped* (=@object &orb (shape: …)= compiled at defaults: the ARG_LIST began with the
+  space before its paren). =src/syntax/events/form_compiler.rs=; gates =tests/plan152_stage_parts_test.rs=.
+- *Junk initial-state CSS for stage parts* (=.shot &orb { posY: 0 }=), which hung raea's selector parser at 10 GB.
+  =src/pipeline/expand.rs= + unit test; raea's parser now refuses a non-advancing compound.
+- Pattern params and sound names were mis-decoded (=ParamList=, =Element=) — caught by inspecting the program.
+
+* Demo films (=demos/film-robot-day=, =demos/film-disco=, =demos/film-forum=)
+RobotExpressive (Quaternius, CC0) is the cast; everything else is procedural. 1920×1080 @ 30 on raea (Work, Intel UHD
+630): Robot Day 24 s in 95 s, Disco 20 s in 89 s, Forum 26 s in 114 s (wall clock), each with an AAC/Opus soundtrack.
+
+* Follow-ups
+- Chromium: a glTF model from =file://= showed its shadow but not its mesh (RobotExpressive) — the web lowering of
+  =Model= needs a look; raea is the film engine for 3D today.
+- Clip crossfades (=blend:=), and beat-synced channels from pattern hits (=&drums.kick=).
+- Layering beyond "full-frame, back-most stage" on raea (TSX's =Canvas3D layered=).
+- raea's character SDK (MakeHuman/IK/motion matching) and DAW instruments as further part kinds.
+- Upstream raea patches 8–11.
+
+* Verification
+- =cargo test --features cdp --lib= → 3258 passed, 0 failed, 1 ignored (incl. =render::soundtrack=,
+  =render::raea= and =pipeline::expand::test_initial_state_css_skips_stage_part_scopes=).
+- =cargo test --features cdp --test plan152_stage_parts_test= → 4 passed (3 seen RED on the unfixed matcher).
+- =cargo test --features cdp --test render_test= → 11 passed (Chromium render gates).
+- =cargo test --test raea_render_test -- --ignored= → 11 passed (incl. =raea_draws_a_scored_3d_stage= seen RED before
+  the =--at= stills fix, =raea_films_carry_their_score_s_sound=).
+- =spacetime test stdlib/3d/tests --cdp= → 22 passed, 11 failed: IDENTICAL to the baseline of HEAD's 3D module (the 11
+  are the file's known-blocked BUG-099/BUG-051 tests). One regression (icosahedron drawn as a sphere in a browser) was
+  found by that comparison and fixed.
+- raea: =cargo test --release -p raea-sys-page --test vars= → 4 passed.

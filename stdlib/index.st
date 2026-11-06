@@ -32,6 +32,7 @@
 @import "./primitives/scatter.st"       // @scatter positions sampled from a shape (PLAN-150 W5)
 @import "./primitives/transition-edge.st" // @form transition on a score -> (PLAN-150 W8)
 @import "./primitives/score-audio.st"   // @audio on the score (PLAN-150 W7)
+@import "./primitives/score-synth.st"   // @sound notes on the score (PLAN-152)
 @import "./primitives/scroll-spy.st"  // Scroll position section tracking
 @import "./primitives/when-guard.st"  // @when &self.<sig> reactive guard (BUG-088)
 

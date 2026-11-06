@@ -1535,9 +1535,14 @@ fn rewrite_camera_axes(
     //
     // `--cam-z` is the dolly: larger z = further back = smaller scale.
     // A perspective from `--cam-fov` gives the parallax feel.
-    let static_transform = "perspective(calc((100 - var(--cam-fov, 38)) * 24px)) \
+    //
+    // PLAN-152: a `@stage` inside the consumer IS the camera's subject — it reads
+    // the same tracks and moves the real camera — so it sets `--cam-rig-off:
+    // none` on the consumer and this rig steps aside (the frame is not also slid
+    // around as a flat picture). Without a stage the fallback is the rig.
+    let static_transform = "var(--cam-rig-off, perspective(calc((100 - var(--cam-fov, 38)) * 24px)) \
         translate3d(calc(var(--cam-x, 0) * -1px), calc(var(--cam-y, 0) * 1px), calc(var(--cam-z, 10) * 8px)) \
-        rotateZ(calc(var(--cam-roll, 0) * 1deg))";
+        rotateZ(calc(var(--cam-roll, 0) * 1deg)))";
     out.push(KeyframeDef {
         property: "transform".into(),
         values: vec![static_transform.to_string()],

@@ -79,6 +79,15 @@ cargo test --test raea_render_test -- --ignored
 
 Read the count: an ignored gate proves nothing.
 
+## 3D and sound (PLAN-152)
+
+A `@stage` reaches raea's Bevy world: the stage's parts are `data-3d` markup that
+raea reads every frame and draws under the page, so a film can be a lit 3D scene
+with a rigged character. A score's `@sound` notes are synthesized into the film's
+soundtrack on both engines. See `scenes-and-sound.md`. Measured on Work (Intel
+UHD 630, 1920×1080 @ 30): `demos/film-robot-day/` 24 s in 95 s,
+`demos/film-disco/` 20 s in 89 s, `demos/film-forum/` 26 s in 114 s (wall clock).
+
 ## Not yet
 
 - Mesa's NVK driver (GTX 1660 Ti here) fails device creation with
@@ -88,5 +97,6 @@ Read the count: an ignored gate proves nothing.
   showcase's floor: 2816×1872 for a 1280×720 film).
 - Drivers seed their start from the first virtual tick, so every frame sits one
   tick (16 ms) behind `t` on both engines.
-- raea's audio, 3D scenes and games are not reachable from a Spacetime page yet;
-  only the HTML composition path is used.
+- raea's character SDK (MakeHuman bodies, IK, motion matching), its DAW and its
+  games are not reachable from a page; 3D comes from a stage's parts and sound
+  from the score synthesizer.

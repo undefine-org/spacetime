@@ -36,6 +36,10 @@ const COMPOSITION_ID: &str = "spacetime";
 /// [`film_document`]).
 const CANVAS_DEFAULT: &str = "\n<style>html{background:#fff}</style>";
 
+/// The runtime's 3D mode under raea (PLAN-152): `three-stage` builds its parts
+/// as `data-3d` markup for raea to draw, and touches no WebGL.
+const STAGE_HEADLESS: &str = "\n<script>window.ST = Object.assign(window.ST || {}, { _stage3d: { renderer: \"none\" } });</script>";
+
 /// Where the vendored engine lives, relative to the repository root.
 const VENDOR_DIR: &str = "stdlib/film/vendor/raea";
 
@@ -141,9 +145,16 @@ pub(crate) fn film_document(html: &str, window: Window, opts: &RenderOptions) ->
     // page over a black camera. Declare the browser's default FIRST, so a
     // page's own background (any later rule) still wins — the film looks the
     // same under either backend.
+    //
+    // PLAN-152: a film with a 3D world (a `@stage`) is drawn OVER that world —
+    // raea lays the page over the 3D it reads from the stage's `data-3d` parts —
+    // so its canvas stays transparent, and the runtime is told before it boots
+    // that there is no WebGL here (the stage then builds parts, not a renderer).
+    let has_world = html.contains("data-st-world");
+    let head = if has_world { STAGE_HEADLESS } else { CANVAS_DEFAULT };
     let html = match html.find("<head>") {
-        Some(at) => format!("{}{CANVAS_DEFAULT}{}", &html[..at + "<head>".len()], &html[at + "<head>".len()..]),
-        None => format!("{CANVAS_DEFAULT}{html}"),
+        Some(at) => format!("{}{head}{}", &html[..at + "<head>".len()], &html[at + "<head>".len()..]),
+        None => format!("{head}{html}"),
     };
     // The LAST </body>: the bridge runs after the runtime's script.
     let at = html.rfind("</body>").expect("checked above");
@@ -213,10 +224,20 @@ fn prepare(entry: &Path, opts: &RenderOptions) -> Result<(Stage, Window, u64), S
     let workspace_root = crate::compiler::project_root_for(&entry);
     // Root-relative assets rebase onto the staged copy, whose entries are the
     // site's own files (see `Stage`).
-    let (html, duration_ms) = compile_page(&entry, &workspace_root, ".")?;
+    let (html, duration_ms, soundtracks) = compile_page(&entry, &workspace_root, ".")?;
     let window = Window::of(duration_ms, opts.from_ms, opts.to_ms);
     let document = film_document(&html, window, opts)?;
-    Ok((Stage::new(&document, &workspace_root)?, window, duration_ms))
+    let stage = Stage::new(&document, &workspace_root)?;
+    // PLAN-152: the film's `@sound`, synthesized for the rendered window, as the
+    // composition's `<audio>` (raea mixes a page's audio into the mp4)
+    if super::soundtrack_in(&stage.dir, &soundtracks, window.from_ms, window.to_ms)?.is_some() {
+        let page = stage.page();
+        let doc = std::fs::read_to_string(&page).map_err(|e| format!("failed to read the staged page: {e}"))?;
+        let at = doc.rfind("</body>").ok_or("the staged page has no </body>")?;
+        let doc = format!("{}<audio src=\"soundtrack.wav\" data-start=\"0\"></audio>\n{}", &doc[..at], &doc[at..]);
+        std::fs::write(&page, doc).map_err(|e| format!("failed to write the staged page: {e}"))?;
+    }
+    Ok((stage, window, duration_ms))
 }
 
 /// Run `raea render <page> -o <out> [extra…]`, surfacing its own words on
@@ -394,6 +415,17 @@ mod tests {
 
     /// A document with no body cannot be a composition — a loud error, never a
     /// silently empty film.
+    /// A film with a 3D world stays transparent (raea draws the world under
+    /// it) and tells the runtime, before it boots, that there is no WebGL.
+    #[test]
+    fn a_film_with_a_stage_is_headless_and_transparent() {
+        let html = "<html><head></head><body>\n<script>var ST={};w.setAttribute('data-st-world','');</script>\n</body></html>";
+        let doc = film_document(html, Window { from_ms: 0, to_ms: 1000 }, &opts()).unwrap();
+        assert!(!doc.contains("html{background:#fff}"), "{doc}");
+        let preset = doc.find("_stage3d").unwrap();
+        assert!(preset < doc.find("var ST={}").unwrap(), "the preset must precede the runtime: {doc}");
+    }
+
     #[test]
     fn a_bodyless_document_is_refused() {
         assert!(film_document("<div></div>", Window { from_ms: 0, to_ms: 1000 }, &opts()).is_err());

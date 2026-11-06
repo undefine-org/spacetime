@@ -256,7 +256,12 @@ impl CompiledForm {
         if !self.form.params.is_empty() {
             if let Some(arg_node) = ctx.child_by_kind(SyntaxKind::ARG_LIST) {
                 let mut arg_cursor = TokenCursor::new(&arg_node.tokens);
-                // Skip opening paren
+                // Skip opening paren. PLAN-152: the ARG_LIST may begin with the
+                // trivia between a leading capture and its parens — the
+                // documented `@object &orb (shape: …)` spelling — and a paren
+                // left unskipped made the whole call ONE unnamed group, so every
+                // named argument silently fell back to its default.
+                arg_cursor.skip_trivia();
                 arg_cursor.skip_kind(SyntaxKind::L_PAREN);
 
                 self.match_params(

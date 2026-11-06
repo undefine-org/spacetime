@@ -27,8 +27,12 @@
   // element — the @stage macro alone owns the canvas element constraint.
   %scope selector
 
+  // PLAN-152: a light MAY be named (`@light &sun (type: "directional", …)`) so a
+  // score can animate it: `@on &.clip { &sun { intensity: 0.5 -> 3; } }`.
+  %capture_type stage_light_name { $name:element }
+
   %form {
-    @light(
+    @light $named:stage_light_name? (
       type: $type:string = "directional",
       color: $color:color = white,
       intensity: $intensity:number = 1.0,
@@ -41,12 +45,17 @@
       distance: $distance:number = 0,
       decay: $decay:number = 2,
       angle: $angle:number = 30,
-      penumbra: $penumbra:number = 0.3
-    )
+      penumbra: $penumbra:number = 0.3,
+      castShadow: $castShadow:bool = false
+    ) {
+      $children*
+    }
   }
 
   %binds {
     three-light(&self,
+      name: $named,
+      castShadow: $castShadow,
       type: $type,
       color: $color,
       intensity: $intensity,
@@ -63,5 +72,9 @@
     ) -> {
       $added
     }
+  }
+
+  %template {
+    $children
   }
 }

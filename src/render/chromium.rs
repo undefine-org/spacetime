@@ -42,7 +42,7 @@ pub fn render_page(entry: &Path, opts: &RenderOptions) -> Result<RenderReport, S
     let entry = resolve_entry(entry)?;
     let workspace_root = crate::compiler::project_root_for(&entry);
     let workspace_root = workspace_root.as_path();
-    let (html, duration_ms) = compile_page(&entry, workspace_root, &file_base(workspace_root))?;
+    let (html, duration_ms, soundtracks) = compile_page(&entry, workspace_root, &file_base(workspace_root))?;
 
     // PLAN-150 W11: an optional [from, to] window trims the render to one scene.
     let start_ms = opts.from_ms.unwrap_or(0).min(duration_ms);
@@ -69,7 +69,11 @@ pub fn render_page(entry: &Path, opts: &RenderOptions) -> Result<RenderReport, S
     // dpr scales the capture viewport; the mux still targets width×height×dpr.
     let out_w = (opts.width as f64 * opts.dpr).round() as u32;
     let out_h = (opts.height as f64 * opts.dpr).round() as u32;
-    let mut ffmpeg = spawn_ffmpeg(&opts.out, opts.fps, out_w, out_h)?;
+    // PLAN-152: the film's `@sound`, synthesized for exactly the rendered window
+    let sound_dir = std::env::temp_dir().join(format!("spacetime-sound-{}", std::process::id()));
+    std::fs::create_dir_all(&sound_dir).map_err(|e| format!("failed to create {}: {e}", sound_dir.display()))?;
+    let soundtrack = super::soundtrack_in(&sound_dir, &soundtracks, start_ms, end_ms.max(start_ms + 1))?;
+    let mut ffmpeg = spawn_ffmpeg(&opts.out, opts.fps, out_w, out_h, soundtrack.as_deref())?;
     let write_result = capture_into(
         &html,
         &mut ffmpeg,
@@ -92,6 +96,7 @@ pub fn render_page(entry: &Path, opts: &RenderOptions) -> Result<RenderReport, S
         .child
         .wait()
         .map_err(|e| format!("ffmpeg wait failed: {e}"))?;
+    let _ = std::fs::remove_dir_all(&sound_dir);
     if !status.success() {
         return Err(format!("ffmpeg exited with {status}"));
     }
@@ -114,7 +119,7 @@ pub fn render_stills(entry: &Path, opts: &StillsOptions) -> Result<Vec<PathBuf>,
     let entry = resolve_entry(entry)?;
     let workspace_root = crate::compiler::project_root_for(&entry);
     let workspace_root = workspace_root.as_path();
-    let (html, duration_ms) = compile_page(&entry, workspace_root, &file_base(workspace_root))?;
+    let (html, duration_ms, soundtracks) = compile_page(&entry, workspace_root, &file_base(workspace_root))?;
 
     if opts.times_s.is_empty() {
         return Err("--stills needs at least one timestamp (e.g. --stills 1.5,9,24)".to_string());
@@ -193,9 +198,9 @@ struct FfmpegPipe {
     stdin: Option<std::process::ChildStdin>,
 }
 
-fn spawn_ffmpeg(out: &Path, fps: u32, width: u32, height: u32) -> Result<FfmpegPipe, String> {
-    let mut child = ProcCommand::new("ffmpeg")
-        .arg("-y")
+fn spawn_ffmpeg(out: &Path, fps: u32, width: u32, height: u32, soundtrack: Option<&Path>) -> Result<FfmpegPipe, String> {
+    let mut cmd = ProcCommand::new("ffmpeg");
+    cmd.arg("-y")
         .arg("-loglevel")
         .arg("error")
         .arg("-f")
@@ -203,7 +208,12 @@ fn spawn_ffmpeg(out: &Path, fps: u32, width: u32, height: u32) -> Result<FfmpegP
         .arg("-framerate")
         .arg(fps.to_string())
         .arg("-i")
-        .arg("-")
+        .arg("-");
+    // PLAN-152: the soundtrack as a second input, AAC beside the picture
+    if let Some(wav) = soundtrack {
+        cmd.arg("-i").arg(wav).arg("-c:a").arg("aac").arg("-b:a").arg("192k").arg("-shortest");
+    }
+    let mut child = cmd
         .arg("-c:v")
         .arg("libx264")
         .arg("-preset")
@@ -375,7 +385,7 @@ pub fn page_moves_under_real_time(entry: &Path) -> Result<bool, String> {
     let entry = resolve_entry(entry)?;
     let workspace_root = crate::compiler::project_root_for(&entry);
     let workspace_root = workspace_root.as_path();
-    let (html, _duration_ms) = compile_page(&entry, workspace_root, &file_base(workspace_root))?;
+    let (html, _duration_ms, _soundtracks) = compile_page(&entry, workspace_root, &file_base(workspace_root))?;
     let infra = cdp::infra()?;
     infra.rt.block_on(async {
         let page = cdp::open_page(&infra.browser).await?;

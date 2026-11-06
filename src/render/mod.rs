@@ -30,6 +30,7 @@ use crate::pipeline::score::declared_score_totals;
 #[cfg(feature = "cdp")]
 pub mod chromium;
 pub mod raea;
+mod soundtrack;
 
 #[cfg(feature = "cdp")]
 pub use chromium::{page_moves_under_real_time, render_page, render_stills};
@@ -124,7 +125,7 @@ pub(crate) fn compile_page(
     entry: &Path,
     workspace_root: &Path,
     url_base: &str,
-) -> Result<(String, u64), String> {
+) -> Result<(String, u64, Vec<serde_json::Value>), String> {
     let compiler = Compiler::from_file(entry, workspace_root)
         .map_err(|e| format!("failed to compile {}: {e}", entry.display()))?;
 
@@ -142,6 +143,9 @@ pub(crate) fn compile_page(
 
     let registry = crate::compiler::cached_stdlib_registry().0;
     let totals = declared_score_totals(&matches, &registry);
+    // PLAN-152: the film's `@sound` notes, from the same tree (what the
+    // renderers mux as its soundtrack).
+    let soundtracks = crate::pipeline::score::declared_soundtracks(&matches, &registry);
     let longest = totals
         .into_iter()
         .fold(0.0_f64, |acc, t| if t > acc { t } else { acc });
@@ -177,7 +181,14 @@ pub(crate) fn compile_page(
     // filesystem root and 404 silently — a film with a photograph would
     // render its photograph as nothing. Rebase them onto the site directory.
     let html = rebase_root_urls(&html, url_base);
-    Ok((html, longest.round() as u64))
+    Ok((html, longest.round() as u64, soundtracks))
+}
+
+/// PLAN-152: the soundtrack of `[from_ms, to_ms)` of a film into `dir` as
+/// `soundtrack.wav` — its path, or None when the film has no `@sound`.
+pub(crate) fn soundtrack_in(dir: &Path, programs: &[serde_json::Value], from_ms: u64, to_ms: u64) -> Result<Option<PathBuf>, String> {
+    let out = dir.join("soundtrack.wav");
+    Ok(soundtrack::write_soundtrack(programs, from_ms, to_ms, &out)?.then_some(out))
 }
 
 /// The `file://` base of a site directory (what a `file://`-staged page

@@ -57,6 +57,12 @@
   posX: number = 0,
   posY: number = 0,
   posZ: number = 0,
+  rotateX: number = 0,
+  rotateY: number = 0,
+  rotateZ: number = 0,
+  scaleX: number = 1,
+  scaleY: number = 1,
+  scaleZ: number = 1,
   flatShading: bool = false
 ) {
   %emit js {
@@ -66,159 +72,40 @@
       console.warn('[Spacetime] three-object: no @stage on this canvas.');
       return;
     }
-    const { THREE, scene } = ctx;
-
+    // PLAN-152: the mesh is a PART (raea's `Mesh` + material); the stage's
+    // realizer builds the three.js mesh, raea draws it from the same props.
     const s = %size;
-    const d = Math.max(0, Math.round(%detail));
-    const geomFor = (name) => {
-      switch (name) {
-        case 'sphere':    return new THREE.SphereGeometry(s, 32 + d * 16, 16 + d * 8);
-        case 'box':       return new THREE.BoxGeometry(s, s, s, 1 + d, 1 + d, 1 + d);
-        case 'torus':     return new THREE.TorusGeometry(s, s * 0.35, 24 + d * 8, 64 + d * 16);
-        case 'torusknot': return new THREE.TorusKnotGeometry(s, s * 0.3, 128 + d * 32, 24 + d * 4);
-        case 'cone':      return new THREE.ConeGeometry(s, s * 2, 32 + d * 8);
-        case 'cylinder':  return new THREE.CylinderGeometry(s, s, s * 2, 32 + d * 8);
-        case 'plane':     return new THREE.PlaneGeometry(s * 2, s * 2, 1 + d, 1 + d);
-        case 'icosahedron':
-        default:          return new THREE.IcosahedronGeometry(s, d);
-      }
+    const SHAPES = {
+      box:       { shape: `box(${s}, ${s}, ${s})`, geom: { type: 'box', args: [s, s, s] } },
+      sphere:    { shape: `sphere(${s})`, geom: { type: 'sphere', args: [s] } },
+      // raea has no icosahedron or knot: it draws the nearest shape it has; a browser draws the real one
+      icosahedron: { shape: `sphere(${s})`, geom: { type: 'icosahedron', args: [s, Math.max(0, Math.round(%detail))] } },
+      plane:     { shape: `box(${s * 2}, ${s * 2}, 0)`, geom: { type: 'plane', args: [s * 2, s * 2] } },
+      cylinder:  { shape: `rotate(cone(${s}, ${s}, ${s * 2}), -90, 0, 0)`, geom: { type: 'cylinder', args: [s, s, s * 2] } },
+      cone:      { shape: `rotate(cone(${s}, 0, ${s * 2}), -90, 0, 0)`, geom: { type: 'cone', args: [s, s * 2] } },
+      torus:     { shape: `torus(${s}, ${s * 0.35})`, geom: { type: 'torus', args: [s, s * 0.35] } },
+      torusknot: { shape: `torus(${s}, ${s * 0.3})`, geom: { type: 'torusknot', args: [s, s * 0.3] } },
+      coin:      { shape: `rotate(cone(${s}, ${s}, ${s * 0.12}), -90, 0, 0)`, geom: { type: 'cylinder', args: [s, s, s * 0.12] } },
     };
-    const geometry = geomFor(%shape);
-
-    const cRGBA = %color.rgba;
-    const eRGBA = %emissive.rgba;
-    const col = new THREE.Color().setRGB(cRGBA[0], cRGBA[1], cRGBA[2]);
-    const emis = new THREE.Color().setRGB(eRGBA[0], eRGBA[1], eRGBA[2]);
-    let mat;
-    switch (%material) {
-      case 'basic':
-        mat = new THREE.MeshBasicMaterial({ color: col });
-        break;
-      case 'physical':
-      case 'glass':
-        mat = new THREE.MeshPhysicalMaterial({
-          color: col,
-          roughness: %roughness,
-          metalness: %metalness,
-          transmission: %transmission,
-          ior: %ior,
-          thickness: %thickness,
-          clearcoat: %clearcoat,
-          clearcoatRoughness: %roughness,
-          iridescence: %iridescence,
-          iridescenceIOR: %iridescenceIOR,
-          iridescenceThicknessRange: [120, 520],
-          emissive: emis,
-          emissiveIntensity: %emissiveIntensity,
-          transparent: %transmission > 0,
-          flatShading: %flatShading,
-        });
-        break;
-      case 'standard':
-      default:
-        mat = new THREE.MeshStandardMaterial({
-          color: col,
-          roughness: %roughness,
-          metalness: %metalness,
-          emissive: emis,
-          emissiveIntensity: %emissiveIntensity,
-          flatShading: %flatShading,
-        });
-        break;
-    }
-
-    const mesh = new THREE.Mesh(geometry, mat);
-    mesh.position.set(%posX, %posY, %posZ);
-    scene.add(mesh);
-
-    // Register for sibling directives.
-    canvas._stObjects = canvas._stObjects || [];
-    canvas._stObjects.push(mesh);
-    canvas._stObject = mesh;
-
-    // PLAN-150 W4: a NAMED object is addressable from `@on &.clip { &name {
-    // … } }`. The @on engine (apply-animations) only ever writes to an
-    // element's `.style`, so we register a CHANNEL PROXY under the name: a
-    // stand-in "element" whose `.style.setProperty(prop, v)` records the
-    // keyframed object property into a channel bag. This frame loop reads the
-    // bag and applies each channel to the real mesh — so the ordinary DOM
-    // keyframe engine drives a 3D object with NO new interpolation path (the
-    // same move @post and camera made). Grid-specific channels (reveal,
-    // displace, fog) are handled by three-grid; the generic object exposes the
-    // transform/material channels every mesh has.
-    const objName = String(%name || '').replace(/^&/, '');
-    const channels = {};
-    let proxy = null;
-    if (objName) {
-      proxy = {
-        _stChannels: channels,
-        style: {
-          setProperty: (prop, v) => { channels[prop] = v; },
-          removeProperty: (prop) => { delete channels[prop]; },
-          getPropertyValue: (prop) => channels[prop] != null ? String(channels[prop]) : '',
-        },
-      };
-      // Mirror `.style[camelProp] = v` assignments too (apply-animations sets
-      // both the custom prop AND the inline style for immediate effect).
-      proxy.style = new Proxy(proxy.style, {
-        set: (o, k, v) => { channels[k] = v; return true; },
-        get: (o, k) => o[k],
-      });
-      canvas._stStageObjects = canvas._stStageObjects || {};
-      canvas._stStageObjects['&' + objName] = proxy;
-      canvas._stStageObjects[objName] = proxy;
-    }
-
-    const num = (v, d) => { const n = parseFloat(v); return isNaN(n) ? d : n; };
-    const baseScale = mesh.scale.x;
-
-    // Declarative auto-spin + channel application.
+    const g = SHAPES[%shape] || SHAPES.sphere;
     const sx = %spinX, sy = %spinY, sz = %spinZ;
-    let unregister = null;
-    if (sx !== 0 || sy !== 0 || sz !== 0 || proxy) {
-      unregister = ctx.registerFrame((t, dt) => {
-        mesh.rotation.x += sx * dt;
-        mesh.rotation.y += sy * dt;
-        mesh.rotation.z += sz * dt;
-        if (proxy) {
-          // The @on engine writes TRANSFORM-family properties (scale, rotate,
-          // translate…) into `proxy._stTransforms` (composed for CSS), and
-          // everything else into the channel bag. Read from BOTH so a keyframe
-          // on `scale`/`rotate`/`posY` reaches the mesh regardless of which
-          // path apply-animations chose for it.
-          const tf = proxy._stTransforms || {};
-          const ch = (k) => (k in channels) ? channels[k] : tf[k];
-          const has = (k) => (k in channels) || (k in tf);
+    const kind = %material === 'basic' ? 'MeshBasicMaterial' : (%material === 'physical' || %material === 'glass') ? 'MeshPhysicalMaterial' : 'MeshStandardMaterial';
+    const mat = { color: ctx.hex(%color.rgba), roughness: %roughness, metalness: %metalness, emissive: ctx.hex(%emissive.rgba), emissiveIntensity: %emissiveIntensity };
+    if (kind === 'MeshPhysicalMaterial') Object.assign(mat, { transmission: %transmission, ior: %ior, thickness: %thickness, clearcoat: %clearcoat });
+    const g0 = SHAPES[%shape];
+    if (!g0) console.warn('[Spacetime] @object: unknown shape `' + %shape + '`, drawing a sphere');
+    const pt = ctx.part('Mesh', {
+      position: [%posX, %posY, %posZ],
+      rotation: [%rotateX * Math.PI / 180, %rotateY * Math.PI / 180, %rotateZ * Math.PI / 180],
+      scale: (%scaleX === 1 && %scaleY === 1 && %scaleZ === 1) ? 1 : [%scaleX, %scaleY, %scaleZ],
+    }, { name: String(%name || '').replace(/^&/, ''), shape: g.shape, geom: g.geom, material: mat, materialKind: kind,
+         update: (sx || sy || sz) ? (p, t) => { p.props.rotation = [%rotateX * Math.PI / 180 + sx * t, %rotateY * Math.PI / 180 + sy * t, %rotateZ * Math.PI / 180 + sz * t]; } : null });
 
-          // Generic mesh channels, applied each frame from the keyframe bag.
-          if (has('opacity')) {
-            mesh.material.transparent = true;
-            mesh.material.opacity = num(ch('opacity'), 1);
-          }
-          if (has('emissive')) mesh.material.emissiveIntensity = num(ch('emissive'), 1);
-          if (has('metalness') && mesh.material.metalness != null) mesh.material.metalness = num(ch('metalness'), mesh.material.metalness);
-          if (has('roughness') && mesh.material.roughness != null) mesh.material.roughness = num(ch('roughness'), mesh.material.roughness);
-          if (has('scale'))  { const s = num(ch('scale'), 1) * baseScale; mesh.scale.set(s, s, s); }
-          if (has('rotateX')) mesh.rotation.x = num(ch('rotateX'), 0) * Math.PI / 180;
-          if (has('rotateY')) mesh.rotation.y = num(ch('rotateY'), 0) * Math.PI / 180;
-          if (has('rotateZ')) mesh.rotation.z = num(ch('rotateZ'), 0) * Math.PI / 180;
-          if (has('spin'))   mesh.rotation.y = num(ch('spin'), 0);
-          if (has('posY'))   mesh.position.y = num(ch('posY'), mesh.position.y);
-          if (has('posX'))   mesh.position.x = num(ch('posX'), mesh.position.x);
-          if (has('posZ'))   mesh.position.z = num(ch('posZ'), mesh.position.z);
-          if (has('morph'))  canvas._stParticleMorph = num(ch('morph'), 0);
-        }
-      });
-    }
+    // Register for sibling directives (legacy: @orbit / @parallax read these).
+    canvas._stObjects = canvas._stObjects || [];
+    if (pt.obj) { canvas._stObjects.push(pt.obj); canvas._stObject = pt.obj; }
 
     %yield true -> $added;
-
-    %cleanup {
-      if (unregister) unregister();
-      scene.remove(mesh);
-      geometry.dispose();
-      mat.dispose();
-    }
   }
 
   %exports {

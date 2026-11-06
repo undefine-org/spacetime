@@ -26,105 +26,60 @@
 /// @yields $progress  - load progress 0..1 (when the server reports lengthComputable)
 /// @yields $error     - error message string, or empty
 
+/// PLAN-152: the model is a PART (raea's `Model`). A named model answers to a
+/// score: `&robot { clip: "Walking" -> "Death" at 60% --steps(1); posZ: -6 -> 0; }`.
+/// `clip` names the glTF animation clip playing; the clip runs from the moment
+/// it began, at `rate`. The pose is a SEEK into the clip (not a step), so a
+/// virtual-clock render is deterministic. `scale` is the model's world scale
+/// (both engines); `size` auto-fits instead, in a browser only.
+///
 %primitive three-gltf(
   &el,
+  name: string = "",
   src: string = "",
+  clip: string = "",
   size: number = 2,
+  scale: number = 0,
   posX: number = 0,
   posY: number = 0,
   posZ: number = 0,
+  rotateY: number = 0,
   spinY: number = 0
 ) {
   %emit js {
     const canvas = %&el;
     const ctx = canvas && canvas._stThree;
     if (!ctx) { console.warn('[Spacetime] three-gltf: no @stage on this canvas.'); return; }
-    const { THREE, scene } = ctx;
-    const A = THREE.addons;
-    const rawSrc = %src;
-
-    const loader = new A.GLTFLoader();
-
-    let root = null;
-    let spinUnregister = null;
-    let loadToken = 0; // guards a stale in-flight load from landing after a newer one starts
-    const spin = %spinY;
-    const targetSize = %size;
-
-    const disposeCurrent = () => {
-      if (spinUnregister) { spinUnregister(); spinUnregister = null; }
-      if (root) {
-        scene.remove(root);
-        if (canvas._stObjects) {
-          const i = canvas._stObjects.indexOf(root);
-          if (i >= 0) canvas._stObjects.splice(i, 1);
-        }
-        if (canvas._stObject === root) canvas._stObject = null;
-        root = null;
-      }
-    };
-
-    const load = (url) => {
-      if (!url) { console.warn('[Spacetime] three-gltf: no src given.'); return; }
-      const myToken = ++loadToken;
-
-      loader.load(
-        url,
-        (gltf) => {
-          if (myToken !== loadToken) return; // a newer load superseded this one
-          disposeCurrent();
-          root = gltf.scene;
-
-          // Center + scale-to-fit so any model frames nicely.
-          if (targetSize > 0) {
-            const box = new THREE.Box3().setFromObject(root);
-            const sphere = new THREE.Sphere();
-            box.getBoundingSphere(sphere);
-            const center = sphere.center;
-            root.position.sub(center);
-            if (sphere.radius > 0) {
-              const k = targetSize / (sphere.radius * 2);
-              root.scale.setScalar(k);
-              root.position.multiplyScalar(k);
-            }
-          }
-          root.position.add(new THREE.Vector3(%posX, %posY, %posZ));
-
-          scene.add(root);
-          canvas._stObjects = canvas._stObjects || [];
-          canvas._stObjects.push(root);
-          canvas._stObject = root;
-
-          if (spin !== 0) {
-            spinUnregister = ctx.registerFrame((t, dt) => { root.rotation.y += spin * dt; });
-          }
-          %yield true -> $loaded;
-          %yield 1 -> $progress;
-        },
-        (xhr) => {
-          if (myToken !== loadToken) return;
-          if (xhr && xhr.lengthComputable && xhr.total > 0) {
-            %yield xhr.loaded / xhr.total -> $progress;
-          }
-        },
-        (err) => {
-          if (myToken !== loadToken) return;
-          console.error('[Spacetime] three-gltf: load failed', url, err);
-          %yield String((err && err.message) || err) -> $error;
-        }
-      );
-    };
-
-    // FEAT-153: resolveReactive calls load(url) once immediately with whatever
-    // `rawSrc` resolves to NOW; if rawSrc is a `$signal` reference, it ALSO
-    // re-invokes load(...) with the NEW value every time that signal changes —
-    // one shared mechanism (three-stage.st), not a hand-rolled watch here.
-    const unwatch = ctx.resolveReactive(rawSrc, load);
-
-    %cleanup {
-      unwatch();
-      disposeCurrent();
+    const raw = %src;
+    const src = (typeof raw === 'string' && raw.charAt(0) === '$' && typeof ST !== 'undefined' && ST.resolvePath) ? ST.resolvePath(canvas, raw.slice(1)) : raw;
+    if (!src) { console.warn('[Spacetime] three-gltf: no src given.'); return; }
+    let k = %scale;
+    if (!(k > 0) && ctx.headless) {
+      console.warn('[Spacetime] @gltf ' + src + ': give `scale:` — `size:` auto-fit needs the loaded mesh, which only a browser has; drawing at scale 1');
+      k = 1;
     }
+    const spin = %spinY;
+    const ry = %rotateY * Math.PI / 180;
+    const pt = ctx.part('Model', {
+      src, animation: %clip || undefined, time: 0,
+      position: [%posX, %posY, %posZ], rotation: [0, ry, 0], scale: k > 0 ? k : 1,
+      castShadow: !!ctx.shadows,
+    }, { name: String(%name || '').replace(/^&/, ''),
+         update: spin ? (p, t) => { p.props.rotation = [0, ry + spin * t, 0]; } : null });
+    // `size` (browser only): scale the loaded model to fit
+    if (!(k > 0) && pt.obj && ctx.THREE) {
+      const THREE = ctx.THREE, target = %size;
+      const fit = () => {
+        const box = new THREE.Box3().setFromObject(pt.obj);
+        if (box.isEmpty()) return false;
+        const sph = new THREE.Sphere(); box.getBoundingSphere(sph);
+        if (sph.radius > 0) pt.props.scale = target / (sph.radius * 2);
+        return true;
+      };
+      const stop = ctx.registerFrame(() => { if (fit()) stop(); });
+    }
+    %yield true -> $loaded;
+    %yield 1 -> $progress;
   }
 
   %exports {

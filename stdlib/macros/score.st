@@ -142,8 +142,20 @@
     "@audio" "(" "src" ":" $src:string ")" "as" $name:element "at" $at:score_measure ";"
 }
 
+/// `@sound(--beat) as &drums at 4s for 16s;` — sound as NOTES on the score
+/// (PLAN-152). The form is an `@form instrument` (one hit, or a held chord with
+/// `notes:`) or an `@form pattern` (looped for the window). Synthesized
+/// deterministically from the score — the same samples live in a browser and
+/// in a rendered mp4. `&name` addresses it like `@audio`'s (`gain` / `pan`).
+%capture_type score_sound_notes { "," "notes" ":" $notes:string }
+%capture_type score_sound_name { "as" $name:element }
+%capture_type score_sound_for { "for" $len:score_measure }
+%capture_type score_sound {
+    "@sound" "(" $form:dashed_ident $notes:score_sound_notes? ")" $named:score_sound_name? "at" $at:score_measure $for:score_sound_for? ";"
+}
+
 %capture_type score_entry {
-    ( $audio:score_audio ) | ( $mark:score_mark ) | ( $gap:score_gap ) | ( $line:score_line )
+    ( $audio:score_audio ) | ( $sound:score_sound ) | ( $mark:score_mark ) | ( $gap:score_gap ) | ( $line:score_line )
 }
 
 /// `as &film` — names the score's own timeline so other scores and `@on`

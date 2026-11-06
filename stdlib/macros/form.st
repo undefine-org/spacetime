@@ -165,6 +165,59 @@
 }
 
 
+/// `@form instrument --kick { wave: sine; pitch: 160hz -> 45hz at 30%; gain: 1 -> 0; for: 450ms; }`
+/// — a named SOUND (PLAN-152). An instrument is MOTION over one note's life:
+/// the same `prop: a -> b at p%;` lines, read by the score's synthesizer
+/// instead of the DOM. Its vocabulary is data in `stdlib/film/synth/synth.js`:
+/// `wave` (sine | triangle | saw | square | noise), `pitch` (Hz, or the note's
+/// own pitch when the instrument plays a note), `gain`, `cutoff` (low-pass),
+/// `highpass`, `detune` (cents), `voices`, `pan`, `reverb` (send), `for` (a
+/// note's length; a held sound lasts its window).
+%macro form-instrument {
+  %scope file | selector
+  %order 700
+
+  %form {
+    @form $kind:("instrument") $name:dashed_ident($params:param_list?) { $body:keyframes }
+  }
+
+  %binds {
+    noop(&self, decl: $name)
+  }
+
+  %registers form($name, kind: "instrument") {
+    kind: "instrument"
+    params: $params
+    body: $body
+  }
+}
+
+
+/// `@form pattern --beat(tempo: 118bpm, step: 1/16) { --kick: x . . . x . . . ; --hat: . . x . ; }`
+/// — a named PATTERN (PLAN-152): one row per instrument (its form name), one
+/// cell per step. `x` plays the instrument, `.` rests, a note name (`C2`, `Eb3`,
+/// `F#4`) plays it at that pitch. A pattern placed on a score loops for its
+/// window (`@sound(--beat) at 4s for 16s;`).
+%macro form-pattern {
+  %scope file | selector
+  %order 700
+
+  %form {
+    @form $kind:("pattern") $name:dashed_ident($params:param_list?) { $body:keyframes }
+  }
+
+  %binds {
+    noop(&self, decl: $name)
+  }
+
+  %registers form($name, kind: "pattern") {
+    kind: "pattern"
+    params: $params
+    body: $body
+  }
+}
+
+
 /// `@form camera --crane { position: 0 9.5 4.5 -> 0 2.1 9.5; fov: 38; }` — a
 /// named CAMERA MOVE (PLAN-150 W3). A camera move is MOTION, so it is consumed
 /// exactly where motion is: `@on &.clip --crane;`. Its body is keyframes over a

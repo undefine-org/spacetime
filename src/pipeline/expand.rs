@@ -1199,6 +1199,14 @@ pub fn generate_initial_state_css(parent_selector: &str, raw_body: &str) -> Vec<
 
     // Process scoped blocks (applied to parent_selector + child selector)
     for (child_selector, props) in &scopes {
+        // PLAN-152: a `&name` scope that is not `&self`/`&` addresses a STAGE
+        // PART (a named 3D object, light, model), not a DOM element — its frame-0
+        // state is the part's own props. CSS for it (`.shot &orb { posY: 0 }`)
+        // is junk: browsers drop it, and a stricter selector engine (raea's)
+        // never finished parsing it.
+        if child_selector.starts_with('&') && child_selector != "&self" && child_selector != "&" {
+            continue;
+        }
         let mut simple = Vec::new();
         let mut transforms = Vec::new();
         let mut filters = Vec::new();
@@ -3564,6 +3572,21 @@ mod tests {
         } else {
             panic!("Expected CssExpr::Raw");
         }
+    }
+
+    /// PLAN-152: a `&name` scope inside an `@on` body addresses a stage part,
+    /// not a DOM element — no initial-state CSS may be emitted for it (it was
+    /// `.shot &orb { posY: 0 }`, junk that hung raea's selector parser), while
+    /// the DOM sibling scope keeps its frame-0 state.
+    #[test]
+    fn test_initial_state_css_skips_stage_part_scopes() {
+        let css = generate_initial_state_css(
+            ".shot",
+            "&orb { posY: 0 -> 2; } .title { opacity: 0 -> 1; }",
+        );
+        let text: String = css.iter().map(|c| if let CssExpr::Raw(s) = c { s.clone() } else { String::new() }).collect();
+        assert!(!text.contains("&orb"), "a stage part must get no initial-state CSS, got: {text}");
+        assert!(text.contains(".shot .title"), "a DOM scope keeps its initial state, got: {text}");
     }
 
     #[test]

@@ -267,6 +267,17 @@ a true `lookAt` from `target` remains in the arc. Working doc: `film/w3-camera.s
 behaviour gate: `tests/score/camera.test.st` (the rig transform changes across
 the window as the dolly pulls in, seen RED against a constant transform).
 
+
+**Shipped (PLAN-152), the real camera.** On a `@stage` the camera IS a part
+(`PerspectiveCamera`, named `&camera`): the stage reads the consumer's `--cam-*`
+tracks every frame and moves the three.js (or raea's Bevy) camera — `position`
+and `target` are world coordinates, `fov` its lens, `roll` its tilt; an axis no
+score drives keeps the stage's rest camera. The DOM rig steps aside
+(`transform: var(--cam-rig-off, …)`, which the stage sets), so the canvas is not
+also slid as a flat picture. A camera can also be keyed directly:
+`&camera { posZ: 14 -> 7; lookY: 1 -> 2; fov: 34 -> 28; }`. Gate:
+`tests/plan152_stage_parts_test.rs` (the rig's fallback) and the demo films.
+
 ---
 
 ## 5. The score drives 3D
@@ -331,6 +342,24 @@ ignored channel). Remaining in W4's arc: the `grid()` object form with
 
 Infra: 3D behaviour gates need WebGL in headless Chromium — the `--cdp` backend
 now launches with SwiftShader (`src/cdp.rs`) instead of `--disable-gpu`.
+
+
+**Shipped (PLAN-152), the scene as data — on both engines.** Every stage child
+is a PART in raea's 3D vocabulary (`Mesh` + material, `DirectionalLight`, `Model`,
+`Fog`, `Group`, `Bloom`, the camera), mirrored as `data-3d` markup beside the
+canvas. `@object`, `@light`, `@gltf`, `@fog` and the new `@grid` may all be named
+(`@light &sun (…)`) and keyed from a score: their channels are a data table in
+`stdlib/3d/primitives/three-stage.st` (`posX/Y/Z`, `rotateX/Y/Z`, `scale`,
+`intensity`, `color`, `opacity`, `emissive`, `clip`, `pulse`, `lookX/Y/Z`, `fov`, …).
+A browser realizes parts with three.js (per-kind builders, also data); `spacetime
+render --engine raea` hands the markup to raea, which draws it with Bevy under the
+page — shadows (`@stage(shadows: "soft")`), fog, bloom. A model's `clip` is a
+stepped channel (`clip: "Walking" -> "Death" at 60% --steps(1)`); each clip plays
+from the moment it began, as a seek. The stage ticks through `ST._raf`, so under
+a virtual clock it moves on the film's instants. Demos: `demos/film-robot-day/`,
+`demos/film-disco/`, `demos/film-forum/`; working doc:
+`film/scenes-and-sound.md`; gates: `tests/render/raea_render_test.rs`
+(`raea_draws_a_scored_3d_stage`), `tests/plan152_stage_parts_test.rs`.
 
 ---
 
@@ -513,6 +542,17 @@ element exists with the right src and its transport-derived seek target advances
 with the clock, seen RED with the seek frozen). Remaining in W7's arc: the
 `render` MUX (ffmpeg audio track at the `at` offset with the gain curve), `pan`,
 and a two-backend conformance test.
+
+
+**Shipped (PLAN-152), sound as notes.** `@sound(--form [, notes: "C3 Eb3"]) [as &name]
+at <t> [for <d>];` is a score entry. Its form is an `@form instrument` (a sound
+written as motion over one note's life: `wave`, `pitch`, `gain`, `cutoff`, `for`, …)
+or an `@form pattern` (one row per instrument, `x` / `.` / note names per step,
+looped for the window; `$tempo`, `$step`). One synthesizer,
+`stdlib/film/synth/synth.js` (first-party, `%vendor STSynth { source: local … }`),
+plays it live in a browser and is run by `spacetime render` in V8 to write the
+film's soundtrack — muxed by both engines (`src/render/soundtrack.rs`). Gates:
+`render::soundtrack` unit test, `raea_films_carry_their_score_s_sound`.
 
 ---
 
