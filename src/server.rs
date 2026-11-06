@@ -46,7 +46,7 @@ const VALIDATION_UI: &str = include_str!("../public/runtime/validation-ui.js");
 ///     EditAst-on-`change` path. Same-origin guarded (`e.origin`).
 const LIVE_RELOAD_SCRIPT: &str = r#"
     <!-- Spacetime Live Reload -->
-    <script>(function(){var ws=new WebSocket((location.protocol==='https:'?'wss://':'ws://')+location.host+'/ws');ws.onmessage=function(e){try{var d=JSON.parse(e.data);if(d.type==='Reload'){location.reload();}}catch(err){}};ws.onclose=function(){setTimeout(function(){location.reload();},2000);};window.addEventListener('message',function(e){if(e.origin!==location.origin)return;var d=e.data;if(!d||d.__spacetime!=='token-preview')return;var b=d.binding,f=d.field;if(typeof b!=='string'||typeof f!=='string')return;var v=d.value;if(typeof v!=='string'&&typeof v!=='number')return;try{if(!window.SpacetimeLocal||!(b in (window._localState||{})))return;var prev=window.SpacetimeLocal[b];if(!prev||typeof prev!=='object')return;var next={};for(var k in prev){if(Object.prototype.hasOwnProperty.call(prev,k))next[k]=prev[k];}next[f]=v;window.SpacetimeLocal[b]=next;}catch(err){}});})()</script>
+    <script>(function(){var ws=new WebSocket((location.protocol==='https:'?'wss://':'ws://')+location.host+'/ws');ws.onmessage=function(e){try{var d=JSON.parse(e.data);if(d.type==='Reload'){location.reload();}}catch(err){}};var leaving=false;addEventListener('beforeunload',function(){leaving=true;});addEventListener('pagehide',function(){leaving=true;});addEventListener('pageshow',function(e){if(e.persisted)leaving=false;});ws.onclose=function(){if(leaving)return;setTimeout(function(){if(!leaving)location.reload();},2000);};window.addEventListener('message',function(e){if(e.origin!==location.origin)return;var d=e.data;if(!d||d.__spacetime!=='token-preview')return;var b=d.binding,f=d.field;if(typeof b!=='string'||typeof f!=='string')return;var v=d.value;if(typeof v!=='string'&&typeof v!=='number')return;try{if(!window.SpacetimeLocal||!(b in (window._localState||{})))return;var prev=window.SpacetimeLocal[b];if(!prev||typeof prev!=='object')return;var next={};for(var k in prev){if(Object.prototype.hasOwnProperty.call(prev,k))next[k]=prev[k];}next[f]=v;window.SpacetimeLocal[b]=next;}catch(err){}});})()</script>
 "#;
 
 /// Application mode
@@ -433,6 +433,10 @@ fn derive_st_path(html_path: &Path) -> PathBuf {
     if literate.exists() {
         return literate;
     }
+    let literate_org = PathBuf::from(format!("{}.org", st.display()));
+    if literate_org.exists() {
+        return literate_org;
+    }
     // PLAN-148: an EDN page is a peer entry — `foo.edn` drives `foo.html`
     // exactly like `foo.st` does.
     let edn = html_path.with_extension("edn");
@@ -446,7 +450,7 @@ fn derive_st_path(html_path: &Path) -> PathBuf {
 /// `index.st` / `index.st.md` / `index.edn` that exists, else `index.st`
 /// (so the "nothing here" error still names the reference syntax).
 pub(crate) fn default_entry(site_dir: &Path) -> PathBuf {
-    ["index.st", "index.st.md", "index.edn"]
+    ["index.st", "index.st.md", "index.st.org", "index.edn"]
         .into_iter()
         .map(|name| site_dir.join(name))
         .find(|p| p.exists())
@@ -1674,6 +1678,7 @@ fn st_entry_for_route(path: &str, site_dir: &Path) -> Option<PathBuf> {
         return [
             site_dir.join("index.st"),
             site_dir.join("index.st.md"),
+            site_dir.join("index.st.org"),
             site_dir.join("index.edn"),
         ]
         .into_iter()
@@ -1691,9 +1696,11 @@ fn st_entry_for_route(path: &str, site_dir: &Path) -> Option<PathBuf> {
     let candidates = [
         site_dir.join(format!("{clean}.st")),
         site_dir.join(format!("{clean}.st.md")),
+        site_dir.join(format!("{clean}.st.org")),
         site_dir.join(format!("{clean}.edn")),
         site_dir.join(clean).join("index.st"),
         site_dir.join(clean).join("index.st.md"),
+        site_dir.join(clean).join("index.st.org"),
         site_dir.join(clean).join("index.edn"),
     ];
     candidates.into_iter().find(|p| p.exists())
@@ -2974,7 +2981,7 @@ fn collect_literate_sources(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
                 continue;
             }
             collect_literate_sources(&path, out);
-        } else if name.ends_with(".st.md") {
+        } else if name.ends_with(".st.md") || name.ends_with(".st.org") {
             out.push(path);
         }
     }
@@ -8115,6 +8122,18 @@ mod tests {
     // synthesize a minimal shell that loads the Spacetime runtime + styles,
     // instead of returning HTTP 500. The shell is the carrier for full-
     // Spacetime pages (state/bindings/templates all live in the .st file).
+    /// BUG (Firefox): following a link closes the live-reload socket while
+    /// the OLD page is still current; an unguarded `onclose` reload then
+    /// cancels the navigation and reloads the old page ("every link brings me
+    /// back home"). Reproduced in Firefox 157 via geckodriver: navigation type
+    /// `reload`, history length 1. The socket close must not reload a page
+    /// that is being left.
+    #[test]
+    fn live_reload_does_not_reload_a_page_being_left() {
+        assert!(LIVE_RELOAD_SCRIPT.contains("addEventListener('pagehide',function(){leaving=true;})"));
+        assert!(LIVE_RELOAD_SCRIPT.contains("ws.onclose=function(){if(leaving)return;"));
+    }
+
     #[test]
     fn test_synthesize_st_only_shell_loads_runtime() {
         let shell = synthesize_st_only_shell("index.st", "", false, "");

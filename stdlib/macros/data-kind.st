@@ -40,6 +40,40 @@
 }
 
 
+/// @data stored — local state that outlives the page.
+///
+/// Exactly `inline`, plus the browser remembers it: the value is restored
+/// from localStorage when the page loads and saved on every write, under the
+/// key `st.<name>`. Use it for a reader's choices that should follow them
+/// across pages and visits (a theme, a lens, a dismissed hint). Falls back to
+/// the declared value when storage is empty, unavailable, or unparseable.
+///
+///   @data stored $lens string : "Read";
+///
+/// Not static: the served HTML cannot know what a visitor stored, so lists
+/// over a stored source hydrate rather than unroll.
+%macro data-stored {
+  %scope file | selector
+  %order 250
+
+  %form {
+    @data stored $name:binding $type:typeref? : $value:expr ;
+  }
+
+  %binds {
+    local-state-impl(name: $name, initial: $value) -> { $state as $name }
+    stored-sync(name: $name)
+  }
+
+  %registers binding($name, type: $type) {
+    value: $name
+    writable: true
+    source_kind: "stored"
+    source_static: false
+  }
+}
+
+
 /// ERROR SIBLING (BUG-264): a bare NUMBER in the type slot (`@data inline $x 5 : …`)
 /// is a near-miss for the `$type:typeref?` optional. The productive `data-inline`
 /// form REJECTS it (strict-capture: `:typeref` won't bind a number), so the value

@@ -156,11 +156,16 @@ pub struct Tangled {
     pub warnings: Vec<String>,
 }
 
-/// True when `path` is a literate Spacetime document (`*.st.md`).
+/// True when `path` is a literate Spacetime document (`*.st.md` or `*.st.org`).
 pub fn is_literate(path: &Path) -> bool {
     path.to_str()
-        .map(|s| s.ends_with(".st.md"))
+        .map(|s| s.ends_with(".st.md") || s.ends_with(".st.org"))
         .unwrap_or(false)
+}
+
+/// True when `path` is an Org-hosted literate document (`*.st.org`).
+pub fn is_literate_org(path: &Path) -> bool {
+    path.to_str().map(|s| s.ends_with(".st.org")).unwrap_or(false)
 }
 
 /// True when `path` is compilable Spacetime source: `*.st`, `*.st.md`, or `*.edn`.
@@ -182,7 +187,13 @@ pub fn is_spacetime_source(path: &Path) -> bool {
 /// support is one call-site change per entry point rather than a parallel
 /// pipeline.
 pub fn read_source(path: &Path) -> std::io::Result<(String, Option<LineMap>)> {
-    let raw = std::fs::read_to_string(path)?;
+    let mut raw = std::fs::read_to_string(path)?;
+    if is_literate_org(path) {
+        // Org is a second HOST, not a second tangler: a line-preserving
+        // rewrite into the Markdown host, so the one tangler (and its
+        // LineMap) serves both and diagnostics still land on the org line.
+        raw = org_to_markdown(&raw);
+    }
     if is_literate(path) {
         let tangled = tangle_seeded(&raw, &file_seed(path));
         Ok((tangled.source, Some(tangled.map)))
@@ -508,10 +519,300 @@ fn flush_prose(em: &mut Emitter, prose: &mut Vec<&str>, start: usize, seg: &mut 
     em.line("", start);
 }
 
+// ---------------------------------------------------------------------------
+// Org as host (`.st.org`)
+// ---------------------------------------------------------------------------
+
+/// Rewrite an Org document into the Markdown host, ONE LINE PER LINE.
+///
+/// The output has exactly as many lines as the input, so the `.st.md`
+/// tangler's `LineMap` keeps pointing at the line the author wrote in the
+/// `.org` file. The rewrite covers the Org a dossier actually uses:
+///
+/// | Org | becomes |
+/// |---|---|
+/// | `* Heading` (n stars) | `#…# Heading` (capped at 6) |
+/// | `#+title: T` | `# T` |
+/// | `#+subtitle:` / `#+kicker:` / `#+status:` | a `<p class="org-…">` line |
+/// | other `#+keyword:` lines, `:PROPERTIES:` drawers | blank |
+/// | `#+begin_src st [flags]` … `#+end_src` | a ```` ```st [flags] ```` fence |
+/// | `#+begin_src LANG` | an inert ```` ```LANG ```` fence |
+/// | `#+begin_quote` | `>`-prefixed lines |
+/// | `#+begin_NAME label` (special block) | `<div class="org-block org-NAME" data-label="label">` |
+/// | `=code=` / `~code~`, `*b*`, `/i/`, `+s+` | Markdown inline equivalents |
+/// | `[[url][text]]`, `[[url]]` | `[text](url)`, `<url>` |
+/// | `- term :: description` | `- **term** — description` |
+///
+/// Special blocks are the semantic surface: `#+begin_hole`, `#+begin_ask`,
+/// `#+begin_decision`, … carry their meaning as a class a page styles, so
+/// a dossier marks what it does NOT know as plainly as what it does.
+pub fn org_to_markdown(input: &str) -> String {
+    let mut out: Vec<String> = Vec::new();
+    // Where we are: inside a src block (verbatim), a quote, or a drawer.
+    let mut in_src = false;
+    let mut in_quote = false;
+    let mut in_drawer = false;
+    let all: Vec<&str> = input.split('\n').collect();
+    let is_table = |l: &str| l.trim_start().starts_with('|');
+    for (idx, raw) in all.iter().enumerate() {
+        let line = raw.trim_end_matches('\r');
+        let trimmed = line.trim_start();
+        let lower = trimmed.to_ascii_lowercase();
+
+        if in_src {
+            if lower.starts_with("#+end_src") {
+                in_src = false;
+                out.push("```".to_string());
+            } else {
+                // Org escapes a leading `*` / `#+` inside src with a comma.
+                let unescaped = match line.trim_start().strip_prefix(',') {
+                    Some(rest) if rest.starts_with('*') || rest.starts_with("#+") => {
+                        let indent = line.len() - line.trim_start().len();
+                        format!("{}{}", &line[..indent], rest)
+                    }
+                    _ => line.to_string(),
+                };
+                out.push(unescaped);
+            }
+            continue;
+        }
+        if in_drawer {
+            if trimmed.eq_ignore_ascii_case(":end:") {
+                in_drawer = false;
+            }
+            out.push(String::new());
+            continue;
+        }
+        if lower.starts_with("#+begin_src") {
+            in_src = true;
+            let info = trimmed["#+begin_src".len()..].trim();
+            // Header args (`:results none`) are Org's business, not the fence's.
+            let info: Vec<&str> = info.split_whitespace().take_while(|w| !w.starts_with(':')).collect();
+            out.push(format!("```{}", info.join(" ")));
+            continue;
+        }
+        if lower.starts_with("#+begin_quote") {
+            in_quote = true;
+            out.push(String::new());
+            continue;
+        }
+        if lower.starts_with("#+end_quote") {
+            in_quote = false;
+            out.push(String::new());
+            continue;
+        }
+        if let Some(rest) = lower.strip_prefix("#+begin_") {
+            let name: String = rest.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_').collect();
+            let label = trimmed["#+begin_".len() + name.len()..].trim();
+            out.push(format!(
+                "<div class=\"org-block org-{name}\" data-label=\"{}\">",
+                escape_html(label)
+            ));
+            continue;
+        }
+        if lower.starts_with("#+end_") {
+            out.push("</div>".to_string());
+            continue;
+        }
+        if trimmed.eq_ignore_ascii_case(":properties:") || trimmed.eq_ignore_ascii_case(":logbook:") {
+            in_drawer = true;
+            out.push(String::new());
+            continue;
+        }
+        if let Some(kw) = trimmed.strip_prefix("#+") {
+            let (key, value) = kw.split_once(':').unwrap_or((kw, ""));
+            let key = key.trim().to_ascii_lowercase();
+            let value = value.trim();
+            out.push(match key.as_str() {
+                "title" => format!("# {}", org_inline(value)),
+                "subtitle" | "kicker" | "status" => {
+                    format!("<p class=\"org-{key}\">{}</p>", escape_html(value))
+                }
+                _ => String::new(),
+            });
+            continue;
+        }
+        if trimmed.starts_with("# ") || trimmed == "#" {
+            // An Org comment line.
+            out.push(String::new());
+            continue;
+        }
+        // Headings: stars at column 0 followed by a space.
+        let stars = line.chars().take_while(|c| *c == '*').count();
+        if stars > 0 && line[stars..].starts_with(' ') {
+            let text = line[stars..].trim();
+            // Drop trailing tags (`:a:b:`).
+            let text = match text.rfind(" :") {
+                Some(i) if text.ends_with(':') && !text[i + 2..].contains(' ') => text[..i].trim_end(),
+                _ => text,
+            };
+            out.push(format!("{} {}", "#".repeat(stars.min(6)), org_inline(text)));
+            continue;
+        }
+        if is_table(line) && !in_quote {
+            // A table row becomes one HTML row on the SAME line; the first
+            // row opens the table and the last one closes it. A rule line
+            // (`|---+---|`) marks the rows above it as the header.
+            let first = idx == 0 || !is_table(all[idx - 1]);
+            let last = idx + 1 >= all.len() || !is_table(all[idx + 1]);
+            let rule = trimmed.starts_with("|-");
+            let open = if first { "<table class=\"org-table\">" } else { "" };
+            let close = if last { "</table>" } else { "" };
+            if rule {
+                out.push(format!("{open}{close}"));
+                continue;
+            }
+            let header = idx + 1 < all.len() && all[idx + 1].trim_start().starts_with("|-") && first;
+            let cell = if header { "th" } else { "td" };
+            let cells: Vec<String> = trimmed
+                .trim_matches('|')
+                .split('|')
+                .map(|c| format!("<{cell}>{}</{cell}>", org_inline(c.trim())))
+                .collect();
+            out.push(format!("{open}<tr>{}</tr>{close}", cells.join("")));
+            continue;
+        }
+        let body = org_list_item(line);
+        if in_quote {
+            out.push(format!("> {}", body));
+        } else {
+            out.push(body);
+        }
+    }
+    out.join("\n")
+}
+
+/// `- term :: description` → `- **term** — description`; other lines get
+/// inline markup only.
+fn org_list_item(line: &str) -> String {
+    let trimmed = line.trim_start();
+    let indent = &line[..line.len() - trimmed.len()];
+    if let Some(item) = trimmed.strip_prefix("- ").or_else(|| trimmed.strip_prefix("+ ")) {
+        if let Some((term, desc)) = item.split_once(" :: ") {
+            return format!("{indent}- **{}** — {}", org_inline(term.trim()), org_inline(desc.trim()));
+        }
+        return format!("{indent}- {}", org_inline(item));
+    }
+    format!("{indent}{}", org_inline(trimmed))
+}
+
+/// Org inline markup → Markdown inline markup. Emphasis markers only count
+/// at word boundaries, as in Org, so `a/b/c` paths and `x*y` stay literal.
+fn org_inline(text: &str) -> String {
+    // Links first: their URLs contain `/` and `=` that must not be read as markup.
+    let mut s = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find("[[") {
+        s.push_str(&rest[..start]);
+        let after = &rest[start + 2..];
+        if let Some(end) = after.find("]]") {
+            let inner = &after[..end];
+            match inner.split_once("][") {
+                Some((url, desc)) => s.push_str(&format!("[{desc}]({url})")),
+                None => s.push_str(&format!("<{inner}>")),
+            }
+            rest = &after[end + 2..];
+        } else {
+            s.push_str("[[");
+            rest = after;
+        }
+    }
+    s.push_str(rest);
+    emphasis(&s)
+}
+
+fn emphasis(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        let boundary_before = i == 0 || !chars[i - 1].is_alphanumeric();
+        if boundary_before && matches!(c, '=' | '~' | '*' | '/' | '+') {
+            // Find the closing marker: non-space before it, boundary after it.
+            let mut j = i + 1;
+            let mut close = None;
+            if j < chars.len() && !chars[j].is_whitespace() {
+                while j < chars.len() {
+                    if chars[j] == c
+                        && !chars[j - 1].is_whitespace()
+                        && (j + 1 == chars.len() || !chars[j + 1].is_alphanumeric())
+                        && j > i + 1
+                    {
+                        close = Some(j);
+                        break;
+                    }
+                    j += 1;
+                }
+            }
+            if let Some(j) = close {
+                let inner: String = chars[i + 1..j].iter().collect();
+                let wrapped = match c {
+                    '=' | '~' => format!("`{inner}`"),
+                    '*' => format!("**{inner}**"),
+                    '/' => format!("_{inner}_"),
+                    _ => format!("~~{inner}~~"),
+                };
+                out.push_str(&wrapped);
+                i = j + 1;
+                continue;
+            }
+        }
+        out.push(c);
+        i += 1;
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn org_host_is_line_preserving() {
+        let org = "#+title: Dossier\n* Thesis :a:\n:PROPERTIES:\n:ID: x\n:END:\nSome =code= and *bold*.\n#+begin_src st src\n<p class=\"x\">hi</p>\n#+end_src\n#+begin_hole LinkedIn about\nNot readable.\n#+end_hole\n- Spell :: the harness\n";
+        let md = org_to_markdown(org);
+        assert_eq!(md.split('\n').count(), org.split('\n').count(), "one line per line");
+        let lines: Vec<&str> = md.split('\n').collect();
+        assert_eq!(lines[0], "# Dossier");
+        assert_eq!(lines[1], "# Thesis", "tags dropped");
+        assert_eq!(lines[2], "");
+        assert_eq!(lines[5], "Some `code` and **bold**.");
+        assert_eq!(lines[6], "```st src");
+        assert_eq!(lines[8], "```");
+        assert!(lines[9].contains("org-block org-hole") && lines[9].contains("LinkedIn about"));
+        assert_eq!(lines[11], "</div>");
+        assert_eq!(lines[12], "- **Spell** — the harness");
+    }
+
+
+    #[test]
+    fn org_tables_become_html_rows_line_for_line() {
+        let org = "| a | b |\n|---+---|\n| =x= | y |\nafter";
+        let md = org_to_markdown(org);
+        let lines: Vec<&str> = md.split('\n').collect();
+        assert_eq!(lines.len(), 4);
+        assert_eq!(lines[0], "<table class=\"org-table\"><tr><th>a</th><th>b</th></tr>");
+        assert_eq!(lines[1], "");
+        assert_eq!(lines[2], "<tr><td>`x`</td><td>y</td></tr></table>");
+        assert_eq!(lines[3], "after");
+    }
+
+    #[test]
+    fn org_paths_and_links_stay_intact() {
+        assert_eq!(org_inline("see ~/org/me.org and a/b/c"), "see ~/org/me.org and a/b/c");
+        assert_eq!(org_inline("[[https://x.dev/a][the repo]]"), "[the repo](https://x.dev/a)");
+        assert_eq!(org_inline("/italic/ word"), "_italic_ word");
+    }
+
+    #[test]
+    fn org_document_tangles_its_st_blocks() {
+        let org = "* Live\n#+begin_src st\n<p class=\"live\">ok</p>\n#+end_src\n";
+        let tangled = tangle(&org_to_markdown(org));
+        assert!(tangled.source.contains("<p class=\"live\">ok</p>"));
+        assert!(tangled.source.contains("@doc(content: \"# Live\")"));
+    }
 
     /// Build a fenced block without embedding literal backtick runs in the
     /// test source (keeps the file readable and heredoc-safe).

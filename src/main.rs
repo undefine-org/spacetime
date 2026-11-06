@@ -1850,6 +1850,8 @@ fn run_check(paths: Vec<PathBuf>, verbose: bool, at_version: Option<String>, qui
             let mut st_files = discover_tests_with_options(path, &options);
             let lit_options = DiscoverOptions::new().with_pattern("*.st.md");
             st_files.extend(discover_tests_with_options(path, &lit_options));
+            let org_options = DiscoverOptions::new().with_pattern("*.st.org");
+            st_files.extend(discover_tests_with_options(path, &org_options));
             // PLAN-148: EDN pages are peers — a third pass collects them.
             let edn_options = DiscoverOptions::new().with_pattern("*.edn");
             st_files.extend(discover_tests_with_options(path, &edn_options));
