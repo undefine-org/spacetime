@@ -238,11 +238,12 @@ enum Command {
         #[arg(long)]
         trace: bool,
     },
-    /// Render a page to an mp4 under Chromium's virtual clock — the SAME page
+    /// Render a page to an mp4 under a virtual clock — the SAME page
     /// `test --cdp` compiles, driven by virtual time instead of the wall clock
     /// (PLAN-132 W5). No author-facing syntax: the page does not know it is
-    /// being rendered. Requires the `cdp` feature, a discoverable Chrome, and
-    /// `ffmpeg`/`ffprobe` on PATH.
+    /// being rendered. `--engine chromium` (default) needs the `cdp` feature, a
+    /// discoverable Chrome and `ffmpeg`; `--engine raea` (PLAN-151) draws it with
+    /// the vendored raea engine on the GPU, no browser.
     Render {
         /// Project directory or page (.st / .st.md) to render
         #[arg(required = true)]
@@ -282,6 +283,12 @@ enum Command {
         /// PLAN-150 W11: render only up to this time (seconds).
         #[arg(long)]
         to: Option<f64>,
+
+        /// PLAN-151: which backend draws the frames — `chromium` (CDP
+        /// screenshots) or `raea` (the vendored engine: Blitz layout, GPU
+        /// paint, no browser).
+        #[arg(long, default_value = "chromium")]
+        engine: spacetime::render::Engine,
     },
     /// Execute a Spacetime script for source transformations
     Script {
@@ -717,7 +724,12 @@ async fn main() {
                 stills,
                 from,
                 to,
+                engine,
             } => {
+                if engine == spacetime::render::Engine::Raea {
+                    run_raea_render(entry, out, fps, width, height, dpr, stills, from, to);
+                    return;
+                }
                 #[cfg(feature = "cdp")]
                 {
                     if !spacetime::cdp::is_available() {
@@ -6019,5 +6031,71 @@ mod init_target_tests {
         symlink(&missing_target, cwd.join("projects")).expect("symlink");
         let resolved = resolve_init_target("foo", cwd);
         assert_eq!(resolved, cwd.join("foo"));
+    }
+}
+
+/// PLAN-151: `render --engine raea` — the vendored raea engine draws the film,
+/// no browser (and no `cdp` feature) involved. Mirrors the Chromium arm's
+/// output so the two backends read the same at the terminal.
+#[allow(clippy::too_many_arguments)]
+fn run_raea_render(
+    entry: PathBuf,
+    out: PathBuf,
+    fps: u32,
+    width: u32,
+    height: u32,
+    dpr: f64,
+    stills: Option<Vec<f64>>,
+    from: Option<f64>,
+    to: Option<f64>,
+) {
+    let started = std::time::Instant::now();
+    if let Some(times_s) = stills {
+        let out_dir = out
+            .parent()
+            .map(|p| p.to_path_buf())
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| PathBuf::from("."));
+        let sopts = spacetime::render::StillsOptions { times_s, out_dir, width, height, dpr };
+        match spacetime::render::raea::render_stills(&entry, &sopts, fps) {
+            Ok(paths) => {
+                println!(
+                    "\x1b[32m✓\x1b[0m {} still(s) written with raea in {:.1}s:",
+                    paths.len(),
+                    started.elapsed().as_secs_f64()
+                );
+                for p in &paths {
+                    println!("  {}", p.display());
+                }
+            }
+            Err(e) => {
+                eprintln!("\x1b[31m✗\x1b[0m stills failed: {e}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+    let opts = spacetime::render::RenderOptions {
+        out,
+        fps,
+        width,
+        height,
+        dpr,
+        from_ms: from.map(|s| (s * 1000.0).round() as u64),
+        to_ms: to.map(|s| (s * 1000.0).round() as u64),
+    };
+    match spacetime::render::raea::render_page(&entry, &opts) {
+        Ok(rep) => println!(
+            "\x1b[32m✓\x1b[0m rendered {} frame(s) of {}ms @ {}fps with raea in {:.1}s -> {}",
+            rep.frames,
+            rep.duration_ms,
+            rep.fps,
+            started.elapsed().as_secs_f64(),
+            rep.out.display()
+        ),
+        Err(e) => {
+            eprintln!("\x1b[31m✗\x1b[0m render failed: {e}");
+            std::process::exit(1);
+        }
     }
 }

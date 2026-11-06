@@ -763,7 +763,7 @@ portable to places that cannot run a browser.
 
 **Shipped (PLAN-150 W11), stills + ranges + dpr.** `spacetime render` gains
 `--stills <csv>` (capture specific timestamps as PNGs, no video mux — the fast
-iteration loop; `src/render.rs::render_stills`), `--from`/`--to` (render one time
+iteration loop; `src/render/chromium.rs::render_stills`), `--from`/`--to` (render one time
 window), and `--dpr <n>` (render at `width·dpr × height·dpr`, e.g. a 4K render of
 a 1080p film). All ride the existing virtual-clock render engine, so a still is
 the page at that exact deterministic instant and the film renders bit-identically
@@ -772,6 +772,15 @@ run to run. Working doc: `film/w11-render-tooling.st.md`; behaviour gates:
 `w11_dpr_scales_the_captured_pixels`, `w11_from_to_window_trims_the_render`).
 Remaining in W11's arc: `--sheet` (contact sheet), `serve --scrub` (transport
 bar), and the `webm`/`gif`/`lottie` targets.
+
+**Shipped (PLAN-151), a second engine: no browser.** `spacetime render --engine
+raea` draws the same compiled page with the vendored raea engine
+(`stdlib/film/vendor/raea`): Blitz/Stylo layout, Vello on the GPU, in-process
+encode. The page is unchanged — `src/render/raea.rs` marks its `<body>` as an
+HTML composition and registers `ST._clock` as its one timeline, so the score
+drives raea's frames exactly as it drives Chromium's. Every flag above works on
+both engines except `--dpr` (render at the size you want instead). Working doc:
+`film/render-engines.md`; behaviour gates: `tests/render/raea_render_test.rs`.
 
 ---
 

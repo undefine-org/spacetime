@@ -34,12 +34,14 @@ spacetime render demos/promo/ --dpr 2 --out scratch/film-4k.mp4          # 3840Ã
 
 ## How it lowers
 
-All three ride the existing render engine (`src/render.rs`): one Chromium page
+All three ride the existing render engine (`src/render/chromium.rs`; the shared
+compile/entry/asset steps live once in `src/render/mod.rs`): one Chromium page
 under the runtime's virtual clock (`ST._clock`), advanced deterministically.
 `--stills` advances to each requested time and screenshots to a PNG (no ffmpeg);
 `--from/--to` bound the frame loop's virtual-time span; `--dpr` sets the capture
 device-scale. The film renders bit-identically run to run â€” the clock is
-deterministic and the stills path shares it.
+deterministic and the stills path shares it. `--stills` and `--from/--to` work
+identically under `--engine raea` (PLAN-151, `film/render-engines.md`).
 
 ## Not yet (later in W11's arc)
 

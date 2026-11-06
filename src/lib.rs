@@ -74,7 +74,6 @@ pub mod analysis;
 pub mod build_runtime;
 #[cfg(feature = "cdp")]
 pub mod cdp;
-#[cfg(feature = "cdp")]
 pub mod render;
 pub mod cli;
 pub mod color;

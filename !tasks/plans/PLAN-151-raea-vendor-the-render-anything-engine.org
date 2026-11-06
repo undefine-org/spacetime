@@ -1,0 +1,101 @@
+#+TITLE: raea — vendor the Render Anything Engine as Spacetime's browserless render backend
+#+STATE: DONE
+#+SESSION_ID: 66d34658-41aa-4590-9582-7d36b409cd80
+#+TRANSCRIPT_PATH: [[file:/home/othman/.claude/projects/-home-othman-code-undefine-spacetime/66d34658-41aa-4590-9582-7d36b409cd80.jsonl]]
+#+CUSTOM_ID: PLAN-151-raea-vendor-the-render-anything-engine
+#+EFFORT: 1d
+#+PRIORITY: #B
+#+LAYER: tooling
+
+* Initial Message
+
+Find the repo mentioned there. Vendor it into space time, make it first party, and wow me with the results. work in the main worktree.
+
+https://x.com/shinyobjectz_/status/2118243087797625163 sorry motion designer
+
+* Source
+
+The tweet is a reply in Shane Murphy's (=@shinyobjectz_=) thread announcing *raea*, "the Render Anything
+Engine": React/TypeScript/HTML compositions rendered to video on the GPU **without a browser** (Bevy 0.20 +
+Blitz/Stylo + Vello, in-process encode), "faster and more capable than hyperframes or remotion". Repo:
+https://github.com/shinyobjectz/raea — licence *FSL-1.1-ALv2* (source-available, any use except a Competing
+Use; Apache-2.0 two years after each release). See =stdlib/film/vendor/PROVENANCE.md=.
+
+* Why it fits Spacetime
+
+PLAN-132's thesis: a website and a video differ only in which signal drives the timeline. Until now only a
+browser could *draw* the video (=render= = Chromium over CDP, one screenshot per frame). raea accepts any HTML
+page that registers a seekable timeline on =window.__timelines=; Spacetime pages already have exactly one
+clock (=ST._clock=). So the integration is one adapter, no new syntax, no second runtime.
+
+* Design
+- Vendoring rail as =stdlib/3d/vendor/three=: a pinned git submodule at =stdlib/film/vendor/raea=, a
+  =PROVENANCE.md=, owned behind ONE file. raea is a native engine, not a JS blob, so there is no =%vendor=
+  bundle: the binary is built from the submodule (=cargo build --release -p raea-cli --no-default-features=)
+  and located by =$SPACETIME_RAEA= / the submodule's =target/release/raea= / =PATH=.
+- =src/render.rs= split into =src/render/mod.rs= (shared: entry resolution, compile, score length, asset
+  rebasing — once), =chromium.rs= (the CDP backend, unchanged behaviour) and =raea.rs= (the new backend).
+  =render= is no longer gated on the =cdp= feature; only the Chromium backend is.
+- =raea.rs::film_document=: the compiled page's =<body>= becomes the root composition
+  (=data-composition-id/width/height/fps/duration=), a bridge after the runtime installs =ST._clock= at one
+  frame per tick and registers it as =__timelines.spacetime= (=totalTime(t)= advances the clock to =t=;
+  =--from= offsets it). A browser's white canvas default is declared before the page CSS (raea composites
+  over black).
+- CLI: =spacetime render … --engine raea=; =--stills=, =--from/--to= work; =--dpr= is refused loudly.
+
+* Engine gaps found by rendering a real film (local patches in the submodule)
+Each was found rendering =demos/film-showcase/= and is a genuine engine gap, fixed in raea (not worked
+around in Spacetime). Details in PROVENANCE.md.
+1. HTML stills to a folder (=-o DIR --at=) wrote nothing ("Is a directory") — the direct path only wrote mp4/txt.
+2. =innerHTML= stripped markup — Spacetime's templates and =@form shot= never mounted ("Template invocation error").
+3. =<template>.content=, DocumentFragment ParentNode accessors, template content in deep clones.
+4. =background-clip: text= — Stylo parsed it only for gecko; Blitz painted a slab. Now source-in through the glyphs.
+5. Inline custom properties were dropped before reaching Blitz — a sheet's =var()= kept its fallback forever
+   (the showcase's perspective floor, whose mask reads =--reveal=, never appeared).
+6. raea's TS cascade re-matched every stylesheet rule against the whole document (in QuickJS) on every frame a
+   score wrote an inline style: 702 ms/frame on =demos/promo/=. Now lazy (re-run when computed style is read): 44 ms.
+7. CSS counters (=content: counter()=) were never drawn — the promo's frame counter. Implemented in Blitz with
+   CSS Lists 3 scoping; a counter pseudo is re-synced after each restyle, and keeps its text while construction
+   has a container's children taken out of the tree (that mid-construction walk had reset it to 0).
+
+A first hypothesis for (5) — missing =servo_restyle_damage= on =mask-*= — was tested, did NOT fix it, and was
+reverted; a Blitz-level test proved computed style followed the property, which pointed at the TS wire.
+
+* Gates (=tests/render/raea_render_test.rs=, =#[ignore]= — needs the binary + a Vulkan GPU)
+- The Chromium backend's four: frame count, motion, determinism, discrimination (static page renders frozen).
+- One per engine fix, each SEEN RED against the unpatched engine first: shot stamped through =<template>=
+  (fixture =raea_shot.st=), =background-clip: text= is letters not a slab (=raea_clip_text.st=), a mask
+  driven by an animated custom property grows (=raea_mask_var.st=); and stills naming.
+- Unit: =render::raea::tests= (composition root, bridge after runtime, window offset, canvas default order,
+  bodyless refusal).
+
+* Results (2026-11-06, Work: Intel UHD 630 via Mesa ANV, 1280×720 @ 30 fps, wall clock, same harness)
+| film                          | Chromium |    raea | speed-up |
+|-------------------------------+----------+---------+----------|
+| demos/film-showcase/ (24 s)   |  180.7 s |  41.9 s |     4.3× |
+| demos/promo/ (30 s)           |  245.7 s |  76.5 s |     3.2× |
+Before fix 6 raea was 2.7× SLOWER than Chromium on the promo (670 s). Both engines install =ST._clock= the same
+way, so a frame at =t= is the same picture: the promo's counter reads =698 / 1800= at 20 s on both (an earlier
+one-frame-per-tick bridge read 691 — drivers seed their start from the first tick).
+
+* Follow-ups
+- NVK (GTX 1660 Ti) fails =vkCreateDevice= with FEATURE_NOT_PRESENT when Bevy requests every advertised
+  feature; raea runs on the Intel iGPU here. A real GPU is where raea's speed claims live.
+- A 3D-warped layer (the showcase's perspective floor) is drawn at its full content size in its own space
+  (2816×1872 for a 1280×720 film) every frame: clamp it to what lands on the page.
+- Upstream the seven patches to raea.
+- Drivers seed their start from the first virtual tick, so every frame sits one tick (16 ms) behind =t= on both
+  engines (runtime, not raea).
+- raea's audio / 3D / game surfaces are not reachable from a Spacetime page; only the HTML composition path is used.
+
+* Verification
+- =cargo test --features cdp --test raea_render_test -- --ignored= → 9 passed, 0 failed (each engine-fix gate seen
+  RED first: clip-text slab, frozen mask dot, frozen nested counter; the shot's RED was the runtime's
+  "Template invocation error" under raea).
+- =cargo test --features cdp --test render_test= → 11 passed (the Chromium backend after the =src/render/= split).
+- =cargo test --features cdp --lib= → 3254 passed, 1 failed, 1 ignored. The failure
+  (=toolchain::tests::standalone_site_has_no_toolchain_root=) was the harness: =TMPDIR= pointed inside the
+  checkout. With the default =TMPDIR= it passes.
+- raea: =cargo test --release -p raea-sys-page --test vars= → 4 passed (incl. =nested_counter_follows_its_reset=).
+- Renders: =spacetime render demos/{film-showcase,promo}/ --engine raea|chromium --width 1280 --height 720 --fps 30=.
+
