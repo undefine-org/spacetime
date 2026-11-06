@@ -46,7 +46,7 @@ const VALIDATION_UI: &str = include_str!("../public/runtime/validation-ui.js");
 ///     EditAst-on-`change` path. Same-origin guarded (`e.origin`).
 const LIVE_RELOAD_SCRIPT: &str = r#"
     <!-- Spacetime Live Reload -->
-    <script>(function(){var ws=new WebSocket((location.protocol==='https:'?'wss://':'ws://')+location.host+'/ws');ws.onmessage=function(e){try{var d=JSON.parse(e.data);if(d.type==='Reload'){location.reload();}}catch(err){}};var leaving=false;addEventListener('beforeunload',function(){leaving=true;});addEventListener('pagehide',function(){leaving=true;});addEventListener('pageshow',function(e){if(e.persisted)leaving=false;});ws.onclose=function(){if(leaving)return;setTimeout(function(){if(!leaving)location.reload();},2000);};window.addEventListener('message',function(e){if(e.origin!==location.origin)return;var d=e.data;if(!d||d.__spacetime!=='token-preview')return;var b=d.binding,f=d.field;if(typeof b!=='string'||typeof f!=='string')return;var v=d.value;if(typeof v!=='string'&&typeof v!=='number')return;try{if(!window.SpacetimeLocal||!(b in (window._localState||{})))return;var prev=window.SpacetimeLocal[b];if(!prev||typeof prev!=='object')return;var next={};for(var k in prev){if(Object.prototype.hasOwnProperty.call(prev,k))next[k]=prev[k];}next[f]=v;window.SpacetimeLocal[b]=next;}catch(err){}});})()</script>
+    <script>(function(){var ws=new WebSocket((location.protocol==='https:'?'wss://':'ws://')+location.host+'/ws');ws.onmessage=function(e){try{var d=JSON.parse(e.data);if(d.type==='Reload'){if(dispatchEvent(new Event('st:reload',{cancelable:true})))location.reload();}}catch(err){}};var leaving=false;addEventListener('beforeunload',function(){leaving=true;});addEventListener('pagehide',function(){leaving=true;});addEventListener('pageshow',function(e){if(e.persisted)leaving=false;});ws.onclose=function(){if(leaving)return;setTimeout(function(){if(!leaving)location.reload();},2000);};window.addEventListener('message',function(e){if(e.origin!==location.origin)return;var d=e.data;if(!d||d.__spacetime!=='token-preview')return;var b=d.binding,f=d.field;if(typeof b!=='string'||typeof f!=='string')return;var v=d.value;if(typeof v!=='string'&&typeof v!=='number')return;try{if(!window.SpacetimeLocal||!(b in (window._localState||{})))return;var prev=window.SpacetimeLocal[b];if(!prev||typeof prev!=='object')return;var next={};for(var k in prev){if(Object.prototype.hasOwnProperty.call(prev,k))next[k]=prev[k];}next[f]=v;window.SpacetimeLocal[b]=next;}catch(err){}});})()</script>
 "#;
 
 /// Application mode
@@ -200,6 +200,12 @@ pub fn create_router_raw(state: AppState) -> Router {
             "/__spacetime/inspect/styles.css",
             get(inspector_styles_css_handler),
         )
+        // PLAN-154: the studio chip — a visual editor whose every edit is a
+        // source edit (src/studio). Dev-only, like the inspector it sits beside.
+        .route("/__spacetime/studio/outline.json", get(studio_outline_handler))
+        .route("/__spacetime/studio/apply", post(studio_apply_handler))
+        .route("/__spacetime/studio/runtime.js", get(studio_runtime_js_handler))
+        .route("/__spacetime/studio/styles.css", get(studio_styles_css_handler))
         .route("/__spacetime/save", post(save_handler))
         .route("/__spacetime/dev/deploy-init", post(deploy_init_handler))
         .route(
@@ -2853,6 +2859,142 @@ async fn inspector_styles_css_handler(
     }
 }
 
+/// PLAN-154: compile the studio chip (`stdlib/__studio__/index.st`). The entry
+/// rides in through a sentinel, query-encoded, exactly like the inspector's.
+fn compile_studio_widget_raw(
+    entry: Option<&str>,
+    cache_stdlib: bool,
+    compile_cache: &CompileCache,
+) -> Result<(String, String, String), String> {
+    let path = PathBuf::from("stdlib/__studio__/index.st");
+    if !path.exists() {
+        return Err("studio .st not found".to_string());
+    }
+    let compiled = Compiler::from_file(&path, Path::new("."))
+        .map_err(|e| e.to_string())?
+        .cache_stdlib(cache_stdlib)
+        .with_cache(compile_cache)
+        .compile();
+    let js = compiled.js.replace(
+        "__SPACETIME_STUDIO_ENTRY__",
+        &encode_query_component(entry.unwrap_or_default()),
+    );
+    Ok((js, compiled.css, compiled.html))
+}
+
+async fn studio_runtime_js_handler(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    Query(query): Query<InspectorWidgetQuery>,
+) -> Response {
+    let body = match compile_studio_widget_raw(query.entry.as_deref(), state.cache_stdlib, &state.compile_cache) {
+        Ok((js, _, _)) => scope_bundle_to_owner(js, "studio"),
+        Err(e) => format!("console.error({:?});", format!("Studio compile error: {e}")),
+    };
+    (StatusCode::OK, [(header::CONTENT_TYPE, "application/javascript")], body).into_response()
+}
+
+async fn studio_styles_css_handler(
+    axum::extract::State(state): axum::extract::State<AppState>,
+) -> Response {
+    let body = match compile_studio_widget_raw(None, state.cache_stdlib, &state.compile_cache) {
+        Ok((_, css, _)) => css,
+        Err(e) => format!("/* Studio compile error: {} */", e.replace("*/", "* /")),
+    };
+    (StatusCode::OK, [(header::CONTENT_TYPE, "text/css")], body).into_response()
+}
+
+/// The shape of the page's code, rebuilt from disk on every request (no cached
+/// spans can go stale).
+async fn studio_outline_handler(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    Query(query): Query<InspectorWidgetQuery>,
+) -> Response {
+    let AppMode::Dev { site_dir, .. } = &state.mode else {
+        return (StatusCode::NOT_FOUND, "Not found").into_response();
+    };
+    let entry = query.entry.unwrap_or_default();
+    if let Err(e) = crate::sync::handlers::validate_file_path(site_dir, &entry) {
+        return Json(serde_json::json!({ "error": e })).into_response();
+    }
+    match crate::studio::outline::Site::load(site_dir, &entry) {
+        Ok(site) => {
+            let mut outline = site.outline();
+            outline["pages"] = studio_pages(site_dir);
+            Json(outline).into_response()
+        }
+        Err(e) => Json(serde_json::json!({ "error": e })).into_response(),
+    }
+}
+
+/// Every routable page of the site: `(route, file)`, for the explorer.
+fn studio_pages(site_dir: &Path) -> serde_json::Value {
+    let mut pages = Vec::new();
+    let mut stack = vec![(site_dir.to_path_buf(), String::new())];
+    while let Some((dir, prefix)) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with('_') || name.starts_with('.') || name == "dist" || name == "fonts" {
+                continue;
+            }
+            let path = entry.path();
+            if path.is_dir() {
+                if prefix.matches('/').count() < 3 {
+                    stack.push((path, format!("{prefix}{name}/")));
+                }
+                continue;
+            }
+            let Some(stem) = [".st.md", ".st.org", ".st"].iter().find_map(|ext| name.strip_suffix(ext)) else {
+                continue;
+            };
+            let route = if stem == "index" { format!("/{prefix}") } else { format!("/{prefix}{stem}") };
+            pages.push(serde_json::json!({ "route": route, "file": format!("{prefix}{name}") }));
+        }
+    }
+    pages.sort_by(|a, b| a["route"].as_str().cmp(&b["route"].as_str()));
+    serde_json::Value::Array(pages)
+}
+
+#[derive(Deserialize)]
+struct StudioApplyRequest {
+    entry: String,
+    #[serde(flatten)]
+    op: crate::studio::ops::Op,
+}
+
+/// Apply one studio edit to the source and write the changed files. The page
+/// reloads through the normal file watcher, so what you see is the source.
+async fn studio_apply_handler(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    Json(req): Json<StudioApplyRequest>,
+) -> Response {
+    let AppMode::Dev { site_dir, .. } = &state.mode else {
+        return (StatusCode::NOT_FOUND, "Not found").into_response();
+    };
+    let fail = |e: String| Json(serde_json::json!({ "ok": false, "error": e })).into_response();
+    if let Err(e) = crate::sync::handlers::validate_file_path(site_dir, &req.entry) {
+        return fail(e);
+    }
+    let site = match crate::studio::outline::Site::load(site_dir, &req.entry) {
+        Ok(site) => site,
+        Err(e) => return fail(e),
+    };
+    let changes = match crate::studio::ops::apply(&site, &req.op) {
+        Ok(changes) => changes,
+        Err(e) => return fail(e),
+    };
+    for (file, text) in &changes {
+        let path = match crate::sync::handlers::validate_file_path(site_dir, file) {
+            Ok(path) => path,
+            Err(e) => return fail(e),
+        };
+        if let Err(e) = std::fs::write(&path, text) {
+            return fail(format!("write {file}: {e}"));
+        }
+    }
+    Json(serde_json::json!({ "ok": true, "changed": changes.keys().collect::<Vec<_>>() })).into_response()
+}
+
 async fn comments_runtime_js_handler(
     axum::extract::State(state): axum::extract::State<AppState>,
 ) -> Response {
@@ -4239,6 +4381,9 @@ fn host_widget_inject(
     // file), and one containing a quote closes the `src="…"` attribute outright.
     // Percent-encode everything outside a conservative unreserved set — that also
     // neutralizes the HTML-attribute hazard, since `"`, `'`, `<` and `&` all encode.
+    let studio_html = compile_studio_widget_raw(entry, cache_stdlib, compile_cache)
+        .map(|(_, _, html)| html)
+        .unwrap_or_default();
     let inspector_entry = encode_query_component(entry.unwrap_or_default());
     format!(
         r#"
@@ -4257,11 +4402,13 @@ fn host_widget_inject(
     <link rel="stylesheet" href="/__spacetime/host/styles.css" />
     <link rel="stylesheet" href="/__spacetime/migrations/styles.css" />
     <link rel="stylesheet" href="/__spacetime/inspect/styles.css" />
+    <link rel="stylesheet" href="/__spacetime/studio/styles.css" />
     <style>{DEV_DOCK_CSS}</style>
-    <div class="st-dev-dock">{comments_html}{migrations_html}{inspector_html}{shell_html}</div>
+    <div class="st-dev-dock">{studio_html}{comments_html}{migrations_html}{inspector_html}{shell_html}</div>
     <script src="/__spacetime/comments/runtime.js"></script>
     <script src="/__spacetime/migrations/runtime.js"></script>
     <script src="/__spacetime/inspect/runtime.js?entry={inspector_entry}"></script>
+    <script src="/__spacetime/studio/runtime.js?entry={inspector_entry}"></script>
     <script src="/__spacetime/host/runtime.js"></script>
     <script>{DEV_DOCK_EXCLUSIVE_PANELS_JS}</script>
 "#
