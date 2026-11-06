@@ -358,9 +358,15 @@ fn decl(site: &Site, file: &str, start: usize, end: usize, expect: &str, value: 
     if current != expect {
         return Err("the source changed under this edit; reload and try again".to_string());
     }
-    let colon = current.find(':').ok_or("not a declaration")?;
-    let tail_end = current.trim_end().trim_end_matches(';').len();
-    let replacement = format!("{} {}{}", &current[..=colon], value.trim(), &current[tail_end..]);
+    // The parser's declaration span covers the VALUE only (`1100px`); a span
+    // that also holds `prop:` keeps its property and trailing `;`.
+    let replacement = match current.find(':') {
+        Some(colon) => {
+            let tail_end = current.trim_end().trim_end_matches(';').len();
+            format!("{} {}{}", &current[..=colon], value.trim(), &current[tail_end..])
+        }
+        None => value.trim().to_string(),
+    };
     Ok(splice(site, fi, Span::new(start, end), &replacement))
 }
 
@@ -475,6 +481,9 @@ mod tests {
         let end = start + "color: red;".len();
         let op = Op::Decl { file: "index.st".into(), start, end, expect: "color: red;".into(), value: "blue".into() };
         assert!(run(op).unwrap().contains(".hero__title { color: blue; }"));
+        let v = PAGE.find("red;").unwrap();
+        let value_only = Op::Decl { file: "index.st".into(), start: v, end: v + 3, expect: "red".into(), value: "teal".into() };
+        assert!(run(value_only).unwrap().contains(".hero__title { color: teal; }"));
         let stale = Op::Decl { file: "index.st".into(), start, end, expect: "color: green;".into(), value: "blue".into() };
         assert!(run(stale).is_err());
     }
