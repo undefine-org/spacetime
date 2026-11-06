@@ -26,6 +26,9 @@
 @data stored $stuOpen bool : false;
 @data stored $stuTabName string : "Layers";
 @data inline $stuQuery string : "";
+// The tool: Select edits the page; Interact lets it behave like the site, to
+// reach a state (a tab, a filter, a hover) before selecting in it.
+@data stored $stuToolName string : "Select";
 
 // Written by the kit: the selection, the explorer key it maps to, and the
 // result of the last edit.
@@ -37,6 +40,12 @@
 
 @type StuTab { Layers | Lists | Components | Pages }
 @type StuSelection { Nothing | Element | Row }
+@type StuTool { Select | Interact }
+
+@data derive $stuTool StuTool : @match {
+  ($stuToolName == "Interact") => Interact;
+  _                            => Select;
+}
 
 @data derive $stuTab StuTab : @match {
   ($stuTabName == "Lists")      => Lists;
@@ -81,6 +90,11 @@
   @on &.click { $stuOpen <- !$stuOpen; }
 }
 .stu-bar__close { @on &.click { $stuOpen <- false; } }
+.stu-bar {
+  @state(when: $stuTool is Select)   { --stu-tool: 0; }
+  @state(when: $stuTool is Interact) { --stu-tool: 1; }
+}
+.stu-tool { @on &.click { $stuToolName <- $.dataset.tool; } }
 
 .stu-explorer {
   @state(when: $stuTab is Layers)     { --stu-tab: 0; }
@@ -99,12 +113,12 @@
 
 .stu-tree--layers {
   @each($stuLayers as $n) {
-    <button type="button" class="stu-node" data-key="`$n.key`" data-kind="`$n.kind`" data-file="`$n.file`" data-index="`$n.index`" style="--stu-depth: `$n.depth`"><span class="stu-node__mark"></span><span class="stu-node__label">`$n.label`</span><span class="stu-node__text">`$n.text`</span></button>
+    <button type="button" class="stu-node" data-key="`$n.key`" data-kind="`$n.kind`" data-file="`$n.file`" data-at="`$n.index`" style="--stu-depth: `$n.depth`"><span class="stu-node__mark"></span><span class="stu-node__label">`$n.label`</span><span class="stu-node__text">`$n.text`</span></button>
   }
 }
 .stu-tree--lists {
   @each($stuLists as $n) {
-    <button type="button" class="stu-node" draggable="`$n.kind == 'row'`" data-key="`$n.key`" data-kind="`$n.kind`" data-binding="`$n.binding`" data-index="`$n.index`" style="--stu-depth: `$n.depth`"><span class="stu-node__mark"></span><span class="stu-node__label">`$n.label`</span><span class="stu-node__text">`$n.text`</span></button>
+    <button type="button" class="stu-node" draggable="`$n.drag`" data-key="`$n.key`" data-kind="`$n.kind`" data-binding="`$n.binding`" data-at="`$n.index`" style="--stu-depth: `$n.depth`"><span class="stu-node__mark"></span><span class="stu-node__label">`$n.label`</span><span class="stu-node__text">`$n.text`</span></button>
   }
 }
 .stu-tree--components {
@@ -118,10 +132,7 @@
   }
 }
 
-.stu-node {
-  .is-selected: node.dataset.key == $stuSelKey;
-  @on &.click { $stuNoop <- ST.stuReveal($); }
-}
+.stu-node { @on &.click { $stuNoop <- ST.stuReveal($); } }
 
 .stu-inspector {
   @state(when: $stuSelection is Nothing) { --stu-sel: 0; }
@@ -137,14 +148,14 @@
 
 .stu-fields {
   @each($stuFields as $f) {
-    <label class="stu-field" data-kind="`$f.kind`"><span class="stu-field__key">`$f.key`</span><textarea class="stu-field__input" rows="`$f.rows`" data-binding="`$f.binding`" data-index="`$f.index`" data-field="`$f.field`" spellcheck="false">`$f.value`</textarea></label>
+    <label class="stu-field" data-kind="`$f.kind`"><span class="stu-field__key">`$f.key`</span><textarea class="stu-field__input" rows="`$f.rows`" data-binding="`$f.binding`" data-at="`$f.index`" data-field="`$f.field`" spellcheck="false">`$f.value`</textarea></label>
   }
 }
 .stu-field__input { @on &.change { $stuNoop <- ST.stuCommitField($); } }
 
 .stu-box {
   @each($stuBox as $b) {
-    <div class="stu-prop" data-group="`$b.group`"><span class="stu-prop__group">`$b.group`</span><span class="stu-prop__k">`$b.label`</span><span class="stu-prop__v">`$b.value`</span><span class="stu-prop__sw" style="background: `$b.swatch`"></span></div>
+    <div class="stu-prop" data-group="`$b.group`"><span class="stu-prop__group">`$b.group`</span><span class="stu-prop__k">`$b.label`</span><span class="stu-prop__v">`$b.value`</span><span class="stu-prop__sw" data-swatch="`$b.swatch`" style="background: `$b.swatch`"></span></div>
   }
 }
 
@@ -220,9 +231,12 @@
   </aside>
 
   <div class="stu-bar stu-ui" role="status">
-    <span class="stu-bar__dot"></span>
+    <span class="stu-tools" role="group" aria-label="Tool">
+      <button type="button" class="stu-tool" data-tool="Select" title="Select and edit (V)">Select</button>
+      <button type="button" class="stu-tool" data-tool="Interact" title="Use the page like a visitor (I); Alt-click does it once">Interact</button>
+    </span>
     <span class="stu-bar__msg"></span>
-    <span class="stu-bar__hint">click select / double-click edit / Esc parent / Alt+arrows move</span>
+    <span class="stu-bar__hint">double-click edit / Esc parent / Alt+arrows move / Alt-click use</span>
     <button type="button" class="stu-bar__close">Done</button>
   </div>
 </section>
@@ -265,6 +279,7 @@
 .stu-explorer, .stu-inspector, .stu-bar { display: none; }
 html.stu-on .stu-explorer, html.stu-on .stu-inspector { display: flex; }
 html.stu-on .stu-bar { display: flex; }
+html.stu-on { --stu-left: 264px; --stu-right: 300px; }
 html.stu-on body { margin-left: var(--stu-left) !important; margin-right: var(--stu-right) !important; }
 
 .stu-explorer, .stu-inspector {
@@ -407,7 +422,8 @@ html.stu-on body { margin-left: var(--stu-left) !important; margin-right: var(--
 .stu-field__input:focus { border-color: var(--stu-blue); background: #fff; }
 
 .stu-box { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 8px; }
-.stu-prop { display: grid; grid-template-columns: 52px 1fr 12px; gap: 4px; align-items: center; min-width: 0; padding: 3px 6px; border-radius: 4px; background: #f5f5f5; }
+.stu-prop__sw[data-swatch=""] { visibility: hidden; }
+.stu-prop { display: grid; grid-template-columns: 70px 1fr 12px; gap: 4px; align-items: center; min-width: 0; padding: 3px 6px; border-radius: 4px; background: #f5f5f5; }
 .stu-prop[data-group="Layout"], .stu-prop[data-group="Type"], .stu-prop[data-group="Fill"], .stu-prop[data-group="Stroke"], .stu-prop[data-group="Effects"] { grid-column: 1 / -1; }
 .stu-prop__group { display: none; }
 .stu-prop__k { color: var(--stu-soft); }
@@ -444,7 +460,18 @@ html.stu-on body { margin-left: var(--stu-left) !important; margin-right: var(--
   pointer-events: none;
 }
 .stu-bar > * { pointer-events: auto; }
-.stu-bar__dot { width: 8px; height: 8px; border-radius: 50%; background: var(--stu-blue); box-shadow: 0 0 0 3px var(--stu-blue-soft); }
+.stu-tools { display: inline-flex; padding: 2px; border-radius: 7px; background: rgba(30, 30, 30, 0.92); }
+.stu-tool {
+  padding: 4px 10px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: #bdbdbd;
+  font: 600 11px/1.3 Inter, -apple-system, sans-serif;
+  cursor: pointer;
+}
+.stu-bar[data-st-state="Select"] .stu-tool[data-tool="Select"],
+.stu-bar[data-st-state="Interact"] .stu-tool[data-tool="Interact"] { background: var(--stu-blue); color: #fff; }
 .stu-bar__msg, .stu-bar__hint {
   padding: 6px 10px;
   border-radius: 6px;

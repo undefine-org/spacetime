@@ -66,6 +66,18 @@
           return rows;
         };
 
+        /// A row's readable name: a title-like field, else the first string
+        /// field with real content (a short code like "01" names nothing).
+        var NAME_KEYS = ['title', 'name', 'label', 'heading', 'line', 'what', 'text'];
+        var rowText = function (r) {
+          for (var i = 0; i < NAME_KEYS.length; i++) {
+            var f = r.fields.filter(function (x) { return x.key === NAME_KEYS[i] && norm(x.value); })[0];
+            if (f) { return f.value; }
+          }
+          var first = r.fields.filter(function (x) { return x.kind === 'string' && norm(x.value).length >= 4; })[0];
+          return first ? first.value : r.label;
+        };
+
         ST.stuLists = function (o, q) {
           var rows = [];
           if (!o || !o.lists) { return rows; }
@@ -74,9 +86,9 @@
             if (!l.count) { return; }
             var hits = l.rows.filter(function (r) { return !query || norm(r.label).toLowerCase().indexOf(query) >= 0 || l.binding.toLowerCase().indexOf(query) >= 0; });
             if (!hits.length) { return; }
-            rows.push({ key: 'l:' + l.binding, kind: 'list', label: '$' + l.binding, text: l.count + ' items', depth: 0, binding: l.binding, index: -1, file: l.file });
+            rows.push({ key: 'l:' + l.binding, kind: 'list', label: '$' + l.binding, text: l.count + ' items', depth: 0, binding: l.binding, index: -1, file: l.file, drag: 'false' });
             hits.forEach(function (r) {
-              rows.push({ key: 'r:' + l.binding + ':' + r.index, kind: 'row', label: clip(r.label, 46), text: String(r.index + 1), depth: 1, binding: l.binding, index: r.index, file: l.file });
+              rows.push({ key: 'r:' + l.binding + ':' + r.index, kind: 'row', label: clip(rowText(r), 46), text: String(r.index + 1), depth: 1, binding: l.binding, index: r.index, file: l.file, drag: 'true' });
             });
           });
           return rows;
@@ -239,12 +251,51 @@
           return d;
         };
 
+        /// The explorer key of an element: its list row, else the markup node
+        /// that declares it (same tag and classes, same text when static).
+        S.keyFor = function (el) {
+          var row = S.rowOf(el);
+          if (row) { return 'r:' + row.binding + ':' + row.index; }
+          var o = outline();
+          if (!o || !o.markup) { return ''; }
+          var tag = el.tagName.toLowerCase(), cls = [].slice.call(el.classList), text = norm(el.textContent);
+          var fallback = '';
+          for (var i = 0; i < o.markup.length; i++) {
+            var f = o.markup[i];
+            for (var j = 0; j < f.nodes.length; j++) {
+              var n = f.nodes[j];
+              if (n.tag !== tag || n.classes.join(' ') !== cls.join(' ')) { continue; }
+              var key = 'n:' + f.file + ':' + n.index;
+              if (n.static && norm(n.text) === text) { return key; }
+              if (!fallback) { fallback = key; }
+            }
+          }
+          return fallback;
+        };
+
         S.select = function (el) {
           S.el = el || null;
           S.selRow = el ? S.rowOf(el) : null;
           put('stuSel', el ? describe(el) : null);
-          put('stuSelKey', el ? (L().stuSel && L().stuSel.key) || '' : '');
+          put('stuSelKey', el ? S.keyFor(el) : '');
           S.paint();
+        };
+
+        /// Mark the selected explorer row and bring it into view (Figma's
+        /// "select on canvas, reveal in layers").
+        S.markTree = function () {
+          var key = L().stuSelKey || '';
+          var nodes = document.querySelectorAll('.stu-node');
+          var stamp = key + '|' + nodes.length;
+          if (stamp === S.marked) { return; }
+          S.marked = stamp;
+          var hit = null;
+          for (var i = 0; i < nodes.length; i++) {
+            var on = !!key && nodes[i].dataset.key === key;
+            nodes[i].classList.toggle('is-selected', on);
+            if (on && nodes[i].offsetParent) { hit = nodes[i]; }
+          }
+          if (hit) { hit.scrollIntoView({ block: 'nearest' }); }
         };
 
         // ---- 3. transport -----------------------------------------------------------
@@ -305,7 +356,7 @@
         ST.stuCommitField = function (input) {
           var d = input.dataset;
           if (input.value === input.defaultValue) { return ''; }
-          S.apply({ op: 'field', binding: d.binding, index: +d.index, field: d.field || '', value: input.value });
+          S.apply({ op: 'field', binding: d.binding, index: +d.at, field: d.field || '', value: input.value });
           return '';
         };
 
@@ -333,16 +384,19 @@
           var o = outline();
           var target = null;
           if (d.kind === 'row' || d.kind === 'list') {
-            var idx = d.kind === 'row' ? +d.index : 0;
-            var rows = document.querySelectorAll('[data-index="' + idx + '"]');
+            var idx = d.kind === 'row' ? +d.at : 0;
+            // By SOURCE identity: a filtered or derived view renders this row
+            // under a different index, or not at all.
+            var rows = document.querySelectorAll('[data-index]');
             for (var i = 0; i < rows.length && !target; i++) {
+              if (inUi(rows[i])) { continue; }
               var hit = S.rowOf(rows[i]);
-              if (hit && hit.binding === d.binding && hit.el === rows[i]) { target = rows[i]; }
+              if (hit && hit.el === rows[i] && hit.binding === d.binding && (d.kind === 'list' || hit.index === idx)) { target = rows[i]; }
             }
             if (d.kind === 'list' && target) { target = target.parentElement; }
           } else if (o && d.file) {
             var file = o.markup.filter(function (f) { return f.file === d.file; })[0];
-            var n = file && file.nodes.filter(function (x) { return String(x.index) === d.index; })[0];
+            var n = file && file.nodes.filter(function (x) { return String(x.index) === d.at; })[0];
             if (n) {
               var sel = n.tag + (n.classes.length ? '.' + n.classes.map(CSS.escape).join('.') : '');
               var all = document.querySelectorAll(sel);
@@ -393,6 +447,7 @@
 
         S.paint = function () {
           if (!S.on) { return; }
+          S.markTree();
           var b = overlay();
           place(b.hover, S.hovered && S.hovered !== S.el && !S.editing ? S.hovered : null);
           place(b.select, S.el);
@@ -415,7 +470,7 @@
           return out;
         };
 
-        S.beginEdit = function (el, x, y) {
+        S.beginEdit = function (el) {
           if (S.editing) { S.endEdit(true); }
           var nodes = textNodes(el);
           if (!nodes.length) { put('stuError', 'No text to edit here.'); return; }
@@ -429,11 +484,19 @@
           el.setAttribute('contenteditable', 'plaintext-only');
           if (el.contentEditable !== 'plaintext-only') { el.setAttribute('contenteditable', 'true'); }
           el.classList.add('stu-is-editing');
+          // Keep the browser's own double-click selection (the word under the
+          // pointer, so typing replaces it); from the keyboard, put the caret
+          // at the end of the text.
+          var keep = getSelection();
+          var native = keep.rangeCount && !keep.isCollapsed && el.contains(keep.anchorNode);
           el.focus();
-          var pos = document.caretPositionFromPoint ? document.caretPositionFromPoint(x, y) : null;
-          var range = !pos && document.caretRangeFromPoint ? document.caretRangeFromPoint(x, y) : null;
-          var selObj = getSelection();
-          if (pos && pos.offsetNode) { selObj.collapse(pos.offsetNode, pos.offset); } else if (range) { selObj.removeAllRanges(); selObj.addRange(range); }
+          if (!native) {
+            var r = document.createRange();
+            r.selectNodeContents(el);
+            r.collapse(false);
+            keep.removeAllRanges();
+            keep.addRange(r);
+          }
           put('stuStatus', 'Editing: Enter to save, Esc to cancel');
         };
 
@@ -518,21 +581,24 @@
         // Explorer rows of a list can be dragged onto each other.
         S.treeDrop = function (fromEl, toEl) {
           var a = fromEl.dataset, b = toEl.dataset;
-          if (a.kind !== 'row' || b.kind !== 'row' || a.binding !== b.binding || a.index === b.index) { return; }
-          S.apply({ op: 'move', binding: a.binding, from: +a.index, to: +b.index });
+          if (a.kind !== 'row' || b.kind !== 'row' || a.binding !== b.binding || a.at === b.at) { return; }
+          S.apply({ op: 'move', binding: a.binding, from: +a.at, to: +b.at });
         };
+
+        /// Interact tool, or Alt held: the page behaves like the site.
+        var passThrough = function (ev) { return L().stuToolName === 'Interact' || ev.altKey; };
 
         var handlers = {
           move: function (ev) {
             if (S.drag) { S.moveDrag(ev); return; }
-            S.hovered = inUi(ev.target) ? null : ev.target;
+            S.hovered = inUi(ev.target) || passThrough(ev) ? null : ev.target;
           },
           down: function (ev) {
             if (ev.target.closest && ev.target.closest('.stu-handle')) { S.beginDrag(ev); }
           },
           up: function () { if (S.drag) { S.endDrag(); } },
           click: function (ev) {
-            if (inUi(ev.target)) { return; }
+            if (inUi(ev.target) || (passThrough(ev) && !S.editing)) { return; }
             if (S.editing && S.editing.el.contains(ev.target)) {
               if (ev.target.closest('a')) { ev.preventDefault(); }
               return;
@@ -543,10 +609,10 @@
             S.select(ev.target);
           },
           dblclick: function (ev) {
-            if (inUi(ev.target)) { return; }
+            if (inUi(ev.target) || passThrough(ev)) { return; }
             ev.preventDefault();
             S.select(ev.target);
-            S.beginEdit(ev.target, ev.clientX, ev.clientY);
+            S.beginEdit(ev.target);
           },
           key: function (ev) {
             if (S.editing) {
@@ -555,8 +621,12 @@
               return;
             }
             if (inUi(ev.target) || /INPUT|TEXTAREA|SELECT/.test(ev.target.tagName)) { return; }
+            if (!ev.metaKey && !ev.ctrlKey && !ev.altKey) {
+              if (ev.key === 'v' || ev.key === 'V') { put('stuToolName', 'Select'); }
+              if (ev.key === 'i' || ev.key === 'I') { put('stuToolName', 'Interact'); }
+            }
             if (ev.key === 'Escape') { S.select(S.el && S.el.parentElement !== document.body ? S.el.parentElement : null); }
-            if (ev.key === 'Enter' && S.el) { ev.preventDefault(); var r = S.el.getBoundingClientRect(); S.beginEdit(S.el, r.left + 2, r.top + 2); }
+            if (ev.key === 'Enter' && S.el) { ev.preventDefault(); S.beginEdit(S.el); }
             var sel = L().stuSel;
             if (ev.altKey && sel && sel.row && (ev.key === 'ArrowUp' || ev.key === 'ArrowDown')) {
               ev.preventDefault();
