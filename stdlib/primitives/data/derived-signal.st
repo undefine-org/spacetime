@@ -46,7 +46,12 @@
         try {
           value = compute.apply(null, vals);
         } catch (e) {
-          console.error('[derived-signal ' + name + ']', e);
+          // An input that has not been published yet is not an error: the
+          // derive simply has nothing to say until it arrives (a fetch still
+          // in flight, a host widget before its first reply). Only a throw
+          // with every input present is a real defect worth reporting.
+          var waiting = vals.some(function (v) { return v === undefined; });
+          if (!waiting) console.error('[derived-signal ' + name + ']', e);
           return;
         }
         window.__stPublish(name, value);
