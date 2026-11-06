@@ -511,13 +511,17 @@
         make: (pt) => {
           const holder = new THREE.Group();
           scene.add(holder);
+          // a render waits for this (ST._loading): frame 0 must have its cast
+          ST._loading = (ST._loading || 0) + 1;
+          const done = () => { ST._loading = Math.max(0, (ST._loading || 1) - 1); };
           new THREE.addons.GLTFLoader().load(pt.props.src, (gltf) => {
+            done();
             holder.add(gltf.scene);
             gltf.scene.traverse((o) => { if (o.isMesh) shadowed(o, pt.props); });
             pt.mixer = new THREE.AnimationMixer(gltf.scene);
             pt.clips = gltf.animations;
             publish(pt);
-          }, undefined, (e) => console.error('[Spacetime] @gltf: load failed', pt.props.src, e));
+          }, undefined, (e) => { done(); console.error('[Spacetime] @gltf: load failed', pt.props.src, e); });
           return holder;
         },
         update: (pt) => {

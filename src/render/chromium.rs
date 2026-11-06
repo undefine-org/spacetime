@@ -26,7 +26,7 @@ use chromiumoxide::cdp::browser_protocol::emulation::SetDeviceMetricsOverridePar
 use chromiumoxide::cdp::browser_protocol::page::CaptureScreenshotFormat;
 use chromiumoxide::page::{Page, ScreenshotParams};
 
-use super::{RenderOptions, RenderReport, StillsOptions, compile_page, file_base, resolve_entry};
+use super::{RenderOptions, RenderReport, Served, Stage, StillsOptions, compile_page, resolve_entry};
 use crate::cdp;
 
 /// How long to let the compositor paint after advancing virtual time, before
@@ -42,7 +42,11 @@ pub fn render_page(entry: &Path, opts: &RenderOptions) -> Result<RenderReport, S
     let entry = resolve_entry(entry)?;
     let workspace_root = crate::compiler::project_root_for(&entry);
     let workspace_root = workspace_root.as_path();
-    let (html, duration_ms, soundtracks) = compile_page(&entry, workspace_root, &file_base(workspace_root))?;
+    let (html, duration_ms, soundtracks) = compile_page(&entry, workspace_root, ".")?;
+    // PLAN-152: served over loopback HTTP from a stage beside the site's files
+    // (Chrome won't fetch `file://`: a glTF character never arrived)
+    let stage = Stage::new(&html, workspace_root)?;
+    let served = Served::start(&stage.dir)?;
 
     // PLAN-150 W11: an optional [from, to] window trims the render to one scene.
     let start_ms = opts.from_ms.unwrap_or(0).min(duration_ms);
@@ -75,7 +79,7 @@ pub fn render_page(entry: &Path, opts: &RenderOptions) -> Result<RenderReport, S
     let soundtrack = super::soundtrack_in(&sound_dir, &soundtracks, start_ms, end_ms.max(start_ms + 1))?;
     let mut ffmpeg = spawn_ffmpeg(&opts.out, opts.fps, out_w, out_h, soundtrack.as_deref())?;
     let write_result = capture_into(
-        &html,
+        &served.url,
         &mut ffmpeg,
         frames,
         frame_ms,
@@ -119,7 +123,11 @@ pub fn render_stills(entry: &Path, opts: &StillsOptions) -> Result<Vec<PathBuf>,
     let entry = resolve_entry(entry)?;
     let workspace_root = crate::compiler::project_root_for(&entry);
     let workspace_root = workspace_root.as_path();
-    let (html, duration_ms, soundtracks) = compile_page(&entry, workspace_root, &file_base(workspace_root))?;
+    let (html, duration_ms, soundtracks) = compile_page(&entry, workspace_root, ".")?;
+    // PLAN-152: served over loopback HTTP from a stage beside the site's files
+    // (Chrome won't fetch `file://`: a glTF character never arrived)
+    let stage = Stage::new(&html, workspace_root)?;
+    let served = Served::start(&stage.dir)?;
 
     if opts.times_s.is_empty() {
         return Err("--stills needs at least one timestamp (e.g. --stills 1.5,9,24)".to_string());
@@ -153,8 +161,7 @@ pub fn render_stills(entry: &Path, opts: &StillsOptions) -> Result<Vec<PathBuf>,
             )
             .await
             .map_err(|e| format!("inject rAF gate failed: {e}"))?;
-        let html_file = cdp::HtmlFileGuard::write(&html)?;
-        page.goto(html_file.url())
+        page.goto(served.url.clone())
             .await
             .map_err(|e| format!("goto(file:) failed: {e}"))?;
         wait_for_driver(&page).await?;
@@ -241,7 +248,7 @@ fn spawn_ffmpeg(out: &Path, fps: u32, width: u32, height: u32, soundtrack: Optio
 /// clock, then advance it one frame's worth at a time and pipe each screenshot
 /// to ffmpeg.
 fn capture_into(
-    html: &str,
+    url: &str,
     ffmpeg: &mut FfmpegPipe,
     frames: u32,
     frame_ms: f64,
@@ -286,8 +293,7 @@ fn capture_into(
     // unlike a data: URL (the exact reason cdp::HtmlFileGuard exists). The
     // page loads under REAL time (the gate swallows its rAFs); virtual time
     // is frozen next, from a deterministic baseline.
-    let html_file = cdp::HtmlFileGuard::write(html)?;
-    page.goto(html_file.url())
+    page.goto(url.to_string())
         .await
         .map_err(|e| format!("goto(file:) failed: {e}"))?;
 
@@ -385,15 +391,16 @@ pub fn page_moves_under_real_time(entry: &Path) -> Result<bool, String> {
     let entry = resolve_entry(entry)?;
     let workspace_root = crate::compiler::project_root_for(&entry);
     let workspace_root = workspace_root.as_path();
-    let (html, _duration_ms, _soundtracks) = compile_page(&entry, workspace_root, &file_base(workspace_root))?;
+    let (html, _duration_ms, _soundtracks) = compile_page(&entry, workspace_root, ".")?;
+    let stage = Stage::new(&html, workspace_root)?;
+    let served = Served::start(&stage.dir)?;
     let infra = cdp::infra()?;
     infra.rt.block_on(async {
         let page = cdp::open_page(&infra.browser).await?;
         page.execute(SetDeviceMetricsOverrideParams::new(480, 360, 1.0, false))
             .await
             .map_err(|e| format!("set device metrics failed: {e}"))?;
-        let html_file = cdp::HtmlFileGuard::write(&html)?;
-        page.goto(html_file.url())
+        page.goto(served.url.clone())
             .await
             .map_err(|e| format!("goto(file:) failed: {e}"))?;
         wait_for_driver(&page).await?;
@@ -424,7 +431,9 @@ async fn wait_for_driver(page: &Page) -> Result<(), String> {
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
         let ready = page
-            .evaluate("typeof ST !== 'undefined' && ST._raf && ST._raf.callbacks && ST._raf.callbacks.size > 0")
+            // PLAN-152: and every asset a stage is loading (a glTF model) has
+            // arrived, so frame 0 is the scene, not the scene minus its cast
+            .evaluate("typeof ST !== 'undefined' && ST._raf && ST._raf.callbacks && ST._raf.callbacks.size > 0 && !(ST._loading > 0)")
             .await
             .ok()
             .and_then(|r| r.into_value::<bool>().ok())

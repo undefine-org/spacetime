@@ -184,6 +184,165 @@ pub(crate) fn compile_page(
     Ok((html, longest.round() as u64, soundtracks))
 }
 
+/// A staged film (shared by both engines): `index.html` in a fresh temp dir whose other entries
+/// are symlinks to the site's own files, so the page's root-relative assets
+/// (rebased to `./…`) resolve exactly as they do under `serve`.
+pub(crate) struct Stage {
+    pub(crate) dir: PathBuf,
+}
+
+impl Stage {
+    pub(crate) fn new(document: &str, site_dir: &Path) -> Result<Self, String> {
+        let dir = std::env::temp_dir().join(format!(
+            "spacetime-stage-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).map_err(|e| format!("failed to create {}: {e}", dir.display()))?;
+        let site = std::fs::canonicalize(site_dir).unwrap_or_else(|_| site_dir.to_path_buf());
+        if let Ok(entries) = std::fs::read_dir(&site) {
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                if name == "index.html" || name == "dist" {
+                    continue;
+                }
+                #[cfg(unix)]
+                let _ = std::os::unix::fs::symlink(entry.path(), dir.join(&name));
+            }
+        }
+        std::fs::write(dir.join("index.html"), document)
+            .map_err(|e| format!("failed to stage the composition: {e}"))?;
+        Ok(Stage { dir })
+    }
+
+    pub(crate) fn page(&self) -> PathBuf {
+        self.dir.join("index.html")
+    }
+}
+
+impl Drop for Stage {
+    fn drop(&mut self) {
+        if std::env::var_os("SPACETIME_RENDER_KEEP").is_none() {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        } else {
+            eprintln!("  (kept staged composition at {})", self.dir.display());
+        }
+    }
+}
+
+/// A loopback HTTP server over a [`Stage`] (the Chromium engine): Chrome will
+/// not `fetch()` a `file://` URL, and a page's models, fonts and sounds load
+/// by fetch — a glTF character from `file://` simply never arrived. Served
+/// from the stage, relative URLs resolve against the site as under `serve`.
+/// Stops when dropped.
+#[cfg(feature = "cdp")]
+pub(crate) struct Served {
+    pub(crate) url: String,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    addr: std::net::SocketAddr,
+}
+
+#[cfg(feature = "cdp")]
+impl Served {
+    pub(crate) fn start(root: &Path) -> Result<Self, String> {
+        use std::io::{BufRead, BufReader, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").map_err(|e| format!("failed to serve the film: {e}"))?;
+        let addr = listener.local_addr().map_err(|e| e.to_string())?;
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (root, halt) = (root.to_path_buf(), stop.clone());
+        std::thread::spawn(move || {
+            for conn in listener.incoming() {
+                if halt.load(std::sync::atomic::Ordering::Relaxed) {
+                    break;
+                }
+                let Ok(mut conn) = conn else { continue };
+                let root = root.clone();
+                std::thread::spawn(move || {
+                    let mut line = String::new();
+                    let mut reader = BufReader::new(conn.try_clone().ok()?);
+                    reader.read_line(&mut line).ok()?;
+                    // drain the headers
+                    let mut h = String::new();
+                    while reader.read_line(&mut h).ok()? > 2 {
+                        h.clear();
+                    }
+                    let raw = line.split_whitespace().nth(1).unwrap_or("/");
+                    let path = raw.split(['?', '#']).next().unwrap_or("/");
+                    let path = percent_decode(path.trim_start_matches('/'));
+                    let file = if path.is_empty() { root.join("index.html") } else { root.join(&path) };
+                    let safe = !path.split('/').any(|seg| seg == "..");
+                    match std::fs::read(&file) {
+                        Ok(body) if safe => {
+                            let head = format!("HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", content_type(&file), body.len());
+                            let _ = conn.write_all(head.as_bytes()).and_then(|_| conn.write_all(&body));
+                        }
+                        _ => {
+                            let _ = conn.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                        }
+                    }
+                    Some(())
+                });
+            }
+        });
+        Ok(Served { url: format!("http://{addr}/"), stop, addr })
+    }
+}
+
+#[cfg(feature = "cdp")]
+impl Drop for Served {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        let _ = std::net::TcpStream::connect(self.addr); // wake the accept loop
+    }
+}
+
+#[cfg(feature = "cdp")]
+fn percent_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' && i + 3 <= b.len() {
+            if let Ok(v) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
+                out.push(v);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+#[cfg(feature = "cdp")]
+fn content_type(p: &Path) -> &'static str {
+    match p.extension().and_then(|e| e.to_str()).unwrap_or("") {
+        "html" => "text/html; charset=utf-8",
+        "js" | "mjs" => "text/javascript",
+        "css" => "text/css",
+        "json" => "application/json",
+        "glb" => "model/gltf-binary",
+        "gltf" => "model/gltf+json",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "webp" => "image/webp",
+        "svg" => "image/svg+xml",
+        "wav" => "audio/wav",
+        "mp3" => "audio/mpeg",
+        "ogg" => "audio/ogg",
+        "woff2" => "font/woff2",
+        "woff" => "font/woff",
+        "hdr" => "application/octet-stream",
+        "mp4" => "video/mp4",
+        _ => "application/octet-stream",
+    }
+}
+
 /// PLAN-152: the soundtrack of `[from_ms, to_ms)` of a film into `dir` as
 /// `soundtrack.wav` — its path, or None when the film has no `@sound`.
 pub(crate) fn soundtrack_in(dir: &Path, programs: &[serde_json::Value], from_ms: u64, to_ms: u64) -> Result<Option<PathBuf>, String> {

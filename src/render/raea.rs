@@ -27,7 +27,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use super::{RenderOptions, RenderReport, StillsOptions, compile_page, resolve_entry};
+use super::{RenderOptions, RenderReport, Stage, StillsOptions, compile_page, resolve_entry};
 
 /// The composition id the bridge registers its timeline under.
 const COMPOSITION_ID: &str = "spacetime";
@@ -161,55 +161,6 @@ pub(crate) fn film_document(html: &str, window: Window, opts: &RenderOptions) ->
     Ok(format!("{}{}{}", &html[..at], bridge, &html[at + "</body>".len()..]))
 }
 
-/// A staged composition: `index.html` in a fresh temp dir whose other entries
-/// are symlinks to the site's own files, so the page's root-relative assets
-/// (rebased to `./…`) resolve exactly as they do under `serve`.
-struct Stage {
-    dir: PathBuf,
-}
-
-impl Stage {
-    fn new(document: &str, site_dir: &Path) -> Result<Self, String> {
-        let dir = std::env::temp_dir().join(format!(
-            "spacetime-raea-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).map_err(|e| format!("failed to create {}: {e}", dir.display()))?;
-        let site = std::fs::canonicalize(site_dir).unwrap_or_else(|_| site_dir.to_path_buf());
-        if let Ok(entries) = std::fs::read_dir(&site) {
-            for entry in entries.flatten() {
-                let name = entry.file_name();
-                if name == "index.html" || name == "dist" {
-                    continue;
-                }
-                #[cfg(unix)]
-                let _ = std::os::unix::fs::symlink(entry.path(), dir.join(&name));
-            }
-        }
-        std::fs::write(dir.join("index.html"), document)
-            .map_err(|e| format!("failed to stage the composition: {e}"))?;
-        Ok(Stage { dir })
-    }
-
-    fn page(&self) -> PathBuf {
-        self.dir.join("index.html")
-    }
-}
-
-impl Drop for Stage {
-    fn drop(&mut self) {
-        if std::env::var_os("SPACETIME_RAEA_KEEP").is_none() {
-            let _ = std::fs::remove_dir_all(&self.dir);
-        } else {
-            eprintln!("  (kept staged composition at {})", self.dir.display());
-        }
-    }
-}
 
 /// Compile `entry` and stage it as a raea composition over `window`.
 fn prepare(entry: &Path, opts: &RenderOptions) -> Result<(Stage, Window, u64), String> {
