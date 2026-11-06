@@ -235,9 +235,9 @@
       <button type="button" class="stu-tool" data-tool="Select" title="Select and edit (V)">Select</button>
       <button type="button" class="stu-tool" data-tool="Interact" title="Use the page like a visitor (I); Alt-click does it once">Interact</button>
     </span>
+    <button type="button" class="stu-bar__close">Done</button>
     <span class="stu-bar__msg"></span>
     <span class="stu-bar__hint">double-click edit / Esc parent / Alt+arrows move / Alt-click use</span>
-    <button type="button" class="stu-bar__close">Done</button>
   </div>
 </section>
 
@@ -279,6 +279,8 @@
 .stu-explorer, .stu-inspector, .stu-bar { display: none; }
 html.stu-on .stu-explorer, html.stu-on .stu-inspector { display: flex; }
 html.stu-on .stu-bar { display: flex; }
+// The dock steps out of the inspector's way while the studio is open.
+html.stu-on .st-dev-dock { right: calc(var(--stu-right) + 16px) !important; }
 html.stu-on { --stu-left: 264px; --stu-right: 300px; }
 html.stu-on body { margin-left: var(--stu-left) !important; margin-right: var(--stu-right) !important; }
 
@@ -423,6 +425,8 @@ html.stu-on body { margin-left: var(--stu-left) !important; margin-right: var(--
 
 .stu-box { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 8px; }
 .stu-prop__sw[data-swatch=""] { visibility: hidden; }
+.stu-prop[data-group="Frame"] { grid-template-columns: 14px 1fr; }
+.stu-prop[data-group="Frame"] .stu-prop__sw { display: none; }
 .stu-prop { display: grid; grid-template-columns: 70px 1fr 12px; gap: 4px; align-items: center; min-width: 0; padding: 3px 6px; border-radius: 4px; background: #f5f5f5; }
 .stu-prop[data-group="Layout"], .stu-prop[data-group="Type"], .stu-prop[data-group="Fill"], .stu-prop[data-group="Stroke"], .stu-prop[data-group="Effects"] { grid-column: 1 / -1; }
 .stu-prop__group { display: none; }
@@ -451,10 +455,10 @@ html.stu-on body { margin-left: var(--stu-left) !important; margin-right: var(--
 
 .stu-bar {
   position: fixed;
-  top: 10px;
+  bottom: 16px;
   left: calc(var(--stu-left) + 12px);
-  right: calc(var(--stu-right) + 12px);
-  justify-content: center;
+  right: calc(var(--stu-right) + 380px);
+  justify-content: flex-start;
   align-items: center;
   gap: 10px;
   pointer-events: none;
@@ -473,6 +477,8 @@ html.stu-on body { margin-left: var(--stu-left) !important; margin-right: var(--
 .stu-bar[data-st-state="Select"] .stu-tool[data-tool="Select"],
 .stu-bar[data-st-state="Interact"] .stu-tool[data-tool="Interact"] { background: var(--stu-blue); color: #fff; }
 .stu-bar__msg, .stu-bar__hint {
+  min-width: 0;
+  flex: 0 1 auto;
   padding: 6px 10px;
   border-radius: 6px;
   background: rgba(30, 30, 30, 0.92);
