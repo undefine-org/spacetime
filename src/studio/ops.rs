@@ -58,6 +58,41 @@ pub enum Op {
         expect: String,
         value: String,
     },
+    /// Replace exactly the bytes `start..end`, which must still read `expect`
+    /// (PLAN-155: a clip's `at 2s`, a keyframe stop, a drum cell — the words
+    /// `score.json` hands out).
+    Span {
+        file: String,
+        start: usize,
+        end: usize,
+        expect: String,
+        value: String,
+    },
+    /// Insert `text` at byte `at`, where the source must still read `before`
+    /// just ahead of it (a param added to a part, a stop to a chain).
+    Insert {
+        file: String,
+        at: usize,
+        before: String,
+        text: String,
+    },
+    /// Replace a whole file (the code pane), guarded by the hash of the text
+    /// the edit was made on ([`source_hash`]).
+    Source {
+        file: String,
+        base: String,
+        text: String,
+    },
+}
+
+/// The guard a whole-file edit carries: FNV-1a of the text, in hex.
+pub fn source_hash(text: &str) -> String {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in text.bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    format!("{h:016x}")
 }
 
 /// What the browser knows about where a text was shown.
@@ -99,7 +134,39 @@ pub fn apply(site: &Site, op: &Op) -> Result<Changes, String> {
         Op::Duplicate { binding, index } => duplicate_row(site, binding, *index),
         Op::Delete { binding, index } => delete_row(site, binding, *index),
         Op::Decl { file, start, end, expect, value } => decl(site, file, *start, *end, expect, value),
+        Op::Span { file, start, end, expect, value } => {
+            let fi = file_index(site, file)?;
+            let current = site.files[fi].text.get(*start..*end).ok_or("the span is outside the file")?;
+            if current != expect {
+                return Err(STALE.to_string());
+            }
+            Ok(splice(site, fi, Span::new(*start, *end), value))
+        }
+        Op::Insert { file, at, before, text } => {
+            let fi = file_index(site, file)?;
+            let src = &site.files[fi].text;
+            let ahead = at.checked_sub(before.len()).and_then(|a| src.get(a..*at));
+            if ahead != Some(before.as_str()) {
+                return Err(STALE.to_string());
+            }
+            Ok(splice(site, fi, Span::new(*at, *at), text))
+        }
+        Op::Source { file, base, text } => {
+            let fi = file_index(site, file)?;
+            if source_hash(&site.files[fi].text) != *base {
+                return Err(STALE.to_string());
+            }
+            let mut changes = Changes::new();
+            changes.insert(site.files[fi].path.clone(), text.clone());
+            Ok(changes)
+        }
     }
+}
+
+const STALE: &str = "the source changed under this edit; reload and try again";
+
+fn file_index(site: &Site, file: &str) -> Result<usize, String> {
+    site.files.iter().position(|f| f.path == file).ok_or_else(|| format!("{file} is not part of this page"))
 }
 
 // ---- text ------------------------------------------------------------------

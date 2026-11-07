@@ -415,4 +415,60 @@ mod tests {
         let near = stage["params"].as_array().unwrap().iter().find(|p| p["name"] == "near").unwrap();
         assert!(near["written"].is_null(), "an unwritten param is shown at its default");
     }
+
+    /// The edit a gesture sends: one `score.json` address, a new word.
+    fn span_op(addr: &Value, value: &str) -> crate::studio::ops::Op {
+        crate::studio::ops::Op::Span {
+            file: "index.st".into(),
+            start: addr["start"].as_u64().unwrap() as usize,
+            end: addr["end"].as_u64().unwrap() as usize,
+            expect: addr["text"].as_str().unwrap().into(),
+            value: value.into(),
+        }
+    }
+
+    fn apply(text: &str, op: &crate::studio::ops::Op) -> Result<String, String> {
+        let site = Site::from_files(&[("index.st", text)]);
+        crate::studio::ops::apply(&site, op).map(|c| c["index.st"].clone())
+    }
+
+    #[test]
+    fn a_gesture_rewrites_exactly_its_word() {
+        let text = std::fs::read_to_string("demos/film-robot-day/index.st").unwrap();
+        let s = robot_day();
+        // drag the &card clip to start at 1 s
+        let card = s["scores"][0]["entries"].as_array().unwrap().iter().find(|e| e["subject"] == "card").unwrap();
+        let moved = apply(&text, &span_op(&card["at"], "1s")).unwrap();
+        assert!(moved.contains("&card at 1s for 5.2s;"));
+        assert_eq!(moved.len(), text.len() - "0.4s".len() + "1s".len(), "nothing else changed");
+        let again = score(&Site::from_files(&[("index.st", &moved)]));
+        let card2 = again["scores"][0]["entries"].as_array().unwrap().iter().find(|e| e["subject"] == "card").unwrap();
+        assert_eq!(card2["at_ms"], 1000.0);
+        // a stale address is refused, never guessed
+        assert!(apply(&moved, &span_op(&card["at"], "2s")).is_err());
+        // a drum cell
+        let row = s["forms"]["--beat"]["props"].as_array().unwrap().iter().find(|p| p["prop"] == "--kick").unwrap();
+        let toggled = apply(&text, &span_op(&row["cells"][1], "x")).unwrap();
+        assert!(toggled.contains("--kick:  x x . . . . . . x . x . . . . . ;"));
+        // a keyframe stop
+        let card_opacity = &s["clips"]["card"]["channels"][0]["stops"][1]["span"];
+        let stop = apply(&text, &span_op(card_opacity, "1 at 25%")).unwrap();
+        assert!(stop.contains("opacity: 0 -> 1 at 25% -> 1 at 78% -> 0;"));
+    }
+
+    #[test]
+    fn a_param_is_added_and_a_file_is_saved_whole() {
+        use crate::studio::ops::{Op, source_hash};
+        let text = std::fs::read_to_string("demos/film-robot-day/index.st").unwrap();
+        let s = robot_day();
+        let robot = s["parts"].as_array().unwrap().iter().find(|p| p["name"] == "robot").unwrap();
+        let scale = robot["params"].as_array().unwrap().iter().find(|p| p["name"] == "scale").unwrap();
+        let at = scale["written"]["end"].as_u64().unwrap() as usize;
+        let added = apply(&text, &Op::Insert { file: "index.st".into(), at, before: "0.42".into(), text: ", rate: 1.5".into() }).unwrap();
+        assert!(added.contains("scale: 0.42, rate: 1.5"));
+        assert!(apply(&text, &Op::Insert { file: "index.st".into(), at, before: "0.43".into(), text: "x".into() }).is_err());
+        let saved = apply(&text, &Op::Source { file: "index.st".into(), base: source_hash(&text), text: "// new\n".into() }).unwrap();
+        assert_eq!(saved, "// new\n");
+        assert!(apply(&added, &Op::Source { file: "index.st".into(), base: source_hash(&text), text: "x".into() }).is_err(), "a save on a stale base is refused");
+    }
 }

@@ -42,3 +42,17 @@ studio draws. Every word in it carries `{file, start, end, text}`:
 It is read from the parser's own matches: the metasystem keeps the span of
 every capture, nested, under its grammar's path, so nothing re-reads the
 language.
+
+## Edits are words
+
+`POST /__spacetime/studio/apply` takes PLAN-154's ops and three more:
+
+| op | does | guarded by |
+|---|---|---|
+| `span {file, start, end, expect, value}` | replaces one word `score.json` handed out | the bytes still read `expect` |
+| `insert {file, at, before, text}` | adds a param or a stop | the bytes just ahead read `before` |
+| `source {file, base, text}` | saves a whole file (the code pane) | `base` is the hash of the file it was edited from |
+
+A gesture is one of these: drag a clip and its `at 0.4s` becomes `at 1s`; click
+a drum cell and its `.` becomes `x`. An edit on a stale address is refused,
+never guessed.
