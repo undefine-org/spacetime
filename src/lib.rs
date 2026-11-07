@@ -97,6 +97,7 @@ pub mod html;
 pub mod introspect;
 pub mod ir;
 pub mod literate;
+pub mod studio;
 #[cfg(any(feature = "lsp", feature = "wasm"))]
 pub mod lsp;
 pub mod mcp;
