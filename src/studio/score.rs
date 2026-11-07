@@ -51,6 +51,10 @@ pub fn score(site: &Site) -> Value {
     json!({
         "entry": site.entry,
         "files": site.files.iter().map(|f| f.path.clone()).collect::<Vec<_>>(),
+        // the code pane edits a whole file, guarded by the hash it was read at
+        "sources": site.files.iter().map(|f| json!({
+            "path": f.path, "text": f.text, "hash": crate::studio::ops::source_hash(&f.text),
+        })).collect::<Vec<_>>(),
         "scores": out.scores,
         "clips": out.clips,
         "forms": out.forms,

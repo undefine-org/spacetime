@@ -1,6 +1,6 @@
 # Film studio
 
-*Working doc for PLAN-155. Being built. Companion to `../film.st.md` and
+*Working doc for PLAN-155. Ships today (dev server). Companion to `../film.st.md` and
 `scenes-and-sound.md`.*
 
 The film studio is the PLAN-154 studio's Film mode: a timeline, keyframes, sound
@@ -56,3 +56,26 @@ language.
 A gesture is one of these: drag a clip and its `at 0.4s` becomes `at 1s`; click
 a drum cell and its `.` becomes `x`. An edit on a stale address is refused,
 never guessed.
+
+## Using it
+
+`spacetime serve demos/film-robot-day/`, open the page, press the dock's
+**Edit** chip. On a page with a `@score` the studio adds Film mode:
+
+| | does |
+|---|---|
+| Space / K / L / J | play-pause / pause / play / back a second |
+| ← → (Shift: a second) | a frame |
+| Home / End | start / end |
+| I / O, Esc | loop in / out, clear |
+| ruler | scrub |
+| clip bar / its right edge | drag: its `at` / its `for` (snaps to 0.1 s; Shift: free) |
+| diamond | drag: the stop's `at p%` |
+| drum cell | click: `.` ↔ `x` |
+| Inspector → Film | the selection's words, editable |
+| Explorer → Scene | the stage's parts and every param |
+| Code | the file, saved whole when you leave it |
+
+Every change is a source edit; the page reloads and the film comes back at the
+same frame, paused or playing, looped, with the same selection (about 5 s on a
+release build for Robot Day). Gate: `tests/studio/film_studio_e2e.sh`.

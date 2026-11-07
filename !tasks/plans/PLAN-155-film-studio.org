@@ -65,6 +65,41 @@ The studio is a PROJECTION of the score; every gesture is one source edit (SIP-0
 - Gates =studio::score= (+2): a clip move, a drum cell and a keyframe stop each rewrite exactly their word and the
   re-projected score reads the new time; a stale address, insert or save is refused. Live on a scratch copy over
   HTTP: one-word diff (=&card at 0.4s= → =1s=), the replay refused.
-** TODO P4 F5 hot rescore
-** TODO P5 F6 primitives + Film UI
+** DONE P4 (re-scoped) an edit keeps the film where it was
+Hot rescore needs the compiler to hand out each bind's arguments (keyframe tables, window offsets, the synth program)
+to a running page; scraping emitted JS or re-lowering keyframes in the client would be a second lowering. Re-scoped
+to a reload that LOSES NOTHING: the playhead, play state, loop and selection are kept across it (=pagehide=, restored
+once the transport and the score are up). Measured on the release build (Robot Day): the reload starts 0.7 s after
+the edit, HTML at 2.2 s, the page and the studio back at ~5 s. Hot rescore stays a follow-up (below).
+** DONE P5 Film mode UI (=stdlib/__studio__/film.st= + =primitives/film-kit.st=)
+- Viewer (the page framed between the panels: =<body>= becomes the containing block of the film's fixed reel, the
+  dock and the overlays live beside it), transport bar (Space/K/L/J, arrows, Home/End, I/O loop), timeline (ruler
+  scrub, a bar per clip — drag: =at=, edge: =for= —, channels with a diamond per keyframe — drag: =at p%= —, sound
+  lanes with waveforms from =STSynth.render=), inspector Film section (the selection's words; a pattern's step
+  grid), explorer Scene tab (every part's params, a default one written in after the last written), Code tab
+  (whole file, guarded by its hash). No JavaScript in the =.st=; behaviour in the kit primitive.
+- Bugs found in the browser and fixed: a selection's addresses carried the file INDEX where ops need its path; a
+  part lookup was shadowed by the entry lookup; an inserted param landed after the alphabetically last param; the
+  restore ran before the studio's state existed; the PLAN-154 kit relied on the file watcher, which can miss a
+  studio write (it now reloads by itself 600 ms after an edit if the watcher has not); the runtime's selector-init
+  observer watched only =<body>= (=st.js= now observes the document; overlays attach beside =<body>=).
+- Gate =tests/studio/film_studio_e2e.sh= (agent-browser, real input events, reads the SOURCE after each gesture):
+  11/11 on the release build — timeline drawn, seek+pause, clip drag (=at=), restore (12 s, paused, selection),
+  inspector (=for=), keyframe drag, drum cell (+ the synth program hears it), default param inserted, code pane
+  save, Space. Before Film mode it stops at "the film studio did not open".
+** DONE Builds off this machine (asked mid-way: "use nix + the nixbuild system to offload")
+=nix/spacetime.nix= (crane): =nix build -f nix/spacetime.nix= runs on the configured Build host
+(=/etc/nix/machines=, =max-jobs = 0=); deps are one cached derivation, so a change recompiles only spacetime. Also
+=tests= (=cargo test --lib=) and =headless= (the =.test.st= suite). Found on the way: crane stubs path crates in the
+deps build, and =Cargo.toml= patches serde/serde_core from =.patches/= — the deps build gets the real patches; V8 is
+pinned (no network in the sandbox). =tests= runs in the dev profile (the suite has =cfg(debug_assertions)= helpers)
+with its own cached dev deps.
+- Verification for P4/P5: e2e 11/11 (release, remote-built); headless 756/11 (baseline, run on the Build host);
+  =tests/score --cdp= 42/4 and =stdlib/3d/tests --cdp= 23/11 (baselines). The remote =cargo test --lib= (dev
+  profile) was still running at this commit.
 ** TODO P6 render from studio, docs, demo film
+* Follow-ups
+- Hot rescore (sub-second edits): the compiler exposes per-bind arguments for apply-animations / score-window /
+  score-synth; the page swaps them in place.
+- A clip's age after a live seek restarts at the seek (renders are exact).
+- The file watcher sometimes misses the studio's own writes (seen; not root-caused).

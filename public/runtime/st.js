@@ -3626,14 +3626,10 @@
       }
     });
 
-    // Start observing when DOM is ready
-    if (document.body) {
-      observer.observe(document.body, { childList: true, subtree: true });
-    } else {
-      document.addEventListener('DOMContentLoaded', () => {
-        observer.observe(document.body, { childList: true, subtree: true });
-      });
-    }
+    // Observe the whole document: a node a page adds outside <body> (a dev
+    // dock lifted beside it, PLAN-155) is still the page's, and init is
+    // idempotent per element.
+    observer.observe(document.documentElement, { childList: true, subtree: true });
   }
 
   // Export to global

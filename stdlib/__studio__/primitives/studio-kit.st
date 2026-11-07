@@ -312,7 +312,15 @@
             }).then(function (r) { return r.json(); }).then(function (res) {
               if (res.ok) {
                 put('stuStatus', res.changed && res.changed.length ? 'Saved to ' + res.changed.join(', ') : 'No change');
-                if (res.changed && res.changed.length) { S.remember(); }
+                if (res.changed && res.changed.length) {
+                  S.remember();
+                  // The file watcher reloads the page; an edit of ours does not
+                  // depend on it (it can miss a write), so if it has not come
+                  // in a moment, the page goes back to its source by itself.
+                  setTimeout(function () {
+                    if (S.inflight || S.editing) { S.pendingReload = true; } else { location.reload(); }
+                  }, 600);
+                }
               } else {
                 put('stuStatus', '');
                 put('stuError', res.error || 'The edit was refused');
@@ -425,7 +433,9 @@
             var d = document.createElement('div');
             d.className = 'stu-overlay ' + cls;
             if (html) { d.innerHTML = html; }
-            document.body.appendChild(d);
+            // fixed, in viewport coordinates: beside <body>, which a film's
+            // studio makes the frame of its page (PLAN-155)
+            document.documentElement.appendChild(d);
             return d;
           };
           S.boxes = {

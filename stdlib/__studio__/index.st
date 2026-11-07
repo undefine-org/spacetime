@@ -16,6 +16,7 @@
 /// `$stu*` because dock widgets share one reactive scope. This file holds no
 /// JavaScript: behaviour lives in ./primitives/studio-kit.st.
 @import "./primitives/studio-kit.st";
+@import "./film.st";
 
 // ---- state ---------------------------------------------------------------------
 
@@ -38,7 +39,7 @@
 @data inline $stuError string : "";
 @data inline $stuNoop string : "";
 
-@type StuTab { Layers | Lists | Components | Pages }
+@type StuTab { Layers | Lists | Components | Pages | Scene }
 @type StuSelection { Nothing | Element | Row }
 @type StuTool { Select | Interact }
 
@@ -51,6 +52,7 @@
   ($stuTabName == "Lists")      => Lists;
   ($stuTabName == "Components") => Components;
   ($stuTabName == "Pages")      => Pages;
+  ($stuTabName == "Scene")      => Scene;
   _                             => Layers;
 }
 
@@ -101,6 +103,7 @@
   @state(when: $stuTab is Lists)      { --stu-tab: 1; }
   @state(when: $stuTab is Components) { --stu-tab: 2; }
   @state(when: $stuTab is Pages)      { --stu-tab: 3; }
+  @state(when: $stuTab is Scene)      { --stu-tab: 4; }
 }
 .stu-tab { @on &.click { $stuTabName <- $.dataset.tab; } }
 .stu-find {
@@ -183,12 +186,14 @@
       <button type="button" class="stu-tab" data-tab="Lists">Lists</button>
       <button type="button" class="stu-tab" data-tab="Components">Components</button>
       <button type="button" class="stu-tab" data-tab="Pages">Pages</button>
+      <button type="button" class="stu-tab" data-tab="Scene">Scene</button>
     </nav>
     <input class="stu-find" type="search" placeholder="Filter" aria-label="Filter the explorer" />
     <div class="stu-tree stu-tree--layers"></div>
     <div class="stu-tree stu-tree--lists"></div>
     <div class="stu-tree stu-tree--components"></div>
     <div class="stu-tree stu-tree--pages"></div>
+    <div class="stu-tree stu-tree--scene"></div>
   </aside>
 
   <aside class="stu-inspector stu-ui" aria-label="Inspector">
@@ -196,6 +201,13 @@
       <p class="stu-inspector__label">Nothing selected</p>
       <p class="stu-inspector__crumbs"></p>
     </header>
+
+    <section class="stu-sec stu-sec--film is-hidden">
+      <h3 class="stu-sec__h">Film</h3>
+      <p class="stu-film-sel__label"></p>
+      <div class="stu-film-fields"></div>
+      <div class="stu-grid"></div>
+    </section>
 
     <section class="stu-sec stu-sec--empty">
       <p class="stu-empty">Click anything on the page to select it. Double-click text to edit it where it stands. Lists are in the explorer: drag their items to reorder.</p>
@@ -229,6 +241,34 @@
       <div class="stu-rules"></div>
     </section>
   </aside>
+
+  <section class="stu-film stu-ui" aria-label="Film">
+    <header class="stu-film__bar">
+      <p class="stu-film__title"></p>
+      <button type="button" class="stu-film__go" data-go="start" title="To the start (Home)">|&lt;</button>
+      <button type="button" class="stu-film__go" data-go="back" title="A frame back (Left)">&lt;</button>
+      <button type="button" class="stu-film__play" title="Play / pause (Space)"></button>
+      <button type="button" class="stu-film__go" data-go="fwd" title="A frame on (Right)">&gt;</button>
+      <button type="button" class="stu-film__go" data-go="end" title="To the end (End)">&gt;|</button>
+      <span class="stu-film__time">00:00:00</span>
+      <span class="stu-film__loop"></span>
+      <span class="stu-film__spacer"></span>
+      <button type="button" class="stu-film__tab" data-panel="Timeline">Timeline</button>
+      <button type="button" class="stu-film__tab" data-panel="Code">Code</button>
+    </header>
+    <div class="stu-film__body stu-film__body--timeline">
+      <div class="stu-film__labels"></div>
+      <div class="stu-film__lanes">
+        <div class="stu-film__ruler" data-film="ruler"><div class="stu-film__ticks"></div></div>
+        <div class="stu-film__bars"></div>
+        <div class="stu-film__keys"></div>
+        <div class="stu-film__playhead"></div>
+      </div>
+    </div>
+    <div class="stu-film__body stu-film__body--code">
+      <div class="stu-film__code"></div>
+    </div>
+  </section>
 
   <div class="stu-bar stu-ui" role="status">
     <span class="stu-tools" role="group" aria-label="Tool">
@@ -319,7 +359,8 @@ html.stu-on body { margin-left: var(--stu-left) !important; margin-right: var(--
 .stu-explorer[data-st-state="Layers"] .stu-tab[data-tab="Layers"],
 .stu-explorer[data-st-state="Lists"] .stu-tab[data-tab="Lists"],
 .stu-explorer[data-st-state="Components"] .stu-tab[data-tab="Components"],
-.stu-explorer[data-st-state="Pages"] .stu-tab[data-tab="Pages"] { color: var(--stu-ink); background: #f0f0f0; }
+.stu-explorer[data-st-state="Pages"] .stu-tab[data-tab="Pages"],
+.stu-explorer[data-st-state="Scene"] .stu-tab[data-tab="Scene"] { color: var(--stu-ink); background: #f0f0f0; }
 
 .stu-find {
   margin: 8px;
@@ -337,7 +378,8 @@ html.stu-on body { margin-left: var(--stu-left) !important; margin-right: var(--
 .stu-explorer[data-st-state="Layers"] .stu-tree--layers,
 .stu-explorer[data-st-state="Lists"] .stu-tree--lists,
 .stu-explorer[data-st-state="Components"] .stu-tree--components,
-.stu-explorer[data-st-state="Pages"] .stu-tree--pages { display: block; }
+.stu-explorer[data-st-state="Pages"] .stu-tree--pages,
+.stu-explorer[data-st-state="Scene"] .stu-tree--scene { display: block; }
 
 .stu-node {
   display: flex;
