@@ -771,11 +771,19 @@ pub fn expand_score_binds(
             // The score's own progress publication. `as &film` names it; an
             // unnamed score gets a synthetic name, so the clips can reference
             // it either way.
+            // `as &film` names the score's timeline (an element-sigil name,
+            // `score_as_name`): its progress signal and its transport. A score
+            // with no clock of its own (`.clip`) still adopts its parent's
+            // window below, whatever it is called.
             let score_name = captures
                 .get("as")
                 .and_then(named_field(&["name"]))
-                .and_then(text_of)
+                .and_then(|v| match v {
+                    CapturedValue::Element(e) => Some(e.trim_start_matches('&').to_string()),
+                    other => text_of(other),
+                })
                 .filter(|n| !n.is_empty())
+                .filter(|_| !(domain == Domain::Inherited && driver_primitive.is_none()))
                 .unwrap_or_else(|| {
                     // A `.clip`-driven score does NOT invent a name: it adopts
                     // the window its parent already computed for this element

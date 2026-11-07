@@ -154,9 +154,14 @@
 ///
 /// @yields $progress - Current progress (0-1)
 /// @yields $play - Start playback
-/// @yields $pause - Pause playback
+/// @yields $pause - Pause playback (holds the position; play resumes from it)
+/// @yields $seek - Move the playhead to a position in ms (shown at once)
 /// @yields $reset - Reset to start
 /// @yields $destroy - Cleanup function
+///
+/// The timeline also registers as `ST._transports[name]` ({play, pause, seek,
+/// loop(in, out), position, playing, duration}) and publishes
+/// `<name>__playing`, so a tool (a studio, a scrub bar) can hold it.
 
 %primitive time-driver(
   &el,
@@ -171,7 +176,12 @@
     (() => {
     let progress = 0;
     let playing = false;
-    let startTime = null;
+    // the timeline is a POSITION (ms into it) that a frame advances: a pause
+    // holds it, a seek moves it, and play resumes from it
+    let startTime = null;   // the timestamp at which the position was 0
+    let resumeAt = null;    // a position to take up on the next frame (seek / resume)
+    let position = 0;
+    let loopIn = null, loopOut = null;
     let currentIteration = 0;
     let rafUnsub = null;
     let timeoutId = null;
@@ -181,27 +191,34 @@
     const maxIterations = %iterations;
     const alt = %alternate;
     const timelineName = %name;
+    const root = %&el;
 
+    const publish = (ms) => {
+      position = ms;
+      let rawProgress = Math.max(0, Math.min(1, ms / dur));
+      if (alt && currentIteration % 2 === 1) rawProgress = 1 - rawProgress;
+      progress = rawProgress;
+      %yield progress -> $%name;
+      if (typeof __stDebugHook !== 'undefined') __stDebugHook.timeline(timelineName, progress);
+    };
+    const setPlaying = (on) => {
+      playing = on;
+      if (root && ST.set) ST.set(root, timelineName + '__playing', on);
+    };
 
     const animate = (timestamp) => {
       if (!playing) return;
 
-      if (!startTime) startTime = timestamp + delayMs;
+      if (resumeAt !== null) { startTime = timestamp - resumeAt; resumeAt = null; }
+      if (startTime === null) startTime = timestamp + delayMs;
       if (timestamp < startTime) {
         return; // Still in delay, coordinator will call us next frame
       }
 
-      const elapsed = timestamp - startTime;
-      let rawProgress = Math.min(1, elapsed / dur);
-
-      // Handle alternate direction
-      if (alt && currentIteration % 2 === 1) {
-        rawProgress = 1 - rawProgress;
-      }
-
-      progress = rawProgress;
-      %yield progress -> $%name;
-      if (typeof __stDebugHook !== 'undefined') __stDebugHook.timeline(timelineName, progress);
+      let elapsed = timestamp - startTime;
+      // a loop range plays its section again (a studio's in/out)
+      if (loopOut !== null && elapsed >= loopOut) { startTime = timestamp - loopIn; elapsed = loopIn; }
+      publish(Math.min(dur, elapsed));
 
       if (elapsed >= dur) {
         currentIteration++;
@@ -209,34 +226,52 @@
         if (maxIterations === 0 || currentIteration < maxIterations) {
           startTime = null; // Reset for next iteration
         } else {
-          playing = false;
-          if (rafUnsub) { rafUnsub(); rafUnsub = null; }
-          // Notify completion when iterations finish
+          stop();
         }
       }
     };
 
+    const stop = () => {
+      setPlaying(false);
+      if (rafUnsub) { rafUnsub(); rafUnsub = null; }
+    };
+
     const play = () => {
       if (playing) return;
-      playing = true;
+      // resume where it was held; a finished timeline plays again from the top
+      if (position >= dur) { position = 0; currentIteration = 0; }
       startTime = null;
+      resumeAt = position > 0 ? position : null;
+      setPlaying(true);
       // Use RAF coordinator for synchronized updates
       rafUnsub = ST._raf.add(animate);
     };
 
-    const pause = () => {
-      playing = false;
-      if (rafUnsub) {
-        rafUnsub();
-        rafUnsub = null;
+    const pause = () => stop();
+
+    // move the playhead: shown at once, and a playing timeline goes on from there
+    const seek = (ms) => {
+      const at = Math.max(0, Math.min(dur, Number(ms) || 0));
+      if (playing) resumeAt = at;
+      publish(at);
+      if (root && root.dispatchEvent && typeof CustomEvent !== 'undefined') {
+        root.dispatchEvent(new CustomEvent('st:seek', { bubbles: true, detail: { name: timelineName, position: at } }));
       }
+    };
+
+    // play [inMs, outMs) over and over; loop() with no range plays through
+    const loop = (inMs, outMs) => {
+      if (inMs == null || outMs == null || !(outMs > inMs)) { loopIn = loopOut = null; return; }
+      loopIn = Math.max(0, inMs); loopOut = Math.min(dur, outMs);
     };
 
     const reset = () => {
       pause();
-      progress = 0;
       currentIteration = 0;
       startTime = null;
+      resumeAt = null;
+      position = 0;
+      progress = 0;
       %yield 0 -> $progress;
       if (typeof __stDebugHook !== 'undefined') __stDebugHook.timeline(timelineName, 0);
     };
@@ -244,7 +279,17 @@
     const destroy = () => {
       pause();
       if (timeoutId) clearTimeout(timeoutId);
+      if (ST._transports && ST._transports[timelineName] === transport) delete ST._transports[timelineName];
     };
+
+    // A timeline is a transport tools can hold (a studio, a scrub bar): by name.
+    const transport = {
+      el: root, duration: dur, play, pause, seek, loop,
+      get position() { return position; },
+      get playing() { return playing; },
+    };
+    ST._transports = ST._transports || {};
+    ST._transports[timelineName] = transport;
 
     // Set initial progress to 0 so watchers receive initial state
     %yield 0 -> $%name;
@@ -252,6 +297,7 @@
 
     %yield play -> $play;
     %yield pause -> $pause;
+    %yield seek -> $seek;
     %yield reset -> $reset;
     %yield destroy -> $destroy;
 
@@ -269,6 +315,7 @@
     $progress: number
     $play: fn() ~> effect
     $pause: fn() ~> effect
+    $seek: fn(number) ~> effect
     $reset: fn() ~> effect
     $destroy: fn() ~> effect
   }

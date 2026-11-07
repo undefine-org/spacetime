@@ -687,6 +687,10 @@
     // drivers to mount must not take this one for them (it would start the
     // clock before the score's driver exists, and the film would run late)
     tick._stStage = true;
+    // a transport's seek: a model's clip plays on from the frame it is seen
+    // (a live jump cannot know when the clip began; a render never seeks)
+    const onSeek = () => { for (const pt of parts) if (pt.kind === 'Model') pt.clipFrom = sceneTime; };
+    document.addEventListener('st:seek', onSeek);
     const raf = (typeof ST !== 'undefined' && ST._raf) ? ST._raf : null;
     let stopLoop = null;
     let rafId = null;
@@ -705,6 +709,7 @@
     start();
 
     %cleanup {
+      document.removeEventListener('st:seek', onSeek);
       if (stopLoop) stopLoop();
       if (rafId) cancelAnimationFrame(rafId);
       if (resizeObs) resizeObs.disconnect();

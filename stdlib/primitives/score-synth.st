@@ -5,7 +5,7 @@
 /// synthesizer `STSynth` (stdlib/film/synth/synth.js — the same file `spacetime
 /// render` runs to write the film's soundtrack) renders it to a buffer once;
 /// the buffer plays in step with the score's progress, seeking when the
-/// transport jumps. Under a virtual clock (render, `@clock`) nothing plays: the
+/// transport jumps, silent while it is paused. Under a virtual clock (render, `@clock`) nothing plays: the
 /// film's sound is written by the renderer from the same program instead.
 ///
 /// @param &el       - the score's element
@@ -51,12 +51,20 @@
       startedAt = ctx.currentTime; offset = sec;
     };
     if (typeof ST === 'undefined' || !ST.watchScoped) { %yield true -> $ready; return; }
+    let held = false;
+    const silence = () => { if (src) { try { src.stop(); } catch (_e) {} src = null; } };
     ST.watchScoped(root, %progress, (p) => {
       if (virtual()) return;
       const sec = ((typeof p === 'number' ? p : 0) * totalMs) / 1000;
       root._stSynthAt = sec;
+      if (held) return;
       const heard = src ? offset + (ctx.currentTime - startedAt) : -1;
       if (!src || Math.abs(heard - sec) > 0.2) play(sec);
+    });
+    // a paused transport is silent; it sounds again from where it is
+    ST.watchScoped(root, %progress + '__playing', (on) => {
+      held = on === false;
+      if (held) silence();
     });
     %yield true -> $ready;
   }
