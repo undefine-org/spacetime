@@ -23,3 +23,22 @@ silent while paused and follows every seek. A model's clip plays on from the
 frame a seek lands on (a render never seeks, so a rendered clip is exact).
 
 Gate: `tests/score/transport.test.st`.
+
+## The film's shape: `score.json`
+
+`GET /__spacetime/studio/score.json?entry=index.st` (dev server) is what the
+studio draws. Every word in it carries `{file, start, end, text}`:
+
+- `scores[]`: name, host, total, `entries[]` — a clip's `subject`, `at`, `for`
+  (and `at_ms`, `for_ms`), a sound's `form`, `at`, `for`, `notes`;
+- `clips{subject}`: the clip's `@on &.clip` body as `channels[]` — `scope`
+  (`&robot`, or none for the element itself), `prop`, `stops[]` (`value`, `at`,
+  `easing`);
+- `forms{--name}`: instruments (props with stops) and patterns (rows with cells);
+- `parts[]`: the stage and its parts with every param, written (with its span)
+  or at its default;
+- `programs[]`: the synth program of each score.
+
+It is read from the parser's own matches: the metasystem keeps the span of
+every capture, nested, under its grammar's path, so nothing re-reads the
+language.

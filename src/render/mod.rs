@@ -391,7 +391,7 @@ pub(crate) fn rebase_root_urls(html: &str, base: &str) -> String {
 }
 
 /// Collect every `FormMatch` from a scope tree (scores live in selectors).
-fn collect_scope_matches(
+pub(crate) fn collect_scope_matches(
     scopes: &[crate::parser::ast::ScopeBlock],
     out: &mut Vec<crate::syntax::FormMatch>,
 ) {

@@ -10,7 +10,7 @@ use crate::parser::meta_ast::{CaptureModifier, CapturePatternAst, CaptureType};
 use crate::syntax::cst::SyntaxKind;
 use crate::syntax::form_match::CapturedValue;
 
-use super::{CaptureExtractor, ExtractResult, ExtractorRegistry, TokenData};
+use super::{CaptureExtractor, ExtractResult, ExtractorRegistry, SpanTree, SpannedResult, TokenData};
 
 /// Compile a CapturePatternAst into a CaptureExtractor.
 ///
@@ -318,6 +318,13 @@ impl CaptureExtractor for AdjacentExtractor {
             return None;
         }
         self.inner.extract(tokens, source)
+    }
+
+    fn extract_spanned(&self, tokens: &[TokenData], source: &str) -> SpannedResult {
+        if tokens.first().is_some_and(|t| t.kind.is_trivia()) {
+            return None;
+        }
+        self.inner.extract_spanned(tokens, source)
     }
 
     fn requires_adjacency(&self) -> bool {
@@ -709,6 +716,13 @@ impl CaptureExtractor for ReifyingExtractor {
     fn extract(&self, tokens: &[TokenData], source: &str) -> ExtractResult {
         let (value, consumed) = self.inner.extract(tokens, source)?;
         Some(((self.reify)(value), consumed))
+    }
+
+    // The spans keep the GRAMMAR's shape (before reification): a keyframes
+    // body's items are its lines, `property` / `values` / `selector` / `scope`.
+    fn extract_spanned(&self, tokens: &[TokenData], source: &str) -> SpannedResult {
+        let (value, consumed, tree) = self.inner.extract_spanned(tokens, source)?;
+        Some(((self.reify)(value), consumed, tree))
     }
 }
 
@@ -1257,9 +1271,13 @@ struct OptionalExtractor {
 
 impl CaptureExtractor for OptionalExtractor {
     fn extract(&self, tokens: &[TokenData], source: &str) -> ExtractResult {
-        match self.inner.extract(tokens, source) {
+        self.extract_spanned(tokens, source).map(|(v, c, _)| (v, c))
+    }
+
+    fn extract_spanned(&self, tokens: &[TokenData], source: &str) -> SpannedResult {
+        match self.inner.extract_spanned(tokens, source) {
             Some(result) => Some(result),
-            None => Some((CapturedValue::String(String::new()), 0)),
+            None => Some((CapturedValue::String(String::new()), 0, SpanTree::default())),
         }
     }
 }
@@ -1272,7 +1290,12 @@ struct RepeatExtractor {
 
 impl CaptureExtractor for RepeatExtractor {
     fn extract(&self, tokens: &[TokenData], source: &str) -> ExtractResult {
+        self.extract_spanned(tokens, source).map(|(v, c, _)| (v, c))
+    }
+
+    fn extract_spanned(&self, tokens: &[TokenData], source: &str) -> SpannedResult {
         let mut values = Vec::new();
+        let mut trees = Vec::new();
         let mut total_consumed = 0;
 
         loop {
@@ -1281,9 +1304,10 @@ impl CaptureExtractor for RepeatExtractor {
                 break;
             }
 
-            match self.inner.extract(remaining, source) {
-                Some((value, consumed)) if consumed > 0 => {
+            match self.inner.extract_spanned(remaining, source) {
+                Some((value, consumed, tree)) if consumed > 0 => {
                     values.push(value);
+                    trees.push(tree);
                     total_consumed += consumed;
                 }
                 _ => break,
@@ -1294,7 +1318,9 @@ impl CaptureExtractor for RepeatExtractor {
             return None;
         }
 
-        Some((CapturedValue::Array(values), total_consumed))
+        let mut tree = SpanTree::leaf(tokens, total_consumed);
+        tree.items = trees;
+        Some((CapturedValue::Array(values), total_consumed, tree))
     }
 }
 
@@ -1308,6 +1334,12 @@ struct SequenceExtractor(Vec<(Option<String>, Box<dyn CaptureExtractor>)>);
 
 impl CaptureExtractor for SequenceExtractor {
     fn extract(&self, tokens: &[TokenData], source: &str) -> ExtractResult {
+        self.extract_spanned(tokens, source).map(|(v, c, _)| (v, c))
+    }
+
+    fn extract_spanned(&self, tokens: &[TokenData], source: &str) -> SpannedResult {
+        let mut fields: std::collections::HashMap<String, SpanTree> = std::collections::HashMap::new();
+        let mut last_tree = SpanTree::default();
         let mut total_consumed = 0;
         let mut last_value = CapturedValue::String(String::new());
         let mut record: std::collections::HashMap<String, CapturedValue> =
@@ -1336,11 +1368,12 @@ impl CaptureExtractor for SequenceExtractor {
             }
             total_consumed = skipped;
             let remaining = &tokens[total_consumed..];
-            match extractor.extract(remaining, source) {
-                Some((value, consumed)) => {
+            match extractor.extract_spanned(remaining, source) {
+                Some((value, consumed, tree)) => {
                     match name {
                         Some(n) => {
                             record.insert(n.clone(), value.clone());
+                            fields.insert(n.clone(), tree.clone());
                             any_named = true;
                         }
                         None => {
@@ -1351,11 +1384,15 @@ impl CaptureExtractor for SequenceExtractor {
                                 for (k, v) in sub {
                                     record.insert(k.clone(), v.clone());
                                 }
+                                for (k, t) in &tree.fields {
+                                    fields.insert(k.clone(), t.clone());
+                                }
                                 any_named = true;
                             }
                         }
                     }
                     last_value = value;
+                    last_tree = tree;
                     total_consumed += consumed;
                 }
                 None => return None,
@@ -1363,9 +1400,14 @@ impl CaptureExtractor for SequenceExtractor {
         }
 
         if any_named {
-            Some((CapturedValue::Named(record), total_consumed))
+            let mut tree = SpanTree::leaf(tokens, total_consumed);
+            tree.fields = fields;
+            Some((CapturedValue::Named(record), total_consumed, tree))
         } else {
-            Some((last_value, total_consumed))
+            let mut tree = SpanTree::leaf(tokens, total_consumed);
+            tree.fields = last_tree.fields;
+            tree.items = last_tree.items;
+            Some((last_value, total_consumed, tree))
         }
     }
 }
@@ -1378,15 +1420,21 @@ struct ChoiceExtractor(Vec<(Option<String>, Box<dyn CaptureExtractor>)>);
 
 impl CaptureExtractor for ChoiceExtractor {
     fn extract(&self, tokens: &[TokenData], source: &str) -> ExtractResult {
+        self.extract_spanned(tokens, source).map(|(v, c, _)| (v, c))
+    }
+
+    fn extract_spanned(&self, tokens: &[TokenData], source: &str) -> SpannedResult {
         for (name, extractor) in &self.0 {
-            if let Some((value, consumed)) = extractor.extract(tokens, source) {
+            if let Some((value, consumed, tree)) = extractor.extract_spanned(tokens, source) {
                 return match name {
                     Some(n) => {
                         let mut map = std::collections::HashMap::new();
                         map.insert(n.clone(), value);
-                        Some((CapturedValue::Named(map), consumed))
+                        let mut outer = SpanTree::leaf(tokens, consumed);
+                        outer.fields.insert(n.clone(), tree);
+                        Some((CapturedValue::Named(map), consumed, outer))
                     }
-                    None => Some((value, consumed)),
+                    None => Some((value, consumed, tree)),
                 };
             }
         }

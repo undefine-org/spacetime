@@ -29,6 +29,7 @@ pub mod literal;
 pub mod markup;
 pub mod ops;
 pub mod outline;
+pub mod score;
 
 /// A byte range in one source file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]

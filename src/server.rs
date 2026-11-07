@@ -204,6 +204,7 @@ pub fn create_router_raw(state: AppState) -> Router {
         // source edit (src/studio). Dev-only, like the inspector it sits beside.
         .route("/__spacetime/studio/outline.json", get(studio_outline_handler))
         .route("/__spacetime/studio/apply", post(studio_apply_handler))
+        .route("/__spacetime/studio/score.json", get(studio_score_handler))
         .route("/__spacetime/studio/runtime.js", get(studio_runtime_js_handler))
         .route("/__spacetime/studio/styles.css", get(studio_styles_css_handler))
         .route("/__spacetime/save", post(save_handler))
@@ -2921,6 +2922,30 @@ async fn studio_outline_handler(
             let mut outline = site.outline();
             outline["pages"] = studio_pages(site_dir);
             Json(outline).into_response()
+        }
+        Err(e) => Json(serde_json::json!({ "error": e })).into_response(),
+    }
+}
+
+/// GET /__spacetime/studio/score.json?entry= — the film's shape (PLAN-155):
+/// its scores, clip bodies, sound forms and stage parts, every word with its
+/// span, and the synth program. Dev only; rebuilt from disk per request.
+async fn studio_score_handler(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    Query(query): Query<InspectorWidgetQuery>,
+) -> Response {
+    let AppMode::Dev { site_dir, .. } = &state.mode else {
+        return (StatusCode::NOT_FOUND, "Not found").into_response();
+    };
+    let entry = query.entry.unwrap_or_default();
+    if let Err(e) = crate::sync::handlers::validate_file_path(site_dir, &entry) {
+        return Json(serde_json::json!({ "error": e })).into_response();
+    }
+    match crate::studio::outline::Site::load(site_dir, &entry) {
+        Ok(site) => {
+            let mut shape = crate::studio::score::score(&site);
+            shape["programs"] = crate::studio::score::programs(site_dir, &entry);
+            Json(shape).into_response()
         }
         Err(e) => Json(serde_json::json!({ "error": e })).into_response(),
     }

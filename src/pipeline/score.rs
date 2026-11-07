@@ -2066,6 +2066,11 @@ fn measure_value_kind(value: &CapturedValue) -> Option<(f64, bool)> {
 /// `2s` → `(2.0, "s")`. The number and unit are ADJACENT by the time a scalar
 /// survives its grammar (the `length_unit`/`time_unit` adjacency rule), so a
 /// space inside the text means it is not a scalar at all.
+/// A time measure's milliseconds (`0.4s`, `420ms`), as a score reads it.
+pub(crate) fn time_ms(s: &str) -> Option<f64> {
+    parse_scalar_measure(s).and_then(|(v, unit)| duration_ms(v, &unit))
+}
+
 fn parse_scalar_measure(s: &str) -> Option<(f64, String)> {
     let s = s.trim();
     let split = s.find(|c: char| !(c.is_ascii_digit() || c == '.' || c == '-'))?;

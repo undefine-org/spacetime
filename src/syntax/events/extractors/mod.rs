@@ -36,6 +36,53 @@ impl TokenData {
 /// Result of a capture extraction: the captured value and how many tokens were consumed.
 pub type ExtractResult = Option<(CapturedValue, usize)>;
 
+/// Where a captured value came from, in the SHAPE of the value (PLAN-155 F2):
+/// a `Named` record's fields and an `Array`'s items each keep the byte span
+/// they were matched from. A tool that edits source (the studio) addresses a
+/// clip's `at 2s` or a pattern cell by it instead of re-reading the text.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SpanTree {
+    /// Byte range of the value's non-trivia tokens, `(start, end)` exclusive.
+    pub span: Option<(usize, usize)>,
+    pub fields: HashMap<String, SpanTree>,
+    pub items: Vec<SpanTree>,
+}
+
+impl SpanTree {
+    /// The span of the first `consumed` tokens, trivia trimmed at both ends.
+    pub fn leaf(tokens: &[TokenData], consumed: usize) -> Self {
+        let taken = &tokens[..consumed.min(tokens.len())];
+        let first = taken.iter().find(|t| !t.kind.is_trivia());
+        let last = taken.iter().rev().find(|t| !t.kind.is_trivia());
+        SpanTree {
+            span: first.zip(last).map(|(a, b)| (a.text_range.0, b.text_range.1)),
+            ..Default::default()
+        }
+    }
+
+    /// Every nested span as `(path, span)`, paths dotted from `prefix`
+    /// (`entries.3.at`); the root itself is not included.
+    pub fn flatten(&self, prefix: &str, out: &mut Vec<(String, (usize, usize))>) {
+        for (i, item) in self.items.iter().enumerate() {
+            let path = format!("{prefix}.{i}");
+            if let Some(sp) = item.span {
+                out.push((path.clone(), sp));
+            }
+            item.flatten(&path, out);
+        }
+        for (k, field) in &self.fields {
+            let path = format!("{prefix}.{k}");
+            if let Some(sp) = field.span {
+                out.push((path.clone(), sp));
+            }
+            field.flatten(&path, out);
+        }
+    }
+}
+
+/// `ExtractResult` with the value's [`SpanTree`].
+pub type SpannedResult = Option<(CapturedValue, usize, SpanTree)>;
+
 /// Each CaptureType implements extraction from a token slice.
 ///
 /// Simple extractors (Ident, Number, etc.) match 1-2 tokens.
@@ -44,6 +91,14 @@ pub trait CaptureExtractor: Send + Sync {
     /// Try to extract a value from the given token slice.
     /// Returns `Some((value, tokens_consumed))` on success, `None` on failure.
     fn extract(&self, tokens: &[TokenData], source: &str) -> ExtractResult;
+
+    /// `extract`, keeping where each part of the value came from. A terminal's
+    /// value is one span; composite grammars (sequence, choice, repetition)
+    /// override this to give their parts theirs.
+    fn extract_spanned(&self, tokens: &[TokenData], source: &str) -> SpannedResult {
+        self.extract(tokens, source)
+            .map(|(value, consumed)| (value, consumed, SpanTree::leaf(tokens, consumed)))
+    }
 
     /// Whether this extractor must match with NO whitespace before it.
     ///

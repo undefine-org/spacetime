@@ -500,6 +500,7 @@ impl CompiledForm {
                     source,
                     extractors,
                     &mut captures,
+                    &mut capture_spans,
                     body_inner_start,
                 );
                 r?;
@@ -1117,7 +1118,7 @@ impl CompiledForm {
                 }
 
                 if let Some(ext) = extractor
-                    && let Some((value, consumed)) = ext.extract(remaining, source)
+                    && let Some((value, consumed, tree)) = ext.extract_spanned(remaining, source)
                 {
                     // I3 / gh-37: a CUSTOM capture (e.g. `$params:param_list`)
                     // that consumes ZERO tokens from a non-empty bounded region
@@ -1161,6 +1162,7 @@ impl CompiledForm {
                     if let Some(s) = span {
                         capture_spans.insert(var_name.to_string(), s);
                     }
+                    record_nested_spans(var_name, &tree, capture_spans);
                     cursor.advance(consumed);
                     return Ok(());
                 }
@@ -1191,12 +1193,13 @@ impl CompiledForm {
             CaptureModifier::Optional => {
                 let remaining = &cursor.remaining()[..bound(cursor.remaining())];
                 if let Some(ext) = extractor {
-                    if let Some((value, consumed)) = ext.extract(remaining, source) {
+                    if let Some((value, consumed, tree)) = ext.extract_spanned(remaining, source) {
                         let span = cursor.span_for(consumed);
                         captures.insert(var_name.to_string(), value);
                         if let Some(s) = span {
                             capture_spans.insert(var_name.to_string(), s);
                         }
+                        record_nested_spans(var_name, &tree, capture_spans);
                         cursor.advance(consumed);
                     } else if let Some(def) = default {
                         captures.insert(var_name.to_string(), CapturedValue::from_default(def));
@@ -1215,7 +1218,13 @@ impl CompiledForm {
                         if remaining.is_empty() {
                             break;
                         }
-                        if let Some((value, consumed)) = ext.extract(remaining, source) {
+                        if let Some((value, consumed, tree)) = ext.extract_spanned(remaining, source) {
+                            // each item is `var.i`, its parts below it
+                            let item = format!("{var_name}.{}", values.len());
+                            if let Some((a, b)) = tree.span {
+                                capture_spans.insert(item.clone(), SourceSpan::new(a, b));
+                            }
+                            record_nested_spans(&item, &tree, capture_spans);
                             values.push(value);
                             cursor.advance(consumed);
                             // Skip comma separator if present
@@ -1762,6 +1771,7 @@ impl CompiledForm {
         source: &str,
         extractors: &ExtractorRegistry,
         captures: &mut HashMap<String, CapturedValue>,
+        capture_spans: &mut HashMap<String, SourceSpan>,
         // FEAT-103: when leading body GROUPS consumed a head-line, this is the source
         // byte offset where the REMAINING body run begins. The body capture scans
         // from here instead of the brace start, so a `$body:component_body` after
@@ -2004,7 +2014,15 @@ impl CompiledForm {
                             // Honor the repeat modifier so `match_arm+` (and any repeated
                             // CUSTOM %capture_type) accumulates into an Array, exactly like
                             // a repeated builtin (template_invocation+).
-                            extract_with_modifier(ext.as_ref(), &tokens, source, cap_spec.modifier)
+                            extract_with_modifier_spanned(ext.as_ref(), &tokens, source, cap_spec.modifier)
+                                .map(|(value, tree)| {
+                                    // the body's parts keep their spans (`entries.3.at`)
+                                    if let Some((a, b)) = tree.span {
+                                        capture_spans.insert(cap_spec.name.clone(), SourceSpan::new(a, b));
+                                    }
+                                    record_nested_spans(&cap_spec.name, &tree, capture_spans);
+                                    value
+                                })
                         } else {
                             // BUG-229 (B): NO lenient fallback. Passing the raw inner
                             // text through here made a body that CANNOT match its
@@ -3529,6 +3547,17 @@ fn extract_with_modifier(
     source: &str,
     modifier: crate::parser::meta_ast::CaptureModifier,
 ) -> Option<crate::syntax::form_match::CapturedValue> {
+    extract_with_modifier_spanned(ext, tokens, source, modifier).map(|(v, _)| v)
+}
+
+/// [`extract_with_modifier`], keeping where each part came from (PLAN-155 F2):
+/// a repeat's items are the tree's `items`.
+fn extract_with_modifier_spanned(
+    ext: &dyn super::extractors::CaptureExtractor,
+    tokens: &[super::extractors::TokenData],
+    source: &str,
+    modifier: crate::parser::meta_ast::CaptureModifier,
+) -> Option<(crate::syntax::form_match::CapturedValue, super::extractors::SpanTree)> {
     use crate::parser::meta_ast::CaptureModifier;
     use crate::syntax::cst::SyntaxKind;
     use crate::syntax::form_match::CapturedValue;
@@ -3536,9 +3565,10 @@ fn extract_with_modifier(
         // Counted is a single extraction — the count lives inside the char-class
         // extractor, which consumes the whole run in one call.
         CaptureModifier::Required | CaptureModifier::Optional | CaptureModifier::Counted(_) => {
-            ext.extract(tokens, source).map(|(v, _)| v)
+            ext.extract_spanned(tokens, source).map(|(v, _, t)| (v, t))
         }
         CaptureModifier::ZeroOrMore | CaptureModifier::OneOrMore => {
+            let mut trees = Vec::new();
             let mut values = Vec::new();
             let mut consumed_total = 0usize;
             while consumed_total < tokens.len() {
@@ -3553,9 +3583,10 @@ fn extract_with_modifier(
                     break;
                 }
                 let remaining = &tokens[consumed_total..];
-                match ext.extract(remaining, source) {
-                    Some((value, consumed)) if consumed > 0 => {
+                match ext.extract_spanned(remaining, source) {
+                    Some((value, consumed, tree)) if consumed > 0 => {
                         values.push(value);
+                        trees.push(tree);
                         consumed_total += consumed;
                     }
                     _ => break,
@@ -3587,7 +3618,9 @@ fn extract_with_modifier(
             if matches!(modifier, CaptureModifier::OneOrMore) && values.is_empty() {
                 None
             } else {
-                Some(CapturedValue::Array(values))
+                let mut tree = super::extractors::SpanTree::leaf(tokens, tokens.len());
+                tree.items = trees;
+                Some((CapturedValue::Array(values), tree))
             }
         }
     }
@@ -7514,4 +7547,19 @@ fn skip_leading_trivia(source: &str, mut start: usize) -> usize {
         break;
     }
     start
+}
+
+
+/// A capture's nested parts keep their spans under dotted paths
+/// (`entries.3.at`, `body.0.values`) beside the capture's own (PLAN-155 F2).
+fn record_nested_spans(
+    var_name: &str,
+    tree: &super::extractors::SpanTree,
+    capture_spans: &mut HashMap<String, SourceSpan>,
+) {
+    let mut nested = Vec::new();
+    tree.flatten(var_name, &mut nested);
+    for (path, (a, b)) in nested {
+        capture_spans.insert(path, SourceSpan::new(a, b));
+    }
 }

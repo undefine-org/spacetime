@@ -238,10 +238,10 @@ pub(crate) fn first_stop_value(val: &str) -> Option<String> {
 /// -> 0.25, `at 0.4` -> 0.4), and an optional per-step easing form ref
 /// (`--ease-out-expo`). PLAN-150 W1, the film-surface keyframe grammar of
 /// docs/language/film.st.md §2.
-struct Stop {
-    value: String,
-    at: Option<f64>,
-    easing: Option<String>,
+pub(crate) struct Stop {
+    pub(crate) value: String,
+    pub(crate) at: Option<f64>,
+    pub(crate) easing: Option<String>,
 }
 
 /// Split a `a -> b -> c` value chain into stops, then peel `at <pos>` and a
@@ -249,24 +249,39 @@ struct Stop {
 /// inside `calc(…)`, `circle(50% at 50%)` or a `radial-gradient(… at …)` is
 /// mistaken for the stop-level `at`/`--` tokens.
 fn parse_stops(val: &str) -> Vec<Stop> {
-    split_top_level(val, "->")
+    parse_stops_spanned(val).into_iter().map(|(stop, _)| stop).collect()
+}
+
+/// [`parse_stops`], each stop with its byte range in `val` (trimmed) — what a
+/// tool that rewrites ONE stop addresses (the film studio, PLAN-155).
+pub(crate) fn parse_stops_spanned(val: &str) -> Vec<(Stop, (usize, usize))> {
+    split_top_level_ranges(val, "->")
         .into_iter()
-        .filter(|s| !s.trim().is_empty())
-        .map(|raw| {
-            let (body, easing) = peel_trailing_easing(raw.trim());
-            let (value, at) = peel_at(body.trim());
-            Stop {
-                value: value.trim().to_string(),
-                at,
-                easing,
+        .filter_map(|(a, b)| {
+            let raw = &val[a..b];
+            let lead = raw.len() - raw.trim_start().len();
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                return None;
             }
+            let (body, easing) = peel_trailing_easing(trimmed);
+            let (value, at) = peel_at(body.trim());
+            let start = a + lead;
+            Some((
+                Stop {
+                    value: value.trim().to_string(),
+                    at,
+                    easing,
+                },
+                (start, start + trimmed.len()),
+            ))
         })
         .collect()
 }
 
 /// Split `s` on a top-level (paren-depth 0, outside strings) occurrence of the
-/// two-byte separator `sep` (`->`).
-fn split_top_level(s: &str, sep: &str) -> Vec<String> {
+/// two-byte separator `sep` (`->`), as byte ranges into `s`.
+fn split_top_level_ranges(s: &str, sep: &str) -> Vec<(usize, usize)> {
     let b = s.as_bytes();
     let sepb = sep.as_bytes();
     let mut out = Vec::new();
@@ -288,7 +303,7 @@ fn split_top_level(s: &str, sep: &str) -> Vec<String> {
             b'(' | b'[' | b'{' => depth += 1,
             b')' | b']' | b'}' => depth -= 1,
             _ if depth == 0 && b[i..].starts_with(sepb) => {
-                out.push(s[start..i].to_string());
+                out.push((start, i));
                 i += sepb.len();
                 start = i;
                 continue;
@@ -297,7 +312,7 @@ fn split_top_level(s: &str, sep: &str) -> Vec<String> {
         }
         i += 1;
     }
-    out.push(s[start..].to_string());
+    out.push((start, s.len()));
     out
 }
 
