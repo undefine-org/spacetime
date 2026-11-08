@@ -52,7 +52,7 @@
     if (kind === 'PointLight' || kind === 'SpotLight') props.distance = %distance;
     if (kind === 'SpotLight') { props.angle = %angle * Math.PI / 180; props.penumbra = %penumbra; }
     if (ctx.shadows && (kind === 'DirectionalLight' || kind === 'SpotLight' || %castShadow)) props.castShadow = true;
-    const pt = ctx.part(kind, props, { name: String(%name || '').replace(/^&/, '') });
+    const pt = ctx.part(kind, props, { name: String(%name || '').replace(/^&/, ''), bind: %bind });
 
     // PLAN-155 hot bind: the same light, new numbers (a new type is not).
     ST.hot(%bind, (a) => {

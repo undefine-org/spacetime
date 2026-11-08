@@ -402,7 +402,7 @@
       const pt = { kind, props: Object.assign({}, props), shape: o.shape, geom: o.geom, mat: o.material ? Object.assign({}, o.material) : null,
                    matKind: o.materialKind || 'MeshStandardMaterial', name: o.name || '', parent: o.parent || null, kids: [],
                    baseScale: props.scale != null ? props.scale : 1, el: document.createElement('i'), obj: null,
-                   clipFrom: 0, since: {}, rate: 1, pulse: 0, phase: 0, update: o.update || null, text: '' };
+                   clipFrom: 0, since: {}, rate: 1, bind: o.bind || '', pulse: 0, phase: 0, update: o.update || null, text: '' };
       if (pt.name) pt.props.name = pt.name;
       pt.el.setAttribute('data-3d', kind);
       if (pt.shape) pt.el.setAttribute('data-shape', pt.shape);
@@ -627,6 +627,10 @@
       // a part whose rest props changed (a hot edit, PLAN-155): fold its score
       // channels over them, publish, draw
       touch: (pt) => { fold(pt); publish(pt); requestSettle(); },
+      // the scene's parts (a dev tool picks and outlines them, PLAN-155) and a
+      // draw on the next settled frame
+      parts: () => parts,
+      draw: () => requestSettle(),
       onResize: (cb) => { sizeListeners.push(cb); },
       size: sizeFn,
       bounds: boundsFn,

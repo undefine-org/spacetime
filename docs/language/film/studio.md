@@ -75,6 +75,10 @@ never guessed.
 | Inspector → Film | the selection's words, editable |
 | Explorer → Scene | the stage's parts and every param |
 | Code | the file, saved whole when you leave it |
+| Select (P) | point into the 3D: hover outlines a part, click opens it in the Scene |
+| Scene list | hovering a part outlines it in the 3D |
+| a sound / pattern | the inspector shows where the playhead is in it; the step grid lights the step playing |
+| keyboard | a chord: a key toggles its note; a melodic cell (click it in the grid): a key sets its note |
 
 Every change is a source edit, and the running page takes it IN PLACE: a
 clip's timing, a keyframe, a drum cell, a note, a part's pose or material —

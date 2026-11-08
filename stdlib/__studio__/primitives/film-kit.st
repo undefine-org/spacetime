@@ -183,19 +183,239 @@
           if (!form || form.kind !== 'pattern') { return out; }
           // one flat list (an element renders one `@each`): each row's name, then its cells
           form.props.forEach(function (row, r) {
-            out.push({ kind: 'name', row: r + 1, col: 1, text: row.prop, on: false, file: '', start: 0, end: 0, expect: '' });
+            // a row that plays notes is melodic: its cells open the note picker
+            var melodic = (row.cells || []).some(function (c) { return NOTE.test(c.text); });
+            out.push({ kind: 'name', row: r + 1, col: 1, step: -1, rc: '', melodic: melodic, text: row.prop, on: false, file: '', start: 0, end: 0, expect: '' });
             (row.cells || []).forEach(function (c, k) {
-              out.push(Object.assign({ kind: 'cell', row: r + 1, col: k + 2, text: c.text, on: c.text !== '.', file: fileOf(s, c.file) }, addr(c)));
+              out.push(Object.assign({ kind: 'cell', row: r + 1, col: k + 2, step: k, rc: r + ':' + k, melodic: melodic, text: c.text, on: c.text !== '.', file: fileOf(s, c.file) }, addr(c)));
             });
           });
           return out;
         };
 
         /// The scene: the stage and its parts.
-        ST.stuFilmParts = function (s) {
+        ST.stuFilmParts = function (s, sel) {
           return ((s && s.parts) || []).map(function (p, i) {
-            return { key: 'part:' + i, kind: p.kind, label: p.name ? '&' + p.name : p.kind, text: p.kind, depth: p.kind === 'stage' ? 0 : 1 };
+            return { key: 'part:' + i, kind: p.kind, label: p.name ? '&' + p.name : p.kind, text: p.kind, depth: p.kind === 'stage' ? 0 : 1, selected: sel === 'part:' + i };
           });
+        };
+
+        // ---- the scene: a score.json part <-> the stage's live part ---------------------
+        // A stage part remembers the compiled call that made it (its hot key,
+        // `three-object@canvas.world#3`); score.json lists the parts in source
+        // order. The n-th call of a primitive on a stage is the n-th part of
+        // that kind in the source.
+        var PRIM = { object: 'three-object', light: 'three-light', gltf: 'three-gltf' };
+        var KIND = { 'three-object': 'object', 'three-light': 'light', 'three-gltf': 'gltf' };
+        F.stage = function () {
+          var cs = document.querySelectorAll('canvas');
+          for (var c = 0; c < cs.length; c++) { if (cs[c]._stThree && cs[c]._stThree.parts) { return cs[c]._stThree; } }
+          return null;
+        };
+        var keyOf = function (bind) {
+          var at = bind.indexOf('@'), hash = bind.lastIndexOf('#');
+          return at > 0 && hash > at ? { prim: bind.slice(0, at), n: +bind.slice(hash + 1) } : null;
+        };
+        /// The live part a score.json part (by index) is drawn as.
+        F.stagePart = function (s, i) {
+          var p = s && s.parts && s.parts[i], st = F.stage();
+          if (!p || !st || !PRIM[p.kind]) { return null; }
+          var n = 0;
+          for (var j = 0; j < i; j++) { if (s.parts[j].kind === p.kind) { n++; } }
+          return st.parts().filter(function (pt) {
+            var k = pt.bind && keyOf(pt.bind);
+            return k && k.prim === PRIM[p.kind] && k.n === n;
+          })[0] || null;
+        };
+        /// The score.json part (its index) a live part is.
+        F.partIndexOf = function (s, pt) {
+          var k = pt && pt.bind && keyOf(pt.bind);
+          if (!k || !KIND[k.prim] || !s || !s.parts) { return -1; }
+          var n = -1;
+          for (var i = 0; i < s.parts.length; i++) {
+            if (s.parts[i].kind === KIND[k.prim] && ++n === k.n) { return i; }
+          }
+          return -1;
+        };
+
+        // ---- outlines: a box drawn round a part in the 3D itself ---------------------------
+        F.outlines = {};
+        F.outline = function (slot, pt, color) {
+          var st = F.stage(), old = F.outlines[slot];
+          if (!st || !st.THREE || !st.scene) { return; }
+          // the selected part already has its outline: hovering it adds none
+          if (slot === 'hover' && pt && F.outlines.sel && F.outlines.sel.pt === pt) { pt = null; }
+          if (slot === 'sel' && pt && F.outlines.hover && F.outlines.hover.pt === pt) { F.outline('hover', null); }
+          if (old && old.pt === pt) { return; }
+          if (old) { st.scene.remove(old.helper); if (old.helper.geometry) { old.helper.geometry.dispose(); } }
+          F.outlines[slot] = null;
+          if (pt && pt.obj) {
+            var helper = new st.THREE.BoxHelper(pt.obj, color);
+            helper.userData.stuOutline = true;
+            // drawn as it is (not through the film's exposure and tone curve),
+            // and over everything
+            helper.material.toneMapped = false;
+            helper.material.depthTest = false;
+            helper.renderOrder = 999;
+            st.scene.add(helper);
+            F.outlines[slot] = { pt: pt, helper: helper };
+          }
+          st.draw();
+        };
+        var followOutlines = function () {
+          var moved = false;
+          Object.keys(F.outlines).forEach(function (k) { var o = F.outlines[k]; if (o) { o.helper.update(); moved = true; } });
+          return moved;
+        };
+
+        // ---- the Select tool: point at the 3D, pick a part --------------------------------
+        var inStudioUi = function (node) { return !!(node && node.closest && node.closest('.stu-ui, .st-dev-dock, .stu-overlay')); };
+        F.pickAt = function (ev) {
+          var st = F.stage();
+          if (!st || !st.THREE || !st.camera || !st.renderer) { return null; }
+          var r = st.renderer.domElement.getBoundingClientRect();
+          if (ev.clientX < r.left || ev.clientX > r.right || ev.clientY < r.top || ev.clientY > r.bottom) { return null; }
+          var ndc = new st.THREE.Vector2((ev.clientX - r.left) / r.width * 2 - 1, -((ev.clientY - r.top) / r.height) * 2 + 1);
+          F.ray = F.ray || new st.THREE.Raycaster();
+          F.ray.setFromCamera(ndc, st.camera);
+          var parts = st.parts().filter(function (pt) { return pt.bind && pt.obj; });
+          var hits = F.ray.intersectObjects(st.scene.children, true);
+          for (var h = 0; h < hits.length; h++) {
+            if (hits[h].object.userData.stuOutline || hits[h].object.isLine) { continue; }
+            for (var o = hits[h].object; o; o = o.parent) {
+              for (var q = 0; q < parts.length; q++) { if (parts[q].obj === o) { return parts[q]; } }
+            }
+          }
+          return null;
+        };
+        F.pickMove = function (ev) {
+          if (!F.pickOn || inStudioUi(ev.target)) { return; }
+          var pt = F.pickAt(ev);
+          F.outline('hover', pt, 0x0d99ff);
+          document.documentElement.classList.toggle('stu-picking-hit', !!pt);
+        };
+        F.pickClick = function (ev) {
+          if (!F.pickOn || inStudioUi(ev.target)) { return; }
+          ev.preventDefault();
+          ev.stopImmediatePropagation();
+          var pt = F.pickAt(ev), i = F.partIndexOf(score(), pt);
+          if (i < 0) { return; }
+          put('stuTabName', 'Scene');
+          put('stuFilmSel', 'part:' + i);
+        };
+        ST.stuFilmPickTool = function () {
+          F.pickOn = !F.pickOn;
+          put('stuFilmPickOn', F.pickOn);
+          document.documentElement.classList.toggle('stu-picking', F.pickOn);
+          if (!F.pickOn) { F.outline('hover', null); }
+          return '';
+        };
+        // the Scene list: hovering a part outlines it in the 3D
+        F.listOver = function (ev) {
+          var row = ev.target.closest && ev.target.closest('.stu-part');
+          if (!row) { return; }
+          F.outline('hover', F.stagePart(score(), +String(row.dataset.key).split(':')[1]), 0x0d99ff);
+        };
+        F.listOut = function (ev) {
+          var row = ev.target.closest && ev.target.closest('.stu-part');
+          if (row && !(ev.relatedTarget && row.contains(ev.relatedTarget))) { F.outline('hover', null); }
+        };
+
+        // ---- music: where the playhead is in the selected sound ---------------------------
+        var NAMES = ['C', 'Db', 'D', 'Eb', 'E', 'F', 'Gb', 'G', 'Ab', 'A', 'Bb', 'B'];
+        var NOTE = /^([A-G])([#b]?)(-?\d)$/;
+        var midiOf = function (n) {
+          var m = NOTE.exec(String(n));
+          if (!m) { return null; }
+          var pc = { C: 0, D: 2, E: 4, F: 5, G: 7, A: 9, B: 11 }[m[1]] + (m[2] === '#' ? 1 : m[2] === 'b' ? -1 : 0);
+          return (+m[3] + 1) * 12 + pc;
+        };
+        var nameOf = function (mi) { return NAMES[((mi % 12) + 12) % 12] + (Math.floor(mi / 12) - 1); };
+        var ms = function (t) { var v = parseFloat(t); return /ms$/.test(String(t)) ? v : v * 1000; };
+        /// The selected sound's own clock: its window, and for a pattern its step.
+        F.soundClock = function (s, key, at) {
+          var f = find(s, key);
+          if (!f || f.kind !== 'sound' || !f.entry.form) { return null; }
+          var e = f.entry, prog = s.programs && s.programs[0];
+          var form = prog && prog.forms && prog.forms[e.form.text];
+          var start = e.at_ms || 0;
+          var len = e.for_ms != null ? e.for_ms : (form && form.props && form.props['for'] ? ms(form.props['for'][0]) : 1000);
+          var c = { start: start, len: len, t: at - start, step: -1, steps: 0 };
+          if (form && form.kind === 'pattern') {
+            var bpm = parseFloat((form.params && form.params.tempo) || '120');
+            var per = parseFloat((form.params && form.params.step) || '16');
+            var shape = s.forms && s.forms[e.form.text];
+            c.steps = shape ? Math.max.apply(null, shape.props.map(function (r) { return (r.cells || []).length; })) : 16;
+            c.stepMs = 60000 / bpm * 4 / per;
+            if (c.t >= 0 && c.t < len) { c.step = Math.floor(c.t / c.stepMs) % c.steps; c.bar = Math.floor(c.t / (c.stepMs * c.steps)) + 1; }
+          }
+          return c;
+        };
+        var secs = function (v) { return (v / 1000).toFixed(2) + ' s'; };
+        F.showSound = function (t) {
+          var s = score(), sel = L().stuFilmSel || '';
+          var c = F.soundClock(s, sel, t.position), text = '';
+          if (c) {
+            if (c.t < 0) { text = 'starts in ' + secs(-c.t); }
+            else if (c.t >= c.len) { text = 'ended ' + secs(c.t - c.len) + ' ago'; }
+            else { text = '\u25b6 ' + secs(c.t) + ' of ' + secs(c.len) + (c.step >= 0 ? '  \u00b7  step ' + (c.step + 1) + '/' + c.steps + '  \u00b7  bar ' + c.bar : ''); }
+          }
+          if (text !== F.lastSound) { F.lastSound = text; put('stuFilmSoundNow', text); }
+          var step = c ? c.step : -1;
+          if (step !== F.lastStep) {
+            F.lastStep = step;
+            document.querySelectorAll('.stu-cell.is-now').forEach(function (el) { el.classList.remove('is-now'); });
+            if (step >= 0) {
+              document.querySelectorAll('.stu-cell[data-step="' + step + '"]').forEach(function (el) { el.classList.add('is-now'); });
+            }
+          }
+        };
+
+        // ---- notes: a keyboard for a chord or a melodic cell -------------------------------
+        var cellAt = function (s, key, rc) {
+          var f = find(s, key);
+          if (!f || f.kind !== 'sound' || !f.entry.form || !rc) { return null; }
+          var form = s.forms && s.forms[f.entry.form.text], p = String(rc).split(':');
+          var row = form && form.props[+p[0]];
+          return row && row.cells && row.cells[+p[1]] ? { cell: row.cells[+p[1]], row: row } : null;
+        };
+        /// The keys of the note picker: two octaves round what is being edited.
+        ST.stuFilmPiano = function (key, s, rc) {
+          var f = find(s, key), notes = [], target = '';
+          var c = cellAt(s, key, rc);
+          if (c) { notes = NOTE.test(c.cell.text) ? [c.cell.text] : []; target = 'cell'; }
+          else if (f && f.kind === 'sound' && f.entry.notes) {
+            notes = f.entry.notes.text.replace(/^["']|["']$/g, '').split(/\s+/).filter(Boolean); target = 'chord';
+          } else { return []; }
+          var on = {}, lo = 48;
+          var mids = notes.map(midiOf).filter(function (m) { return m != null; });
+          mids.forEach(function (m) { on[m] = true; });
+          if (mids.length) { lo = Math.floor(Math.min.apply(null, mids) / 12) * 12; }
+          var hi = Math.max(lo + 24, mids.length ? Math.max.apply(null, mids) + 1 : 0);
+          var keys = [], white = 0;
+          for (var m = lo; m < hi; m++) {
+            var black = [1, 3, 6, 8, 10].indexOf(m % 12) >= 0;
+            keys.push({ note: nameOf(m), black: black, on: !!on[m], label: m % 12 === 0 ? nameOf(m) : '', target: target, i: black ? white - 1 : white++ });
+          }
+          return keys;
+        };
+        ST.stuFilmNote = function (el) {
+          var s = score(), key = L().stuFilmSel || '', note = el.dataset.note;
+          var c = cellAt(s, key, L().stuFilmNoteCell);
+          if (c) {
+            var w = c.cell;
+            ST.stu.apply({ op: 'span', file: fileOf(s, w.file), start: w.start, end: w.end, expect: w.text, value: w.text === note ? '.' : note });
+            return '';
+          }
+          var f = find(s, key);
+          if (!f || !f.entry.notes) { return ''; }
+          var n = f.entry.notes, q = n.text.charAt(0) === "'" ? "'" : '"';
+          var words = n.text.replace(/^["']|["']$/g, '').split(/\s+/).filter(Boolean);
+          var at = words.indexOf(note);
+          if (at >= 0) { words.splice(at, 1); } else { words.push(note); words.sort(function (a, b) { return midiOf(a) - midiOf(b); }); }
+          if (!words.length) { return ''; }
+          ST.stu.apply({ op: 'span', file: fileOf(s, n.file), start: n.start, end: n.end, expect: n.text, value: q + words.join(' ') + q });
+          return '';
         };
 
         /// The film's own file, for the code pane (one item: an `@each` source).
@@ -242,6 +462,23 @@
           root.style.setProperty('--stu-t', String(t.position / t.duration));
           var tc = timecode(t.position) + (t.playing ? '' : '  paused');
           if (tc !== F.lastTime) { F.lastTime = tc; put('stuFilmTime', tc); put('stuFilmPlaying', t.playing); }
+          // the selected part keeps its outline; a new selection forgets a picked note
+          var sel = L().stuFilmSel || '';
+          if (sel !== F.lastSel) {
+            F.lastSel = sel;
+            put('stuFilmNoteCell', '');
+            F.outline('sel', sel.indexOf('part:') === 0 ? F.stagePart(score(), +sel.split(':')[1]) : null, 0xffcf5a);
+            F.lastStep = null;
+          }
+          if (followOutlines() && !t.playing) { var st = F.stage(); if (st) { st.draw(); } }
+          F.showSound(t);
+          // the picked note cell is marked in the grid
+          var rc = L().stuFilmNoteCell || '';
+          if (rc !== F.lastRc) {
+            F.lastRc = rc;
+            document.querySelectorAll('.stu-cell.is-picked').forEach(function (el) { el.classList.remove('is-picked'); });
+            if (rc) { document.querySelectorAll('.stu-cell[data-rc="' + rc + '"]').forEach(function (el) { el.classList.add('is-picked'); }); }
+          }
         };
 
         // ---- 3. gestures ----------------------------------------------------------------
@@ -332,6 +569,8 @@
           else if (k === 'i' || k === 'I') { F.loopIn = t.position; F.setLoop(); }
           else if (k === 'o' || k === 'O') { F.loopOut = t.position; F.setLoop(); }
           else if (k === 'Escape' && (F.loopIn != null || F.loopOut != null)) { F.loopIn = F.loopOut = null; F.setLoop(); }
+          else if (k === 'p' || k === 'P') { ST.stuFilmPickTool(); }
+          else if (k === 'Escape' && F.pickOn) { ST.stuFilmPickTool(); }
           else { hit = false; }
           if (hit) { ev.preventDefault(); ev.stopPropagation(); }
         };
@@ -356,7 +595,10 @@
         };
         ST.stuFilmCell = function (el) {
           if (el.dataset.kind !== 'cell') { return ''; }
-          var d = el.dataset, next = d.text === '.' ? 'x' : '.';
+          var d = el.dataset;
+          // a melodic cell is a note: pick it, and the keyboard edits it
+          if (d.melodic === 'true') { put('stuFilmNoteCell', L().stuFilmNoteCell === d.rc ? '' : d.rc); return ''; }
+          var next = d.text === '.' ? 'x' : '.';
           ST.stu.apply({ op: 'span', file: d.file, start: +d.start, end: +d.end, expect: d.text, value: next });
           return '';
         };
@@ -449,6 +691,12 @@
           document[m]('pointermove', F.move, true);
           document[m]('pointerup', F.up, true);
           document[m]('keydown', F.key, true);
+          // the Select tool runs before the page's own studio canvas (window capture)
+          window[m]('pointermove', F.pickMove, true);
+          window[m]('click', F.pickClick, true);
+          document[m]('pointerover', F.listOver, true);
+          document[m]('pointerout', F.listOut, true);
+          if (!on && F.pickOn) { ST.stuFilmPickTool(); }
           if (on) {
             F.raf = requestAnimationFrame(tick);
             setTimeout(F.paintWaves, 60);

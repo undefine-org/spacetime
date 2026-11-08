@@ -103,7 +103,7 @@
       position: [%posX, %posY, %posZ],
       rotation: rest.r.slice(),
       scale: (%scaleX === 1 && %scaleY === 1 && %scaleZ === 1) ? 1 : [%scaleX, %scaleY, %scaleZ],
-    }, { name: String(%name || '').replace(/^&/, ''), shape: g.shape, geom: g.geom, material: mat, materialKind: kind,
+    }, { name: String(%name || '').replace(/^&/, ''), shape: g.shape, geom: g.geom, material: mat, materialKind: kind, bind: %bind,
          update: (sx || sy || sz) ? (p, t) => { p.props.rotation = rest.r.map((r, i) => r + rest.spin[i] * t); } : null });
 
     // PLAN-155 hot bind: a new rest pose or material is the same part; a new

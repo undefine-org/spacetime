@@ -24,6 +24,11 @@
 @data inline $stuFilmPlaying bool : false;
 @data inline $stuFilmLoop string : "";
 @data stored $stuFilmPanelName string : "Timeline";
+// the Select tool (pick a part in the 3D), the melodic cell the keyboard edits
+// ("row:col"), and where the playhead is in the selected sound
+@data inline $stuFilmPickOn bool : false;
+@data inline $stuFilmNoteCell string : "";
+@data inline $stuFilmSoundNow string : "";
 
 @type StuFilmPanel { Timeline | Code }
 @data derive $stuFilmPanel StuFilmPanel : @match {
@@ -36,7 +41,8 @@
 @data derive $stuFilmTicks array : ST.stuFilmTicks($stuScore);
 @data derive $stuFilmFields array : ST.stuFilmFields($stuFilmSel, $stuScore);
 @data derive $stuFilmGrid array : ST.stuFilmGrid($stuFilmSel, $stuScore);
-@data derive $stuFilmParts array : ST.stuFilmParts($stuScore);
+@data derive $stuFilmParts array : ST.stuFilmParts($stuScore, $stuFilmSel);
+@data derive $stuFilmPiano array : ST.stuFilmPiano($stuFilmSel, $stuScore, $stuFilmNoteCell);
 @data derive $stuFilmSrcs array : ST.stuFilmSources($stuScore);
 @data derive $stuFilmSelLabel string : ST.stuFilmLabel($stuFilmSel, $stuScore);
 @data derive $stuFilmTitle string : (($stuScore && $stuScore.scores && $stuScore.scores[0]) ? ("&" + ($stuScore.scores[0].name || "score") + "  " + ($stuScore.scores[0].total ? $stuScore.scores[0].total.text : "")) : "");
@@ -57,6 +63,24 @@
 }
 .stu-film__go { @on &.click { $stuNoop <- ST.stuFilmGo($); } }
 .stu-film__tab { @on &.click { $stuFilmPanelName <- $.dataset.panel; } }
+.stu-film__pick {
+  .is-on: $stuFilmPickOn;
+  @on &.click { $stuNoop <- ST.stuFilmPickTool(); }
+}
+.stu-film-now { .is-hidden: $stuFilmSoundNow == ""; text <- $stuFilmSoundNow; }
+
+// THE NOTE PICKER: one key of a keyboard, drawn from the selection (a chord's
+// notes, or the melodic cell picked in the step grid). A key that is on is in
+// the chord / is the cell's note; pressing it toggles that.
+@template &piano-key($k) {
+  <button type="button" class="stu-pkey" data-note="`$k.note`" data-black="`$k.black`" data-on="`$k.on`" data-target="`$k.target`" title="`$k.note`" style="--stu-i: `$k.i`"><span class="stu-pkey__label">`$k.label`</span></button>
+}
+.stu-piano {
+  @each($stuFilmPiano as $k) {
+    &piano-key($k);
+  }
+}
+.stu-pkey { @on &.click { $stuNoop <- ST.stuFilmNote($); } }
 
 .stu-film__ticks {
   @each($stuFilmTicks as $k) {
@@ -95,14 +119,14 @@
 .stu-film-input { @on &.change { $stuNoop <- ST.stuFilmCommit($); } }
 .stu-grid {
   @each($stuFilmGrid as $c) {
-    <button type="button" class="stu-cell" data-kind="`$c.kind`" data-on="`$c.on`" data-text="`$c.text`" data-file="`$c.file`" data-start="`$c.start`" data-end="`$c.end`" title="`$c.text`" style="grid-row: `$c.row`; grid-column: `$c.col`">`$c.text`</button>
+    <button type="button" class="stu-cell" data-kind="`$c.kind`" data-on="`$c.on`" data-text="`$c.text`" data-step="`$c.step`" data-rc="`$c.rc`" data-melodic="`$c.melodic`" data-file="`$c.file`" data-start="`$c.start`" data-end="`$c.end`" title="`$c.text`" style="grid-row: `$c.row`; grid-column: `$c.col`">`$c.text`</button>
   }
 }
 .stu-cell { @on &.click { $stuNoop <- ST.stuFilmCell($); } }
 
 .stu-tree--scene {
   @each($stuFilmParts as $p) {
-    <button type="button" class="stu-node stu-part" data-key="`$p.key`" data-kind="`$p.kind`" style="--stu-depth: `$p.depth`"><span class="stu-node__mark"></span><span class="stu-node__label">`$p.label`</span><span class="stu-node__text">`$p.text`</span></button>
+    <button type="button" class="stu-node stu-part" data-key="`$p.key`" data-kind="`$p.kind`" data-selected="`$p.selected`" style="--stu-depth: `$p.depth`"><span class="stu-node__mark"></span><span class="stu-node__label">`$p.label`</span><span class="stu-node__text">`$p.text`</span></button>
   }
 }
 .stu-part { @on &.click { $stuNoop <- ST.stuFilmPick($); } }
@@ -209,8 +233,34 @@ html.stu-film-on .st-dev-dock { bottom: calc(var(--stu-film-h) + 12px) !importan
 .stu-field__hint { display: block; color: var(--stu-soft); font-size: 10px; margin-top: 1px; }
 .stu-film-input { width: 100%; box-sizing: border-box; border: 1px solid var(--stu-line); border-radius: 4px; padding: 4px 6px; font: 11px ui-monospace, Menlo, monospace; }
 .stu-film-input:focus { outline: 1px solid var(--stu-blue); }
-.stu-grid { display: grid; grid-template-columns: auto; grid-auto-columns: 14px; gap: 2px; margin-top: 10px; overflow-x: auto; }
+.stu-grid { display: grid; grid-template-columns: auto; grid-auto-columns: 13px; gap: 1px; margin-top: 10px; overflow-x: auto; }
 .stu-cell[data-kind="name"] { width: auto; padding-right: 6px; background: transparent; color: var(--stu-soft); font: 10px ui-monospace, Menlo, monospace; text-align: left; cursor: default; white-space: nowrap; }
-.stu-cell { width: 14px; height: 18px; padding: 0; border: 0; border-radius: 2px; background: #ececec; color: transparent; font-size: 0; cursor: pointer; }
+.stu-cell { width: 13px; height: 18px; padding: 0; border: 0; border-radius: 2px; background: #ececec; color: transparent; font-size: 0; cursor: pointer; }
 .stu-cell[data-on="true"] { background: #8a5cf6; }
 .stu-cell:nth-child(4n + 2) { box-shadow: inset 2px 0 0 #d0d0d0; }
+// a melodic row shows its notes; the step being played lights up as the
+// playhead passes it, and a hit flashes
+.stu-cell[data-melodic="true"][data-kind="cell"] { font: 600 6px/18px ui-monospace, Menlo, monospace; color: #fff; letter-spacing: -0.04em; overflow: hidden; }
+.stu-cell.is-now { outline: 2px solid #ff4d4d; outline-offset: -1px; }
+.stu-cell.is-now[data-on="true"] { background: #ff4d4d; }
+.stu-cell.is-picked { outline: 2px solid #0d99ff; outline-offset: 1px; }
+
+.stu-film-now { margin: 8px 0 0; font: 600 11px ui-monospace, Menlo, monospace; color: #ff4d4d; }
+.stu-film-now.is-hidden { display: none; }
+
+// the keyboard: white keys in a row, black keys over their gaps (a template
+// renders a true flag as a present attribute, a false one not at all)
+.stu-piano { position: relative; height: 74px; margin-top: 10px; }
+.stu-pkey {
+  position: absolute; top: 0; left: calc(var(--stu-i) * 16px); width: 15px; height: 72px; padding: 0;
+  border: 1px solid #c8c8c8; border-radius: 0 0 3px 3px; background: #fff; cursor: pointer; z-index: 1;
+}
+.stu-pkey[data-black] { left: calc(var(--stu-i) * 16px + 10px); width: 11px; height: 44px; background: #222; border-color: #111; z-index: 2; }
+.stu-pkey[data-on] { background: #8a5cf6; border-color: #6b3fe0; }
+.stu-pkey:hover { filter: brightness(0.92); }
+.stu-pkey__label { position: absolute; bottom: 2px; left: 0; right: 0; font: 7px ui-monospace, Menlo, monospace; color: #888; text-align: center; }
+
+// the Select tool
+.stu-film__pick.is-on { background: #0d99ff; color: #fff; }
+html.stu-picking body { cursor: crosshair; }
+.stu-part[data-selected="true"] { background: var(--stu-blue-soft); }

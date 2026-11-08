@@ -67,7 +67,7 @@
       src, animation: %clip || undefined, time: 0,
       position: [%posX, %posY, %posZ], rotation: [0, ry, 0], scale: k > 0 ? k : 1,
       castShadow: !!ctx.shadows,
-    }, { name: String(%name || '').replace(/^&/, ''),
+    }, { name: String(%name || '').replace(/^&/, ''), bind: %bind,
          update: spin ? (p, t) => { p.props.rotation = [0, rest.ry + rest.spin * t, 0]; } : null });
 
     // PLAN-155 hot bind: the same model, a new pose / scale / starting clip

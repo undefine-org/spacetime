@@ -110,7 +110,34 @@ sleep 2; ready
 [ "$(head -1 "$SRC")" = "// from the code pane" ] && ok "the code pane saves" || bad "code pane: $(head -1 "$SRC")"
 js "document.querySelector('.stu-film__tab[data-panel=Timeline]').click(); 1" >/dev/null
 
-# 8. keys
+# 8. the Select tool: point at the robot in the 3D, click -> the Scene opens it
+js "document.querySelector('.stu-film__tab[data-panel=Timeline]').click(); SpacetimeLocal.stuFilmSel=''; ST.stuFilm.transport().pause(); ST.stuFilm.seek(8000); 1" >/dev/null
+sleep 0.5
+agent-browser press p >/dev/null
+read -r X Y <<<"$(js "var st=ST.stuFilm.stage(); var pt=ST.stuFilm.stagePart(SpacetimeLocal.stuScore, SpacetimeLocal.stuScore.parts.findIndex(p=>p.name=='robot')); var b=new st.THREE.Box3().setFromObject(pt.obj); var c=new st.THREE.Vector3(); b.getCenter(c); c.project(st.camera); var r=st.renderer.domElement.getBoundingClientRect(); Math.round(r.left+(c.x+1)/2*r.width)+' '+Math.round(r.top+(1-c.y)/2*r.height)")"
+agent-browser mouse move "$X" "$Y" >/dev/null; sleep 0.4
+[ "$(js "(ST.stuFilm.outlines.hover && ST.stuFilm.outlines.hover.pt.name) || ''")" = robot ] && ok "the Select tool outlines what it points at" || bad "the Select tool outlines what it points at"
+click_at "$X" "$Y"; sleep 0.6
+[ "$(js "SpacetimeLocal.stuTabName+' '+SpacetimeLocal.stuFilmSelLabel")" = "Scene &robot (gltf)" ] && ok "clicking a part opens it in the Scene" || bad "pick: $(js "SpacetimeLocal.stuTabName+' '+SpacetimeLocal.stuFilmSelLabel")"
+agent-browser press p >/dev/null
+
+# 9. hovering a part in the Scene list outlines it in the 3D
+read -r X Y <<<"$(centre "[...document.querySelectorAll('.stu-part')].find(b=>b.textContent.indexOf('&globe2')>=0)")"
+agent-browser mouse move "$X" "$Y" >/dev/null; sleep 0.4
+[ "$(js "(ST.stuFilm.outlines.hover && ST.stuFilm.outlines.hover.pt.name) || ''")" = globe2 ] && ok "hovering the Scene list outlines the part" || bad "list hover"
+
+# 10. a pattern's step grid follows the playhead
+js "var r=SpacetimeLocal.stuFilmRows.find(r=>r.kind=='pattern'); SpacetimeLocal.stuFilmSel=r.key; ST.stuFilm.seek(9000); 1" >/dev/null; sleep 0.6
+[ "$(js "document.querySelectorAll('.stu-cell.is-now').length")" -ge 3 ] && [ -n "$(js "SpacetimeLocal.stuFilmSoundNow.indexOf('step 5/16')>=0 ? 'y' : ''")" ] && ok "the step grid lights the step being played (step 5/16 at 9 s)" || bad "step playhead: $(js "SpacetimeLocal.stuFilmSoundNow")"
+
+# 11. the note picker: a chord is edited from the keyboard
+js "var r=SpacetimeLocal.stuFilmRows.find(r=>r.label.indexOf('--pad')>=0); SpacetimeLocal.stuFilmSel=r.key; 1" >/dev/null; sleep 0.6
+read -r X Y <<<"$(js "var r=document.querySelector('.stu-pkey[data-note=\"D4\"]').getBoundingClientRect(); Math.round(r.x+r.width/2)+' '+Math.round(r.y+r.height*0.8)")"
+mark; click_at "$X" "$Y"
+live "SpacetimeLocal.stuScore.scores[0].entries.some(e=>e.notes && e.notes.text.indexOf('D4')>=0)" && ok "a key adds its note to the chord, live" || bad "a key adds its note to the chord"
+grep -q '@sound(--pad, notes: "C3 Eb3 G3 Bb3 D4")' "$SRC" && ok "the chord's notes word is rewritten" || bad "chord: $(grep -n '@sound(--pad' "$SRC")"
+
+# 12. keys
 js "document.activeElement && document.activeElement.blur(); ST.stuFilm.transport().pause(); 1" >/dev/null
 agent-browser press Space >/dev/null; sleep 0.3
 [ "$(js "ST.stuFilm.transport().playing")" = true ] && ok "Space plays" || bad "Space plays"

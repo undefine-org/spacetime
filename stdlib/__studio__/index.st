@@ -206,7 +206,9 @@
       <h3 class="stu-sec__h">Film</h3>
       <p class="stu-film-sel__label"></p>
       <div class="stu-film-fields"></div>
+      <p class="stu-film-now is-hidden"></p>
       <div class="stu-grid"></div>
+      <div class="stu-piano"></div>
     </section>
 
     <section class="stu-sec stu-sec--empty">
@@ -253,6 +255,7 @@
       <span class="stu-film__time">00:00:00</span>
       <span class="stu-film__loop"></span>
       <span class="stu-film__spacer"></span>
+      <button type="button" class="stu-film__pick" title="Select in the 3D: point at a part, click to open it (P)">Select</button>
       <button type="button" class="stu-film__tab" data-panel="Timeline">Timeline</button>
       <button type="button" class="stu-film__tab" data-panel="Code">Code</button>
     </header>
