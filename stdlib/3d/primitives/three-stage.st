@@ -385,6 +385,9 @@
         // a clip plays from the frame the score switched to it
         if (name !== p.animation) { p.animation = name; part.clipFrom = part.since.clip != null ? part.since.clip : sceneTime; }
       },
+      // its exact age in the score (apply-animations reads it off the keyframe
+      // table and the window): a seek or a live edit lands mid-clip, not at 0
+      clipAge: (p, k, part) => { const a = num(k, NaN); if (!isNaN(a)) part.clipFrom = sceneTime - a / 1000; },
       rate: (p, k, part) => { part.rate = num(k, 1); },
       near: (p, k) => { p.near = num(k, p.near); },
       far: (p, k) => { p.far = num(k, p.far); },
@@ -621,6 +624,9 @@
       THREE: typeof THREE !== 'undefined' ? THREE : null, scene, camera, renderer,
       registerFrame, setRender,
       part, headless: headless3d, shadows: shadowMode, hex, num,
+      // a part whose rest props changed (a hot edit, PLAN-155): fold its score
+      // channels over them, publish, draw
+      touch: (pt) => { fold(pt); publish(pt); requestSettle(); },
       onResize: (cb) => { sizeListeners.push(cb); },
       size: sizeFn,
       bounds: boundsFn,
@@ -687,10 +693,6 @@
     // drivers to mount must not take this one for them (it would start the
     // clock before the score's driver exists, and the film would run late)
     tick._stStage = true;
-    // a transport's seek: a model's clip plays on from the frame it is seen
-    // (a live jump cannot know when the clip began; a render never seeks)
-    const onSeek = () => { for (const pt of parts) if (pt.kind === 'Model') pt.clipFrom = sceneTime; };
-    document.addEventListener('st:seek', onSeek);
     const raf = (typeof ST !== 'undefined' && ST._raf) ? ST._raf : null;
     let stopLoop = null;
     let rafId = null;
@@ -709,7 +711,6 @@
     start();
 
     %cleanup {
-      document.removeEventListener('st:seek', onSeek);
       if (stopLoop) stopLoop();
       if (rafId) cancelAnimationFrame(rafId);
       if (resizeObs) resizeObs.disconnect();

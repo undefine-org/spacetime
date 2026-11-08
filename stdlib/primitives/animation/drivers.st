@@ -283,8 +283,10 @@
     };
 
     // A timeline is a transport tools can hold (a studio, a scrub bar): by name.
+    // show the current frame again (new arguments, same playhead: a hot edit)
+    const refresh = () => publish(position);
     const transport = {
-      el: root, duration: dur, play, pause, seek, loop,
+      el: root, duration: dur, play, pause, seek, loop, refresh,
       get position() { return position; },
       get playing() { return playing; },
     };

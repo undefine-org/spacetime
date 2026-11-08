@@ -34,7 +34,8 @@
   angle: number = 30,
   penumbra: number = 0.3,
   name: string = "",
-  castShadow: bool = false
+  castShadow: bool = false,
+  bind: string = ""
 ) {
   %emit js {
     const canvas = %&el;
@@ -51,7 +52,20 @@
     if (kind === 'PointLight' || kind === 'SpotLight') props.distance = %distance;
     if (kind === 'SpotLight') { props.angle = %angle * Math.PI / 180; props.penumbra = %penumbra; }
     if (ctx.shadows && (kind === 'DirectionalLight' || kind === 'SpotLight' || %castShadow)) props.castShadow = true;
-    ctx.part(kind, props, { name: String(%name || '').replace(/^&/, '') });
+    const pt = ctx.part(kind, props, { name: String(%name || '').replace(/^&/, '') });
+
+    // PLAN-155 hot bind: the same light, new numbers (a new type is not).
+    ST.hot(%bind, (a) => {
+      if (a.type !== type || a.name !== %name || !!a.castShadow !== !!%castShadow) return false;
+      pt.props.intensity = a.intensity;
+      pt.props.color = ctx.hex(a.color.rgba);
+      if (kind !== 'AmbientLight') pt.props.position = [a.posX, a.posY, a.posZ];
+      if (kind === 'DirectionalLight' || kind === 'SpotLight') pt.props.target = [a.targetX, a.targetY, a.targetZ];
+      if (kind === 'PointLight' || kind === 'SpotLight') pt.props.distance = a.distance;
+      if (kind === 'SpotLight') { pt.props.angle = a.angle * Math.PI / 180; pt.props.penumbra = a.penumbra; }
+      ctx.touch(pt);
+      return true;
+    });
 
     %yield true -> $added;
   }

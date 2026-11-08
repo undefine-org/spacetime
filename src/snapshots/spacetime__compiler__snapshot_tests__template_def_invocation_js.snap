@@ -443,6 +443,83 @@ expression: compiled.js
     }
   };
 
+  // ---- Hot binds (PLAN-155) ------------------------------------------------
+  // A primitive that declares a `bind` param is compiled with a stable key
+  // (`apply-animations@.shot#0`) and may say how it takes new arguments in
+  // place: `ST.hot(%bind, (args) => …)`. A dev tool hands a page the arguments
+  // a fresh compile gives each key (`/__spacetime/studio/hot.json`); the page
+  // takes them without reloading — or reports that it cannot (a key it does
+  // not run, a key it runs that is gone, a handler that refuses), and the tool
+  // reloads instead. One key may run on several elements (a selector).
+  ST._hot = ST._hot || {};
+  ST.hot = function(key, take) {
+    if (!key || typeof take !== 'function') return;
+    (ST._hot[key] = ST._hot[key] || []).push(take);
+  };
+  /// `binds`: `[{key, args: {name: js}}]`. Returns true when every call took
+  /// its arguments; false means the page needs a reload to show the source.
+  ST.hotApply = function(binds) {
+    var want = {};
+    for (var i = 0; i < binds.length; i++) want[binds[i].key] = binds[i];
+    var have = Object.keys(ST._hot);
+    if (have.length !== Object.keys(want).length) return false;
+    for (var h = 0; h < have.length; h++) if (!want[have[h]]) return false;
+    ST._hotLast = ST._hotLast || {};
+    for (var k in want) {
+      var text = JSON.stringify(want[k].args);
+      if (ST._hotLast[k] === text) continue;
+      var args = {};
+      for (var name in want[k].args) {
+        try { args[name] = Function('"use strict"; return (' + want[k].args[name] + ');')(); }
+        catch (e) { return false; }
+      }
+      var takers = ST._hot[k];
+      for (var t = 0; t < takers.length; t++) if (takers[t](args) === false) return false;
+      ST._hotLast[k] = text;
+    }
+    return true;
+  };
+  /// Record what a page was compiled with, so an unchanged call is left alone.
+  ST.hotSeen = function(binds) {
+    ST._hotLast = ST._hotLast || {};
+    for (var i = 0; i < binds.length; i++) ST._hotLast[binds[i].key] = JSON.stringify(binds[i].args);
+  };
+  /// Make `old` equal `next` IN PLACE (closures holding `old` and its parts see
+  /// the change). Same shape required — an object's keys, an array of objects'
+  /// length; a leaf array (keyframe stops) may change length. False otherwise.
+  ST.patchInPlace = function(old, next) {
+    if (Array.isArray(old) && Array.isArray(next)) {
+      var objects = old.length && old[0] && typeof old[0] === 'object';
+      if (objects) {
+        if (old.length !== next.length) {
+          var leafy = old.every(function(x) { return x && 'value' in x; });
+          if (!leafy) return false;
+          old.length = 0;
+          for (var a = 0; a < next.length; a++) old.push(next[a]);
+          return true;
+        }
+        for (var j = 0; j < old.length; j++) if (!ST.patchInPlace(old[j], next[j])) return false;
+        return true;
+      }
+      old.length = 0;
+      for (var b = 0; b < next.length; b++) old.push(next[b]);
+      return true;
+    }
+    if (old && next && typeof old === 'object' && typeof next === 'object') {
+      var ko = Object.keys(old), kn = Object.keys(next);
+      if (ko.length !== kn.length) return false;
+      for (var c = 0; c < kn.length; c++) {
+        var key = kn[c];
+        if (!(key in old)) return false;
+        var o = old[key], n = next[key];
+        if (o && typeof o === 'object') { if (!ST.patchInPlace(o, n)) return false; }
+        else old[key] = n;
+      }
+      return true;
+    }
+    return false;
+  };
+
   ST._pendingNotifies = new Set();
   // Run every batched signal change now, including the changes those cause,
   // in the order they were made (the order their microtasks would have run).
@@ -7449,8 +7526,8 @@ expression: compiled.js
 })();
 (function() {
   const init = function(el) {
-    if (el._st_init_ace06eaace4d2145) return;
-    el._st_init_ace06eaace4d2145 = true;
+    if (el._st_init_a0dd288e3abeb165) return;
+    el._st_init_a0dd288e3abeb165 = true;
   (function() {
         const root = el;
         const anims = {
@@ -7473,6 +7550,16 @@ expression: compiled.js
         // Early exit if no animations data
         if (!anims) return;
 
+        // PLAN-155 hot bind: a studio edit hands this call a new keyframe table;
+        // it is patched INTO the one the watchers read (same shape — the same
+        // channels — or the page reloads), and var() values are re-resolved.
+        ST.hot("apply-animations@div.widget#0", (a) => {
+          if (a.easing !== defaultEasing || a.stagger !== defaultStaggerDelay) return false;
+          if (!ST.patchInPlace(anims, a.animations)) return false;
+          try { window.dispatchEvent(new Event('st:scheme-change')); } catch (e) {}
+          return true;
+        });
+
         // PLAN-150 W4: a `&name` scope selector may address a STAGE OBJECT (a
         // 3D mesh/particle field registered by the stage under that name) rather
         // than a DOM element. Stage objects register a channel proxy on the
@@ -7493,6 +7580,20 @@ expression: compiled.js
             if (reg && reg[sel]) return reg[sel];
           }
           return null;
+        };
+
+        // PLAN-155: a stage model's `clip` plays from when the score switched to
+        // it. That moment is in this table — the stop the current value started
+        // at — and the window's length is published by its score-window
+        // (`<window>__ms`), so the clip's AGE is exact on every frame, a seek or
+        // a hot edit included: (progress - stop) x window.
+        const stampClipAge = (el, prop, progress, driverSignal) => {
+          if (!el || !el._stPart || prop.property !== 'clip' || !prop.keyframes || !prop.keyframes.length) return;
+          const ms = ST.resolve(root, driverSignal + '__ms');
+          if (typeof ms !== 'number') return;
+          let at = 0;
+          for (const k of prop.keyframes) if (k.at <= progress) at = k.at;
+          el.style.setProperty('clipAge', Math.max(0, (progress - at) * ms));
         };
 
         // Easing functions
@@ -7974,6 +8075,7 @@ expression: compiled.js
                     if (isActive || !owner) el._stAnimOwner[normProp] = driverSignal;
                     const value = interpolateKeyframes(prop.keyframes, progress, prop.easing || scopeEasing, colorSpace);
                     applyStyle(el, prop.property, value, driverSignal, scopeId);
+                    stampClipAge(el, prop, progress, driverSignal);
                   });
                 } else {
                   // Scalar progress path (scroll, time, single-axis mouse)
@@ -8001,6 +8103,7 @@ expression: compiled.js
                     if (isActive || !owner) el._stAnimOwner[normProp] = driverSignal;
                     const value = interpolateKeyframes(prop.keyframes, progress, prop.easing || scopeEasing, colorSpace);
                     applyStyle(el, prop.property, value, driverSignal, scopeId);
+                    stampClipAge(el, prop, progress, driverSignal);
                   });
                 }
               });

@@ -42,9 +42,13 @@
         var type = data.type;
         if (!type) return;
 
-        // Live-reload: Reload message triggers page refresh
+        // Live-reload: a Reload goes through the page's cancellable handshake
+        // (`st:reload`), as the dev server's own live-reload script does — a
+        // tool that is mid-edit, or has just applied an edit live (the
+        // studio, PLAN-155), defers or declines it. Reloading here directly
+        // bypassed that and reloaded every page on every write.
         if (type === 'Reload') {
-          location.reload();
+          if (dispatchEvent(new Event('st:reload', { cancelable: true }))) location.reload();
           return;
         }
 

@@ -17,7 +17,8 @@
   &el,
   program: string = "",
   total: number = 0,
-  progress: string = "time"
+  progress: string = "time",
+  bind: string = ""
 ) {
   %emit js {
     const root = %&el;
@@ -34,7 +35,7 @@
       if (buffer || virtual()) return !!buffer;
       const AC = typeof AudioContext !== 'undefined' ? AudioContext : (typeof webkitAudioContext !== 'undefined' ? webkitAudioContext : null);
       if (!AC) return false;
-      ctx = new AC();
+      ctx = ctx || new AC();
       const r = STSynth.render(prog, { sr: ctx.sampleRate });
       buffer = ctx.createBuffer(2, r.left.length, r.sr);
       buffer.copyToChannel(r.left, 0);
@@ -61,6 +62,21 @@
       const heard = src ? offset + (ctx.currentTime - startedAt) : -1;
       if (!src || Math.abs(heard - sec) > 0.2) play(sec);
     });
+    // PLAN-155 hot bind: new notes / a new pattern / a new instrument is a new
+    // program; it is rendered again and heard from where the score is.
+    ST.hot(%bind, (a) => {
+      let next = null;
+      try { next = JSON.parse(a.program); } catch (_e) { return false; }
+      prog = next;
+      root._stSynthProgram = prog;
+      if (buffer) {
+        buffer = null;
+        silence();
+        if (!held && !virtual() && ensure()) play(root._stSynthAt || 0);
+      }
+      return true;
+    });
+
     // a paused transport is silent; it sounds again from where it is
     ST.watchScoped(root, %progress + '__playing', (on) => {
       held = on === false;

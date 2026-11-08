@@ -76,6 +76,22 @@ never guessed.
 | Explorer → Scene | the stage's parts and every param |
 | Code | the file, saved whole when you leave it |
 
-Every change is a source edit; the page reloads and the film comes back at the
-same frame, paused or playing, looped, with the same selection (about 5 s on a
-release build for Robot Day). Gate: `tests/studio/film_studio_e2e.sh`.
+Every change is a source edit, and the running page takes it IN PLACE: a
+clip's timing, a keyframe, a drum cell, a note, a part's pose or material —
+about half a second from the gesture to the frame on a release build, with no
+reload. Anything the page cannot take in place (markup, a style, a new part,
+the score's length) reloads, and the film comes back at the same frame, paused
+or playing, looped, with the same selection. Gate:
+`tests/studio/film_studio_e2e.sh`.
+
+## Instant edits: hot binds
+
+A primitive that declares a `bind` param receives a stable key from the
+compiler (`apply-animations@.card#0`) and says how it takes new arguments:
+`ST.hot(%bind, (args) => …)`. `GET /__spacetime/studio/hot.json?entry=` compiles
+only as far as Resolve and returns every keyed call's arguments — the values
+its body is compiled with — and a fingerprint of everything else on the page.
+After an edit the studio compares the fingerprint (unchanged: only hot
+arguments moved) and hands the page the new arguments (`ST.hotApply`); a key
+set that differs or a call that refuses means a reload. Gates:
+`tests/studio_hot_binds_test.rs`.

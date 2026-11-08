@@ -65,6 +65,44 @@ The studio is a PROJECTION of the score; every gesture is one source edit (SIP-0
 - Gates =studio::score= (+2): a clip move, a drum cell and a keyframe stop each rewrite exactly their word and the
   re-projected score reads the new time; a stale address, insert or save is refused. Live on a scratch copy over
   HTTP: one-word diff (=&card at 0.4s= → =1s=), the replay refused.
+** DONE P4b instant edits — the page takes an edit in place (asked: "fix everything in the compiler especially instant edits")
+- *Compiler — hot binds.* A primitive that declares a =bind= param is handed a STABLE KEY after Resolve
+  (=pipeline::assign_hot_keys=: primitive, selector, ordinal). =pipeline::hot_binds= runs the layers of
+  =compile_verbose= up to Resolve and returns each keyed call's arguments AS ITS BODY IS GIVEN THEM — through
+  codegen's own typed =%param= resolution (=metasystem_codegen::param_values_js=) — plus a FINGERPRINT of every
+  other call, the markup, the raw CSS and every rule's declarations (spans left out). =Compiler::hot_only()=;
+  =GET /__spacetime/studio/hot.json= (~100–200 ms on Robot Day, release).
+- *Runtime.* =ST.hot(key, take)=, =ST.hotApply(binds)= (false on a key set that differs or a call that refuses),
+  =ST.patchInPlace=. Hot: =apply-animations= (its keyframe table patched in place), =score-window= (the window map's
+  numbers), =score-synth= (a new program re-rendered), =three-object= / =three-light= / =three-gltf= (rest pose,
+  material, light numbers; a new shape/kind/file refuses), the stage's =touch=. The time-driver's =refresh= shows
+  the current frame again with the new arguments.
+- *Studio.* Before the first write it reads the page's baseline; after an edit it asks for =hot.json=: same
+  fingerprint and every call takes its arguments → no reload (the panels re-read the source); else reload as
+  before. Measured in the page (release): the frame changes ~480 ms after the gesture (apply 65 ms, hot.json
+  180 ms, swap 2 ms); slower (~2.4 s) while the dev server is also recompiling the page for the inspector.
+- *Bugs found and fixed on the way:*
+  - =stdlib/__dev__/primitives/dev-ws.st= reloaded every page on every write, bypassing the cancellable
+    =st:reload= handshake (PLAN-154's deferral of a reload while typing never held either). It now goes through it.
+  - =src/emit/js_parser.rs=: three of its four scanners took an apostrophe in a =//= comment for a string; an
+    odd number of them before a =for (;;)= split its header at the semicolons and the page's bundle failed to
+    parse (E0952). One =comment_end= rule now serves all four. Gate
+    =emit::js_parser::tests::an_apostrophe_in_a_comment_does_not_open_a_string= (the failure was seen live first).
+  - A model's clip age after a seek restarted at 0: =score-window= publishes =<window>__ms=, =apply-animations=
+    stamps a stepped =clip= channel's age from the stop it began at, the stage plays the clip at that age (exact
+    on seeks and hot edits; renders unchanged). Gate =stdlib/3d/tests/stage-seek.test.st= (+1).
+- *Gates:* =tests/studio_hot_binds_test.rs= (5: windows/keyframes/sound are hot; a retime moves only its window;
+  a keyframe and a drum cell are hot; markup/style/score length change the fingerprint; hot arguments are the
+  body's values). =tests/studio/film_studio_e2e.sh= 16/16 on the release build — every film gesture live, the
+  page never reloads (a marker set before the gesture survives it).
+- *Verification (2026-11-08):*
+  - On the Build host: =cargo test --lib= 3288 passed, 0 failed; =studio_hot_binds_test= 5/5; =plan152= 4/4; headless
+    756/11 (baseline).
+  - Local, in a systemd scope (=MemoryMax=6G=, =CPUQuota=400%=): e2e 16/16; =tests/score --cdp= 42/4 and
+    =stdlib/3d/tests --cdp= 24/11 (baselines, +1 clip-age gate).
+  - Renders of all three films on both engines: unchanged.
+  - Snapshots re-recorded on the builder (=nix build -f nix/spacetime.nix snapshots=): only the primitives' new hot
+    handler / clip-age stamp and their init hashes.
 ** DONE P4 (re-scoped) an edit keeps the film where it was
 Hot rescore needs the compiler to hand out each bind's arguments (keyframe tables, window offsets, the synth program)
 to a running page; scraping emitted JS or re-lowering keyframes in the client would be a second lowering. Re-scoped
@@ -99,7 +137,6 @@ with its own cached dev deps.
   profile) was still running at this commit.
 ** TODO P6 render from studio, docs, demo film
 * Follow-ups
-- Hot rescore (sub-second edits): the compiler exposes per-bind arguments for apply-animations / score-window /
-  score-synth; the page swaps them in place.
-- A clip's age after a live seek restarts at the seek (renders are exact).
-- The file watcher sometimes misses the studio's own writes (seen; not root-caused).
+- More hot primitives (the stage's own params, fog, grid, particles): they reload today.
+- The "watcher misses a write" seen earlier was the inspector's dev-ws reloading on its own; with the handshake
+  fixed, the studio's 300 ms fallback reload covers a genuinely missed write.

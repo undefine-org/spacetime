@@ -44,3 +44,30 @@ canvas.field {
   @assert (Math.abs(window.__mx - 3) < 0.1)
     "the three.js mesh must be at the score's frame too"
 }
+
+// A stepped `clip` channel is a model's animation clip. Seeking into the
+// middle of a clip must play it at its AGE in the score — measured from the
+// stop it started at, in the window's ms — not restart it (PLAN-155).
+.reel2 { @score &.time(6s) as &reel2 { &stage2 at 0s for 6s; } }
+.stage2 {
+  width: 200px; height: 200px;
+  @on &.clip { &bot { clip: "Idle" -> "Walk" at 50% --steps(1); } }
+}
+canvas.field2 {
+  width: 200px; height: 200px;
+  @stage(camZ: 6) { @object &bot (shape: "box", size: 1) }
+}
+
+@test "a seek lands mid-clip at the clip's age" needs timing {
+  @fixture { <div class="reel2"><div class="stage2"><canvas class="field2"></canvas></div></div> }
+
+  @wait 400ms
+  @eval (ST._transports.reel2.pause(), ST._transports.reel2.seek(4500))
+  @wait 300ms
+  @eval (window.__bot = document.querySelector('canvas.field2')._stStageObjects['&bot']._stPart)
+  @eval (window.__age = window.__bot.channels.clipAge)
+  @assert (window.__bot.props.animation === 'Walk')
+    "at 4.5 s of a 6 s window the clip is the one that began at 50%"
+  @assert (Math.abs(window.__age - 1500) < 40)
+    "its age is (75% - 50%) x 6000 ms = 1500 ms, not 0 (a seek must not restart it)"
+}

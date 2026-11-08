@@ -44,7 +44,8 @@
   posY: number = 0,
   posZ: number = 0,
   rotateY: number = 0,
-  spinY: number = 0
+  spinY: number = 0,
+  bind: string = ""
 ) {
   %emit js {
     const canvas = %&el;
@@ -58,14 +59,31 @@
       console.warn('[Spacetime] @gltf ' + src + ': give `scale:` — `size:` auto-fit needs the loaded mesh, which only a browser has; drawing at scale 1');
       k = 1;
     }
-    const spin = %spinY;
-    const ry = %rotateY * Math.PI / 180;
+    // mutable rest pose: a hot edit (PLAN-155) can move it
+    const rest = { spin: %spinY, ry: %rotateY * Math.PI / 180 };
+    const spin = rest.spin;
+    const ry = rest.ry;
     const pt = ctx.part('Model', {
       src, animation: %clip || undefined, time: 0,
       position: [%posX, %posY, %posZ], rotation: [0, ry, 0], scale: k > 0 ? k : 1,
       castShadow: !!ctx.shadows,
     }, { name: String(%name || '').replace(/^&/, ''),
-         update: spin ? (p, t) => { p.props.rotation = [0, ry + spin * t, 0]; } : null });
+         update: spin ? (p, t) => { p.props.rotation = [0, rest.ry + rest.spin * t, 0]; } : null });
+
+    // PLAN-155 hot bind: the same model, a new pose / scale / starting clip
+    // (a new file, or a spin started or stopped, is a reload).
+    ST.hot(%bind, (a) => {
+      if (a.src !== raw || a.name !== %name || !!a.spinY !== !!spin) return false;
+      if (!(a.scale > 0) !== !(k > 0)) return false;
+      rest.ry = a.rotateY * Math.PI / 180;
+      rest.spin = a.spinY;
+      pt.props.position = [a.posX, a.posY, a.posZ];
+      pt.props.rotation = [0, rest.ry, 0];
+      if (a.scale > 0) pt.props.scale = a.scale;
+      if (!pt.channels || pt.channels.clip == null) pt.props.animation = a.clip || undefined;
+      ctx.touch(pt);
+      return true;
+    });
     // `size` (browser only): scale the loaded model to fit
     if (!(k > 0) && pt.obj && ctx.THREE) {
       const THREE = ctx.THREE, target = %size;

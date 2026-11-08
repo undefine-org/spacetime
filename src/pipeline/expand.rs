@@ -489,6 +489,20 @@ fn ir_to_expanded(
     }
 }
 
+/// A primitive call's arguments as the JS its body is compiled with — the SAME
+/// conversion codegen uses ([`resolved_to_primitive_args`]), so what a running
+/// page is handed again (PLAN-155 hot binds) cannot drift from what it was
+/// compiled with. Element refs are not data and are left out.
+pub(crate) fn primitive_call_args(
+    primitive: &ResolvedPrimitive,
+    meta_registry: &MetaRegistry,
+) -> Option<std::collections::HashMap<String, String>> {
+    let def = meta_registry.get_primitive(&primitive.primitive_name)?;
+    let no_scopes = std::collections::HashMap::new();
+    let args = resolved_to_primitive_args(primitive, def, meta_registry, &no_scopes).ok()?;
+    Some(crate::emit::metasystem_codegen::param_values_js(def, &args))
+}
+
 /// Convert ResolvedPrimitive args (BoundArgs) to PrimitiveArgs for codegen.
 ///
 /// Uses the primitive definition to distinguish element refs from params.

@@ -222,6 +222,9 @@ pub struct CompileOptions {
     pub bindings_first: bool,
     /// Development-only template invocation root stamps for the inspector.
     pub inspector_node_stamps: bool,
+    /// PLAN-155: stop after Resolve and return only the page's hot-keyed calls
+    /// and their arguments (`CompiledSpacetime::hot_binds`) — a studio edit.
+    pub hot_only: bool,
     /// PLAN-076: products of the compile-time migration shim (`Compiler::from_file`),
     /// threaded into the final output.
     pub migration_outcome: MigrationOutcome,
@@ -238,6 +241,7 @@ impl Default for CompileOptions {
             site_dir: None,
             bindings_first: false,
             inspector_node_stamps: false,
+            hot_only: false,
             migration_outcome: MigrationOutcome::default(),
         }
     }
@@ -316,6 +320,9 @@ pub struct CompiledSpacetime {
     /// PLAN-076: warning-severity shim diagnostics (W0715: old syntax
     /// auto-migrated in memory — persist via the pill or `spacetime migrate`).
     pub migration_warnings: Vec<PipelineErrorInfo>,
+    /// PLAN-155: the page's hot-keyed calls and their arguments
+    /// (`[{key, primitive, args}]`); filled by a `hot_only` compile.
+    pub hot_binds: Vec<serde_json::Value>,
 }
 
 /// Information about a pipeline compilation error
@@ -382,6 +389,7 @@ pub struct Compiler<'a> {
     bindings_first: bool,
     /// Emit development-only structure ids on template invocation roots.
     inspector_node_stamps: bool,
+    hot_only: bool,
     /// PLAN-076: shim products collected while building this compiler
     /// (`from_file`; empty for `from_ast` — the shim needs source text).
     migration_outcome: MigrationOutcome,
@@ -412,6 +420,7 @@ impl<'a> Compiler<'a> {
             site_dir: None,
             bindings_first: false,
             inspector_node_stamps: false,
+            hot_only: false,
             migration_outcome: MigrationOutcome::default(),
             source_hash: None,
         }
@@ -428,6 +437,13 @@ impl<'a> Compiler<'a> {
     /// Emit structure ids only for the dev server's inspector selection rail.
     pub fn inspector_node_stamps(mut self, enabled: bool) -> Self {
         self.inspector_node_stamps = enabled;
+        self
+    }
+
+    /// PLAN-155: compile only as far as the page's hot binds (see
+    /// `CompileOptions::hot_only`).
+    pub fn hot_only(mut self) -> Self {
+        self.hot_only = true;
         self
     }
 
@@ -616,6 +632,7 @@ impl<'a> Compiler<'a> {
             site_dir: None,
             bindings_first: false,
             inspector_node_stamps: false,
+            hot_only: false,
             migration_outcome,
             source_hash: Some(source_hash),
         })
@@ -739,6 +756,7 @@ impl<'a> Compiler<'a> {
             site_dir: self.site_dir,
             bindings_first: self.bindings_first,
             inspector_node_stamps: self.inspector_node_stamps,
+            hot_only: self.hot_only,
             migration_outcome: self.migration_outcome,
         };
         match self.input {
@@ -746,6 +764,41 @@ impl<'a> Compiler<'a> {
             CompilerInput::Owned(ref ast) => compile_pipeline(ast, options),
         }
     }
+}
+
+/// A hot-only compile's answer (PLAN-155): the hot binds, then one row with the
+/// page's `fingerprint` — every non-hot call (see `pipeline::hot_binds`), the
+/// markup, the raw CSS and every rule's declarations, spans left out — so a
+/// studio swaps arguments in place only when nothing else changed.
+fn hot_shape(ast: &StFile, form_matches: &[crate::syntax::FormMatch], context: &pipeline::CompileContext) -> Vec<serde_json::Value> {
+    use std::hash::{Hash, Hasher};
+    let Ok((mut binds, calls)) = pipeline::hot_binds(form_matches, context) else {
+        return Vec::new();
+    };
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    calls.hash(&mut h);
+    for b in &ast.html_blocks {
+        b.skeleton.hash(&mut h);
+        b.holes.hash(&mut h);
+    }
+    for b in &ast.raw_css_blocks {
+        b.source.hash(&mut h);
+    }
+    fn decls(h: &mut std::collections::hash_map::DefaultHasher, selector: &str, ds: &[crate::parser::ast::CssDeclaration], nested: &[crate::parser::ast::NestedScope]) {
+        selector.hash(h);
+        for d in ds {
+            d.property.hash(h);
+            d.value.hash(h);
+        }
+        for n in nested {
+            decls(h, &n.selector, &n.css_declarations, &n.nested_scopes);
+        }
+    }
+    for scope in &ast.scopes {
+        decls(&mut h, &scope.selector, &scope.css_declarations, &scope.nested_scopes);
+    }
+    binds.push(serde_json::json!({ "fingerprint": format!("{:016x}", h.finish()) }));
+    binds
 }
 
 /// Compile a parsed AST into CSS + JS output.
@@ -1825,6 +1878,7 @@ fn compile_pipeline(ast: &StFile, options: CompileOptions) -> CompiledSpacetime 
             pipeline_errors,
             pending_migrations: Vec::new(),
             migration_warnings: Vec::new(),
+            hot_binds: Vec::new(),
         };
     }
 
@@ -1883,6 +1937,7 @@ fn compile_pipeline(ast: &StFile, options: CompileOptions) -> CompiledSpacetime 
                         }],
                         pending_migrations: Vec::new(),
                         migration_warnings: Vec::new(),
+            hot_binds: Vec::new(),
                     };
                 }
             },
@@ -2062,6 +2117,22 @@ fn compile_pipeline(ast: &StFile, options: CompileOptions) -> CompiledSpacetime 
             }
             diags
         });
+
+    // A studio edit wants only the hot binds: Resolve, no codegen (PLAN-155).
+    if options.hot_only {
+        return CompiledSpacetime {
+            css: String::new(),
+            js: String::new(),
+            html: String::new(),
+            build_scripts: Vec::new(),
+            css_source_map: None,
+            js_source_map: None,
+            pipeline_errors: Vec::new(),
+            pending_migrations: Vec::new(),
+            migration_warnings: Vec::new(),
+            hot_binds: hot_shape(ast, form_matches, &context),
+        };
+    }
 
     // Run through the new pipeline
     crate::profile_span!("pipeline_compile");
@@ -2524,6 +2595,7 @@ fn compile_pipeline(ast: &StFile, options: CompileOptions) -> CompiledSpacetime 
         pipeline_errors,
         pending_migrations,
         migration_warnings,
+        hot_binds: Vec::new(),
     }
 }
 

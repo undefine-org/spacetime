@@ -225,6 +225,30 @@ pub fn generate_primitive_ir_structured(
 }
 
 /// Fill in default values for missing arguments based on primitive param definitions.
+/// Each declared typed param of a primitive call AS ITS BODY IS GIVEN IT: the
+/// call's args with the defaults filled, resolved through the same `%param`
+/// marker resolution and emission codegen uses (type-aware: a `string` param's
+/// raw `&ground` becomes the string it is in the body). PLAN-155 hot binds hand
+/// a running page exactly these, so they cannot drift from the compiled call.
+pub fn param_values_js(primitive: &PrimitiveDefAst, args: &PrimitiveArgs) -> HashMap<String, String> {
+    use crate::ir::{JsExpr, Marker};
+    let filled = fill_default_args_structured(primitive, args);
+    let ctx = build_emit_context_structured(&filled, primitive);
+    let opts = EmitOptions::default();
+    let mut out = HashMap::new();
+    for param in &primitive.params {
+        if let PrimitiveParam::Typed { name, .. } = param {
+            let marker = JsExpr::Marker(Marker::Param { name: name.clone(), field: None, in_string: None });
+            if let Ok(resolved) = js_emit::resolve_expr(&marker, &ctx, &opts)
+                && let Ok(text) = js_emit::emit_expr(&resolved, &opts)
+            {
+                out.insert(name.clone(), text);
+            }
+        }
+    }
+    out
+}
+
 fn fill_default_args_structured(
     primitive: &PrimitiveDefAst,
     args: &PrimitiveArgs,

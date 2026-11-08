@@ -34,7 +34,8 @@
   stagger: number = 0,
   staggerFrom: string = "first",
   interactive: bool = false,
-  colorSpace: string = "rgb"
+  colorSpace: string = "rgb",
+  bind: string = ""
 ) {
   // NOTE: CSS variables are set on elements via JS (e.g., --st-{driver}-opacity)
   // These can be used in custom CSS for additional styling. The JS also sets
@@ -51,6 +52,16 @@
 
       // Early exit if no animations data
       if (!anims) return;
+
+      // PLAN-155 hot bind: a studio edit hands this call a new keyframe table;
+      // it is patched INTO the one the watchers read (same shape — the same
+      // channels — or the page reloads), and var() values are re-resolved.
+      ST.hot(%bind, (a) => {
+        if (a.easing !== defaultEasing || a.stagger !== defaultStaggerDelay) return false;
+        if (!ST.patchInPlace(anims, a.animations)) return false;
+        try { window.dispatchEvent(new Event('st:scheme-change')); } catch (e) {}
+        return true;
+      });
 
       // PLAN-150 W4: a `&name` scope selector may address a STAGE OBJECT (a
       // 3D mesh/particle field registered by the stage under that name) rather
@@ -72,6 +83,20 @@
           if (reg && reg[sel]) return reg[sel];
         }
         return null;
+      };
+
+      // PLAN-155: a stage model's `clip` plays from when the score switched to
+      // it. That moment is in this table — the stop the current value started
+      // at — and the window's length is published by its score-window
+      // (`<window>__ms`), so the clip's AGE is exact on every frame, a seek or
+      // a hot edit included: (progress - stop) x window.
+      const stampClipAge = (el, prop, progress, driverSignal) => {
+        if (!el || !el._stPart || prop.property !== 'clip' || !prop.keyframes || !prop.keyframes.length) return;
+        const ms = ST.resolve(root, driverSignal + '__ms');
+        if (typeof ms !== 'number') return;
+        let at = 0;
+        for (const k of prop.keyframes) if (k.at <= progress) at = k.at;
+        el.style.setProperty('clipAge', Math.max(0, (progress - at) * ms));
       };
 
       // Easing functions
@@ -553,6 +578,7 @@
                   if (isActive || !owner) el._stAnimOwner[normProp] = driverSignal;
                   const value = interpolateKeyframes(prop.keyframes, progress, prop.easing || scopeEasing, colorSpace);
                   applyStyle(el, prop.property, value, driverSignal, scopeId);
+                  stampClipAge(el, prop, progress, driverSignal);
                 });
               } else {
                 // Scalar progress path (scroll, time, single-axis mouse)
@@ -580,6 +606,7 @@
                   if (isActive || !owner) el._stAnimOwner[normProp] = driverSignal;
                   const value = interpolateKeyframes(prop.keyframes, progress, prop.easing || scopeEasing, colorSpace);
                   applyStyle(el, prop.property, value, driverSignal, scopeId);
+                  stampClipAge(el, prop, progress, driverSignal);
                 });
               }
             });

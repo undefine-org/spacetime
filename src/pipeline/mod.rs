@@ -1239,6 +1239,92 @@ pub fn compile(
     compile_verbose(matches, context).map(|v| v.output)
 }
 
+/// PLAN-155 hot binds: a primitive that declares a `bind` param is handed a
+/// STABLE KEY — its primitive, its selector and its ordinal among calls of that
+/// primitive on that selector — so a running page can be given a call's new
+/// arguments (`hot_binds`) and the call can take them in place: a keyframe
+/// table, a clip window, a synth program, without a reload. An edit that adds
+/// or removes a call changes the key set, which is how a page knows to reload.
+pub(crate) fn assign_hot_keys(primitives: &mut [ResolvedPrimitive], registry: &crate::metasystem::MetaRegistry) {
+    use crate::parser::meta_ast::PrimitiveParam;
+    let mut seen: HashMap<(String, String), usize> = HashMap::new();
+    for p in primitives.iter_mut() {
+        let declares = registry.get_primitive(&p.primitive_name).is_some_and(|def| {
+            def.params.iter().any(|q| matches!(q, PrimitiveParam::Typed { name, .. } if name == "bind"))
+        });
+        if !declares || p.args.contains_key("bind") {
+            continue;
+        }
+        let selector = p.selector.clone().unwrap_or_default();
+        let n = seen.entry((p.primitive_name.clone(), selector.clone())).or_insert(0);
+        let key = format!("{}@{}#{}", p.primitive_name, selector, n);
+        *n += 1;
+        p.args.insert("bind".to_string(), CapturedValue::String(key));
+    }
+}
+
+/// Every hot-keyed call on the page with the arguments it is compiled with:
+/// `[{key, primitive, args: {name: js}}]` (PLAN-155), and a FINGERPRINT of every
+/// other call — its primitive, selector and arguments, no spans — so a caller
+/// can tell an edit a running page can take in place (only hot arguments
+/// moved) from one it cannot (anything else did). Runs the layers of
+/// [`compile_verbose`] up to Resolve — the same calls, in the same order — and
+/// stops there: no codegen.
+pub fn hot_binds(
+    matches: &[FormMatch],
+    context: &CompileContext,
+) -> Result<(Vec<serde_json::Value>, u64), PipelineError> {
+    let enum_facts = EnumTypeFacts::from_matches(matches);
+    let mutation_owned;
+    let (mutation_rewritten, _) = lower_variant_mutations(matches, &enum_facts);
+    let matches: &[FormMatch] = match mutation_rewritten {
+        Some(v) => {
+            mutation_owned = v;
+            &mutation_owned
+        }
+        None => matches,
+    };
+    let canonical_owned;
+    let matches: &[FormMatch] = if context.import_scope.is_empty() {
+        matches
+    } else {
+        canonical_owned = canonicalize_qualifiers(matches, &context.import_scope, &context.meta_registry);
+        &canonical_owned
+    };
+    let mut evaluated = evaluate::evaluate(matches, &context.meta_registry)?;
+    let _ = drivers::expand_drive_binds(&mut evaluated, matches, &context.meta_registry);
+    let _ = score::expand_score_binds(&mut evaluated, matches, &context.meta_registry);
+    for ev in &mut evaluated {
+        let def_name = ev.form_match.matched_macro.as_deref().unwrap_or(&ev.form_match.macro_name);
+        if let Some((_, Some(_))) = context.meta_registry.retired_by_macro(def_name) {
+            ev.binds_consumed = true;
+        }
+    }
+    let mut primitives = resolve::resolve_evaluated(&evaluated, &context.meta_registry)?;
+    assign_hot_keys(&mut primitives, &context.meta_registry);
+    use std::hash::{Hash, Hasher};
+    let mut rest = std::collections::hash_map::DefaultHasher::new();
+    let mut binds = Vec::new();
+    for p in &primitives {
+        p.primitive_name.hash(&mut rest);
+        p.selector.hash(&mut rest);
+        if let Some(CapturedValue::String(key)) = p.args.get("bind") {
+            key.hash(&mut rest);
+            if let Some(args) = expand::primitive_call_args(p, &context.meta_registry) {
+                binds.push(serde_json::json!({ "key": key, "primitive": p.primitive_name, "args": args }));
+            }
+            continue;
+        }
+        let mut names: Vec<&String> = p.args.keys().collect();
+        names.sort();
+        for n in names {
+            n.hash(&mut rest);
+            format!("{:?}", p.args[n]).hash(&mut rest);
+        }
+    }
+    Ok((binds, rest.finish()))
+}
+
 /// Compile with detailed layer outputs for debugging
 ///
 /// Returns intermediate results from each layer for inspection.
@@ -1345,6 +1431,7 @@ pub fn compile_verbose(
 
     // Layer 2: Resolve
     let mut primitives = resolve::resolve_evaluated(&evaluated, &context.meta_registry)?;
+    assign_hot_keys(&mut primitives, &context.meta_registry);
 
     // PLAN-112 W4: only dev-server compiles carry this map. Its ids come from the
     // same bundle walk as `/__spacetime/inspect/structure`; production maps are

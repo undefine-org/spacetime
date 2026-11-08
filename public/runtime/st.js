@@ -436,6 +436,83 @@
     }
   };
 
+  // ---- Hot binds (PLAN-155) ------------------------------------------------
+  // A primitive that declares a `bind` param is compiled with a stable key
+  // (`apply-animations@.shot#0`) and may say how it takes new arguments in
+  // place: `ST.hot(%bind, (args) => …)`. A dev tool hands a page the arguments
+  // a fresh compile gives each key (`/__spacetime/studio/hot.json`); the page
+  // takes them without reloading — or reports that it cannot (a key it does
+  // not run, a key it runs that is gone, a handler that refuses), and the tool
+  // reloads instead. One key may run on several elements (a selector).
+  ST._hot = ST._hot || {};
+  ST.hot = function(key, take) {
+    if (!key || typeof take !== 'function') return;
+    (ST._hot[key] = ST._hot[key] || []).push(take);
+  };
+  /// `binds`: `[{key, args: {name: js}}]`. Returns true when every call took
+  /// its arguments; false means the page needs a reload to show the source.
+  ST.hotApply = function(binds) {
+    var want = {};
+    for (var i = 0; i < binds.length; i++) want[binds[i].key] = binds[i];
+    var have = Object.keys(ST._hot);
+    if (have.length !== Object.keys(want).length) return false;
+    for (var h = 0; h < have.length; h++) if (!want[have[h]]) return false;
+    ST._hotLast = ST._hotLast || {};
+    for (var k in want) {
+      var text = JSON.stringify(want[k].args);
+      if (ST._hotLast[k] === text) continue;
+      var args = {};
+      for (var name in want[k].args) {
+        try { args[name] = Function('"use strict"; return (' + want[k].args[name] + ');')(); }
+        catch (e) { return false; }
+      }
+      var takers = ST._hot[k];
+      for (var t = 0; t < takers.length; t++) if (takers[t](args) === false) return false;
+      ST._hotLast[k] = text;
+    }
+    return true;
+  };
+  /// Record what a page was compiled with, so an unchanged call is left alone.
+  ST.hotSeen = function(binds) {
+    ST._hotLast = ST._hotLast || {};
+    for (var i = 0; i < binds.length; i++) ST._hotLast[binds[i].key] = JSON.stringify(binds[i].args);
+  };
+  /// Make `old` equal `next` IN PLACE (closures holding `old` and its parts see
+  /// the change). Same shape required — an object's keys, an array of objects'
+  /// length; a leaf array (keyframe stops) may change length. False otherwise.
+  ST.patchInPlace = function(old, next) {
+    if (Array.isArray(old) && Array.isArray(next)) {
+      var objects = old.length && old[0] && typeof old[0] === 'object';
+      if (objects) {
+        if (old.length !== next.length) {
+          var leafy = old.every(function(x) { return x && 'value' in x; });
+          if (!leafy) return false;
+          old.length = 0;
+          for (var a = 0; a < next.length; a++) old.push(next[a]);
+          return true;
+        }
+        for (var j = 0; j < old.length; j++) if (!ST.patchInPlace(old[j], next[j])) return false;
+        return true;
+      }
+      old.length = 0;
+      for (var b = 0; b < next.length; b++) old.push(next[b]);
+      return true;
+    }
+    if (old && next && typeof old === 'object' && typeof next === 'object') {
+      var ko = Object.keys(old), kn = Object.keys(next);
+      if (ko.length !== kn.length) return false;
+      for (var c = 0; c < kn.length; c++) {
+        var key = kn[c];
+        if (!(key in old)) return false;
+        var o = old[key], n = next[key];
+        if (o && typeof o === 'object') { if (!ST.patchInPlace(o, n)) return false; }
+        else old[key] = n;
+      }
+      return true;
+    }
+    return false;
+  };
+
   ST._pendingNotifies = new Set();
   // Run every batched signal change now, including the changes those cause,
   // in the order they were made (the order their microtasks would have run).

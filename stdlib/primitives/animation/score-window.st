@@ -50,7 +50,8 @@
   offset_rel: number = 0,
   span_rel: number = 0,
   rate_from: number = 1,
-  rate_to: number = 1
+  rate_to: number = 1,
+  bind: string = ""
 ) {
   %emit js {
     var _swName = %name;
@@ -61,6 +62,7 @@
     var _swSpanRel = %span_rel;
     var _swRateFrom = %rate_from;
     var _swRateTo = %rate_to;
+    var _swExtent = null;
 
     // `total` is the SCALE that converts the parent's 0..1 into the score's
     // domain — normally a compile-time constant (`.time`: the declared ms;
@@ -90,6 +92,9 @@
       var offset = _swOffsetRel ? _swOffset * total : _swOffset;
       var span = _swSpanRel ? _swSpan * total : _swSpan;
       var extent = span > 0 ? span : Math.max(0, total - offset);
+      // the window's length in the score's own ms: what a clip's elapsed
+      // time inside it is measured in (a stage model's clip age, PLAN-155)
+      if (extent !== _swExtent) { _swExtent = extent; ST.set(%&el, _swName + '__ms', extent); }
       if (extent <= 0) return 0;
       var local = (parentProgress * total - offset) / extent;
       local = local < 0 ? 0 : (local > 1 ? 1 : local);
@@ -168,6 +173,18 @@
     ST.watchScoped(%&el, %parent, function (parentProgress) {
       progress = _swMap(parentProgress || 0);
       %yield progress -> $%name;
+    });
+
+    // PLAN-155 hot bind: a retimed clip (`at`/`for`/`rate`) is a new window
+    // map — the same signal, new numbers — shown at the parent's current value.
+    ST.hot(%bind, function (a) {
+      if (a.name !== _swName) return false;
+      _swOffset = a.offset; _swSpan = a.span; _swTotal = a.total;
+      _swOffsetRel = a.offset_rel; _swSpanRel = a.span_rel;
+      _swRateFrom = a.rate_from; _swRateTo = a.rate_to;
+      progress = _swMap(ST.resolve(%&el, %parent) || 0);
+      %yield progress -> $%name;
+      return true;
     });
   }
 

@@ -205,6 +205,7 @@ pub fn create_router_raw(state: AppState) -> Router {
         .route("/__spacetime/studio/outline.json", get(studio_outline_handler))
         .route("/__spacetime/studio/apply", post(studio_apply_handler))
         .route("/__spacetime/studio/score.json", get(studio_score_handler))
+        .route("/__spacetime/studio/hot.json", get(studio_hot_handler))
         .route("/__spacetime/studio/runtime.js", get(studio_runtime_js_handler))
         .route("/__spacetime/studio/styles.css", get(studio_styles_css_handler))
         .route("/__spacetime/save", post(save_handler))
@@ -2948,6 +2949,46 @@ async fn studio_score_handler(
             Json(shape).into_response()
         }
         Err(e) => Json(serde_json::json!({ "error": e })).into_response(),
+    }
+}
+
+/// GET /__spacetime/studio/hot.json?entry= — the page's hot-keyed calls with
+/// the arguments a fresh compile gives them (PLAN-155): what a studio edit
+/// hands the running page instead of reloading it. Compiles only as far as
+/// Resolve (no codegen). Dev only.
+async fn studio_hot_handler(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    Query(query): Query<InspectorWidgetQuery>,
+) -> Response {
+    let AppMode::Dev { site_dir, .. } = &state.mode else {
+        return (StatusCode::NOT_FOUND, "Not found").into_response();
+    };
+    let entry = query.entry.unwrap_or_default();
+    if let Err(e) = crate::sync::handlers::validate_file_path(site_dir, &entry) {
+        return Json(serde_json::json!({ "error": e })).into_response();
+    }
+    let st_path = site_dir.join(&entry);
+    let started = std::time::Instant::now();
+    match Compiler::from_file(&st_path, site_dir) {
+        Ok(compiler) => {
+            let compiled = compiler
+                .cache_stdlib(state.cache_stdlib)
+                .with_site_dir(Some(crate::compiler::project_root_for(&st_path)))
+                .hot_only()
+                .compile();
+            let mut binds = compiled.hot_binds;
+            let fingerprint = binds
+                .iter()
+                .position(|b| b.get("fingerprint").is_some())
+                .map(|i| binds.remove(i)["fingerprint"].clone());
+            Json(serde_json::json!({
+                "binds": binds,
+                "fingerprint": fingerprint,
+                "ms": started.elapsed().as_millis() as u64,
+            }))
+            .into_response()
+        }
+        Err(e) => Json(serde_json::json!({ "error": e.to_string() })).into_response(),
     }
 }
 

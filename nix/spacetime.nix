@@ -19,6 +19,7 @@
 { pkgs ? import (builtins.getFlake "nixpkgs") { }
 , crane ? builtins.getFlake "github:ipetkov/crane"
 , features ? [ "cdp" ]
+, testArgs ? "--lib"   # nix build -f nix/spacetime.nix tests --argstr testArgs "--test studio_hot_binds_test"
 }:
 let
   lib = pkgs.lib;
@@ -78,9 +79,23 @@ let
         CARGO_PROFILE = "dev";
         cargoArtifacts = depsFor "dev";
         doCheck = true;
-        cargoTestExtraArgs = "--lib";
+        cargoTestExtraArgs = testArgs;
         RUST_TEST_THREADS = "1";
         RUST_MIN_STACK = "8388608";
+      });
+      # nix build -f nix/spacetime.nix snapshots -o <dir>   (insta snapshots re-recorded on the
+      # builder; review the diff, then copy them into src/snapshots/)
+      snapshots = craneLib.cargoTest (common // {
+        CARGO_PROFILE = "dev";
+        cargoArtifacts = depsFor "dev";
+        doCheck = true;
+        cargoTestExtraArgs = "--lib compiler::snapshot_tests";
+        INSTA_UPDATE = "always";
+        INSTA_FORCE_PASS = "1";
+        RUST_TEST_THREADS = "1";
+        RUST_MIN_STACK = "8388608";
+        doInstallCargoArtifacts = false;
+        installPhaseCommand = "mkdir -p $out && cp src/snapshots/*.snap $out/";
       });
       # nix build -f nix/spacetime.nix headless   (the .test.st suite, by the built binary)
       headless = pkgs.runCommand "spacetime-headless-suite" { } ''

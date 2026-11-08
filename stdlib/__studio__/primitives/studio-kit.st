@@ -306,7 +306,7 @@
           put('stuError', '');
           put('stuStatus', 'Saving...');
           S.inflight++;
-          S.queue = S.queue.then(function () {
+          S.queue = S.queue.then(S.hotBaseline).then(function () {
             return fetch('/__spacetime/studio/apply', {
               method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
             }).then(function (r) { return r.json(); }).then(function (res) {
@@ -314,12 +314,26 @@
                 put('stuStatus', res.changed && res.changed.length ? 'Saved to ' + res.changed.join(', ') : 'No change');
                 if (res.changed && res.changed.length) {
                   S.remember();
-                  // The file watcher reloads the page; an edit of ours does not
-                  // depend on it (it can miss a write), so if it has not come
-                  // in a moment, the page goes back to its source by itself.
-                  setTimeout(function () {
-                    if (S.inflight || S.editing) { S.pendingReload = true; } else { location.reload(); }
-                  }, 600);
+                  // An edit the running page can take IN PLACE (PLAN-155: only
+                  // hot-keyed arguments moved — a keyframe table, a clip
+                  // window, a synth program) is applied without a reload.
+                  // Anything else reloads: the file watcher does it, and if it
+                  // has not in a moment (it can miss a write), the page goes
+                  // back to its source by itself.
+                  S.hotting = true;
+                  return S.hot().then(function (live) {
+                    S.hotting = false;
+                    if (live) {
+                      S.hotDone = Date.now();
+                      S.pendingReload = false;
+                      put('stuStatus', 'Saved to ' + res.changed.join(', ') + ' - live');
+                    } else {
+                      setTimeout(function () {
+                        if (S.inflight || S.editing) { S.pendingReload = true; } else { location.reload(); }
+                      }, 300);
+                    }
+                    return res;
+                  });
                 }
               } else {
                 put('stuStatus', '');
@@ -336,6 +350,42 @@
             });
           });
           return S.queue;
+        };
+
+        // ---- hot edits (PLAN-155) ------------------------------------------------
+        var hotUrl = function () { return '/__spacetime/studio/hot.json?entry=' + encodeURIComponent(entry()); };
+        /// The page's shape as it was compiled — its fingerprint and arguments —
+        /// read once, just before the first edit writes (so it is the page as
+        /// loaded, and the studio knows its entry by then).
+        S.hotBase = null;
+        S.hotBaseline = function () {
+          if (S.hotBase || !entry()) { return Promise.resolve(); }
+          return fetch(hotUrl()).then(function (r) { return r.json(); }).then(function (h) {
+            if (h && !h.error) { S.hotBase = h.fingerprint; if (ST.hotSeen) { ST.hotSeen(h.binds); } }
+          }).catch(function () {});
+        };
+        /// Hand the page what a fresh compile gives its hot-keyed calls; true
+        /// when it took them all and nothing else about the page changed.
+        S.hot = function () {
+          if (!ST.hotApply) { return Promise.resolve(false); }
+          return fetch(hotUrl()).then(function (r) { return r.json(); }).then(function (h) {
+            if (!h || h.error || !S.hotBase || h.fingerprint !== S.hotBase) { return false; }
+            if (!ST.hotApply(h.binds)) { return false; }
+            // the page shows the current frame again with its new arguments
+            Object.keys(ST._transports || {}).forEach(function (k) {
+              var t = ST._transports[k];
+              if (t && t.refresh) { t.refresh(); }
+            });
+            // and the studio re-reads the source (its addresses moved)
+            S.refresh();
+            return true;
+          }).catch(function () { return false; });
+        };
+        /// Re-read the outline and the film's shape into the panels.
+        S.refresh = function () {
+          [['stuOutline', '/__spacetime/studio/outline.json?entry='], ['stuScore', '/__spacetime/studio/score.json?entry=']].forEach(function (src) {
+            fetch(src[1] + encodeURIComponent(entry())).then(function (r) { return r.json(); }).then(function (v) { put(src[0], v); }).catch(function () {});
+          });
         };
 
         /// Keep the place across the reload an edit causes.
@@ -660,8 +710,10 @@
             S.treeDrag = null;
           },
           reload: function (ev) {
+            // An edit the page has just taken live is not a reload (PLAN-155).
+            if (S.hotDone && Date.now() - S.hotDone < 2500) { ev.preventDefault(); return; }
             // Typing, or an edit still on its way: the reload waits for both.
-            if (S.editing || S.inflight) { ev.preventDefault(); S.pendingReload = true; return; }
+            if (S.editing || S.inflight || S.hotting) { ev.preventDefault(); S.pendingReload = true; return; }
             S.remember();
           }
         };

@@ -63,7 +63,8 @@
   scaleX: number = 1,
   scaleY: number = 1,
   scaleZ: number = 1,
-  flatShading: bool = false
+  flatShading: bool = false,
+  bind: string = ""
 ) {
   %emit js {
     const canvas = %&el;
@@ -94,12 +95,32 @@
     if (kind === 'MeshPhysicalMaterial') Object.assign(mat, { transmission: %transmission, ior: %ior, thickness: %thickness, clearcoat: %clearcoat });
     const g0 = SHAPES[%shape];
     if (!g0) console.warn('[Spacetime] @object: unknown shape `' + %shape + '`, drawing a sphere');
+    // the rest pose (its rotation is what a spin turns from): mutable, so a
+    // hot edit (PLAN-155) can move it
+    const rad = (d) => d * Math.PI / 180;
+    const rest = { r: [rad(%rotateX), rad(%rotateY), rad(%rotateZ)], spin: [sx, sy, sz] };
     const pt = ctx.part('Mesh', {
       position: [%posX, %posY, %posZ],
-      rotation: [%rotateX * Math.PI / 180, %rotateY * Math.PI / 180, %rotateZ * Math.PI / 180],
+      rotation: rest.r.slice(),
       scale: (%scaleX === 1 && %scaleY === 1 && %scaleZ === 1) ? 1 : [%scaleX, %scaleY, %scaleZ],
     }, { name: String(%name || '').replace(/^&/, ''), shape: g.shape, geom: g.geom, material: mat, materialKind: kind,
-         update: (sx || sy || sz) ? (p, t) => { p.props.rotation = [%rotateX * Math.PI / 180 + sx * t, %rotateY * Math.PI / 180 + sy * t, %rotateZ * Math.PI / 180 + sz * t]; } : null });
+         update: (sx || sy || sz) ? (p, t) => { p.props.rotation = rest.r.map((r, i) => r + rest.spin[i] * t); } : null });
+
+    // PLAN-155 hot bind: a new rest pose or material is the same part; a new
+    // shape, size, material kind or a spin started/stopped is not (reload).
+    ST.hot(%bind, (a) => {
+      if (a.shape !== %shape || a.size !== %size || a.detail !== %detail || a.material !== %material || a.name !== %name) return false;
+      if (!!(a.spinX || a.spinY || a.spinZ) !== !!(sx || sy || sz)) return false;
+      rest.r = [rad(a.rotateX), rad(a.rotateY), rad(a.rotateZ)];
+      rest.spin = [a.spinX, a.spinY, a.spinZ];
+      pt.props.position = [a.posX, a.posY, a.posZ];
+      pt.props.rotation = rest.r.slice();
+      pt.props.scale = (a.scaleX === 1 && a.scaleY === 1 && a.scaleZ === 1) ? 1 : [a.scaleX, a.scaleY, a.scaleZ];
+      Object.assign(pt.mat, { color: ctx.hex(a.color.rgba), roughness: a.roughness, metalness: a.metalness, emissive: ctx.hex(a.emissive.rgba), emissiveIntensity: a.emissiveIntensity });
+      if (kind === 'MeshPhysicalMaterial') Object.assign(pt.mat, { transmission: a.transmission, ior: a.ior, thickness: a.thickness, clearcoat: a.clearcoat });
+      ctx.touch(pt);
+      return true;
+    });
 
     // Register for sibling directives (legacy: @orbit / @parallax read these).
     canvas._stObjects = canvas._stObjects || [];

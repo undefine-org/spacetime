@@ -382,6 +382,35 @@ fn convert_segments_to_ir(
 }
 
 /// Find the position of a semicolon that's at depth 0 (not inside braces/parens)
+/// Where a comment starting at `i` ends (the index just past it), when `i`
+/// starts one — `//` to the end of the line, `/* … */` past its close. Every
+/// scanner here asks this before it reads a quote: an apostrophe in a comment
+/// (`// the window's length`) is prose, not a string, and taking it for one
+/// flips the scanner for the rest of the body — a `for (;;)` was then split at
+/// its semicolons and the page's whole bundle failed to parse (PLAN-155).
+fn comment_end(chars: &[char], i: usize) -> Option<usize> {
+    if chars.get(i) != Some(&'/') {
+        return None;
+    }
+    match chars.get(i + 1) {
+        Some('/') => {
+            let mut j = i + 2;
+            while j < chars.len() && chars[j] != '\n' {
+                j += 1;
+            }
+            Some(j)
+        }
+        Some('*') => {
+            let mut j = i + 2;
+            while j + 1 < chars.len() && !(chars[j] == '*' && chars[j + 1] == '/') {
+                j += 1;
+            }
+            Some((j + 2).min(chars.len()))
+        }
+        _ => None,
+    }
+}
+
 fn find_semicolon_at_depth_zero(s: &str) -> Option<usize> {
     let mut depth = 0i32;
     let mut in_string = false;
@@ -403,27 +432,9 @@ fn find_semicolon_at_depth_zero(s: &str) -> Option<usize> {
             // boundary (FUP-063). Only recognized outside string literals; a
             // lone `/` (division / regex) is left untouched, so normal JS
             // splitting is unaffected.
-            if c == '/' && i + 1 < chars.len() {
-                match chars[i + 1] {
-                    '/' => {
-                        // Line comment: skip to end-of-line (or end-of-input).
-                        i += 2;
-                        while i < chars.len() && chars[i] != '\n' {
-                            i += 1;
-                        }
-                        continue;
-                    }
-                    '*' => {
-                        // Block comment: skip to the closing `*/`.
-                        i += 2;
-                        while i + 1 < chars.len() && !(chars[i] == '*' && chars[i + 1] == '/') {
-                            i += 1;
-                        }
-                        i += 2; // step past the closing `*/`
-                        continue;
-                    }
-                    _ => {}
-                }
+            if let Some(end) = comment_end(&chars, i) {
+                i = end;
+                continue;
             }
             match c {
                 '"' | '\'' | '`' => {
@@ -446,15 +457,20 @@ fn brace_depth_change(s: &str) -> i32 {
     let mut depth = 0i32;
     let mut in_string = false;
     let mut string_char = '"';
-    let mut chars = s.chars().peekable();
+    let chars: Vec<char> = s.chars().collect();
+    let mut i = 0;
 
-    while let Some(c) = chars.next() {
+    while i < chars.len() {
+        let c = chars[i];
         if in_string {
             if c == '\\' {
-                chars.next(); // Skip escaped char
+                i += 1; // Skip escaped char
             } else if c == string_char {
                 in_string = false;
             }
+        } else if let Some(end) = comment_end(&chars, i) {
+            i = end;
+            continue;
         } else {
             match c {
                 '"' | '\'' | '`' => {
@@ -466,6 +482,7 @@ fn brace_depth_change(s: &str) -> i32 {
                 _ => {}
             }
         }
+        i += 1;
     }
     depth
 }
@@ -684,6 +701,10 @@ fn extract_cond_and_body(
                             in_str = false;
                         }
                         ci += 1;
+                        continue;
+                    }
+                    if let Some(end) = comment_end(&chars, ci) {
+                        ci = end;
                         continue;
                     }
                     if c == '"' || c == '\'' || c == '`' {
@@ -923,6 +944,10 @@ fn extract_brace_body(segments: &[EmitSegment]) -> Option<(Vec<EmitSegment>, Str
                             in_str = false;
                         }
                         ci += 1;
+                        continue;
+                    }
+                    if let Some(end) = comment_end(&chars, ci) {
+                        ci = end;
                         continue;
                     }
                     if c == '"' || c == '\'' || c == '`' {
@@ -2225,6 +2250,22 @@ const x = 42;"#;
                 .iter()
                 .any(|s| matches!(s, JsStmt::Decl { name, .. } if name == "x")),
             "const x decl must survive, got: {stmts:?}"
+        );
+    }
+
+    /// PLAN-155: an apostrophe in a comment is prose, not a string. With an odd
+    /// number of them before it, a `for (;;)` was split at its semicolons and
+    /// the page's whole bundle stopped parsing (E0952). Every scanner here now
+    /// skips comments before it reads a quote.
+    #[test]
+    fn an_apostrophe_in_a_comment_does_not_open_a_string() {
+        let input = "// the window's length\nconst f = (xs) => {\n  for (let i = 0; i < xs.length; i++) { if (xs[i]) return i; }\n  return -1;\n};\nconst g = 2;";
+        let stmts = parse_emit_js(input).unwrap();
+        let dump = format!("{stmts:?}");
+        assert!(dump.contains("for (let i = 0; i < xs.length; i++)"), "the for header must stay whole, got: {dump}");
+        assert!(
+            stmts.iter().any(|s| matches!(s, JsStmt::Decl { name, .. } if name == "g")),
+            "the statement after it must still be its own declaration, got: {dump}"
         );
     }
 }

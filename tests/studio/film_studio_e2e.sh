@@ -37,6 +37,17 @@ ready() {  # the film's transport and the studio's score are up on a settled pag
 click_at() { agent-browser mouse move "$1" "$2" >/dev/null; agent-browser mouse down >/dev/null; agent-browser mouse up >/dev/null; }
 drag_by() { agent-browser mouse move "$1" "$2" >/dev/null; agent-browser mouse down >/dev/null; agent-browser mouse move $(($1 + $3 / 2)) "$2" >/dev/null; agent-browser mouse move $(($1 + $3)) "$2" >/dev/null; agent-browser mouse up >/dev/null; }
 centre() { js "var r=($1).getBoundingClientRect(); Math.round(r.x+r.width/2)+' '+Math.round(r.y+r.height/2)"; }
+mark() { js "window.__live = 1; window.__t0 = performance.now(); 1" >/dev/null; }
+# a HOT edit: the page took it in place — the marker survives, the studio
+# read the new source (its panels show the new word); prints how long it took
+live() {
+  for _ in $(seq 1 60); do
+    [ "$(js "(window.__live===1 && (SpacetimeLocal.stuStatus||'').indexOf('live')>=0 && ($1)) ? 'y' : 'n'")" = y ] && {
+      echo "        (live in $(js "Math.round(performance.now()-window.__t0)") ms, no reload)"; return 0; }
+    sleep 0.1
+  done
+  return 1
+}
 
 for _ in $(seq 1 120); do curl -s -o /dev/null "http://127.0.0.1:$PORT/" && break; sleep 0.5; done
 agent-browser set viewport 1600 900 >/dev/null 2>&1
@@ -58,38 +69,38 @@ sleep 0.5
 # 2. drag a clip: its `at` word
 js "SpacetimeLocal.stuFilmSel='clip:1'; var i=SpacetimeLocal.stuFilmRows.findIndex(r=>r.label=='&card'); document.querySelectorAll('.stu-film__bars .stu-bar-clip')[i].scrollIntoView({block:'center'}); 1" >/dev/null
 read -r X Y <<<"$(centre "document.querySelectorAll('.stu-film__bars .stu-bar-clip')[SpacetimeLocal.stuFilmRows.findIndex(r=>r.label=='&card')]")"
-drag_by "$X" "$Y" 23
-sleep 2; ready
+mark; drag_by "$X" "$Y" 23
+live "SpacetimeLocal.stuScore.scores[0].entries.find(e=>e.subject=='card').at.text=='1s'" && ok "dragging &card is live (no reload)" || bad "dragging &card is live"
 grep -q '&card at 1s for 5.2s;' "$SRC" && ok "dragging &card rewrites its at (0.4s -> 1s)" || bad "dragging &card rewrites its at: $(grep -n '&card at' "$SRC")"
 [ "$(js "Math.round(ST.stuFilm.transport().position)+' '+ST.stuFilm.transport().playing+' '+SpacetimeLocal.stuFilmSel")" = "12000 false clip:1" ] && ok "after the reload: 12 s, paused, &card selected" || bad "restore: $(js "Math.round(ST.stuFilm.transport().position)+' '+ST.stuFilm.transport().playing+' '+SpacetimeLocal.stuFilmSel")"
 
 # 3. type in the inspector: its `for` word
 js "var i=document.querySelectorAll('.stu-film-input')[1]; i.focus(); i.select(); 1" >/dev/null
-agent-browser keyboard type "4.5s" >/dev/null; agent-browser press Tab >/dev/null
-sleep 2; ready
+mark; agent-browser keyboard type "4.5s" >/dev/null; agent-browser press Tab >/dev/null
+live "SpacetimeLocal.stuScore.scores[0].entries.find(e=>e.subject=='card').for.text=='4.5s'" && ok "the inspector edit is live" || bad "the inspector edit is live"
 grep -q '&card at 1s for 4.5s;' "$SRC" && ok "typing in the inspector rewrites for (5.2s -> 4.5s)" || bad "inspector: $(grep -n '&card at' "$SRC")"
 
 # 4. drag a keyframe: its stop
 js "var k=SpacetimeLocal.stuFilmKeys.findIndex(k=>k.key=='stop:1:0:1'); document.querySelectorAll('.stu-key')[k].scrollIntoView({block:'center'}); 1" >/dev/null
 read -r X Y <<<"$(centre "document.querySelectorAll('.stu-key')[SpacetimeLocal.stuFilmKeys.findIndex(k=>k.key=='stop:1:0:1')]")"
-drag_by "$X" "$Y" 20
-sleep 2; ready
+mark; drag_by "$X" "$Y" 20
+live "SpacetimeLocal.stuScore.clips.card.channels[0].stops[1].at > 0.2" && ok "the keyframe drag is live" || bad "the keyframe drag is live"
 grep -Eq 'opacity: 0 -> 1 at (2[0-9]|3[0-9])(\.[0-9])?% -> 1 at 78% -> 0;' "$SRC" && ok "dragging a keyframe rewrites its stop (18% -> later)" || bad "keyframe: $(grep -n 'opacity: 0 -> 1 at' "$SRC" | head -1)"
 
 # 5. a drum cell
 js "SpacetimeLocal.stuFilmSel='sound:8'; 1" >/dev/null; sleep 1
 read -r X Y <<<"$(centre "document.querySelectorAll('.stu-cell[data-kind=cell]')[1]")"
-click_at "$X" "$Y"
-sleep 2; ready
+mark; click_at "$X" "$Y"
+live "SpacetimeLocal.stuScore.programs[0].forms['--beat'].props['--kick'][0].indexOf('x x')==0" && ok "the drum cell is live (the synth re-rendered)" || bad "the drum cell is live"
 grep -q -- '--kick:  x x \. \. \. \. \. \. x \. x \. \. \. \. \. ;' "$SRC" && ok "clicking a drum cell writes x" || bad "cell: $(grep -n -- '--kick:' "$SRC")"
 [ "$(js "SpacetimeLocal.stuScore.programs[0].forms['--beat'].props['--kick'][0]")" = "x x . . . . . . x . x . . . . ." ] && ok "the synth program hears it" || bad "the synth program hears it"
 
 # 6. a stage part's unwritten param (inserted after the last written one)
 js "var i=SpacetimeLocal.stuFilmParts.findIndex(p=>p.label=='&robot'); SpacetimeLocal.stuFilmSel='part:'+i; 1" >/dev/null; sleep 1
-js "var x=[...document.querySelectorAll('.stu-film-input')].find(i=>i.dataset.label=='spinY'); x.focus(); x.select(); 1" >/dev/null
-agent-browser keyboard type "0.5" >/dev/null; agent-browser press Tab >/dev/null
-sleep 2; ready
-grep -q 'posZ: -7, spinY: 0.5)' "$SRC" && ok "a default param is written in where it belongs" || bad "param: $(grep -n '@gltf &robot' "$SRC")"
+js "var x=[...document.querySelectorAll('.stu-film-input')].find(i=>i.dataset.label=='rotateY'); x.focus(); x.select(); 1" >/dev/null
+mark; agent-browser keyboard type "30" >/dev/null; agent-browser press Tab >/dev/null
+live "Math.abs(document.querySelector('canvas.world')._stStageObjects['&robot']._stPart.props.rotation[1] - Math.PI/6) < 0.001 && SpacetimeLocal.stuScore.sources[0].text.indexOf('rotateY: 30') >= 0" && ok "a scene param is live (the robot turned)" || bad "a scene param is live"
+grep -q 'posZ: -7, rotateY: 30)' "$SRC" && ok "a default param is written in where it belongs" || bad "param: $(grep -n '@gltf &robot' "$SRC")"
 
 # 7. the code pane saves the whole file
 js "document.querySelector('.stu-film__tab[data-panel=Code]').click(); var a=document.querySelector('.stu-code'); a.focus(); a.setSelectionRange(0,0); 1" >/dev/null
