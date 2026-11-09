@@ -271,16 +271,22 @@ fn collect_strings<'a>(lit: &'a Lit, f: &mut dyn FnMut(Span, &str, Option<&'a st
 
 fn markup_places(site: &Site, want: &str) -> Vec<Place> {
     let mut out = Vec::new();
+    // A form element (`<--accent>`) shows on the page as its projection's root.
+    let forms: Vec<Mark> = if site.files.iter().any(|f| f.text.contains("<--")) { marks::marks(site) } else { Vec::new() };
     for fi in 0..site.files.len() {
         let els = site.elements(fi);
         for el in &els {
+            let (tag, classes) = match forms.iter().find(|m| m.name == el.tag) {
+                Some(m) => (m.tag.clone(), m.classes.clone()),
+                None => (el.tag.clone(), el.classes.clone()),
+            };
             for run in el.runs.iter().filter(|r| r.is_static) {
                 if normalize(&run.text) == want {
                     out.push(Place::Markup {
                         file: fi,
                         span: run.span,
-                        tag: el.tag.clone(),
-                        classes: el.classes.clone(),
+                        tag: tag.clone(),
+                        classes: classes.clone(),
                         element_text: el.static_text(&els),
                     });
                 }
@@ -415,7 +421,9 @@ fn unwrap(site: &Site, shown: &str, name: &str, hint: &Hint) -> Result<Changes, 
     for fi in 0..site.files.len() {
         let els = site.elements(fi);
         for el in &els {
-            if el.tag != mark.tag || !mark.classes.iter().all(|c| el.classes.contains(c)) {
+            // written by name (`<--accent>`), or as its projection
+            let named = el.tag == mark.name;
+            if !named && (el.tag != mark.tag || !mark.classes.iter().all(|c| el.classes.contains(c))) {
                 continue;
             }
             if el.static_text(&els).as_deref() != Some(want.as_str()) || el.span == el.open {
@@ -790,5 +798,25 @@ mod tests {
         assert!(out.contains("<h1 class=\"hero__title\">I write stories.</h1>"), "{out}");
         let err = run(Op::Unmark { text: "Hello".into(), mark: "--bold".into(), hint: Hint::default() }).unwrap_err();
         assert!(err.contains("not written as Bold"), "{err}");
+    }
+
+    #[test]
+    fn a_page_form_is_written_and_unwritten_by_name() {
+        let page = "@form markup --accent(&sel) { <mark class=\"accent\">`&sel`</mark> }\n<h1 class=\"t\">I write software.</h1>\n";
+        let site = Site::from_files(&[("index.st", page)]);
+        let old = "I write software.";
+        let s = old.find("software").unwrap();
+        let op = Op::Mark { old: old.into(), start: s, end: s + 8, mark: "--accent".into(), attrs: BTreeMap::new(), hint: Hint::default() };
+        let out = apply(&site, &op).unwrap()["index.st"].clone();
+        assert!(out.contains("<h1 class=\"t\">I write <--accent>software</--accent>.</h1>"), "{out}");
+
+        // text inside it is edited in place; the page shows it as <mark class="accent">
+        let site = Site::from_files(&[("index.st", out.as_str())]);
+        let hint = Hint { tag: Some("mark".into()), classes: vec!["accent".into()], ..Hint::default() };
+        let edited = apply(&site, &Op::Text { old: "software".into(), new: "stories".into(), hint }).unwrap()["index.st"].clone();
+        assert!(edited.contains("<--accent>stories</--accent>"), "{edited}");
+
+        let op = Op::Unmark { text: "software".into(), mark: "--accent".into(), hint: Hint::default() };
+        assert_eq!(apply(&site, &op).unwrap()["index.st"], page);
     }
 }

@@ -14,10 +14,13 @@
 //! `@cms(--accent) { icon: "✦"; shortcut: "mod+e"; }` only overrides that —
 //! display hints, nothing at runtime.
 //!
-//! Applying a mark to source is a splice of what its projection writes before
-//! and after the slot. In literate prose a mark is written in the prose's own
+//! Applying a mark to source NAMES it when the page declares it: a form in
+//! the page's scope is written as an element, `<--accent>software</--accent>`
+//! (the compiler expands it; `crate::parser::form_elements`), in markup and in
+//! Markdown prose alike. A standard mark is the language's own element, so it
+//! is written as its projection (`<strong>`), and in prose in the prose's own
 //! syntax when it has one ([`crate::literate::prose_mark`], the renderer's
-//! table read backwards); otherwise Markdown takes the markup and Org refuses.
+//! table read backwards). Org prose has no form syntax yet.
 
 use std::collections::BTreeMap;
 
@@ -48,6 +51,8 @@ pub struct Mark {
     pub icon: String,
     pub shortcut: Option<String>,
     pub params: Vec<Param>,
+    /// Declared by the page (written by name), not one of the standard marks.
+    pub scoped: bool,
     /// The projection around the slot, param holes still in place.
     pub before: String,
     pub after: String,
@@ -86,6 +91,14 @@ impl Mark {
                 return Err(format!("{} must be a link, not a script", p.name));
             }
         }
+        if self.scoped && lang != Lang::Org {
+            let attrs: String = self
+                .params
+                .iter()
+                .map(|p| format!(" {}=\"{}\"", p.name, attr_escape(attrs.get(&p.name).map(|v| v.trim()).unwrap_or(""))))
+                .collect();
+            return Ok((format!("<{}{attrs}>", self.name), format!("</{}>", self.name)));
+        }
         if lang == Lang::Markup {
             let fill = |s: &str| {
                 let mut s = s.to_string();
@@ -110,6 +123,7 @@ impl Mark {
             (Some(p), _) => Ok(p),
             // Markdown carries inline HTML; Org prose does not.
             (None, Lang::Markdown) => self.wrap(Lang::Markup, attrs),
+            _ if self.scoped => Err(format!("Org prose has no way to write <{}> yet", self.name)),
             _ => Err(format!("Org prose has no way to write {}", self.label)),
         }
     }
@@ -124,6 +138,7 @@ impl Mark {
             "icon": self.icon,
             "shortcut": self.shortcut,
             "params": self.params.iter().map(|p| json!({ "name": p.name, "type": p.ty, "widget": p.widget })).collect::<Vec<_>>(),
+            "scoped": self.scoped,
         })
     }
 }
@@ -138,10 +153,12 @@ fn attr_escape(v: &str) -> String {
 pub fn marks(site: &Site) -> Vec<Mark> {
     let mut out: Vec<Mark> = Vec::new();
     let mut hints: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
-    let sources = std::iter::once(STANDARD).chain(site.files.iter().filter(|f| f.path.ends_with(".st")).map(|f| f.text.as_str()));
-    for text in sources {
+    let sources = std::iter::once((STANDARD, false))
+        .chain(site.files.iter().filter(|f| f.path.ends_with(".st")).map(|f| (f.text.as_str(), true)));
+    for (text, scoped) in sources {
         let (forms, h) = declared(text);
-        for m in forms {
+        for mut m in forms {
+            m.scoped = scoped;
             match out.iter_mut().find(|o| o.name == m.name) {
                 Some(o) => *o = m,
                 None => out.push(m),
@@ -236,6 +253,7 @@ fn wrapping_form(fm: &crate::syntax::FormMatch) -> Option<Mark> {
         classes: root.classes.clone(),
         icon,
         shortcut: None,
+        scoped: false,
         params: params
             .iter()
             .filter(|p| p.kind != TemplateParamKind::Element)
@@ -306,6 +324,7 @@ mod tests {
         let all = site("@form markup --bold(&sel) { <b>`&sel`</b> }\n");
         let bold = all.iter().find(|m| m.name == "--bold").unwrap();
         assert_eq!((bold.tag.as_str(), bold.icon.as_str()), ("b", "B"), "the page's form, the stdlib's @cms");
+        assert!(bold.scoped, "written by name: the page declares it");
         assert_eq!(all.iter().filter(|m| m.name == "--bold").count(), 1);
     }
 
@@ -329,13 +348,14 @@ mod tests {
         assert_eq!((accent.label.as_str(), accent.icon.as_str(), accent.doc.as_str()), ("Accent", "A", "The pencil's accent."));
         assert_eq!((accent.tag.as_str(), accent.classes.clone()), ("mark", vec!["accent".to_string()]));
         assert_eq!(accent.shortcut, None);
-        assert_eq!(accent.wrap(Lang::Markdown, &BTreeMap::new()).unwrap().0, "<mark class=\"accent\">");
-        assert_eq!(accent.wrap(Lang::Org, &BTreeMap::new()).unwrap_err(), "Org prose has no way to write Accent");
+        assert_eq!(accent.wrap(Lang::Markup, &BTreeMap::new()).unwrap(), ("<--accent>".into(), "</--accent>".into()), "named, not expanded");
+        assert_eq!(accent.wrap(Lang::Markdown, &BTreeMap::new()).unwrap().0, "<--accent>");
+        assert_eq!(accent.wrap(Lang::Org, &BTreeMap::new()).unwrap_err(), "Org prose has no way to write <--accent> yet");
         let tone = &all[6];
         assert_eq!((tone.icon.as_str(), tone.shortcut.as_deref()), ("◐", Some("mod+shift+t")));
         assert_eq!(tone.params[0].widget, "color");
         let attrs = BTreeMap::from([("tint".to_string(), "#c00".to_string())]);
-        assert_eq!(tone.wrap(Lang::Markup, &attrs).unwrap().0, "<span class=\"tone\" style=\"color: #c00\">");
+        assert_eq!(tone.wrap(Lang::Markup, &attrs).unwrap().0, "<--tone tint=\"#c00\">");
     }
 
     #[test]
@@ -343,7 +363,9 @@ mod tests {
         let page = "@form markup --under(&sel) { <u>`&sel`</u> }\n";
         let u = site(page).into_iter().find(|m| m.name == "--under").unwrap();
         assert!(u.wrap(Lang::Org, &BTreeMap::new()).is_err(), "Org's reader has no underline");
-        assert!(u.wrap(Lang::Markdown, &BTreeMap::new()).is_ok(), "Markdown takes it as markup");
+        let standard_like = Mark { scoped: false, ..u };
+        assert!(standard_like.wrap(Lang::Org, &BTreeMap::new()).is_err(), "Org's reader has no underline");
+        assert_eq!(standard_like.wrap(Lang::Markdown, &BTreeMap::new()).unwrap().0, "<u>", "Markdown takes it as markup");
     }
 
     #[test]

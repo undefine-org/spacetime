@@ -8,7 +8,9 @@
 //! those through the data instead.
 //!
 //! A `<` opens a tag only when followed by a letter, `/letter` or `!--`, which
-//! rules out `<-` bindings and `a < b` comparisons. Comment regions and `@data`
+//! rules out `<-` bindings and `a < b` comparisons — or by `--letter`: a markup
+//! form written as an element (`<--accent>…</--accent>`, PLAN-157), whose tag is
+//! the form's name. Comment regions and `@data`
 //! literal regions are excluded by the caller (a string value may itself contain
 //! `<em>`, which is data, not markup).
 
@@ -87,8 +89,9 @@ pub fn elements(src: &str, excluded: &[Span]) -> Vec<Element> {
             i = src[i..].find("-->").map(|e| i + e + 3).unwrap_or(b.len());
             continue;
         }
-        let closing = next == b'/' && b.get(i + 2).is_some_and(|c| c.is_ascii_alphabetic());
-        if !(next.is_ascii_alphabetic() || closing) {
+        let form_at = |at: usize| src[at..].starts_with("--") && b.get(at + 2).is_some_and(|c| c.is_ascii_alphabetic());
+        let closing = next == b'/' && (b.get(i + 2).is_some_and(|c| c.is_ascii_alphabetic()) || form_at(i + 2));
+        if !(next.is_ascii_alphabetic() || closing || form_at(i + 1)) {
             if text_start.is_none() && !stack.is_empty() {
                 text_start = Some(i);
             }
@@ -286,6 +289,16 @@ mod tests {
         assert!(!els[2].runs[0].is_static);
         assert_eq!(els[2].static_text(&els), None);
         assert_eq!(&src[els[0].span.start..els[0].span.end], "<h1 class=\"hero__title big\">I write <em>stories</em>.</h1>");
+    }
+
+    #[test]
+    fn form_elements_are_elements_named_by_their_form() {
+        let src = "<p>I write <--accent>soft</--accent> ware, x<--3 <- y.</p>";
+        let els = elements(src, &[]);
+        assert_eq!(els.iter().map(|e| e.tag.as_str()).collect::<Vec<_>>(), vec!["p", "--accent"]);
+        assert_eq!(els[1].parent, Some(0));
+        assert_eq!(els[1].runs[0].text, "soft");
+        assert_eq!(els[0].static_text(&els).as_deref(), Some("I write soft ware, x<--3 <- y."));
     }
 
     #[test]
