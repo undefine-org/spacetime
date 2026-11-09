@@ -47,9 +47,14 @@ pub enum Lang {
 impl Mark {
     /// The source text around a selection, with `attrs` filling the holes.
     pub fn wrap(&self, lang: Lang, attrs: &BTreeMap<String, String>) -> Result<(String, String), String> {
-        for (p, _) in &self.params {
-            if attrs.get(p).is_none_or(|v| v.trim().is_empty()) {
+        for (p, ty) in &self.params {
+            let Some(v) = attrs.get(p).map(|v| v.trim()).filter(|v| !v.is_empty()) else {
                 return Err(format!("{} needs {}", self.name, p));
+            };
+            // A `url` param is a link, never a script (the editable schema's rule).
+            let scheme: String = v.chars().filter(|c| !c.is_whitespace()).collect::<String>().to_ascii_lowercase();
+            if ty.as_deref() == Some("url") && (scheme.starts_with("javascript:") || scheme.starts_with("vbscript:") || scheme.starts_with("data:text/html")) {
+                return Err(format!("{p} must be a link, not a script"));
             }
         }
         if lang == Lang::Markup {
@@ -213,6 +218,8 @@ mod tests {
         assert_eq!(link.wrap(Lang::Markup, &attrs).unwrap().0, "<a href=\"https://x.y/?a=&quot;b&quot;\">");
         assert_eq!(link.wrap(Lang::Markdown, &attrs).unwrap().1, "](https://x.y/?a=\"b\")");
         assert!(link.wrap(Lang::Markup, &BTreeMap::new()).is_err());
+        let script = BTreeMap::from([("href".to_string(), " Java\tScript:alert(1)".to_string())]);
+        assert_eq!(link.wrap(Lang::Markup, &script).unwrap_err(), "href must be a link, not a script");
     }
 
     #[test]

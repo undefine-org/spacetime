@@ -1,5 +1,5 @@
 #+TITLE: Studio — a visual editor whose every edit is a source edit
-#+STATE: DONE (first pass)
+#+STATE: DONE (second pass: authored content, marks)
 #+CUSTOM_ID: PLAN-154-studio-visual-editor
 #+EFFORT: 2d
 #+PRIORITY: #A
@@ -74,3 +74,73 @@ Each check edited through the UI, then read the =git diff= of the copy:
 hand above; no automated browser gate yet)
 ** TODO Undo: every edit is a file write, so =git= is the undo today
 ** TODO Add an item to an empty list (duplicate needs one row to copy)
+
+* Second pass — "span per word", rich editing (2026-11-09)
+
+** Asked
+How do we fix the span-per-word thing and still edit properly; how can we
+rich-edit, with transformations tied to icons on a Notion-like bar over the
+text; learn from the editable CMS demo.
+
+** Span per word: the authored-content contract
+=@reveal(split: words|chars)= replaces its host's children with one masked
+span per unit plus a screen-reader copy. The canvas selected a word span (the
+label read =span.st-reveal-word=), and editing the host edited generated nodes
+(and the copy's text). The page cannot be fixed from the source side: the
+generated DOM is the primitive's projection, so the primitive says what the
+author wrote:
+
+#+begin_src js
+host.__stAuthored = { nodes /* the author's children */, skip /* generated text that is not a projection (the sr copy) */, project /* rebuild from nodes */ }
+#+end_src
+
+The canvas selects the HOST of anything inside one; editing swaps the author's
+nodes in (the double-clicked word stays selected, by character offset), and on
+the way out the primitive rebuilds from the edited nodes (or the generated
+nodes come back untouched on Esc). Any primitive that rewrites its host's
+children opts in with one property; reveal is the one the site uses.
+
+** Rich editing: marks are the editable module's =@editable-mark=s
+The bar is not a list of buttons in the studio: it is every =@editable-mark=
+with an =icon:= — the standard set (=stdlib/editable/builtins.st=: B I S code
+link, each with a shortcut) and the page's own, which win by name:
+
+#+begin_src st
+@editable-mark &accent(&sel) {
+  shortcut: "mod+e";
+  icon: "✦";
+  <mark class="accent">`&sel`</mark>
+}
+#+end_src
+
+A mark's projection splits at =&sel= into what is written before and after a
+selection; applying it is a splice at the place the text edit would find
+(=ops::locate=), with the selection's UTF-16 offsets mapped through entities and
+reflowed whitespace. In literate prose a mark is written in that language
+(=**x**=, =[x](href)= / =*x*=, =/x/=, =[[href][x]]=); markup the prose cannot
+write falls back to inline HTML in Markdown and is refused in Org. =unmark=
+takes a marked element (or prose mark) back to its text. Typed params are
+asked for in the bar (a link's =href=); a =url= is refused when it is a script.
+A plain string in a list is refused with its reason (its template decides how
+it renders).
+
+** What the editable CMS demo taught (=demos/editable-blog=, =demos/cms-testbed=)
+Taken:
+- A mark IS a template (=@editable-mark=): the vocabulary is code, and every
+  consumer (the =@editable= surface, its schema, now the studio's bar) falls out
+  of it. The studio reads the same declarations rather than keeping its own.
+- Typed free params (=$href url=) drive the inline editor and its validation.
+- Shortcuts belong to the declaration (=shortcut:=); =icon:= joins them.
+Not taken, on purpose:
+- The demo's body is a JSON document AST in =content/post.json= that the page
+  binds with =@richtext(bind: …)=; the studio writes the author's own syntax in
+  the author's own file, and needs no binding on the page.
+- =floating-toolbar= hardcodes emoji buttons and dispatches =__wrap_*= events;
+  the bar here is a projection of declarations.
+- Seen on the way: the demo's saved title reads "Notes on building in the ope"
+  — characters lost by an earlier in-place save, the failure mode the studio's
+  refuse-don't-guess rule exists for.
+Still to take:
+** TODO Blocks: a "Turn into" menu from =@editable-block= (p / h2 / h3 / blockquote)
+** TODO Paste-lift: pasted HTML lifted into the page's marks (the invertible ones)
+** TODO A mark across other marks (the selection must sit in one text node today)
