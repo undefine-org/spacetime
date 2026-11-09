@@ -22,8 +22,9 @@
 ///    not navigate while editing. A reload never interrupts typing: the dev
 ///    live-reload fires a cancellable `st:reload` first, and the canvas defers it.
 /// 5. FORMAT BAR: while text is being edited, a selection shows the page's
-///    marks (`@editable-mark`s with an `icon:`); a mark wraps the selection in
-///    the source, or takes an already marked text out of it.
+///    marks (src/studio/marks.rs: the language's own inline elements, and its
+///    forms that wrap text); a mark wraps the selection in the source, or
+///    takes an already marked text out of it.
 ///
 /// The canvas edits what the AUTHOR wrote. A primitive that rebuilds its
 /// host's children (a reveal's one span per word) hands the author's nodes
@@ -742,15 +743,16 @@
         var marks = function () { var o = outline(); return (o && o.marks) || []; };
         var markNamed = function (name) { return marks().filter(function (m) { return m.name === name; })[0] || null; };
 
-        /// The bar's buttons: every mark with an icon, lit when the selection
-        /// already sits in it.
+        /// The bar's buttons: the page's marks (the language's own inline
+        /// elements, then its forms that wrap text), lit when the selection
+        /// already sits in one. Label, icon and shortcut are the server's
+        /// inference, overridden by `@cms(--form)`.
         ST.stuMarks = function (o, active) {
           var on = String(active || '').split(',');
-          return ((o && o.marks) || []).filter(function (m) { return m.icon; }).map(function (m) {
-            var name = m.name.charAt(0).toUpperCase() + m.name.slice(1);
+          return ((o && o.marks) || []).map(function (m) {
             return {
-              name: m.name, icon: m.icon,
-              title: name + (m.shortcut ? ' (' + keyLabel(m.shortcut) + ')' : ''),
+              name: m.name, icon: m.icon, tag: m.tag,
+              title: m.label + (m.shortcut ? ' (' + keyLabel(m.shortcut) + ')' : '') + (m.doc ? ' - ' + m.doc : ''),
               active: on.indexOf(m.name) >= 0 ? 'true' : 'false'
             };
           });
@@ -843,9 +845,18 @@
             box.style.transform = 'translate(' + c.rect.left + 'px,' + c.rect.top + 'px)';
             box.style.width = c.rect.width + 'px';
             box.style.height = c.rect.height + 'px';
-            var label = mark.params[0].name + (mark.params[0].type ? ' (' + mark.params[0].type + ')' : '') + ', Enter to apply, Esc to go back';
+            // The field is the scalar's own control (`%widget`), as in the admin.
+            var p = mark.params[0];
+            var label = p.name + (p.type ? ' (' + p.type + ')' : '') + ', Enter to apply, Esc to go back';
             put('stuFmtMode', 'Ask');
-            setTimeout(function () { var i = document.querySelector('.stu-format__input'); if (i) { i.value = ''; i.placeholder = label; i.focus(); } }, 0);
+            setTimeout(function () {
+              var i = document.querySelector('.stu-format__input');
+              if (!i) { return; }
+              i.type = p.widget === 'color' ? 'color' : p.widget === 'media' ? 'url' : p.widget === 'number' ? 'number' : 'text';
+              i.value = '';
+              i.placeholder = label;
+              i.focus();
+            }, 0);
             return '';
           }
           runMark(c, mark);

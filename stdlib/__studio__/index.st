@@ -11,8 +11,8 @@
 /// - the CANVAS (the page itself): click to select, double-click to edit text in
 ///   place, drag a list item's handle to reorder;
 /// - the FORMAT BAR, over a selection in the text being edited: the page's
-///   marks (every `@editable-mark` with an `icon:`), each wrapping the selection
-///   in the source, or taking marked text back out.
+///   marks (the language's own inline elements, and its forms that wrap text),
+///   each wrapping the selection in the source, or taking marked text back out.
 ///
 /// Every edit is a source edit (src/studio): the server rewrites the `.st`, the
 /// page reloads, and the studio puts you back where you were. Signals are
@@ -193,7 +193,7 @@
 }
 .stu-format__marks {
   @each($stuMarks as $m) {
-    <button type="button" class="stu-mark" data-mark="`$m.name`" data-active="`$m.active`" title="`$m.title`" aria-label="`$m.title`">`$m.icon`</button>
+    <button type="button" class="stu-mark" data-mark="`$m.name`" data-tag="`$m.tag`" data-active="`$m.active`" title="`$m.title`" aria-label="`$m.title`">`$m.icon`</button>
   }
 }
 .stu-mark { @on &.click { $stuNoop <- ST.stuMark($); } }
@@ -608,10 +608,10 @@ html.stu-on body { margin-left: var(--stu-left) !important; margin-right: var(--
 }
 .stu-mark:hover { background: #383838; }
 .stu-mark[data-active="true"] { background: var(--stu-blue, #0d99ff); color: #fff; }
-.stu-mark[data-mark="bold"] { font-weight: 800; }
-.stu-mark[data-mark="italic"] { font-style: italic; }
-.stu-mark[data-mark="strike"] { text-decoration: line-through; }
-.stu-mark[data-mark="code"] { font: 600 11px/28px ui-monospace, Menlo, monospace; }
+.stu-mark[data-tag="strong"] { font-weight: 800; }
+.stu-mark[data-tag="em"] { font-style: italic; }
+.stu-mark[data-tag="s"] { text-decoration: line-through; }
+.stu-mark[data-tag="code"] { font: 600 11px/28px ui-monospace, Menlo, monospace; }
 .stu-format__input {
   display: none;
   width: 260px;

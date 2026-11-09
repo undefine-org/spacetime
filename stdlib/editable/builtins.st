@@ -13,20 +13,18 @@
 ///   @editable(bind: $body) { marks: &bold &italic &link; blocks: &h2 &p; }
 
 // --- inline marks ---
-// A mark with an `icon:` is on a formatting bar (the studio's); the others are
-// available to surfaces that list them.
 
-@editable-mark &bold(&sel)      { shortcut: "mod+b"; icon: "B"; <strong>`&sel`</strong> }
-@editable-mark &italic(&sel)    { shortcut: "mod+i"; icon: "I"; <em>`&sel`</em> }
+@editable-mark &bold(&sel)      { <strong>`&sel`</strong> }
+@editable-mark &italic(&sel)    { <em>`&sel`</em> }
 @editable-mark &underline(&sel) { <u>`&sel`</u> }
-@editable-mark &strike(&sel)    { shortcut: "mod+shift+x"; icon: "S"; <s>`&sel`</s> }
-@editable-mark &code(&sel)      { shortcut: "mod+e"; icon: "</>"; <code>`&sel`</code> }
+@editable-mark &strike(&sel)    { <s>`&sel`</s> }
+@editable-mark &code(&sel)      { <code>`&sel`</code> }
 
 /// A link carries a typed `href` (url): the editor offers an inline href editor,
 /// and the `url` type makes `javascript:` a validation error server-side (FEAT-099)
 /// rather than a scheme-sniff. Single root + single typed-hole attr + one `&sel`
 /// ⇒ invertible ⇒ pasted `<a href>` lifts back to a link mark.
-@editable-mark &link(&sel, $href url) { shortcut: "mod+k"; icon: "↗"; <a href="`$href`">`&sel`</a> }
+@editable-mark &link(&sel, $href url) { <a href="`$href`">`&sel`</a> }
 
 // --- block containers ---
 

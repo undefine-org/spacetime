@@ -31,9 +31,6 @@
 ///   </figure>
 /// }
 ///
-/// An optional `icon: "…";` line (after `shortcut:`) is what a formatting bar
-/// shows for the mark; without one the bar shows its name.
-///
 /// ## Parameters
 /// - `&sel`      — the selection (an element param; its value is the selected
 ///                 content, inserted whole; a multi-node selection flattens).
@@ -60,7 +57,6 @@
   %form {
     @editable-mark &$name:ident($params:param_list) {
       ( "shortcut" ":" $shortcut:string ";"? )?
-      ( "icon" ":" $icon:string ";"? )?
       $body:component_body
     }
   }
@@ -72,7 +68,6 @@
     params: $params
     body: $body
     shortcut: $shortcut
-    icon: $icon
   }
 
   // A mark IS a template: build the factory via the existing primitive so
@@ -92,7 +87,6 @@
   %form {
     @editable-block &$name:ident($params:param_list) {
       ( "shortcut" ":" $shortcut:string ";"? )?
-      ( "icon" ":" $icon:string ";"? )?
       $body:component_body
     }
   }
@@ -101,7 +95,6 @@
     params: $params
     body: $body
     shortcut: $shortcut
-    icon: $icon
   }
 
   %binds {

@@ -440,8 +440,8 @@ fn unwrap(site: &Site, shown: &str, name: &str, hint: &Hint) -> Result<Changes, 
     let chosen = match (found.len(), fitting.len()) {
         (1, _) => found[0],
         (_, 1) => fitting[0],
-        (0, _) => return Err(format!("\"{}\" is not written as {} in the source", short(&want), mark.name)),
-        (n, _) => return Err(format!("\"{}\" is written as {} in {n} places; unmark it in the source", short(&want), mark.name)),
+        (0, _) => return Err(format!("\"{}\" is not written as {} in the source", short(&want), mark.label)),
+        (n, _) => return Err(format!("\"{}\" is written as {} in {n} places; unmark it in the source", short(&want), mark.label)),
     };
     let (file, whole, inner) = chosen;
     let inner_text = site.files[file].text[inner.start..inner.end].to_string();
@@ -743,12 +743,12 @@ mod tests {
     #[test]
     fn marks_wrap_the_selected_characters_of_markup() {
         // a double-click takes the trailing space along; the mark does not
-        let out = run(mark_op("I write ", "write ", "bold", &[])).unwrap();
+        let out = run(mark_op("I write ", "write ", "--bold", &[])).unwrap();
         assert!(out.contains("<h1 class=\"hero__title\">I <strong>write</strong> <em>stories</em>.</h1>"), "{out}");
-        let out = run(mark_op("I write ", "I", "link", &[("href", "/who")])).unwrap();
+        let out = run(mark_op("I write ", "I", "--link", &[("href", "/who")])).unwrap();
         assert!(out.contains("><a href=\"/who\">I</a> write <em>"), "{out}");
-        assert!(run(mark_op("I write ", "I", "link", &[])).unwrap_err().contains("href"));
-        let err = run(mark_op("AI isn't ", "AI", "bold", &[])).unwrap_err();
+        assert!(run(mark_op("I write ", "I", "--link", &[])).unwrap_err().contains("href"));
+        let err = run(mark_op("AI isn't ", "AI", "--bold", &[])).unwrap_err();
         assert!(err.contains("$tenets"), "{err}");
     }
 
@@ -758,7 +758,7 @@ mod tests {
         let site = Site::from_files(&[("index.st", page)]);
         let old = "Fish & chips,\n    twice";
         let start = old.find("chips").unwrap();
-        let op = Op::Mark { old: old.into(), start, end: old.len(), mark: "italic".into(), attrs: BTreeMap::new(), hint: Hint::default() };
+        let op = Op::Mark { old: old.into(), start, end: old.len(), mark: "--italic".into(), attrs: BTreeMap::new(), hint: Hint::default() };
         let out = apply(&site, &op).unwrap()["index.st"].clone();
         assert_eq!(out, "<p class=\"x\">Fish &amp; <em>chips,\n    twice</em></p>\n");
     }
@@ -769,26 +769,26 @@ mod tests {
         let site = Site::from_files(&[("post.st.md", md)]);
         let old = "We are still in the design phase.";
         let s = old.find("design").unwrap();
-        let op = Op::Mark { old: old.into(), start: s, end: s + 6, mark: "bold".into(), attrs: BTreeMap::new(), hint: Hint::default() };
+        let op = Op::Mark { old: old.into(), start: s, end: s + 6, mark: "--bold".into(), attrs: BTreeMap::new(), hint: Hint::default() };
         let out = apply(&site, &op).unwrap()["post.st.md"].clone();
         assert!(out.contains("in the **design** phase."), "{out}");
         let site = Site::from_files(&[("post.st.md", out.as_str())]);
-        let op = Op::Unmark { text: "design".into(), mark: "bold".into(), hint: Hint::default() };
+        let op = Op::Unmark { text: "design".into(), mark: "--bold".into(), hint: Hint::default() };
         assert_eq!(apply(&site, &op).unwrap()["post.st.md"], md);
 
         let org = "Read the [[https://x.y][notes]] and /this/.\n";
         let site = Site::from_files(&[("p.st.org", org)]);
-        let op = Op::Unmark { text: "notes".into(), mark: "link".into(), hint: Hint::default() };
+        let op = Op::Unmark { text: "notes".into(), mark: "--link".into(), hint: Hint::default() };
         assert_eq!(apply(&site, &op).unwrap()["p.st.org"], "Read the notes and /this/.\n");
-        let op = Op::Unmark { text: "this".into(), mark: "italic".into(), hint: Hint::default() };
+        let op = Op::Unmark { text: "this".into(), mark: "--italic".into(), hint: Hint::default() };
         assert_eq!(apply(&site, &op).unwrap()["p.st.org"], "Read the [[https://x.y][notes]] and this.\n");
     }
 
     #[test]
     fn unmark_takes_markup_text_out_of_its_element() {
-        let out = run(Op::Unmark { text: "stories".into(), mark: "italic".into(), hint: Hint::default() }).unwrap();
+        let out = run(Op::Unmark { text: "stories".into(), mark: "--italic".into(), hint: Hint::default() }).unwrap();
         assert!(out.contains("<h1 class=\"hero__title\">I write stories.</h1>"), "{out}");
-        let err = run(Op::Unmark { text: "Hello".into(), mark: "bold".into(), hint: Hint::default() }).unwrap_err();
-        assert!(err.contains("not written as bold"), "{err}");
+        let err = run(Op::Unmark { text: "Hello".into(), mark: "--bold".into(), hint: Hint::default() }).unwrap_err();
+        assert!(err.contains("not written as Bold"), "{err}");
     }
 }

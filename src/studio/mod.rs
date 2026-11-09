@@ -19,8 +19,9 @@
 //! - [`ops`] — the edits: set text, set a field, move / duplicate / delete a row,
 //!   set a style declaration. Pure `files in -> files out` functions with guards:
 //!   an edit that cannot be placed UNIQUELY is refused, never guessed.
-//! - [`marks`] — the inline marks a page can use (the editable module's
-//!   `@editable-mark` declarations) and how each is written in markup and prose.
+//! - [`marks`] — the inline marks a page can use (the language's own inline
+//!   elements, and the forms in scope whose signature wraps text), presented by
+//!   inference then `@cms(--form)`, and how each is written in markup and prose.
 //!
 //! Addressing is by CONTENT, not by DOM position: the browser reports the text it
 //! shows (and the list and row it sits in, when it knows), and [`ops`] finds the
