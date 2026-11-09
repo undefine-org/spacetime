@@ -3,6 +3,7 @@
 //! Parses `.st` files into an AST.
 
 pub mod ast;
+pub mod form_elements;
 pub mod entity;
 
 pub mod comments;
@@ -3068,6 +3069,137 @@ pub fn expand_style_form_splices(ast: &mut StFile) {
         walk_nested(&mut scope.nested_scopes, &declared, &non_style, &mut diags);
     }
 
+    ast.diagnostics.extend(diags);
+}
+
+/// True when the page writes a markup form as an element (`<--accent>…`,
+/// PLAN-157) anywhere its markup lives: top-level markup, a template body,
+/// or a directive's captured markup (an `@each` body, literate prose).
+pub fn ast_has_form_elements(ast: &StFile) -> bool {
+    use form_elements::mentions_form_element as m;
+    fn in_value(v: &CapturedValue) -> bool {
+        match v {
+            CapturedValue::String(s) | CapturedValue::Expr(s) | CapturedValue::Element(s) => m(s),
+            CapturedValue::Array(items) => items.iter().any(in_value),
+            CapturedValue::Block(ms) => ms.iter().any(|fm| fm.captures.values().any(in_value)),
+            _ => false,
+        }
+    }
+    fn in_nested(scopes: &[crate::parser::ast::NestedScope]) -> bool {
+        scopes.iter().any(|s| s.matches.iter().any(|fm| fm.captures.values().any(in_value)) || in_nested(&s.nested_scopes))
+    }
+    ast.html_blocks.iter().any(|b| m(&b.skeleton))
+        || ast.matches.iter().any(|fm| fm.captures.values().any(in_value))
+        || ast.scopes.iter().any(|s| {
+            m(&s.html) || s.matches.iter().any(|fm| fm.captures.values().any(in_value)) || in_nested(&s.nested_scopes)
+        })
+}
+
+/// Expand every markup form written as an element (`<--accent>software</--accent>`,
+/// PLAN-157) into its projection, wherever markup lives. Same discovery as
+/// [`expand_style_form_splices`]: the forms are the page's `@form` matches
+/// (with the project's `_prelude.st` forms already merged in). Misuse is
+/// E0947 (no such form), E0959 (not a markup form) or E0960 (its arguments,
+/// its slot, its projection's holes); the element is then left as written.
+pub fn expand_markup_form_elements(ast: &mut StFile) {
+    use form_elements::{ElementForm, FormElementError};
+    let mut forms: std::collections::HashMap<String, ElementForm> = std::collections::HashMap::new();
+    for m in &ast.matches {
+        if !is_form_declaring_macro(ast, m.matched_macro.as_deref().unwrap_or(&m.macro_name)) {
+            continue;
+        }
+        let Some(name) = cap_str(m, "name") else { continue };
+        let params = match m.captures.get("params") {
+            Some(CapturedValue::ParamList(p)) => p.clone(),
+            _ => Vec::new(),
+        };
+        let body = match m.captures.get("body") {
+            Some(CapturedValue::String(b)) => b.clone(),
+            _ => String::new(),
+        };
+        forms.insert(name, ElementForm { kind: cap_str(m, "kind").unwrap_or_default(), params, body });
+    }
+
+    let mut diags: Vec<crate::diagnostics::Diagnostic> = Vec::new();
+    let mut fix = |text: &mut String, span: SourceSpan, diags: &mut Vec<crate::diagnostics::Diagnostic>| {
+        let mut errors = Vec::new();
+        if let Some(out) = form_elements::expand(text, &forms, &mut errors) {
+            *text = out;
+        }
+        for e in errors {
+            let code = match e {
+                FormElementError::Unknown(_) => crate::diagnostics::DiagnosticCode::E0947,
+                FormElementError::Kind { .. } => crate::diagnostics::DiagnosticCode::E0959,
+                FormElementError::Use { .. } => crate::diagnostics::DiagnosticCode::E0960,
+            };
+            diags.push(
+                crate::diagnostics::Diagnostic::error(code, e.message())
+                    .with_span(crate::diagnostics::SourceSpan::new(span.start, span.end))
+                    .with_hint("a form element is `<--name attr=\"…\">content</--name>`, for a `@form markup --name(&slot, $attr …)`"),
+            );
+        }
+    };
+    fn in_value(
+        v: &mut CapturedValue,
+        span: SourceSpan,
+        diags: &mut Vec<crate::diagnostics::Diagnostic>,
+        fix: &mut dyn FnMut(&mut String, SourceSpan, &mut Vec<crate::diagnostics::Diagnostic>),
+    ) {
+        match v {
+            CapturedValue::String(s) | CapturedValue::Expr(s) | CapturedValue::Element(s) => {
+                if form_elements::mentions_form_element(s) {
+                    fix(s, span, diags);
+                }
+            }
+            CapturedValue::Array(items) => items.iter_mut().for_each(|i| in_value(i, span, diags, fix)),
+            CapturedValue::Block(ms) => {
+                for fm in ms {
+                    let span = fm.span;
+                    fm.captures.values_mut().for_each(|c| in_value(c, span, diags, fix));
+                }
+            }
+            _ => {}
+        }
+    }
+    fn in_nested(
+        scopes: &mut [crate::parser::ast::NestedScope],
+        diags: &mut Vec<crate::diagnostics::Diagnostic>,
+        fix: &mut dyn FnMut(&mut String, SourceSpan, &mut Vec<crate::diagnostics::Diagnostic>),
+    ) {
+        for s in scopes {
+            for fm in &mut s.matches {
+                let span = fm.span;
+                fm.captures.values_mut().for_each(|c| in_value(c, span, diags, fix));
+            }
+            in_nested(&mut s.nested_scopes, diags, fix);
+        }
+    }
+
+    for b in &mut ast.html_blocks {
+        if form_elements::mentions_form_element(&b.skeleton) {
+            fix(&mut b.skeleton, b.span, &mut diags);
+        }
+    }
+    let declares = |fm: &FormMatch| forms.contains_key(&cap_str(fm, "name").unwrap_or_default()) && fm.captures.contains_key("kind");
+    let skip: Vec<bool> = ast.matches.iter().map(declares).collect();
+    for (fm, skip) in ast.matches.iter_mut().zip(skip) {
+        // a form's own projection is expanded where it is used
+        if skip {
+            continue;
+        }
+        let span = fm.span;
+        fm.captures.values_mut().for_each(|c| in_value(c, span, &mut diags, &mut fix));
+    }
+    for s in &mut ast.scopes {
+        if form_elements::mentions_form_element(&s.html) {
+            fix(&mut s.html, s.span, &mut diags);
+        }
+        for fm in &mut s.matches {
+            let span = fm.span;
+            fm.captures.values_mut().for_each(|c| in_value(c, span, &mut diags, &mut fix));
+        }
+        in_nested(&mut s.nested_scopes, &mut diags, &mut fix);
+    }
     ast.diagnostics.extend(diags);
 }
 

@@ -114,6 +114,32 @@ no bare-hole form: a bare `$x` or `&name` in HTML text is literal text (so `$5`,
 `AT&T`, and `&amp;` need no escaping). Element substitution uses the same delimiter:
 `` `&sel` `` inserts a node or flattens a node sequence at that position.
 
+### A markup form used as an element (PLAN-157)
+
+A `@form markup` is written IN the text by its name, as an element:
+
+```st
+@form markup --accent(&sel) { <mark class="accent">`&sel`</mark> }
+@form markup --link(&sel, $href url) { <a href="`$href`">`&sel`</a> }
+
+<p>I write <--accent>software</--accent> the way I write stories.</p>
+<p><--link href="/who"><--accent>Me</--accent></--link></p>
+```
+
+The text keeps the form's NAME, as `--role-shout;` does in a scope; the compiler
+expands it into the form's projection, the content filling its one element param
+(the slot) and the attributes its params (absent ones take their defaults). The
+same `--` that names a form opens it here; `<--` can never open an HTML element (a
+tag name starts with a letter), so it is unambiguous and never served. It works
+wherever markup does — page markup, `@each` bodies, `@template` bodies, Markdown
+prose — and with a project's `_prelude.st` forms. A form with no slot is written
+`<--badge />`.
+
+A form used as an element may hold only its params and its slot (its projection's
+other holes would have nowhere to go). Misuse is an error and the element is left
+as written: an unknown name (E0947), a form of another kind (E0959), an unknown or
+missing argument, content for a form with no slot, or a cycle (E0960).
+
 ---
 
 ## 3. `@data` — one construct, five kinds
