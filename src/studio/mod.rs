@@ -19,6 +19,8 @@
 //! - [`ops`] — the edits: set text, set a field, move / duplicate / delete a row,
 //!   set a style declaration. Pure `files in -> files out` functions with guards:
 //!   an edit that cannot be placed UNIQUELY is refused, never guessed.
+//! - [`marks`] — the inline marks a page can use (the editable module's
+//!   `@editable-mark` declarations) and how each is written in markup and prose.
 //!
 //! Addressing is by CONTENT, not by DOM position: the browser reports the text it
 //! shows (and the list and row it sits in, when it knows), and [`ops`] finds the
@@ -27,6 +29,7 @@
 
 pub mod literal;
 pub mod markup;
+pub mod marks;
 pub mod ops;
 pub mod outline;
 pub mod score;

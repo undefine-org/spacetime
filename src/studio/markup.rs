@@ -194,6 +194,46 @@ pub fn decode_entities(raw: &str) -> String {
         .replace("&amp;", "&")
 }
 
+/// The characters a raw run shows, each with the source bytes it is written
+/// as (`&amp;` is one character, so is the escaped hole backtick).
+pub fn raw_units(raw: &str) -> Vec<(char, usize, usize)> {
+    const ENTITIES: &[(&str, char)] =
+        &[("&nbsp;", '\u{a0}'), ("&lt;", '<'), ("&gt;", '>'), ("&quot;", '"'), ("&#39;", '\''), ("&#96;", '`'), ("&amp;", '&'), ("\\`", '`')];
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < raw.len() {
+        let rest = &raw[i..];
+        if let Some((e, c)) = ENTITIES.iter().find(|(e, _)| rest.starts_with(e)) {
+            out.push((*c, i, i + e.len()));
+            i += e.len();
+            continue;
+        }
+        let c = rest.chars().next().unwrap();
+        out.push((c, i, i + c.len_utf8()));
+        i += c.len_utf8();
+    }
+    out
+}
+
+/// Units with every whitespace run collapsed to its first character and the
+/// ends trimmed: the form [`normalize`] compares, keeping each unit's bytes.
+pub fn collapse(units: Vec<(char, usize, usize)>) -> Vec<(char, usize, usize)> {
+    let mut out: Vec<(char, usize, usize)> = Vec::new();
+    for u in units {
+        if u.0.is_whitespace() {
+            if out.last().is_some_and(|l| !l.0.is_whitespace()) {
+                out.push((' ', u.1, u.2));
+            }
+        } else {
+            out.push(u);
+        }
+    }
+    while out.last().is_some_and(|l| l.0.is_whitespace()) {
+        out.pop();
+    }
+    out
+}
+
 /// Encode plain text for a markup text run: `<` and the hole backtick are the
 /// only characters `.st` markup cannot carry literally.
 pub fn encode_text(text: &str) -> String {

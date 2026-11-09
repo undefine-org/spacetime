@@ -79,6 +79,8 @@ pub struct MarkSchema {
     pub sel: SelPosition,
     /// Optional keyboard shortcut (`mod+k`), surfaced for the editor keymap.
     pub shortcut: Option<String>,
+    /// Optional icon (`icon: "✦";`): what a formatting bar shows for it.
+    pub icon: Option<String>,
     /// Editable regions this block declares, in document order (FUP-042). Empty
     /// = flat block (the degenerate single-region case). A multi-region block
     /// (`&columns(&left,&right)`) or a block-region container (`&ul(&items)`)
@@ -298,6 +300,7 @@ pub fn extract_editable_schema(
             invertible,
             sel,
             shortcut,
+            icon: None,
             regions,
         },
         errors,
@@ -489,7 +492,8 @@ pub fn collect_schemas_from_matches(
         // FEAT-103: the optional `( shortcut: $s:string ; )?` body-group surfaces
         // `shortcut` as a top-level capture. Absent → None (the group didn't match).
         let shortcut = fm.get_string("shortcut").map(|s| s.to_string());
-        let (schema, errs) = extract_editable_schema(name, kind, &params, html, shortcut);
+        let (mut schema, errs) = extract_editable_schema(name, kind, &params, html, shortcut);
+        schema.icon = fm.get_string("icon").map(|s| s.to_string());
         for e in errs {
             diags.push((name.to_string(), e));
         }
@@ -529,6 +533,7 @@ pub fn schemas_to_json(schemas: &[MarkSchema]) -> serde_json::Value {
             "sel": match s.sel { SelPosition::Children => "children", SelPosition::Nested => "nested" },
             "invertible": s.invertible,
             "shortcut": s.shortcut,
+            "icon": s.icon,
         });
         if !regions.is_empty() {
             entry["regions"] = Value::Array(regions);
