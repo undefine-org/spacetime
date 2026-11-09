@@ -2,10 +2,20 @@
 #+subtitle: Typed widget templates, one reflection, one rewriter, and the language changes that make the studio fall out of them, with no studio code in Rust.
 #+kicker: spacetime · PLAN-156 design dossier · v2
 #+date: 2026-11-09
-#+status: Proposal v2 · round 1 answers folded in · nothing built yet
+#+status: v3 · rounds 1–2 folded in · building P0 → P9
 #+author: Claude for Othman
 
 * What changed since your notes
+** Round 2 (your answers in chat, 2026-11-09)
+#+begin_rosetta
+| Your question | Answer, measured | Where |
+| Bare or quoted choices: which parses easier? | Neither costs more today. A literal union (=@resize='s =direction: $direction:("horizontal" or …)=) already accepts =horizontal= and ="horizontal"= and compiles both to the same value; =easing: ease-out= and =color: white= are bare keywords matched by =%capture_type easing_keyword=. The real gap: an unknown word (=sideways=) compiles *silently to null*. | cell =keywords=, L3 |
+| Which is harder to get back? | Quoted → bare loses: a string can hold anything (a .glb clip can be named =Armature¦Run= or have spaces), a keyword can't. Bare → quoted always works. So the choice is about *where the set lives*, not taste. | L3 |
+| Which is more Spacetimey? | Bare, for sets the language declares, as in CSS (=display: flex=, =ease-out=, =white=). Quoted for words from outside the source: text, file names, a model's clip names. A closed set is a keyword; an open set is a string. | L3 |
+| What does =%role= look like? | It doesn't need to exist. =%registers kind(key) { … }= already makes a construct visible to tools (=MetaRegistry::entries_of("driver")=, =editable-schema.json=). Score and stage macros register =timeline=, =clip=, =part=; reflect lists the entries. | L9 |
+| Order | Complete freedom, everything done thoroughly: P0 through P9 in order, the admin included (Q3 → yes). | Roster |
+#+end_rosetta
+
 ** Round 1 (your answers in chat, 2026-11-09)
 #+begin_rosetta
 | Your note | What changed | Where |
@@ -56,7 +66,7 @@ one consumer is a sign the language is missing two general capabilities.
 | =markup.rs= 268 | a second tokenizer of markup in =.st= | the compiler's markup parse keeps spans for elements and text runs (L8) |
 | =outline.rs= 523 | a projection of the page's shape | *reflect*, merged with =src/introspect= (the Structure IR PLAN-064 meant as « ONE producer ») |
 | =ops.rs= 557 | span and insert edits guarded by expected text | *rewrite*, one engine with =src/migrate.rs= (1,879) |
-| =score.rs= 478 | the film view: matches =score-block=, =on-driver-body=, reads =driver.driver_params.0.value=; splits stops with a Rust string splitter | stops become a capture type (L7); score macros declare their roles (D17); the rest is a query in .st |
+| =score.rs= 478 | the film view: matches =score-block=, =on-driver-body=, reads =driver.driver_params.0.value=; splits stops with a Rust string splitter | stops become a capture type (L7); score macros register =timeline= and =clip= (L9); the rest is a query in .st |
 #+end_rosetta
 
 Today the program is described to tools many separate ways: the LSP's
@@ -89,9 +99,9 @@ edge rewrite -> src | words | solid
 #+end_graph
 
 #+begin_terms
-Reflect | One dev-server projection of the program: every form match with its form, role, file and span; each param with its declared type, default, docs, written words (and their spelling), value, and any facts from files. Generic: no macro name appears in Rust.
+Reflect | One dev-server projection of the program: every form match with its form, registry entries, file and span; each param with its declared type, default, docs, written words (and their spelling), value, and any facts from files. Generic: no macro name appears in Rust.
 Rewrite | One way to change source. A transaction is a list of edits (address, expected text, new words). It is guarded, re-parsed before it's written (refused if it doesn't parse), hot-applied or reloaded, and recorded for undo. Studio gestures, admin saves, MCP edits and migration waves all use it.
-Role | What a form is *for*, declared in the stdlib next to it (=%role timeline.clip=), so tools ask « all clips » instead of naming =on-driver-body=.
+Registry entry | What a form is *for*, declared in the stdlib next to it with =%registers clip(…) { … }=, so tools ask « all clips » instead of naming =on-driver-body=.
 Fact | Something read from a file a param points at: a model's clips, an audio file's length, an image's size.
 #+end_terms
 
@@ -117,11 +127,10 @@ The params are written four times: =%form=, =%binds=, =%primitive=, and two =@pa
 /// A light on the stage. Name it (`&sun`) to animate it from a score.
 %macro light {
   %scope selector
-  %role stage.part
   %form {
     @light $named:part_name? (
       /// how it shines
-      type: $type:LightKind = directional,
+      type: $type:light_kind = directional,
       color: $color:color = white,
       intensity: $intensity:luminance = 1,
       pos: $pos:vec3 = 3 5 4,
@@ -138,6 +147,7 @@ The params are written four times: =%form=, =%binds=, =%primitive=, and two =@pa
     ) { $children* }
   }
   %binds { three-light(&self, name: $named, ...) -> { $added } }
+  %registers part($named) { kind: light }
   %template { $children }
 
   %example "a warm lamp the score can switch on" {
@@ -145,18 +155,19 @@ The params are written four times: =%form=, =%binds=, =%primitive=, and two =@pa
   }
 }
 
-@type LightKind {
-  /// light from everywhere, without shadows
-  ambient |
-  /// parallel rays from far away, like the sun
-  directional |
-  point |
-  spot
+/// how a light shines
+%capture_type light_kind {
+    /// light from everywhere, without shadows
+    "ambient"
+    /// parallel rays from far away, like the sun
+  | "directional"
+  | "point"
+  | "spot"
 }
 #+end_src
 
 In =three-light.st= the signature becomes types only:
-=%primitive three-light(&el, name: part_name, type: LightKind, color: color, …)=.
+=%primitive three-light(&el, name: part_name, type: light_kind, color: color, …)=.
 The form owns the defaults. Authors write =@light &lamp1 (type: point, pos: -2.6 2.3 -4)=,
 or keep =posX: -2.6=: both mean the same thing.
 
@@ -165,7 +176,7 @@ or keep =posX: -2.6=: both mean the same thing.
 | Today (a JSDoc carryover) | Native | Why |
 | =/// @param penumbra - spot soft-edge 0..1= above the macro | =/// how soft the spot's edge is= above =penumbra:= in the =%form=; the range moves to the type (=unit=) | the name isn't repeated, so it can't drift; the doc moves with the param |
 | =/// @yields $source - Raw source code string= | =/// the raw source= above =%yield … -> $source;= | the =%yield= line already declares it |
-| =/// @param type - "ambient" or "directional" …= | =@type LightKind { ambient … }= with a =///= per tag | a choice is a type, and each choice has its own doc |
+| =/// @param type - "ambient" or "directional" …= | =%capture_type light_kind { "ambient" … }= with a =///= per keyword | a choice is a keyword set, as =easing_keyword= already is, and each keyword has its own doc |
 | =/// (default 1)=, =/// default 2= | deleted | the signature says the default (91 lines restate one) |
 | =/// @example …= prose | =%example "title" { … }=, compiled by =spacetime check= and offered as an insertable snippet in the studio and LSP | 320 examples nothing compiles; light's own is wrong |
 #+end_rosetta
@@ -179,11 +190,19 @@ restates the type or the default.
 only bound through forms declares types, not defaults. The form is the one
 public signature (cell =drift=).
 
-** L3 · Choices are sum types, written bare
-=type: point=, not =type: "point"=. There's precedent: =color: white= is already a
-bare word. An unknown tag is a compile error with suggestions. Six 3D params
-start here (=tone=, =shape=, =material=, =type=, =drive=, =shadows=), then any
-=string= whose docs list options.
+** L3 · Closed sets are keywords, open sets are strings
+A set the source declares is a *keyword set*: a =%capture_type= of literal
+alternatives, the mechanism =easing_keyword= already uses, with a =///= per
+keyword. Values are written bare (=type: point=); the quoted spelling stays
+accepted, because the parser already treats them as equal. An unknown word
+becomes a compile error with suggestions instead of today's silent =null=.
+A set that comes from outside the source (a model's clips, a font file's
+families) is a *fact*, and its values stay quoted strings: they can contain
+anything. Six 3D params start (=tone=, =shape=, =material=, =type=, =drive=,
+=shadows=), then every =string= whose docs list options, and every inline union.
+
+Not =@type=: =@type= sums describe *data* (=Idle | Failed(string)=, PascalCase
+tags, payloads). A keyword is grammar, so it lives with the grammar.
 
 ** L4 · Ranges and units are scalar rows
 New rows in =stdlib/scalars/types.st=: =unit= (0..1), =luminance=, =meters=,
@@ -216,6 +235,24 @@ splitter (=reify_keyframes= / =parse_stops=). Every stop is then a reflected
 node with its own span, value, time and easing, and a keyframe widget is the
 type of the param its channel animates.
 
+** L9 · Tools find constructs through %registers
+No new directive. The score macro registers its timeline, a clip body its clip,
+a stage child its part:
+
+#+begin_src st
+%macro score-block {
+  %form { … }
+  %registers timeline($as) { length: $length }
+}
+%macro on-driver-body {
+  %form { … }
+  %registers clip($subject) { timeline: $driver channels: $lines }
+}
+#+end_src
+
+Reflect lists registry entries with their spans (=entries_of("clip")=). The
+studio asks for « every clip », and renaming a macro breaks nothing.
+
 ** L8 · Every node keeps its span
 =@data= values and markup keep lossless spans in the compiler's own parse
 (PLAN-155 did this for captures). =literal.rs= and =markup.rs= are deleted.
@@ -233,7 +270,7 @@ Both run on *reflect* and *rewrite*, so the migrator dogfoods the facilities the
 | 1 · docs on declarations (stdlib) | =@param= prose → =///= on the param; =@yields= → =///= on the =%yield=; default restatements deleted | 692 + 307 lines (=docs=) | prose naming a unit or range: 69 lines, pick the type |
 | 2 · examples compile (stdlib) | =@example= → =%example { … }= | 320 | examples that don't compile, light's first |
 | 3 · params once (stdlib) | forwarding =%binds= → =...=; primitive defaults dropped when equal | 79 binds, 249 defaults (=drift=) | the 11 disagreeing defaults: a human picks the true one |
-| 4 · types (stdlib + projects) | 6 choices → sum types; =type: "point"= → =type: point= in projects | 6 params; every use | — |
+| 4 · keywords (stdlib + projects) | choices in prose → keyword sets; =type: "point"= → =type: point= in projects | 6 params, every inline union, every use | — |
 | 5 · vectors (stdlib only) | =posX/Y/Z= params → =pos: vec3= in the forms | 16 triples | none: project files keep =posX= because the longhand stays valid |
 #+end_rosetta
 
@@ -371,6 +408,30 @@ Cells that read the real repository; their results are the evidence above.
 #+end_src
 #+RESULTS: facets
 : {:robot-posZ {:span "posZ", :words "0.4"}, :lamp-pos-x {:span "pos", :words "-2", :component 0}, :unwritten {:insert "posX: 1"}}
+
+
+#+begin_src beam-lisp :id keywords
+;; Closed sets are keywords (bare or quoted: one value); open sets are strings.
+;; Today an unknown word fails open to null (measured with @resize, direction: sideways).
+(def light-kind #{"ambient" "directional" "point" "spot"})
+(defn word [w] (if (String/starts_with? w "\"") (subs w 1 (- (count w) 1)) w))
+(defn check-keyword [set w]
+  (let [v (word w)]
+    (if (contains? set v) {:value v}
+        {:error (str "`" v "` is not one of " (apply str (interpose ", " (sort set))))})))
+(defn check-fact [facts w]
+  (if (String/starts_with? w "\"")
+    (check-keyword facts w)
+    {:error "a clip name comes from the file: quote it"}))
+(assert (= (check-keyword light-kind "point") (check-keyword light-kind "\"point\"")))
+(assert (:error (check-keyword light-kind "sideways")))                 ; today: null, silently
+(assert (= {:value "Armature|Run"} (check-fact #{"Armature|Run"} "\"Armature|Run\"")))
+(assert (:error (check-fact #{"Walking"} "Walking")))
+{:bare (check-keyword light-kind "point") :typo (check-keyword light-kind "pont")
+ :open-set (check-fact #{"Armature|Run"} "\"Armature|Run\"")}
+#+end_src
+#+RESULTS: keywords
+: {:bare {:value "point"}, :typo {:error "`pont` is not one of ambient, directional, point, spot"}, :open-set {:value "Armature|Run"}}
 
 
 #+begin_src beam-lisp :id view
@@ -564,7 +625,7 @@ From each product's docs and common use; not re-verified for this dossier.
 - [ ] Keep =src/studio/= and add =fields.rs= (round 1's D3)
 - [ ] A studio module per feature (film, page, admin) on the server
 The domain knowledge (what a clip, a stop, a stage part is) moves to the stdlib
-that defines them: capture types and =%role=. Rust keeps parsing, generic
+that defines them: capture types and =%registers=. Rust keeps parsing, generic
 projection, guarded writing and file-format readers.
 #+end_decision
 
@@ -619,31 +680,16 @@ projection, guarded writing and file-format readers.
 #+end_decision
 
 * Questions
-#+begin_ask :id q3 :title "Move the admin onto the shared widgets in this plan?" :options "Yes, right after the studio's widgets|After this plan|Leave the admin alone"
-The admin (=/__spacetime/admin=) edits =@data stored= entries. Its drawer
-renders ten =&fld-*= templates, and Rust's =widget_for= picks one per field from
-JSON schema and name rules (a field called =slug= or =id= is read-only). Moving it would mean:
-- the drawer renders =&w-*= from reflect, like the studio;
-- =widget_for='s cases move into the type table (enum → choice, =id(T)= → reference picker, richtext);
-- the brand pane's colour pill becomes =&w-color=.
-Gain: one look, one place to add a widget, and the studio gets relation pickers
-and rich text for free. Cost: the admin's screens and tests move. About one phase.
-#+end_ask
+None open: round 2 settled them.
 
-#+begin_ask :id q5 :title "Choices written bare: type: point?" :options "Bare tags, strings still accepted through a migration window|Bare tags only|Keep strings"
-Bare tags read like =color: white= and get compile errors with suggestions.
-Strings stay legal through the migration window (W0715), then wave 4 rewrites them.
-#+end_ask
-
-#+begin_ask :id q6 :title "How do tools find clips without naming macros?" :options "%role declared on the macro|The studio matches form names in .st|Both"
-=%role timeline.clip= on the score macros lets reflect answer « every clip »,
-and survives renaming a macro. Matching names in .st is less language but more fragile.
-#+end_ask
-
-#+begin_ask :id q7 :title "Start with the language or the studio?" :options "P0 bugs, then reflect and rewrite, then the waves|P0, then widgets on today's score.json, then migrate|Language waves first"
-The first keeps you working in the studio while the base moves under it. The
-second shows widgets sooner but builds them on the module we're deleting.
-#+end_ask
+#+begin_decision :id q3 :title "The admin moves onto the shared widgets" :status decided
+- [x] In this plan, right after the studio's widgets (P5)
+- [ ] After this plan
+- [ ] Leave the admin alone
+The drawer renders =&w-*= from reflect; =widget_for='s cases move into the type
+table (enum → choice, =id(T)= → reference picker, richtext); the brand pane's
+colour pill becomes =&w-color=.
+#+end_decision
 
 * Roster
 ** TODO P0 · The bugs from the review
