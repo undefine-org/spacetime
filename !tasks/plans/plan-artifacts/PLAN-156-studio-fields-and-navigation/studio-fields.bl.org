@@ -1,0 +1,468 @@
+#+title: Studio fields that know their type, and a studio you can move around in
+#+subtitle: Every field is a widget template chosen by the type its form declares; the timeline and the 3D view pan, zoom and select many.
+#+kicker: spacetime · stdlib/__studio__ · PLAN-156 design dossier
+#+date: 2026-11-09
+#+status: Proposal · reviewed in the browser, nothing built yet
+#+author: Claude for Othman
+
+* In one breath
+#+begin_lede
+Today every field in the studio is a text box. The studio doesn't know that
+=intensity= is a number, =color= a colour, or =type= one of four words, even though
+the stdlib forms already say so (=intensity: $intensity:number=). And you work on
+one thing at a time: no zoom, no pan, no box selection, no handle in the 3D view.
+
+The proposal is a layer of *widgets*: =@template= blocks in one shared library, picked
+by the *type* the form declares, fed by *field descriptors* the compiler projects.
+Navigation is a few generic *behaviors* (zoom-pan, an editor camera, a move handle)
+that write words, like every other studio gesture. The studio's .st gets shorter,
+its JS moves into small named primitives, and the admin drawer reuses the same widgets.
+#+end_lede
+
+#+begin_stats
+~1,450 | lines of JS in the two studio kits | studio-kit 742, film-kit 712; most of it builds view models and DOM
+2 | inspectors doing the same job | page fields (=ST.stuFields=) and film fields (=ST.stuFilmFields=): two selections, two commit paths
+6 | choices hidden in comments | =tone=, =shape=, =material=, =type=, =drive=, =shadows=: typed =string=; their options live in =/// @param= prose
+10 | widget templates already in the admin | =&fld-select=, =&fld-media=, =&fld-range-*=, …: the pattern exists, only for =@type= data
+#+end_stats
+
+* What I saw in the browser
+Reviewed with =agent-browser= at 1440×900 on the served studio
+(=https://work.tailcb5318.ts.net:18090/=, the =robot-day-studio= service), then traced in code.
+
+#+begin_rosetta
+| Seen | Why (code) | Fix lives in |
+| Inspector says « Nothing selected » with =&robot= selected | =$stuSelection= ignores =$stuFilmSel= (=index.st:59-63=) | one selection (D7) |
+| The studio opens on the end card at =00:24:00= | the driver autoplays once and parks at =dur=; nothing seeks to 0 (=film-kit 656-706=) | P0 |
+| The ruler stops at ~22.5 s of 24 s; =&end= is clipped | lanes scale by =total_ms= parsed from source, the playhead by the driver's =duration=; =overflow-x: hidden= | a view window (D9) |
+| Clip text runs over its keyframes | the stops text is drawn under the diamonds in the same lane | lane template (P1) |
+| A selected keyframe isn't marked | the selection key isn't reflected on =.stu-film__keys= | one selection (D7) |
+| A keyframe is one box: =6.5 at 62%= with hint =value [at p%] [--easing]= | =stuFilmFields= hard-codes hints per mode (=film-kit 145-176=) | descriptors (D3) |
+| Strings in quotes, a « default » under half the fields | values are shown as source text; =mode: insert= labels itself | widgets (D1) |
+| =i= sets the loop in Film and switches to Interact in the page studio | two keydown handlers in document capture (=film-kit 555=, =studio-kit 686=) | one keymap (D10) |
+#+end_rosetta
+
+* The words
+#+begin_terms
+Field | One editable fact about a selected thing: a part's param, a CSS declaration, a keyframe's value, a clip's =at=.
+Descriptor | The record the compiler sends for a field: its address, label, type, value, value at the playhead, choices, range, unit, whether a channel drives it.
+Widget | An =@template= that renders a descriptor and emits a =change= carrying the new words. It never knows where it is used.
+Behavior | A small =%primitive= for what markup can't say: dragging a label to scrub, zooming a lane, orbiting a camera. JS lives only there.
+Address | Where a field's words are: file, span, the text expected there. Every edit is still an op on words.
+Selection | A set of addresses, not one key. The inspector shows the fields they share.
+View window | The part of the film the timeline shows: =from= and =span= in ms. Zoom and pan only change it.
+Rest value / value now | What the source says vs what the playhead shows. An animated field edits the stop at the playhead, not the rest value.
+#+end_terms
+
+#+begin_honest :title "What « automatic » never means here"
+The studio won't guess. A field's widget comes only from a type declared in a
+form or the scalar table. If a param has no type worth a widget, it stays a text
+field until its form says more. No Rust list of param names, no doc-comment parsing.
+#+end_honest
+
+* Principles
+#+begin_principles
+Types decide, the studio doesn't | The form declares =$x:color=; the scalar table says a colour's widget is =&w-color=. Nothing in the studio or the server names a widget per param.
+A widget is a template | Markup, styles and a =change= event. Behaviors it needs (scrub, swatch picker) are primitives it calls, so it stays .st.
+One descriptor, one inspector, one commit | Parts, CSS rules, keyframes, clips and sounds all become descriptors; one =@each= renders them; one handler turns any =change= into ops.
+Gestures are words | Zoom and pan change only the view. A drag in 3D or on the timeline ends as =span=/=insert= ops, so undo and the code pane stay exact.
+Shared, not studio-only | The admin drawer's =&fld-*= templates and the studio's widgets become one =stdlib/widgets/= library.
+#+end_principles
+
+* Jobs
+#+begin_job :id light :title "Tune a light by feel" :decision "Drag the label to scrub; a range gives a slider"
+I select =&lamp2= and want its intensity right while I watch the frame, not
+type numbers and wait. Blender and After Effects let you drag on the label.
+#+end_job
+
+#+begin_job :id key :title "Key a moment" :decision "◆ on every animated field: add or edit the stop at the playhead"
+I park the playhead at 14 s and nudge =&camera posZ=. That should become a
+stop at 58%, not a change to the rest value that the score overrides anyway.
+#+end_job
+
+#+begin_job :id block :title "Block a shot in 3D" :decision "Editor camera + move handle; « look through &camera » goes back"
+I want to walk around the set, grab the robot and put it on its mark, then look
+through the film's camera again.
+#+end_job
+
+#+begin_job :id many :title "Change several at once" :decision "Selection is a set; shared fields show mixed values as —"
+All four globes should glow the same. I box-select them in 3D or shift-click
+them in the Scene list and set =emissiveIntensity= once.
+#+end_job
+
+#+begin_job :id long :title "Work on a long film" :decision "A view window: ctrl-wheel zoom at the cursor, wheel pan, \\ to fit"
+Keyframes at 14.0 s and 14.2 s sit on top of each other at this width
+(=&camera posX=). I need to zoom into a second, and see the whole film again.
+#+end_job
+
+* The architecture
+#+begin_graph :title "From a form's types to a word in the file"
+node form | stdlib forms | $intensity:number, $type:("ambient" or …) | 0,0 | foreign
+node scalars | scalar table | %scalar_type color { %widget … } | 0,1 | foreign
+node fields | src/studio/fields.rs | descriptors per selection | 1,0 | station
+node sel | $stuSel | a set of addresses | 1,1 | you
+node insp | inspector | @each &$f.tpl($f) | 2,0 | you
+node widgets | stdlib/widgets | &w-number &w-color &w-choice … | 2,1 | door
+node beh | behaviors | @scrub @zoom-pan @gizmo @editor-camera | 3,1 | builder
+node ops | ops | span · insert · source | 3,0 | station
+edge form -> fields | types | solid
+edge scalars -> fields | widget names | solid
+edge sel -> fields | which fields | solid
+edge fields -> insp | descriptors | solid
+edge insp -> widgets | one call per field | solid
+edge widgets -> beh | uses | dash
+edge widgets -> ops | change → words | solid
+edge beh -> ops | drag end → words | dash
+#+end_graph
+
+#+begin_sequence :title "Scrubbing an animated field at the playhead"
+lanes you · label drag | w-number · widget | studio · inspector | server · ops | stage · hot
+you -> w-number : drag « intensity » right
+w-number -> w-number : @scrub previews value (no write)
+w-number -> studio : change {address, words: "1.6", now: true}
+studio -> studio : field is driven → stop at 58% (exists? span : insert)
+studio => server : POST ops [span …]
+server --> studio : ok, new hashes
+studio -> stage : hot apply (no reload)
+note studio, server : the same path as a code-pane edit
+#+end_sequence
+
+** The modules
+#+begin_rosetta
+| Module | Holds | Replaces |
+| =stdlib/scalars/types.st= | =%widget &w-color= names a template; new rows: =unit= (0..1), =intensity=, =distance=, =vec3= | Rust =widget_for= branches for scalars |
+| =stdlib/widgets/*.st= | =&w-number=, =&w-color=, =&w-choice=, =&w-toggle=, =&w-text=, =&w-asset=, =&w-ref=, =&w-vec3=, =&w-stop=, =&w-easing= | =&fld-*= in the admin; the textarea/input in both inspectors |
+| =stdlib/widgets/primitives/= | =@scrub=, =@swatch=, =@curve= (easing) | inline JS in kits |
+| =src/studio/fields.rs= | descriptors for parts, CSS decls, clips, stops, sounds; =tpl= from the scalar table | =ST.stuFields=, =ST.stuFilmFields=, hint strings |
+| =stdlib/__studio__/inspector.st= | one inspector: header, crumbs, =@each &$f.tpl($f)=, mixed values | the page + film field sections |
+| =stdlib/__studio__/selection.st= | =@type Selection=, shift/box add, clear, keyed by address | =$stuSel=, =$stuFilmSel=, =$stuFilmNoteCell= |
+| =stdlib/__studio__/timeline.st= + =@zoom-pan= | a view window ={from, span}=; lane/bar/key templates; overview strip; marquee | percent-of-total layout, =msAt= |
+| =stdlib/3d= =@editor-camera=, =@gizmo= | OrbitControls / TransformControls (vendored three) on a second camera | — |
+| =studio-core= prelude | apply, hot, remember, one keymap table | duplicates in both kits |
+#+end_rosetta
+
+** A field descriptor
+#+begin_schema :id descriptor :title "What the compiler sends for each field"
+field @edit | one editable fact, rendered by its template
+  address -> span | file, start, end, expected text
+  label text | =intensity=, =stop 3=, =at=
+  type text | the declared type: number, color, unit, a union of words, vec3, asset, ref
+  tpl text | the widget template, from the scalar table
+  value text | the words written, or the default
+  now text | the value at the playhead when a channel drives it
+  driven -> channel | the channel line that animates it, if any
+  choices text | from a union type, or a model's clips
+  range text | min, max, step, unit: from the scalar row
+  state written, default, mixed | mixed when several selected parts differ
+span @link | where the words are
+  file text | path, not an index
+  start text | byte offset
+  expect text | the text that must still be there (STALE otherwise)
+#+end_schema
+
+* Screens
+#+begin_desk :id inspector :url "studio · robot-day" :title "One inspector, typed fields" :job light :caption "&lamp2 selected at 14.2 s; intensity is driven by a channel, so it shows ◆ and edits the stop"
+crumb Scene › stage › &lamp2
+head &lamp2 | idle · point light | @eye Look through?
+col main
+row type | ambient · directional · point* · spot
+row color | ■ #ffcf8a
+row intensity ◆ | ━━━━●──── 1.6 (rest 0) · at 58%
+row distance | 9 m
+row decay | 2
+section Position | 3
+row pos | X −2.6 · Y 2.3 · Z −4
+row castShadow | ○ off
+col rail
+note Drag any label to scrub. Shift for fine, ctrl for coarse.
+row Driven by | [[#screen-timeline][&lamp2 intensity · 4 stops]]
+#+end_desk
+
+#+begin_desk :id timeline :url "studio · robot-day" :title "A timeline you can zoom" :job long :caption "Zoomed to 12–16 s; the overview strip shows where you are; three keys box-selected"
+head &film 24s | run · 00:14:12 | @play Play!
+meta 12 s → 16 s of 24 s | snap: beats
+col main
+row ▁▁▁▁[████]▁▁▁▁▁▁▁▁▁▁ | overview · drag the window
+row &camera posZ | ··◆·········◆ 14.0 s
+row &camera posX | ·········◆◆◆ 14.0 · 14.1 · 14.2 (selected)
+row &robot clip | ··"Walking"··· "Death" at 15.3 s
+row &drums --beat | ▮▯▮▯▮▯▮▯▮▯▮▯
+col rail
+section 3 keys selected
+row value | — (mixed)
+row easing | ⌒ ease-out
+actions @next Nudge +1 beat | @x Delete?
+#+end_desk
+
+#+begin_desk :id stage3d :url "studio · robot-day" :title "The editor camera" :job block :caption "Orbit, pan, dolly; F frames the selection; the move handle writes posX/posZ"
+head Viewport | turn · editor camera | @eye Look through &camera!
+col main
+card run | &robot | gltf · selected | move handle: ⟷ X · ⟂ Z · ↻ Y
+card idle | &globe1 … &globe4 | 4 hovered by a box drag | release to select
+col rail
+row Camera | editor (free)
+row Frame | F
+row Tool | Select · Move* · Rotate · Scale
+#+end_desk
+
+* The model, executable
+The first cell reads the real stdlib: how many typed params the 3D forms
+declare, and which =string= params are choices hiding in comments.
+
+#+begin_src beam-lisp :id coverage
+(ns studio.fields)
+(def repo "/home/othman/code/undefine/spacetime/")
+(defn read-dir [dir]
+  (map (fn [f] (File/read! (str repo dir f)))
+       (filter (fn [f] (String/ends_with? f ".st")) (File/ls! (str repo dir)))))
+(def forms (read-dir "stdlib/3d/macros/"))
+(def prims (read-dir "stdlib/3d/primitives/"))
+(def types (frequencies
+  (mapcat (fn [t] (map (fn [m] (nth m 2)) (Regex/scan #"\w+: \$(\w+):(\w+)" t))) forms)))
+;; choices written as prose: `/// @param NAME - "a" | "b"`
+(def hidden (set (mapcat (fn [t] (map (fn [m] (nth m 1))
+                                      (Regex/scan #"@param\s+(\w+)\s+-[^\n]*\"\w*\"\s*\|" t)))
+                         (concat forms prims))))
+;; the scalar types a widget exists for today, plus the ones this plan adds
+(def widgets {"number" "w-number" "color" "w-color" "bool" "w-toggle" "string" "w-text"})
+(def editable (filter (fn [[t _]] (contains? #{"number" "color" "bool" "string"} t)) types))
+(assert (every? (fn [[t _]] (contains? widgets t)) editable))
+(assert (>= (count hidden) 5))
+{:param-types (into (sorted-map) types)
+ :choices-in-comments (sort hidden)
+ :editable-params (reduce + (map second editable))}
+#+end_src
+#+RESULTS: coverage
+: {:param-types {"bool" 6, "color" 5, "expr" 2, "number" 80, "string" 11}, :choices-in-comments ("drive" "material" "shadows" "shape" "tone" "type"), :editable-params 102}
+
+
+#+begin_src beam-lisp :id view
+;; The timeline's view window. Zoom keeps the time under the cursor fixed;
+;; fit shows the whole film; positions are fractions of the view, not of the film.
+(defn x->ms [v x] (+ (:from v) (* x (:span v))))           ; x in 0..1 of the lane
+(defn ms->x [v ms] (/ (- ms (:from v)) (:span v)))
+(defn clamp [v total]
+  (let [span (min (max (:span v) 50) total)]
+    {:from (min (max (:from v) 0) (- total span)) :span span}))
+(defn zoom [v x factor total]
+  (let [at (x->ms v x) span (/ (:span v) factor)]
+    (clamp {:from (- at (* x span)) :span span} total)))
+(defn fit [total] {:from 0 :span total})
+(def total 24000)
+(def v (zoom (fit total) 0.6 6 total))                       ; zoom 6× around 14.4 s
+(assert (< (abs (- (x->ms v 0.6) 14400)) 1e-6))              ; the cursor's time didn't move
+(assert (= (fit total) (zoom v 0.5 (/ 1 100) total)))        ; zooming out stops at the whole film
+(assert (= (ms->x (fit total) 24000) 1))                     ; the end is on screen when fitted
+{:view v :keys-14.0-14.2-apart-px (* 1100 (- (ms->x v 14200) (ms->x v 14000)))}
+#+end_src
+#+RESULTS: view
+: {:view {:span 4000.0, :from 12000.0}, :keys-14.0-14.2-apart-px 55.00000000000005}
+
+
+#+begin_src beam-lisp :id route
+;; One commit path. A change from any widget becomes ops on words:
+;; a driven field edits (or adds) the stop at the playhead, others edit their param.
+(defn op-for [field words playhead]
+  (cond
+    (:driven field)
+    (let [stop (first (filter (fn [s] (= (:at s) playhead)) (:stops (:driven field))))]
+      (if stop
+        {:op :span :address (:address stop) :words words}
+        {:op :insert :after (:address (last (filter (fn [s] (< (:at s) playhead)) (:stops (:driven field)))))
+         :words (str " -> " words " at " playhead "%")}))
+    (= (:state field) :default) {:op :insert :after (:last-param field) :words (str ", " (:label field) ": " words)}
+    :else {:op :span :address (:address field) :words words}))
+(def posZ {:label "posZ" :state :written :address [0 3300 3302]
+           :driven {:stops [{:at 0 :address [0 900 902]} {:at 25 :address [0 906 907]} {:at 62 :address [0 915 919]}]}})
+(assert (= :span (:op (op-for posZ "7" 25))))                ; on a stop: rewrite that stop
+(assert (= :insert (:op (op-for posZ "7" 58))))              ; between stops: a new stop at 58%
+(assert (= [0 906 907] (:after (op-for posZ "7" 58))))       ; after the stop before it
+(assert (= :insert (:op (op-for {:label "decay" :state :default :last-param [0 10 20]} "3" 58))))
+{:between (op-for posZ "7" 58)}
+#+end_src
+#+RESULTS: route
+: {:between {:op :insert, :after [0 906 907], :words " -> 7 at 58%"}}
+
+
+#+begin_src beam-lisp :id many
+;; A selection is a set. The inspector shows fields every selected part has, with
+;; the same type; differing values show as mixed and one edit writes them all.
+(defn shared [parts]
+  (let [keyed (map (fn [p] (into {} (map (fn [f] [[(:label f) (:type f)] f]) (:fields p)))) parts)
+        common (reduce (fn [a m] (filter (fn [k] (contains? m k)) a)) (keys (first keyed)) (rest keyed))]
+    (map (fn [k] (let [vals (set (map (fn [m] (:value (get m k))) keyed))]
+                   {:label (first k) :type (second k)
+                    :value (if (= 1 (count vals)) (first vals) :mixed)
+                    :writes (count keyed)}))
+         (sort common))))
+(defn globe [n e] {:fields [{:label "emissiveIntensity" :type "number" :value e}
+                            {:label "posX" :type "number" :value n}
+                            {:label "color" :type "color" :value "#fff1d0"}]})
+(def lamp {:fields [{:label "intensity" :type "number" :value 0} {:label "color" :type "color" :value "#ffcf8a"}]})
+(def g (shared [(globe -2.6 0) (globe 2.6 0) (globe -2.6 1.5) (globe 2.6 0)]))
+(assert (= :mixed (:value (first (filter (fn [f] (= "emissiveIntensity" (:label f))) g)))))
+(assert (= ["color"] (map :label (shared [(globe 1 0) lamp]))))   ; a globe and a lamp share only colour
+{:four-globes g}
+#+end_src
+#+RESULTS: many
+: {:four-globes ({:label "color", :type "color", :value "#fff1d0", :writes 4} {:label "emissiveIntensity", :type "number", :value :mixed, :writes 4} {:label "posX", :type "number", :value :mixed, :writes 4})}
+
+
+* Prior art
+From each product's docs and common use; not re-verified for this dossier.
+#+begin_matrix
+| | Blender | After Effects | Unity | Theatre.js | Spacetime today | Proposed |
+| Drag a label to scrub | y | y | y | y | n | y |
+| Widget from the property's type | y | y | y attributes | y prop types | n | y scalar table |
+| Keyframe toggle on the field | y ◆ | y stopwatch | y | y | n | y ◆ |
+| Timeline zoom at cursor, fit | y | y | y | y | n | y |
+| Editor camera vs shot camera | y | y | y | y | n | y |
+| Move handle in the viewport | y | y | y | ~ | n | y writes words |
+| Edit many, mixed values | y | ~ | y | n | n | y |
+| Edits are source words | n | n | ~ YAML | ~ JSON state | y | y |
+#+end_matrix
+
+* Decisions
+#+begin_decision :id d1 :title "Widgets are templates in one shared library" :status proposed
+- [x] =@template &w-*($f)= in =stdlib/widgets/=, used by the studio and the admin drawer
+- [ ] Separate templates per app (the admin's =&fld-*= and the studio's would drift)
+- [ ] JS that builds the inputs (what the kits do today)
+- [ ] =@form markup= (it binds =noop=; nothing renders it yet)
+A widget takes one descriptor and emits one =change=. It doesn't know about ops,
+selection or the timeline, so the same =&w-color= works in the admin's brand pane.
+#+end_decision
+
+#+begin_decision :id d2 :title "The scalar table picks the widget" :status proposed
+- [x] =%widget &w-color= in =stdlib/scalars/types.st=; the descriptor carries =tpl=; markup calls =&$f.tpl($f)=
+- [ ] =@match $f.type= in every inspector (the dispatch list repeats per app)
+- [ ] A Rust =widget_for= branch per type (today's admin path for non-scalars)
+The table already exists for exactly this (=%widget "color"=, FEAT-168: « adding a
+scalar should require no Rust change »). It points at a template instead of a string.
+#+end_decision
+
+#+begin_decision :id d3 :title "The compiler projects every field" :status proposed
+- [x] =src/studio/fields.rs=: descriptors for part params, CSS declarations, clips, stops and sounds
+- [ ] Keep =ST.stuFields= / =ST.stuFilmFields= in JS and add types to them
+The compiler has the form's =FormClause= (types, defaults) and the scalar table;
+the JS has neither. A keyframe's widget is the type of the param its channel animates.
+#+end_decision
+
+#+begin_decision :id d4 :title "Choices are union types in the form" :status proposed
+- [x] =type: $type:("ambient"|"directional"|"point"|"spot") = "directional"=
+- [ ] Read the =/// @param= prose (a parser for comments; the project rules forbid it)
+Unions already parse in =%form= captures (=form-syntax.md:129-146=). Six 3D params move (the =coverage= cell finds them).
+#+end_decision
+
+#+begin_decision :id d5 :title "Ranges and units are named scalar types" :status proposed
+- [x] New rows in the scalar table: =unit= (0..1), =angle= (exists), =intensity=, =distance=, =exposure=
+- [ ] Inline refinements =number(0..1)= (new grammar; can come later if rows multiply)
+=penumbra: $penumbra:unit= reads better than a bare =number= and needs no new syntax.
+#+end_decision
+
+#+begin_decision :id d7 :title "One selection, a set of addresses" :status proposed
+- [x] =@type Selection=; page elements, parts, clips, stops and sounds; shift adds, a box adds many
+- [ ] Two selections (=$stuSel= object, =$stuFilmSel= key) as today
+This fixes « Nothing selected » and the unmarked keyframe at the root, and is what multi-edit needs.
+#+end_decision
+
+#+begin_decision :id d8 :title "One commit path" :status proposed
+- [x] Every widget emits =change {address, words}=; one handler makes ops; driven fields write the stop at the playhead
+- [ ] A commit function per field kind (=stuCommitField=, =stuCommitDecl=, =stuFilmCommit= today)
+The =route= cell above is that handler's rule.
+#+end_decision
+
+#+begin_decision :id d9 :title "Navigation is generic behaviors" :status proposed
+- [x] =@zoom-pan= writes a view window signal; lanes position with CSS over =--from=/=--span=; =@editor-camera= and =@gizmo= on the stage
+- [ ] Zoom code inside film-kit (it would stay timeline-only)
+=@zoom-pan= also serves the code pane's minimap and the sound grid. The move handle
+uses three's TransformControls (vendored), and ends its drag as =span= ops.
+#+end_decision
+
+#+begin_decision :id d10 :title "Split the kits, one keymap" :status proposed
+- [x] =studio-core= (apply, hot, remember, keymap table) + one primitive per behavior
+- [ ] Keep two 700-line preludes
+Fixes the =i= conflict and the duplicated helpers; each piece gets its own =.test.st=.
+#+end_decision
+
+* Questions
+#+begin_ask :id q1 :title "Positions: keep posX/posY/posZ, or a vec3?" :options "vec3: pos: 0 3 -7|Keep posX/Y/Z, group them in the form|Both: vec3 with posX… still accepted"
+A vec3 makes the source shorter (=@gltf &robot (pos: 0 0 -7)=) and the widget
+one row, but channels then animate =pos: 0 0 -7 -> 0 0 0.4=, and every 3D form,
+score and demo changes. Grouping keeps the words and only changes the inspector.
+#+end_ask
+
+#+begin_ask :id q2 :title "A model's clip names: where do they come from?" :options "The compiler reads the .glb|The live part reports them|Both"
+=clip: "Walking"= should be a menu of the model's animations. The compiler can
+read them from the .glb's JSON chunk (works in the code pane and offline); the
+running part knows them too, but only once loaded.
+#+end_ask
+
+#+begin_ask :id q3 :title "Move the admin drawer onto the shared widgets in this plan?" :options "Yes, in the same plan|After the studio works|Leave the admin alone"
+The admin has ten =&fld-*= templates and its own =widget_for=. Sharing is the
+point of D1, but it widens the change.
+#+end_ask
+
+#+begin_ask :id q4 :title "Where should I start?" :options "P0 bugs, then widgets|Widgets first|Timeline zoom first|3D camera first"
+Each phase below lands with its tests, docs and PLAN-156 record in the same commit.
+#+end_ask
+
+* Roster
+** TODO P0 · The bugs from the review
+:PROPERTIES:
+:JOBS: light long
+:AREA: stdlib/__studio__
+:END:
+Header and empty state follow the selection; open at 0 (or the remembered time);
+lanes and playhead use one duration; clip text clears its keyframes; =i= and Escape
+conflicts; =stuRules= / =stuBox= read a signal, not =S.el=.
+
+** TODO P1 · Widgets and descriptors
+:PROPERTIES:
+:JOBS: light
+:AREA: stdlib/widgets src/studio/fields.rs stdlib/scalars
+:PROTO: inspector
+:END:
+=&w-number= (with =@scrub=), =&w-color=, =&w-toggle=, =&w-text=, =&w-choice=;
+=%widget= names templates; =fields.rs= projects parts, CSS declarations, clips,
+stops; one inspector renders =&$f.tpl($f)=.
+
+** TODO P2 · Types in the stdlib forms
+:PROPERTIES:
+:JOBS: light key
+:AREA: stdlib/3d stdlib/scalars
+:END:
+Unions for the six choices; =unit=, =intensity=, =distance=, =exposure= rows;
+=&w-stop= (value, time, easing via =@curve=); clip names (Q2); positions (Q1).
+
+** TODO P3 · One selection, one commit, edit many
+:PROPERTIES:
+:JOBS: key many
+:AREA: stdlib/__studio__
+:END:
+=@type Selection=; shift-click and list multi-select; mixed values; ◆ on driven
+fields; the =route= rule as the only commit path.
+
+** TODO P4 · Timeline navigation
+:PROPERTIES:
+:JOBS: long
+:AREA: stdlib/__studio__/timeline.st stdlib/widgets/primitives
+:PROTO: timeline
+:END:
+=@zoom-pan= view window, overview strip, fit (=\=), marquee select, drag many,
+snap to beats, ticks and keys, rows grouped by part.
+
+** TODO P5 · 3D navigation
+:PROPERTIES:
+:JOBS: block many
+:AREA: stdlib/3d
+:PROTO: stage3d
+:END:
+=@editor-camera= (OrbitControls) with « look through », =F= to frame,
+=@gizmo= (TransformControls) writing words or stops, box select in the viewport.
+
+** TODO P6 · Split the kits
+:PROPERTIES:
+:AREA: stdlib/__studio__/primitives
+:END:
+=studio-core= + behavior primitives; one keymap; each piece with its =.test.st=.
+Target: the studio's JS halves, and no JS builds DOM.
