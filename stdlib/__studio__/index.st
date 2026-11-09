@@ -9,7 +9,10 @@
 ///   from with every field editable, its design as the browser computes it, and
 ///   the source rules that style it, with their declarations editable;
 /// - the CANVAS (the page itself): click to select, double-click to edit text in
-///   place, drag a list item's handle to reorder.
+///   place, drag a list item's handle to reorder;
+/// - the FORMAT BAR, over a selection in the text being edited: the page's
+///   marks (every `@editable-mark` with an `icon:`), each wrapping the selection
+///   in the source, or taking marked text back out.
 ///
 /// Every edit is a source edit (src/studio): the server rewrites the `.st`, the
 /// page reloads, and the studio puts you back where you were. Signals are
@@ -38,14 +41,25 @@
 @data inline $stuStatus string : "";
 @data inline $stuError string : "";
 @data inline $stuNoop string : "";
+// The format bar: what it shows (its marks, or the field a mark with params
+// asks for, a link's href) and the marks the selection already sits in.
+@data inline $stuFmtMode string : "Hidden";
+@data inline $stuFmtActive string : "";
 
 @type StuTab { Layers | Lists | Components | Pages | Scene }
 @type StuSelection { Nothing | Element | Row }
 @type StuTool { Select | Interact }
+@type StuFormat { Hidden | Marks | Ask }
 
 @data derive $stuTool StuTool : @match {
   ($stuToolName == "Interact") => Interact;
   _                            => Select;
+}
+
+@data derive $stuFormat StuFormat : @match {
+  ($stuFmtMode == "Marks") => Marks;
+  ($stuFmtMode == "Ask")   => Ask;
+  _                        => Hidden;
 }
 
 @data derive $stuTab StuTab : @match {
@@ -71,6 +85,7 @@
 @data derive $stuFields array : ST.stuFields($stuSel);
 @data derive $stuRules array : ST.stuRules($stuSel, $stuOutline);
 @data derive $stuBox array : ST.stuBox($stuSel);
+@data derive $stuMarks array : ST.stuMarks($stuOutline, $stuFmtActive);
 
 @data derive $stuTitle string : (($stuOutline && $stuOutline.title) || "This page");
 @data derive $stuFiles string : (($stuOutline && $stuOutline.files) ? $stuOutline.files.join("  ") : "");
@@ -170,6 +185,19 @@
 .stu-rule__input { @on &.change { $stuNoop <- ST.stuCommitDecl($); } }
 
 .stu-bar__msg { .is-error: $stuHasError; text <- $stuMessage; }
+
+.stu-format {
+  @state(when: $stuFormat is Hidden) { --stu-fmt: 0; }
+  @state(when: $stuFormat is Marks)  { --stu-fmt: 1; }
+  @state(when: $stuFormat is Ask)    { --stu-fmt: 2; }
+}
+.stu-format__marks {
+  @each($stuMarks as $m) {
+    <button type="button" class="stu-mark" data-mark="`$m.name`" data-active="`$m.active`" title="`$m.title`" aria-label="`$m.title`">`$m.icon`</button>
+  }
+}
+.stu-mark { @on &.click { $stuNoop <- ST.stuMark($); } }
+.stu-format__input { @on &.change { $stuNoop <- ST.stuAsk($); } }
 
 // The markup sits at FILE SCOPE: the dev dock injects this file's compiled html.
 <section class="st-studio">
@@ -273,6 +301,11 @@
     </div>
   </section>
 
+  <div class="stu-format stu-ui" role="toolbar" aria-label="Format the selection">
+    <div class="stu-format__marks"></div>
+    <input class="stu-format__input" type="text" spellcheck="false" aria-label="Value for the mark" />
+  </div>
+
   <div class="stu-bar stu-ui" role="status">
     <span class="stu-tools" role="group" aria-label="Tool">
       <button type="button" class="stu-tool" data-tool="Select" title="Select and edit (V)">Select</button>
@@ -280,7 +313,7 @@
     </span>
     <button type="button" class="stu-bar__close">Done</button>
     <span class="stu-bar__msg"></span>
-    <span class="stu-bar__hint">double-click edit / Esc parent / Alt+arrows move / Alt-click use</span>
+    <span class="stu-bar__hint">double-click edit / select text to format / Esc parent / Alt+arrows move / Alt-click use</span>
   </div>
 </section>
 
@@ -545,6 +578,53 @@ html.stu-on body { margin-left: var(--stu-left) !important; margin-right: var(--
   cursor: pointer;
 }
 
+// The format bar floats over the selection; the kit places it.
+.stu-format {
+  position: fixed;
+  left: 0;
+  top: 0;
+  z-index: 2147483647;
+  display: none;
+  align-items: center;
+  gap: 1px;
+  padding: 3px;
+  border-radius: 8px;
+  background: #1e1e1e;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.24), 0 0 0 1px rgba(255, 255, 255, 0.06);
+}
+.stu-format[data-st-state="Marks"], .stu-format[data-st-state="Ask"] { display: flex; }
+.stu-format__marks { display: flex; gap: 1px; }
+.stu-format[data-st-state="Ask"] .stu-format__marks { display: none; }
+.stu-mark {
+  min-width: 28px;
+  height: 28px;
+  padding: 0 7px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: #e8e8e8;
+  font: 600 13px/28px Georgia, "Times New Roman", serif;
+  cursor: pointer;
+}
+.stu-mark:hover { background: #383838; }
+.stu-mark[data-active="true"] { background: var(--stu-blue, #0d99ff); color: #fff; }
+.stu-mark[data-mark="bold"] { font-weight: 800; }
+.stu-mark[data-mark="italic"] { font-style: italic; }
+.stu-mark[data-mark="strike"] { text-decoration: line-through; }
+.stu-mark[data-mark="code"] { font: 600 11px/28px ui-monospace, Menlo, monospace; }
+.stu-format__input {
+  display: none;
+  width: 260px;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 5px;
+  background: #2c2c2c;
+  color: #fff;
+  font: 12px/1.3 Inter, -apple-system, sans-serif;
+  outline: none;
+}
+.stu-format[data-st-state="Ask"] .stu-format__input { display: block; }
+
 // The canvas overlays, created by the kit at the end of <body>.
 .stu-overlay { position: fixed; left: 0; top: 0; display: none; pointer-events: none; z-index: 2147483646; box-sizing: border-box; }
 .stu-hover { outline: 1px solid var(--stu-blue, #0d99ff); }
@@ -581,6 +661,7 @@ html.stu-on body { margin-left: var(--stu-left) !important; margin-right: var(--
   pointer-events: auto;
 }
 .stu-select.has-row .stu-handle { display: block; }
+.stu-asking { background: rgba(13, 153, 255, 0.22); border-radius: 2px; }
 .stu-drop { height: 4px; border-radius: 2px; background: #0d99ff; box-shadow: 0 0 0 2px #fff; }
 .stu-is-editing { outline: none !important; cursor: text; }
 html.stu-on a, html.stu-on button { cursor: default; }
