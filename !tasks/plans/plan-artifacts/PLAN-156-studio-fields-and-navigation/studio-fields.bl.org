@@ -1,81 +1,488 @@
-#+title: Studio fields that know their type, and a studio you can move around in
-#+subtitle: Every field is a widget template chosen by the type its form declares; the timeline and the 3D view pan, zoom and select many.
-#+kicker: spacetime · stdlib/__studio__ · PLAN-156 design dossier
+#+title: The studio is the language looking at itself
+#+subtitle: Typed widget templates, one reflection, one rewriter, and the language changes that make the studio fall out of them, with no studio code in Rust.
+#+kicker: spacetime · PLAN-156 design dossier · v2
 #+date: 2026-11-09
-#+status: Proposal · reviewed in the browser, nothing built yet
+#+status: Proposal v2 · round 1 answers folded in · nothing built yet
 #+author: Claude for Othman
+
+* What changed since your notes
+** Round 1 (your answers in chat, 2026-11-09)
+#+begin_rosetta
+| Your note | What changed | Where |
+| Positions: both =pos= and =posX= should work and be the same in the IR (Q1) | =pos= is a *shorthand* and =posX= a *longhand*, as with CSS =margin= and =margin-left=. Both become the same IR node, order decides as in CSS, and an edit writes back in the spelling you used. | L5, cell =facets= |
+| The .glb is the source of truth, no parallel truths (Q2) | A model's clip names are *facts read from the file*. The compiler checks =clip: "Walkng"= against them, and the widget lists them. three.js reads the same file at runtime. | L6, cell =clips= |
+| What would migrating the admin mean? (Q3) | Explained below as a question with its costs. | Q3 |
+| P0 bugs, then widgets (Q4) | Kept. The widgets now sit on top of the reflection and the type work. | Roster |
+| Why a =src/studio/= in Rust? | It isn't special, and it shouldn't exist. Its 2,121 lines hold three private parsers, an edit engine that duplicates the migration engine, and a film projection that names stdlib macros in Rust. It becomes two generic dev-server facilities, *reflect* and *rewrite*, plus declarations in the stdlib. | Why not src/studio |
+| No =/// @param=: a JS/TS carryover. What is native, and can the migrator do it? | Docs live *on the declaration they describe* (a =///= above a param, a =%yield=, a sum-type tag). Examples become compiled =%example= blocks. Choices, ranges and units become types. Params are declared once. All of it ships as migration waves over the stdlib, and the migration engine learns to rewrite meta-syntax to do it. | L1–L4, Migrations |
+#+end_rosetta
 
 * In one breath
 #+begin_lede
-Today every field in the studio is a text box. The studio doesn't know that
-=intensity= is a number, =color= a colour, or =type= one of four words, even though
-the stdlib forms already say so (=intensity: $intensity:number=). And you work on
-one thing at a time: no zoom, no pan, no box selection, no handle in the 3D view.
+The studio shouldn't be a special case. It should be what you get when the
+language can *look at itself* (reflect) and *edit itself* (rewrite), and when
+declarations say enough about themselves (types, docs, examples, facts from
+files) that a field picks its own widget. Every one of those capabilities also
+serves the LSP, MCP agents, the admin and the migrator.
 
-The proposal is a layer of *widgets*: =@template= blocks in one shared library, picked
-by the *type* the form declares, fed by *field descriptors* the compiler projects.
-Navigation is a few generic *behaviors* (zoom-pan, an editor camera, a move handle)
-that write words, like every other studio gesture. The studio's .st gets shorter,
-its JS moves into small named primitives, and the admin drawer reuses the same widgets.
+Measuring the stdlib turned up the debt that stands in the way. Params are
+declared twice, and 11 pairs already disagree. 1,319 JSDoc-style tag lines
+duplicate what the code declares, and some are now wrong. Light's own documented
+example compiles, with no warning, to the wrong light. The fixes are language
+changes, applied by the migration engine, and they leave the .st shorter.
 #+end_lede
 
 #+begin_stats
-~1,450 | lines of JS in the two studio kits | studio-kit 742, film-kit 712; most of it builds view models and DOM
-2 | inspectors doing the same job | page fields (=ST.stuFields=) and film fields (=ST.stuFilmFields=): two selections, two commit paths
-6 | choices hidden in comments | =tone=, =shape=, =material=, =type=, =drive=, =shadows=: typed =string=; their options live in =/// @param= prose
-10 | widget templates already in the admin | =&fld-select=, =&fld-media=, =&fld-range-*=, …: the pattern exists, only for =@type= data
+2,121 | lines in src/studio | 3 private parsers (=@data=, markup, stops), an edit engine, and a film view that names =score-block= and =on-driver-body= in Rust
+249 | params declared twice with a default | once in the macro's =%form=, again in its =%primitive=; 11 pairs disagree today (cell =drift=)
+1,319 | JSDoc-style tag lines | 692 =@param=, 307 =@yields=, 320 =@example=; nothing checks any of them
+0 | warnings for a stale example | =@light ambient(intensity: 0.4)= (light.st's own doc) builds a =directional= light
 #+end_stats
 
-* What I saw in the browser
-Reviewed with =agent-browser= at 1440×900 on the served studio
-(=https://work.tailcb5318.ts.net:18090/=, the =robot-day-studio= service), then traced in code.
+* Why not src/studio
+#+begin_note :title "The reasoning"
+I put =src/studio/= there because PLAN-154 started it and it was the shortest
+path to a working editor. That doesn't make the studio special. Look at what the
+module does. *Reading the program with spans* is what the compiler should already
+produce for every consumer. *Writing words back safely* is what =spacetime migrate=
+already does. *Knowing what a clip is* belongs to the stdlib that defines clips,
+by the project's own rule (no Rust for stdlib constructs). A module named after
+one consumer is a sign the language is missing two general capabilities.
+#+end_note
 
+#+begin_rosetta
+| src/studio file | What it really is | Where it belongs |
+| =literal.rs= 244 | a second, lossless parser of =@data= values | the compiler's own parse keeps spans for =@data= values (L8) |
+| =markup.rs= 268 | a second tokenizer of markup in =.st= | the compiler's markup parse keeps spans for elements and text runs (L8) |
+| =outline.rs= 523 | a projection of the page's shape | *reflect*, merged with =src/introspect= (the Structure IR PLAN-064 meant as « ONE producer ») |
+| =ops.rs= 557 | span and insert edits guarded by expected text | *rewrite*, one engine with =src/migrate.rs= (1,879) |
+| =score.rs= 478 | the film view: matches =score-block=, =on-driver-body=, reads =driver.driver_params.0.value=; splits stops with a Rust string splitter | stops become a capture type (L7); score macros declare their roles (D17); the rest is a query in .st |
+#+end_rosetta
+
+Today the program is described to tools many separate ways: the LSP's
+=FormRegistry=, =src/introspect=, =/dev/templates.json= (read with a regex),
+=/dev/types.json= and Rust's =widget_for=, the editable schema, MCP's tools, and the
+studio's =outline.json= and =score.json=. It is written back several ways too:
+=/save=, =/save-html=, =/studio/apply=, =/migrations/apply=, MCP actions.
+
+#+begin_graph :title "Proposed: two facilities every tool shares"
+node src | .st source | stdlib + project | 0,1 | foreign
+node cst | compiler parse | every node keeps its span | 1,1 | station
+node facts | asset facts | .glb clips, audio length | 1,2 | station
+node reflect | reflect | typed matches, docs, facts | 2,1 | door
+node rewrite | rewrite | guarded edits, re-parse, undo | 2,0 | door
+node studio | studio (.st) | widgets, timeline, 3D | 3,0 | you
+node admin | admin (.st) | entries | 3,1 | you
+node lsp | LSP · MCP | hover, agents | 3,2 | builder
+node mig | migrations | %rewrite waves | 1,0 | builder
+edge src -> cst | parse | solid
+edge cst -> reflect | | solid
+edge facts -> reflect | | solid
+edge reflect -> studio | | solid
+edge reflect -> admin | | solid
+edge reflect -> lsp | | solid
+edge studio -> rewrite | gesture | solid
+edge admin -> rewrite | save | solid
+edge lsp -> rewrite | agent edit | dash
+edge mig -> rewrite | wave | solid
+edge rewrite -> src | words | solid
+#+end_graph
+
+#+begin_terms
+Reflect | One dev-server projection of the program: every form match with its form, role, file and span; each param with its declared type, default, docs, written words (and their spelling), value, and any facts from files. Generic: no macro name appears in Rust.
+Rewrite | One way to change source. A transaction is a list of edits (address, expected text, new words). It is guarded, re-parsed before it's written (refused if it doesn't parse), hot-applied or reloaded, and recorded for undo. Studio gestures, admin saves, MCP edits and migration waves all use it.
+Role | What a form is *for*, declared in the stdlib next to it (=%role timeline.clip=), so tools ask « all clips » instead of naming =on-driver-body=.
+Fact | Something read from a file a param points at: a model's clips, an audio file's length, an image's size.
+#+end_terms
+
+#+begin_sequence :title "Nudging &lamp2's intensity at 14.2 s, with no Rust that knows lights"
+lanes you · inspector | reflect · dev server | rewrite · dev server | stage · page
+you -> reflect : select &lamp2
+reflect --> you : light match, intensity: luminance (from the form), docs from the ///, driven by a channel
+you -> you : &w-number (picked by the luminance row) scrubs
+you => rewrite : edit {stop at 58%, expect "0", words "1.6"}
+rewrite -> rewrite : guard, splice, re-parse, record undo
+rewrite -> stage : hot apply (no reload)
+note reflect, rewrite : the same two calls an MCP agent makes
+#+end_sequence
+
+* The language changes
+Each change makes the .st shorter or makes it say more, and each is applied by a migration (see *Migrations*).
+
+** L0 · Light, before and after
+Before: =stdlib/3d/macros/light.st= (80 lines) plus =three-light.st='s header.
+The params are written four times: =%form=, =%binds=, =%primitive=, and two =@param= blocks.
+
+#+begin_src st
+/// A light on the stage. Name it (`&sun`) to animate it from a score.
+%macro light {
+  %scope selector
+  %role stage.part
+  %form {
+    @light $named:part_name? (
+      /// how it shines
+      type: $type:LightKind = directional,
+      color: $color:color = white,
+      intensity: $intensity:luminance = 1,
+      pos: $pos:vec3 = 3 5 4,
+      /// where a directional or spot light points
+      target: $target:vec3 = 0 0 0,
+      /// how far a point or spot light reaches; 0 is forever
+      distance: $distance:meters = 0,
+      decay: $decay:number = 2,
+      /// the spot's cone, measured from its axis
+      angle: $angle:angle = 30deg,
+      /// how soft the spot's edge is
+      penumbra: $penumbra:unit = 0.3,
+      castShadow: $castShadow:bool = false
+    ) { $children* }
+  }
+  %binds { three-light(&self, name: $named, ...) -> { $added } }
+  %template { $children }
+
+  %example "a warm lamp the score can switch on" {
+    @light &lamp (type: point, color: #ffcf8a, pos: -2.6 2.3 -4, distance: 9)
+  }
+}
+
+@type LightKind {
+  /// light from everywhere, without shadows
+  ambient |
+  /// parallel rays from far away, like the sun
+  directional |
+  point |
+  spot
+}
+#+end_src
+
+In =three-light.st= the signature becomes types only:
+=%primitive three-light(&el, name: part_name, type: LightKind, color: color, …)=.
+The form owns the defaults. Authors write =@light &lamp1 (type: point, pos: -2.6 2.3 -4)=,
+or keep =posX: -2.6=: both mean the same thing.
+
+** L1 · Docs live on what they describe
+#+begin_rosetta
+| Today (a JSDoc carryover) | Native | Why |
+| =/// @param penumbra - spot soft-edge 0..1= above the macro | =/// how soft the spot's edge is= above =penumbra:= in the =%form=; the range moves to the type (=unit=) | the name isn't repeated, so it can't drift; the doc moves with the param |
+| =/// @yields $source - Raw source code string= | =/// the raw source= above =%yield … -> $source;= | the =%yield= line already declares it |
+| =/// @param type - "ambient" or "directional" …= | =@type LightKind { ambient … }= with a =///= per tag | a choice is a type, and each choice has its own doc |
+| =/// (default 1)=, =/// default 2= | deleted | the signature says the default (91 lines restate one) |
+| =/// @example …= prose | =%example "title" { … }=, compiled by =spacetime check= and offered as an insertable snippet in the studio and LSP | 320 examples nothing compiles; light's own is wrong |
+#+end_rosetta
+Rule: =///= documents the declaration directly below it, wherever that is
+(macro, param, =%yield=, type, tag). A load-time lint (W) flags a doc that only
+restates the type or the default.
+
+** L2 · Params are declared once
+79 of the 105 =%binds= with three or more named args just forward =name: $name=
+(401 lines). =...= forwards every captured param by name. A =%primitive= that is
+only bound through forms declares types, not defaults. The form is the one
+public signature (cell =drift=).
+
+** L3 · Choices are sum types, written bare
+=type: point=, not =type: "point"=. There's precedent: =color: white= is already a
+bare word. An unknown tag is a compile error with suggestions. Six 3D params
+start here (=tone=, =shape=, =material=, =type=, =drive=, =shadows=), then any
+=string= whose docs list options.
+
+** L4 · Ranges and units are scalar rows
+New rows in =stdlib/scalars/types.st=: =unit= (0..1), =luminance=, =meters=,
+=exposure= (stops); =angle= exists. Each row gets =%range=, =%step=, =%unit=, and
+=%widget &w-number=. No new grammar. Inline refinements (=number(0..1)=) can come
+later if the rows multiply.
+
+** L5 · Shorthands and longhands (Q1)
+A =vec3= param =pos= gets longhands =posX/posY/posZ=. The spelling rule
+=<name><Facet>= is declared once on the =vec3= row, so =target=, =cam=, =rotate=,
+=scale= and =spin= get it too (16 triple params in the stdlib). As in CSS: a
+later longhand overrides the shorthand, a later shorthand resets the longhands,
+and one number on a =vec3= means all three (=scale: 0.42=). Channels too:
+=posX: 0 -> 6;= animates =pos.x=. The IR holds one =pos= node with per-component
+provenance, so an edit to =pos.x= writes back where its words are.
+
+** L6 · Facts from files (Q2)
+=src: $src:model= (a scalar row with =%accepts ".glb" ".gltf"= and =%facts clips nodes=).
+=clip: $clip:clip($src)= is a choice whose tags are =$src='s clips. The dev server
+reads the glTF JSON chunk (a file format, not a language construct). Then:
+- =clip: "Walkng"= is a compile error that lists the clips;
+- score channels on =&robot clip= get the same check and the same menu;
+- three.js reads the same file at runtime.
+The file is the only truth. Audio files get =length= the same way, which fixes
+the 2000 ms guess for sound lanes.
+
+** L7 · Stops are a capture type
+=a -> b at 40% --ease= gets a =%capture_type stop= grammar, retiring the Rust
+splitter (=reify_keyframes= / =parse_stops=). Every stop is then a reflected
+node with its own span, value, time and easing, and a keyframe widget is the
+type of the param its channel animates.
+
+** L8 · Every node keeps its span
+=@data= values and markup keep lossless spans in the compiler's own parse
+(PLAN-155 did this for captures). =literal.rs= and =markup.rs= are deleted.
+
+* Migrations
+The engine (=docs/language/migrations.md=) rewrites *project* files from
+=%rewrite= rules and never touches =stdlib/=. Two extensions:
+- =%scope stdlib=: a wave that rewrites meta-syntax (=%macro=, =%form=, =%primitive=, =///=).
+- Rules that reach across a declaration: a =/// @param X - …= line moves above =X:= in the same macro's =%form=.
+
+Both run on *reflect* and *rewrite*, so the migrator dogfoods the facilities the studio uses.
+
+#+begin_rosetta
+| Wave | Rewrites | Count (cell) | Manual hints |
+| 1 · docs on declarations (stdlib) | =@param= prose → =///= on the param; =@yields= → =///= on the =%yield=; default restatements deleted | 692 + 307 lines (=docs=) | prose naming a unit or range: 69 lines, pick the type |
+| 2 · examples compile (stdlib) | =@example= → =%example { … }= | 320 | examples that don't compile, light's first |
+| 3 · params once (stdlib) | forwarding =%binds= → =...=; primitive defaults dropped when equal | 79 binds, 249 defaults (=drift=) | the 11 disagreeing defaults: a human picks the true one |
+| 4 · types (stdlib + projects) | 6 choices → sum types; =type: "point"= → =type: point= in projects | 6 params; every use | — |
+| 5 · vectors (stdlib only) | =posX/Y/Z= params → =pos: vec3= in the forms | 16 triples | none: project files keep =posX= because the longhand stays valid |
+#+end_rosetta
+
+* The model, executable
+Cells that read the real repository; their results are the evidence above.
+
+#+begin_src beam-lisp :id coverage
+(ns studio.fields)
+(def repo "/home/othman/code/undefine/spacetime/")
+(defn read-dir [dir]
+  (map (fn [f] (File/read! (str repo dir f)))
+       (filter (fn [f] (String/ends_with? f ".st")) (File/ls! (str repo dir)))))
+(def forms (read-dir "stdlib/3d/macros/"))
+(def prims (read-dir "stdlib/3d/primitives/"))
+(def types (frequencies
+  (mapcat (fn [t] (map (fn [m] (nth m 2)) (Regex/scan #"\w+: \$(\w+):(\w+)" t))) forms)))
+;; choices written as prose: `/// @param NAME - "a" | "b"`
+(def hidden (set (mapcat (fn [t] (map (fn [m] (nth m 1))
+                                      (Regex/scan #"@param\s+(\w+)\s+-[^\n]*\"\w*\"\s*\|" t)))
+                         (concat forms prims))))
+(assert (>= (count hidden) 5))
+{:param-types-in-3d-forms (into (sorted-map) types)
+ :choices-written-as-prose (sort hidden)}
+#+end_src
+#+RESULTS: coverage
+: {:param-types-in-3d-forms {"bool" 6, "color" 5, "expr" 2, "number" 80, "string" 11}, :choices-written-as-prose ("drive" "material" "shadows" "shape" "tone" "type")}
+
+
+#+begin_src beam-lisp :id drift
+;; Params declared twice: in a macro's %form and in the %primitive it binds.
+;; Defaults are compared after normalising units (300ms = 300, "20px" = 20px).
+(defn st-files [dir]
+  (mapcat (fn [f] (let [p (str dir "/" f)]
+                    (cond (String/ends_with? f ".st") [p] (File/dir? p) (st-files p) :else [])))
+          (File/ls! dir)))
+(def texts (map File/read! (st-files (str repo "stdlib"))))
+(defn num [s] (if (String/contains? s ".")
+                (erlang/binary_to_float (if (String/ends_with? s ".") (str s "0") s))
+                (erlang/float (erlang/binary_to_integer s))))
+(defn norm [s]
+  (let [s (String/trim (String/replace s "\"" "")) m (Regex/run #"^(-?[\d.]+)(ms|s|px)?$" s)]
+    (if m [(if (= "s" (nth m 2 "")) (* 1000 (num (nth m 1))) (num (nth m 1))) (if (= "px" (nth m 2 "")) "px" "")] s)))
+(defn defaults [txt re] (into {} (map (fn [m] [(nth m 1) (String/trim (nth m 2))]) (Regex/scan re txt))))
+(def prim-defaults
+  (into {} (mapcat (fn [t] (map (fn [m] [(nth m 1) (defaults (nth m 2) #"(\w+)\s*:\s*[\w\[\]?|\"]+\s*=\s*(\"[^\"]*\"|[^,\n]+)")])
+                                (Regex/scan #"(?s)%primitive\s+([\w-]+)\s*\((.*?)\)\s*\{" t))) texts)))
+(def macros
+  (mapcat (fn [t] (keep (fn [m] (let [body (nth m 2)
+                                      form (Regex/run #"(?s)%form\s*\{(.*?)\n\s*\}\s*\n" body)
+                                      bind (Regex/run #"%binds\s*\{\s*([\w-]+)\(" body)]
+                                  (when (and form bind)
+                                    [(nth m 1) (nth bind 1) (defaults (nth form 1) #"(\w+)\s*:\s*\$\w+:[\w()\"|]+\??\s*=\s*(\"[^\"]*\"|[^,\n)]+)")])))
+                        (Regex/scan #"(?s)%macro\s+([\w-]+)\s*\{(?=(.{0,6000}))" t))) texts))
+(def twice (for [[mac prim fd] macros :when (get prim-defaults prim) [k v] fd :when (get (get prim-defaults prim) k)]
+             [mac k v (get (get prim-defaults prim) k)]))
+(def drift (filter (fn [[_ _ a b]] (not= (norm a) (norm b))) twice))
+(assert (= 11 (count drift)))
+{:declared-twice (count twice)
+ :disagree (map (fn [[m k a b]] (str "@" m " " k ": form " a ", primitive " b)) drift)}
+#+end_src
+#+RESULTS: drift
+: {:declared-twice 249, :disagree ("@swipe threshold: form 50, primitive 0" "@each key: form undefined, primitive \"id\"" "@fade-in-up distance: form 30px, primitive \"20px\"" "@fade-in-down distance: form 30px, primitive \"20px\"" "@magnetic-glow-macro radius: form 200, primitive 100" "@magnetic-glow-macro strength: form 0.15, primitive 0.3" "@on-visible threshold: form 0.5, primitive 0.1" "@pull-refresh threshold: form 80, primitive 0" "@long-press threshold: form 10, primitive 0" "@mobile-swipe threshold: form 50, primitive 0" "@drawer threshold: form 20, primitive 0")}
+
+
+#+begin_src beam-lisp :id docs
+;; What the JSDoc-style tags say, sorted by where each belongs natively,
+;; and how many %binds only forward `name: $name`.
+(def lines (mapcat (fn [t] (Regex/scan #"/// @(param|yields|example)\b([^\n]*)" t)) texts))
+(defn kind [[_ tag rest]]
+  (cond (not= tag "param") tag
+        (Regex/run #"\"[\w ]*\"\s*\|" rest) "param: choices → a sum type"
+        (Regex/run #"\d\s*\.\.\s*\d|0\s*-\s*1\b" rest) "param: a range → a scalar row"
+        (Regex/run #"\b(degrees?|radians?|ms|seconds?|px|deg)\b" rest) "param: a unit → a scalar row"
+        (Regex/run #"(?i)default" rest) "param: restates the default → deleted"
+        :else "param: prose → /// on the param"))
+(def binds (mapcat (fn [t] (Regex/scan #"(?s)%binds\s*\{\s*[\w-]+\((.*?)\)\s*(->|\})" t)) texts))
+(defn forwards? [[_ args]]
+  (let [named (filter (fn [a] (String/contains? a ":")) (map String/trim (String/split args ",")))
+        same (filter (fn [a] (let [m (Regex/run #"^(\w+):\s*\$(\w+)$" a)] (and m (= (nth m 1) (nth m 2))))) named)]
+    (and (>= (count named) 3) (>= (count same) (- (count named) 1)))))
+(def wide (filter (fn [[_ args]] (>= (count (filter (fn [a] (String/contains? a ":")) (String/split args ","))) 3)) binds))
+(assert (= 692 (count (filter (fn [[_ t]] (= t "param")) lines))))
+{:tags (into (sorted-map) (frequencies (map kind lines)))
+ :binds-with-3+-args (count wide)
+ :pure-forwards (count (filter forwards? wide))}
+#+end_src
+#+RESULTS: docs
+: {:tags {"example" 320, "param: a range → a scalar row" 33, "param: a unit → a scalar row" 36, "param: choices → a sum type" 9, "param: prose → /// on the param" 523, "param: restates the default → deleted" 91, "yields" 307}, :binds-with-3+-args 105, :pure-forwards 79}
+
+
+#+begin_src beam-lisp :id clips
+;; A model's clips come from the file. The film's clip words are checked
+;; against them; a typo gets the names that share its start.
+(def glb (File/read! (str repo "demos/film-robot-day/models/robot.glb")))
+(def json-len (binary/decode_unsigned (erlang/binary_part glb 12 4) :little))
+(def gltf (erlang/apply :json :decode (list (erlang/binary_part glb 20 json-len))))
+(def clips (set (map (fn [a] (get a "name")) (get gltf "animations"))))
+(def film (File/read! (str repo "demos/film-robot-day/index.st")))
+(def used (set (mapcat (fn [[_ line]] (map second (Regex/scan #"\"([A-Za-z]+)\"" line)))
+                       (Regex/scan #"clip:([^;\n]*)" film))))
+(defn suggest [w] (filter (fn [c] (String/starts_with? (String/downcase c) (String/downcase (subs w 0 3)))) (sort clips)))
+(assert (every? (fn [c] (contains? clips c)) used))
+(assert (= #{"Walking" "WalkJump"} (set (suggest "Walkng"))))
+{:in-robot.glb (sort clips) :the-film-uses (sort used) :Walkng-did-you-mean (suggest "Walkng")}
+#+end_src
+#+RESULTS: clips
+: {:in-robot.glb ("Dance" "Death" "Idle" "Jump" "No" "Punch" "Running" "Sitting" "Standing" "ThumbsUp" "WalkJump" "Walking" "Wave" "Yes"), :the-film-uses ("Death" "Idle" "ThumbsUp" "Walking" "Wave"), :Walkng-did-you-mean ("WalkJump" "Walking")}
+
+
+#+begin_src beam-lisp :id facets
+;; pos is a shorthand, posX/Y/Z longhands (L5). Params apply in order, as in CSS.
+;; The IR keeps, per component, which written words hold it, so an edit writes back there.
+(def axis {"X" 0 "Y" 1 "Z" 2})
+(defn ir [params]
+  (reduce (fn [v [name words]]
+            (if (= name "pos")
+              (let [ns (String/split words " ") ns (if (= 1 (count ns)) [(first ns) (first ns) (first ns)] ns)]
+                (vec (map (fn [i] {:v (nth ns i) :from [name i]}) [0 1 2])))
+              (assoc v (get axis (subs name 3)) {:v words :from [name nil]})))
+          [{:v "0" :from nil} {:v "0" :from nil} {:v "0" :from nil}] params))
+(defn values [params] (map :v (ir params)))
+(defn edit [params i words]
+  (let [[name k] (:from (nth (ir params) i))]
+    (cond (nil? name) {:insert (str "pos" (nth ["X" "Y" "Z"] i) ": " words)}
+          (nil? k) {:span name :words words}
+          :else {:span name :component k :words words})))
+(assert (= (values [["pos" "-2.6 2.3 -4"]]) (values [["posX" "-2.6"] ["posY" "2.3"] ["posZ" "-4"]])))
+(assert (= ["5" "0" "0"] (values [["pos" "0 0 0"] ["posX" "5"]])))      ; a later longhand wins
+(assert (= ["0" "0" "0"] (values [["posX" "5"] ["pos" "0 0 0"]])))      ; a later shorthand resets
+(assert (= ["0.42" "0.42" "0.42"] (values [["pos" "0.42"]])))           ; one number means all three
+(assert (= {:span "posZ" :words "0.4"} (edit [["posZ" "-7"]] 2 "0.4")))  ; the robot keeps its spelling
+{:robot-posZ (edit [["posZ" "-7"]] 2 "0.4")
+ :lamp-pos-x (edit [["pos" "-2.6 2.3 -4"]] 0 "-2")
+ :unwritten (edit [["posZ" "-7"]] 0 "1")}
+#+end_src
+#+RESULTS: facets
+: {:robot-posZ {:span "posZ", :words "0.4"}, :lamp-pos-x {:span "pos", :words "-2", :component 0}, :unwritten {:insert "posX: 1"}}
+
+
+#+begin_src beam-lisp :id view
+;; The timeline's view window. Zoom keeps the time under the cursor fixed;
+;; fit shows the whole film; positions are fractions of the view, not of the film.
+(defn x->ms [v x] (+ (:from v) (* x (:span v))))
+(defn ms->x [v ms] (/ (- ms (:from v)) (:span v)))
+(defn clamp [v total]
+  (let [span (min (max (:span v) 50) total)]
+    {:from (min (max (:from v) 0) (- total span)) :span span}))
+(defn zoom [v x factor total]
+  (let [at (x->ms v x) span (/ (:span v) factor)]
+    (clamp {:from (- at (* x span)) :span span} total)))
+(defn fit [total] {:from 0 :span total})
+(def total 24000)
+(def v (zoom (fit total) 0.6 6 total))
+(assert (< (abs (- (x->ms v 0.6) 14400)) 1e-6))
+(assert (= (fit total) (zoom v 0.5 (/ 1 100) total)))
+(assert (= (ms->x (fit total) 24000) 1))
+{:view v :keys-14.0-14.2-apart-px (* 1100 (- (ms->x v 14200) (ms->x v 14000)))}
+#+end_src
+#+RESULTS: view
+: {:view {:span 4000.0, :from 12000.0}, :keys-14.0-14.2-apart-px 55.00000000000005}
+
+
+#+begin_src beam-lisp :id route
+;; One commit path: a driven field edits (or adds) the stop at the playhead,
+;; others edit their param, or insert it when it is still at its default.
+(defn op-for [field words playhead]
+  (cond
+    (:driven field)
+    (let [stops (:stops (:driven field))
+          stop (first (filter (fn [s] (= (:at s) playhead)) stops))]
+      (if stop
+        {:op :span :address (:address stop) :words words}
+        {:op :insert :after (:address (last (filter (fn [s] (< (:at s) playhead)) stops)))
+         :words (str " -> " words " at " playhead "%")}))
+    (= (:state field) :default) {:op :insert :after (:last-param field) :words (str ", " (:label field) ": " words)}
+    :else {:op :span :address (:address field) :words words}))
+(def posZ {:label "posZ" :state :written :address [0 3300 3302]
+           :driven {:stops [{:at 0 :address [0 900 902]} {:at 25 :address [0 906 907]} {:at 62 :address [0 915 919]}]}})
+(assert (= :span (:op (op-for posZ "7" 25))))
+(assert (= :insert (:op (op-for posZ "7" 58))))
+(assert (= [0 906 907] (:after (op-for posZ "7" 58))))
+(assert (= :insert (:op (op-for {:label "decay" :state :default :last-param [0 10 20]} "3" 58))))
+{:between (op-for posZ "7" 58)}
+#+end_src
+#+RESULTS: route
+: {:between {:op :insert, :after [0 906 907], :words " -> 7 at 58%"}}
+
+
+#+begin_src beam-lisp :id many
+;; A selection is a set. The inspector shows fields every selected part has with
+;; the same type; differing values show as mixed, and one edit writes them all.
+(defn shared [parts]
+  (let [keyed (map (fn [p] (into {} (map (fn [f] [[(:label f) (:type f)] f]) (:fields p)))) parts)
+        common (reduce (fn [a m] (filter (fn [k] (contains? m k)) a)) (keys (first keyed)) (rest keyed))]
+    (map (fn [k] (let [vals (set (map (fn [m] (:value (get m k))) keyed))]
+                   {:label (first k) :type (second k)
+                    :value (if (= 1 (count vals)) (first vals) :mixed) :writes (count keyed)}))
+         (sort common))))
+(defn globe [n e] {:fields [{:label "emissiveIntensity" :type "number" :value e}
+                            {:label "posX" :type "number" :value n}
+                            {:label "color" :type "color" :value "#fff1d0"}]})
+(def lamp {:fields [{:label "intensity" :type "number" :value 0} {:label "color" :type "color" :value "#ffcf8a"}]})
+(def g (shared [(globe -2.6 0) (globe 2.6 0) (globe -2.6 1.5) (globe 2.6 0)]))
+(assert (= :mixed (:value (first (filter (fn [f] (= "emissiveIntensity" (:label f))) g)))))
+(assert (= ["color"] (map :label (shared [(globe 1 0) lamp]))))
+{:four-globes g}
+#+end_src
+#+RESULTS: many
+: {:four-globes ({:label "color", :type "color", :value "#fff1d0", :writes 4} {:label "emissiveIntensity", :type "number", :value :mixed, :writes 4} {:label "posX", :type "number", :value :mixed, :writes 4})}
+
+
+* What I saw in the browser
+Reviewed with =agent-browser= at 1440×900 on the served studio (=robot-day-studio=), then traced in code.
 #+begin_rosetta
 | Seen | Why (code) | Fix lives in |
 | Inspector says « Nothing selected » with =&robot= selected | =$stuSelection= ignores =$stuFilmSel= (=index.st:59-63=) | one selection (D7) |
 | The studio opens on the end card at =00:24:00= | the driver autoplays once and parks at =dur=; nothing seeks to 0 (=film-kit 656-706=) | P0 |
 | The ruler stops at ~22.5 s of 24 s; =&end= is clipped | lanes scale by =total_ms= parsed from source, the playhead by the driver's =duration=; =overflow-x: hidden= | a view window (D9) |
-| Clip text runs over its keyframes | the stops text is drawn under the diamonds in the same lane | lane template (P1) |
+| Clip text runs over its keyframes | the stops text is drawn under the diamonds in the same lane | lane template |
 | A selected keyframe isn't marked | the selection key isn't reflected on =.stu-film__keys= | one selection (D7) |
-| A keyframe is one box: =6.5 at 62%= with hint =value [at p%] [--easing]= | =stuFilmFields= hard-codes hints per mode (=film-kit 145-176=) | descriptors (D3) |
-| Strings in quotes, a « default » under half the fields | values are shown as source text; =mode: insert= labels itself | widgets (D1) |
+| A keyframe is one box: =6.5 at 62%= | =stuFilmFields= hard-codes hints per mode (=film-kit 145-176=) | stops as nodes (L7) |
+| Strings in quotes, a « default » under half the fields | values are shown as source text | widgets (D1) |
 | =i= sets the loop in Film and switches to Interact in the page studio | two keydown handlers in document capture (=film-kit 555=, =studio-kit 686=) | one keymap (D10) |
 #+end_rosetta
 
-* The words
+* Fields and navigation
 #+begin_terms
-Field | One editable fact about a selected thing: a part's param, a CSS declaration, a keyframe's value, a clip's =at=.
-Descriptor | The record the compiler sends for a field: its address, label, type, value, value at the playhead, choices, range, unit, whether a channel drives it.
-Widget | An =@template= that renders a descriptor and emits a =change= carrying the new words. It never knows where it is used.
-Behavior | A small =%primitive= for what markup can't say: dragging a label to scrub, zooming a lane, orbiting a camera. JS lives only there.
-Address | Where a field's words are: file, span, the text expected there. Every edit is still an op on words.
-Selection | A set of addresses, not one key. The inspector shows the fields they share.
-View window | The part of the film the timeline shows: =from= and =span= in ms. Zoom and pan only change it.
-Rest value / value now | What the source says vs what the playhead shows. An animated field edits the stop at the playhead, not the rest value.
+Field | One editable fact about a selected thing: a param, a CSS declaration, a stop, a clip's =at=. In reflect, it's a param node.
+Widget | An =@template &w-*($f)= that renders a field and emits a =change= with new words. It never knows where it is used.
+Behavior | A small =%primitive= for what markup can't say: scrubbing a label, zooming a lane, orbiting a camera. JS lives only there.
+Selection | A set of reflected addresses. The inspector shows the fields they share.
+View window | The part of the film the timeline shows: =from= and =span= in ms.
+Rest value / value now | What the source says vs what the playhead shows. A driven field edits the stop at the playhead.
 #+end_terms
 
-#+begin_honest :title "What « automatic » never means here"
-The studio won't guess. A field's widget comes only from a type declared in a
-form or the scalar table. If a param has no type worth a widget, it stays a text
-field until its form says more. No Rust list of param names, no doc-comment parsing.
-#+end_honest
-
-* Principles
 #+begin_principles
-Types decide, the studio doesn't | The form declares =$x:color=; the scalar table says a colour's widget is =&w-color=. Nothing in the studio or the server names a widget per param.
-A widget is a template | Markup, styles and a =change= event. Behaviors it needs (scrub, swatch picker) are primitives it calls, so it stays .st.
-One descriptor, one inspector, one commit | Parts, CSS rules, keyframes, clips and sounds all become descriptors; one =@each= renders them; one handler turns any =change= into ops.
-Gestures are words | Zoom and pan change only the view. A drag in 3D or on the timeline ends as =span=/=insert= ops, so undo and the code pane stay exact.
-Shared, not studio-only | The admin drawer's =&fld-*= templates and the studio's widgets become one =stdlib/widgets/= library.
+Types decide, the studio doesn't | The form declares =$x:luminance=; the scalar row says its widget is =&w-number= with a range and unit. Nothing names a widget per param.
+A widget is a template | Markup, styles, one =change=. The behaviors it needs (scrub, swatch, curve) are primitives it calls.
+Tools read reflect, write rewrite | The studio, the admin, the LSP, MCP agents and the migrator. None has a private parser or a private writer.
+Gestures are words | Zoom and pan change only the view. A drag in 3D or on the timeline ends as one rewrite transaction.
+The file is the truth | Facts from .glb and audio files, never a second list kept by hand.
 #+end_principles
 
-* Jobs
 #+begin_job :id light :title "Tune a light by feel" :decision "Drag the label to scrub; a range gives a slider"
 I select =&lamp2= and want its intensity right while I watch the frame, not
 type numbers and wait. Blender and After Effects let you drag on the label.
 #+end_job
 
-#+begin_job :id key :title "Key a moment" :decision "◆ on every animated field: add or edit the stop at the playhead"
+#+begin_job :id key :title "Key a moment" :decision "◆ on every driven field: add or edit the stop at the playhead"
 I park the playhead at 14 s and nudge =&camera posZ=. That should become a
 stop at 58%, not a change to the rest value that the score overrides anyway.
 #+end_job
@@ -95,87 +502,20 @@ Keyframes at 14.0 s and 14.2 s sit on top of each other at this width
 (=&camera posX=). I need to zoom into a second, and see the whole film again.
 #+end_job
 
-* The architecture
-#+begin_graph :title "From a form's types to a word in the file"
-node form | stdlib forms | $intensity:number, $type:("ambient" or …) | 0,0 | foreign
-node scalars | scalar table | %scalar_type color { %widget … } | 0,1 | foreign
-node fields | src/studio/fields.rs | descriptors per selection | 1,0 | station
-node sel | $stuSel | a set of addresses | 1,1 | you
-node insp | inspector | @each &$f.tpl($f) | 2,0 | you
-node widgets | stdlib/widgets | &w-number &w-color &w-choice … | 2,1 | door
-node beh | behaviors | @scrub @zoom-pan @gizmo @editor-camera | 3,1 | builder
-node ops | ops | span · insert · source | 3,0 | station
-edge form -> fields | types | solid
-edge scalars -> fields | widget names | solid
-edge sel -> fields | which fields | solid
-edge fields -> insp | descriptors | solid
-edge insp -> widgets | one call per field | solid
-edge widgets -> beh | uses | dash
-edge widgets -> ops | change → words | solid
-edge beh -> ops | drag end → words | dash
-#+end_graph
-
-#+begin_sequence :title "Scrubbing an animated field at the playhead"
-lanes you · label drag | w-number · widget | studio · inspector | server · ops | stage · hot
-you -> w-number : drag « intensity » right
-w-number -> w-number : @scrub previews value (no write)
-w-number -> studio : change {address, words: "1.6", now: true}
-studio -> studio : field is driven → stop at 58% (exists? span : insert)
-studio => server : POST ops [span …]
-server --> studio : ok, new hashes
-studio -> stage : hot apply (no reload)
-note studio, server : the same path as a code-pane edit
-#+end_sequence
-
-** The modules
-#+begin_rosetta
-| Module | Holds | Replaces |
-| =stdlib/scalars/types.st= | =%widget &w-color= names a template; new rows: =unit= (0..1), =intensity=, =distance=, =vec3= | Rust =widget_for= branches for scalars |
-| =stdlib/widgets/*.st= | =&w-number=, =&w-color=, =&w-choice=, =&w-toggle=, =&w-text=, =&w-asset=, =&w-ref=, =&w-vec3=, =&w-stop=, =&w-easing= | =&fld-*= in the admin; the textarea/input in both inspectors |
-| =stdlib/widgets/primitives/= | =@scrub=, =@swatch=, =@curve= (easing) | inline JS in kits |
-| =src/studio/fields.rs= | descriptors for parts, CSS decls, clips, stops, sounds; =tpl= from the scalar table | =ST.stuFields=, =ST.stuFilmFields=, hint strings |
-| =stdlib/__studio__/inspector.st= | one inspector: header, crumbs, =@each &$f.tpl($f)=, mixed values | the page + film field sections |
-| =stdlib/__studio__/selection.st= | =@type Selection=, shift/box add, clear, keyed by address | =$stuSel=, =$stuFilmSel=, =$stuFilmNoteCell= |
-| =stdlib/__studio__/timeline.st= + =@zoom-pan= | a view window ={from, span}=; lane/bar/key templates; overview strip; marquee | percent-of-total layout, =msAt= |
-| =stdlib/3d= =@editor-camera=, =@gizmo= | OrbitControls / TransformControls (vendored three) on a second camera | — |
-| =studio-core= prelude | apply, hot, remember, one keymap table | duplicates in both kits |
-#+end_rosetta
-
-** A field descriptor
-#+begin_schema :id descriptor :title "What the compiler sends for each field"
-field @edit | one editable fact, rendered by its template
-  address -> span | file, start, end, expected text
-  label text | =intensity=, =stop 3=, =at=
-  type text | the declared type: number, color, unit, a union of words, vec3, asset, ref
-  tpl text | the widget template, from the scalar table
-  value text | the words written, or the default
-  now text | the value at the playhead when a channel drives it
-  driven -> channel | the channel line that animates it, if any
-  choices text | from a union type, or a model's clips
-  range text | min, max, step, unit: from the scalar row
-  state written, default, mixed | mixed when several selected parts differ
-span @link | where the words are
-  file text | path, not an index
-  start text | byte offset
-  expect text | the text that must still be there (STALE otherwise)
-#+end_schema
-
-* Screens
-#+begin_desk :id inspector :url "studio · robot-day" :title "One inspector, typed fields" :job light :caption "&lamp2 selected at 14.2 s; intensity is driven by a channel, so it shows ◆ and edits the stop"
+#+begin_desk :id inspector :url "studio · robot-day" :title "One inspector, typed fields" :job light :caption "&lamp2 at 14.2 s. Type is a LightKind, intensity a luminance driven by a channel (◆ edits the stop), pos one vec3 row. Docs come from the /// lines"
 crumb Scene › stage › &lamp2
 head &lamp2 | idle · point light | @eye Look through?
 col main
 row type | ambient · directional · point* · spot
 row color | ■ #ffcf8a
 row intensity ◆ | ━━━━●──── 1.6 (rest 0) · at 58%
-row distance | 9 m
-row decay | 2
-section Position | 3
+row distance | 9 m · how far it reaches; 0 is forever
 row pos | X −2.6 · Y 2.3 · Z −4
 row castShadow | ○ off
 col rail
 note Drag any label to scrub. Shift for fine, ctrl for coarse.
 row Driven by | [[#screen-timeline][&lamp2 intensity · 4 stops]]
+row Example | a warm lamp the score can switch on
 #+end_desk
 
 #+begin_desk :id timeline :url "studio · robot-day" :title "A timeline you can zoom" :job long :caption "Zoomed to 12–16 s; the overview strip shows where you are; three keys box-selected"
@@ -185,7 +525,7 @@ col main
 row ▁▁▁▁[████]▁▁▁▁▁▁▁▁▁▁ | overview · drag the window
 row &camera posZ | ··◆·········◆ 14.0 s
 row &camera posX | ·········◆◆◆ 14.0 · 14.1 · 14.2 (selected)
-row &robot clip | ··"Walking"··· "Death" at 15.3 s
+row &robot clip | ··Walking··· Death at 15.3 s (menu of robot.glb's 14 clips)
 row &drums --beat | ▮▯▮▯▮▯▮▯▮▯▮▯
 col rail
 section 3 keys selected
@@ -194,10 +534,10 @@ row easing | ⌒ ease-out
 actions @next Nudge +1 beat | @x Delete?
 #+end_desk
 
-#+begin_desk :id stage3d :url "studio · robot-day" :title "The editor camera" :job block :caption "Orbit, pan, dolly; F frames the selection; the move handle writes posX/posZ"
+#+begin_desk :id stage3d :url "studio · robot-day" :title "The editor camera" :job block :caption "Orbit, pan, dolly; F frames the selection; the move handle writes pos (or posX…) or a stop"
 head Viewport | turn · editor camera | @eye Look through &camera!
 col main
-card run | &robot | gltf · selected | move handle: ⟷ X · ⟂ Z · ↻ Y
+card run | &robot | gltf · selected | move handle: X · Z · rotate Y
 card idle | &globe1 … &globe4 | 4 hovered by a box drag | release to select
 col rail
 row Camera | editor (free)
@@ -205,205 +545,104 @@ row Frame | F
 row Tool | Select · Move* · Rotate · Scale
 #+end_desk
 
-* The model, executable
-The first cell reads the real stdlib: how many typed params the 3D forms
-declare, and which =string= params are choices hiding in comments.
-
-#+begin_src beam-lisp :id coverage
-(ns studio.fields)
-(def repo "/home/othman/code/undefine/spacetime/")
-(defn read-dir [dir]
-  (map (fn [f] (File/read! (str repo dir f)))
-       (filter (fn [f] (String/ends_with? f ".st")) (File/ls! (str repo dir)))))
-(def forms (read-dir "stdlib/3d/macros/"))
-(def prims (read-dir "stdlib/3d/primitives/"))
-(def types (frequencies
-  (mapcat (fn [t] (map (fn [m] (nth m 2)) (Regex/scan #"\w+: \$(\w+):(\w+)" t))) forms)))
-;; choices written as prose: `/// @param NAME - "a" | "b"`
-(def hidden (set (mapcat (fn [t] (map (fn [m] (nth m 1))
-                                      (Regex/scan #"@param\s+(\w+)\s+-[^\n]*\"\w*\"\s*\|" t)))
-                         (concat forms prims))))
-;; the scalar types a widget exists for today, plus the ones this plan adds
-(def widgets {"number" "w-number" "color" "w-color" "bool" "w-toggle" "string" "w-text"})
-(def editable (filter (fn [[t _]] (contains? #{"number" "color" "bool" "string"} t)) types))
-(assert (every? (fn [[t _]] (contains? widgets t)) editable))
-(assert (>= (count hidden) 5))
-{:param-types (into (sorted-map) types)
- :choices-in-comments (sort hidden)
- :editable-params (reduce + (map second editable))}
-#+end_src
-#+RESULTS: coverage
-: {:param-types {"bool" 6, "color" 5, "expr" 2, "number" 80, "string" 11}, :choices-in-comments ("drive" "material" "shadows" "shape" "tone" "type"), :editable-params 102}
-
-
-#+begin_src beam-lisp :id view
-;; The timeline's view window. Zoom keeps the time under the cursor fixed;
-;; fit shows the whole film; positions are fractions of the view, not of the film.
-(defn x->ms [v x] (+ (:from v) (* x (:span v))))           ; x in 0..1 of the lane
-(defn ms->x [v ms] (/ (- ms (:from v)) (:span v)))
-(defn clamp [v total]
-  (let [span (min (max (:span v) 50) total)]
-    {:from (min (max (:from v) 0) (- total span)) :span span}))
-(defn zoom [v x factor total]
-  (let [at (x->ms v x) span (/ (:span v) factor)]
-    (clamp {:from (- at (* x span)) :span span} total)))
-(defn fit [total] {:from 0 :span total})
-(def total 24000)
-(def v (zoom (fit total) 0.6 6 total))                       ; zoom 6× around 14.4 s
-(assert (< (abs (- (x->ms v 0.6) 14400)) 1e-6))              ; the cursor's time didn't move
-(assert (= (fit total) (zoom v 0.5 (/ 1 100) total)))        ; zooming out stops at the whole film
-(assert (= (ms->x (fit total) 24000) 1))                     ; the end is on screen when fitted
-{:view v :keys-14.0-14.2-apart-px (* 1100 (- (ms->x v 14200) (ms->x v 14000)))}
-#+end_src
-#+RESULTS: view
-: {:view {:span 4000.0, :from 12000.0}, :keys-14.0-14.2-apart-px 55.00000000000005}
-
-
-#+begin_src beam-lisp :id route
-;; One commit path. A change from any widget becomes ops on words:
-;; a driven field edits (or adds) the stop at the playhead, others edit their param.
-(defn op-for [field words playhead]
-  (cond
-    (:driven field)
-    (let [stop (first (filter (fn [s] (= (:at s) playhead)) (:stops (:driven field))))]
-      (if stop
-        {:op :span :address (:address stop) :words words}
-        {:op :insert :after (:address (last (filter (fn [s] (< (:at s) playhead)) (:stops (:driven field)))))
-         :words (str " -> " words " at " playhead "%")}))
-    (= (:state field) :default) {:op :insert :after (:last-param field) :words (str ", " (:label field) ": " words)}
-    :else {:op :span :address (:address field) :words words}))
-(def posZ {:label "posZ" :state :written :address [0 3300 3302]
-           :driven {:stops [{:at 0 :address [0 900 902]} {:at 25 :address [0 906 907]} {:at 62 :address [0 915 919]}]}})
-(assert (= :span (:op (op-for posZ "7" 25))))                ; on a stop: rewrite that stop
-(assert (= :insert (:op (op-for posZ "7" 58))))              ; between stops: a new stop at 58%
-(assert (= [0 906 907] (:after (op-for posZ "7" 58))))       ; after the stop before it
-(assert (= :insert (:op (op-for {:label "decay" :state :default :last-param [0 10 20]} "3" 58))))
-{:between (op-for posZ "7" 58)}
-#+end_src
-#+RESULTS: route
-: {:between {:op :insert, :after [0 906 907], :words " -> 7 at 58%"}}
-
-
-#+begin_src beam-lisp :id many
-;; A selection is a set. The inspector shows fields every selected part has, with
-;; the same type; differing values show as mixed and one edit writes them all.
-(defn shared [parts]
-  (let [keyed (map (fn [p] (into {} (map (fn [f] [[(:label f) (:type f)] f]) (:fields p)))) parts)
-        common (reduce (fn [a m] (filter (fn [k] (contains? m k)) a)) (keys (first keyed)) (rest keyed))]
-    (map (fn [k] (let [vals (set (map (fn [m] (:value (get m k))) keyed))]
-                   {:label (first k) :type (second k)
-                    :value (if (= 1 (count vals)) (first vals) :mixed)
-                    :writes (count keyed)}))
-         (sort common))))
-(defn globe [n e] {:fields [{:label "emissiveIntensity" :type "number" :value e}
-                            {:label "posX" :type "number" :value n}
-                            {:label "color" :type "color" :value "#fff1d0"}]})
-(def lamp {:fields [{:label "intensity" :type "number" :value 0} {:label "color" :type "color" :value "#ffcf8a"}]})
-(def g (shared [(globe -2.6 0) (globe 2.6 0) (globe -2.6 1.5) (globe 2.6 0)]))
-(assert (= :mixed (:value (first (filter (fn [f] (= "emissiveIntensity" (:label f))) g)))))
-(assert (= ["color"] (map :label (shared [(globe 1 0) lamp]))))   ; a globe and a lamp share only colour
-{:four-globes g}
-#+end_src
-#+RESULTS: many
-: {:four-globes ({:label "color", :type "color", :value "#fff1d0", :writes 4} {:label "emissiveIntensity", :type "number", :value :mixed, :writes 4} {:label "posX", :type "number", :value :mixed, :writes 4})}
-
-
 * Prior art
 From each product's docs and common use; not re-verified for this dossier.
 #+begin_matrix
-| | Blender | After Effects | Unity | Theatre.js | Spacetime today | Proposed |
-| Drag a label to scrub | y | y | y | y | n | y |
-| Widget from the property's type | y | y | y attributes | y prop types | n | y scalar table |
-| Keyframe toggle on the field | y ◆ | y stopwatch | y | y | n | y ◆ |
-| Timeline zoom at cursor, fit | y | y | y | y | n | y |
-| Editor camera vs shot camera | y | y | y | y | n | y |
-| Move handle in the viewport | y | y | y | ~ | n | y writes words |
-| Edit many, mixed values | y | ~ | y | n | n | y |
-| Edits are source words | n | n | ~ YAML | ~ JSON state | y | y |
+| | Blender | After Effects | Unity | Theatre.js | Rust | CSS | Spacetime today | Proposed |
+| Widget from the property's type | y | y | y | y | n | n | n | y |
+| Docs on the declaration itself | y RNA | n | y attributes | n | y /// | n | n @param | y /// |
+| Examples are compiled | n | n | n | n | y doctests | n | n | y %example |
+| Shorthand and longhand | n | n | n | n | n | y margin | n | y pos, posX |
+| Asset facts checked at build | n | ~ | y import | n | n | n | n | y .glb clips |
+| One reflection for every tool | y RNA | ~ | y SerializedProperty | ~ | ~ rust-analyzer | n | n many | y |
+| Edits are source words | n | n | ~ YAML | ~ JSON | y rust-analyzer assists | n | y | y |
 #+end_matrix
 
 * Decisions
+#+begin_decision :id d17 :title "No studio code in Rust" :status proposed
+- [x] Two generic dev-server facilities, *reflect* and *rewrite*, used by every tool; the studio is a .st app like the admin
+- [ ] Keep =src/studio/= and add =fields.rs= (round 1's D3)
+- [ ] A studio module per feature (film, page, admin) on the server
+The domain knowledge (what a clip, a stop, a stage part is) moves to the stdlib
+that defines them: capture types and =%role=. Rust keeps parsing, generic
+projection, guarded writing and file-format readers.
+#+end_decision
+
+#+begin_decision :id d18 :title "Docs live on the declaration below them" :status proposed
+- [x] =///= above a param, a =%yield=, a type, a tag; =%example { … }= compiled; types carry choices, ranges, units
+- [ ] =%param name "…"= directives (the name is repeated, so it can drift)
+- [ ] Keep =/// @param= and parse it (prose as data; the project rules forbid it)
+#+end_decision
+
+#+begin_decision :id d19 :title "The form is the only signature" :status proposed
+- [x] =...= forwards captured params; bound primitives declare types without defaults
+- [ ] Derive the form from the primitive (forms add sugar like =&name= and children that a primitive can't say)
+- [ ] Keep both and lint for drift (two truths, policed)
+#+end_decision
+
+#+begin_decision :id d20 :title "Vectors are shorthands with longhands" :status proposed
+- [x] =pos: vec3= with =posX/Y/Z= longhands, CSS order rules, one IR node with per-component provenance
+- [ ] Only =pos= (every project and score rewritten; =posZ= channels become verbose)
+- [ ] Only =posX…= plus a studio-side grouping (the IR doesn't know they're one thing)
+#+end_decision
+
+#+begin_decision :id d21 :title "Facts are read from the files" :status proposed
+- [x] Scalar rows declare =%facts=; the dev server reads them (glTF JSON chunk, audio length); types such as =clip($src)= use them
+- [ ] The running part reports its clips (only after load, not in the code pane, not at build)
+- [ ] A clip list written in the source (a second truth)
+#+end_decision
+
+#+begin_decision :id d22 :title "Migrations rewrite the stdlib too" :status proposed
+- [x] =%scope stdlib= waves over meta-syntax, run by the same engine on reflect and rewrite
+- [ ] A one-off script for the conversion (no record and no shim, and it can't be replayed for forks)
+#+end_decision
+
 #+begin_decision :id d1 :title "Widgets are templates in one shared library" :status proposed
-- [x] =@template &w-*($f)= in =stdlib/widgets/=, used by the studio and the admin drawer
-- [ ] Separate templates per app (the admin's =&fld-*= and the studio's would drift)
-- [ ] JS that builds the inputs (what the kits do today)
-- [ ] =@form markup= (it binds =noop=; nothing renders it yet)
-A widget takes one descriptor and emits one =change=. It doesn't know about ops,
-selection or the timeline, so the same =&w-color= works in the admin's brand pane.
+- [x] =@template &w-*($f)= in =stdlib/widgets/=, chosen by the scalar row's =%widget=; the inspector calls =&$f.tpl($f)=
+- [ ] Templates per app (the admin's =&fld-*= and the studio's would drift)
+- [ ] JS that builds inputs (what the kits do today)
 #+end_decision
 
-#+begin_decision :id d2 :title "The scalar table picks the widget" :status proposed
-- [x] =%widget &w-color= in =stdlib/scalars/types.st=; the descriptor carries =tpl=; markup calls =&$f.tpl($f)=
-- [ ] =@match $f.type= in every inspector (the dispatch list repeats per app)
-- [ ] A Rust =widget_for= branch per type (today's admin path for non-scalars)
-The table already exists for exactly this (=%widget "color"=, FEAT-168: « adding a
-scalar should require no Rust change »). It points at a template instead of a string.
-#+end_decision
-
-#+begin_decision :id d3 :title "The compiler projects every field" :status proposed
-- [x] =src/studio/fields.rs=: descriptors for part params, CSS declarations, clips, stops and sounds
-- [ ] Keep =ST.stuFields= / =ST.stuFilmFields= in JS and add types to them
-The compiler has the form's =FormClause= (types, defaults) and the scalar table;
-the JS has neither. A keyframe's widget is the type of the param its channel animates.
-#+end_decision
-
-#+begin_decision :id d4 :title "Choices are union types in the form" :status proposed
-- [x] =type: $type:("ambient"|"directional"|"point"|"spot") = "directional"=
-- [ ] Read the =/// @param= prose (a parser for comments; the project rules forbid it)
-Unions already parse in =%form= captures (=form-syntax.md:129-146=). Six 3D params move (the =coverage= cell finds them).
-#+end_decision
-
-#+begin_decision :id d5 :title "Ranges and units are named scalar types" :status proposed
-- [x] New rows in the scalar table: =unit= (0..1), =angle= (exists), =intensity=, =distance=, =exposure=
-- [ ] Inline refinements =number(0..1)= (new grammar; can come later if rows multiply)
-=penumbra: $penumbra:unit= reads better than a bare =number= and needs no new syntax.
-#+end_decision
-
-#+begin_decision :id d7 :title "One selection, a set of addresses" :status proposed
-- [x] =@type Selection=; page elements, parts, clips, stops and sounds; shift adds, a box adds many
-- [ ] Two selections (=$stuSel= object, =$stuFilmSel= key) as today
-This fixes « Nothing selected » and the unmarked keyframe at the root, and is what multi-edit needs.
-#+end_decision
-
-#+begin_decision :id d8 :title "One commit path" :status proposed
-- [x] Every widget emits =change {address, words}=; one handler makes ops; driven fields write the stop at the playhead
-- [ ] A commit function per field kind (=stuCommitField=, =stuCommitDecl=, =stuFilmCommit= today)
-The =route= cell above is that handler's rule.
+#+begin_decision :id d7 :title "One selection, one commit path" :status proposed
+- [x] A set of reflected addresses; every =change= becomes one rewrite transaction; driven fields write the stop at the playhead
+- [ ] Two selections and three commit functions, as today
 #+end_decision
 
 #+begin_decision :id d9 :title "Navigation is generic behaviors" :status proposed
-- [x] =@zoom-pan= writes a view window signal; lanes position with CSS over =--from=/=--span=; =@editor-camera= and =@gizmo= on the stage
+- [x] =@zoom-pan= writes a view window; =@editor-camera= (OrbitControls) and =@gizmo= (TransformControls), both vendored with three
 - [ ] Zoom code inside film-kit (it would stay timeline-only)
-=@zoom-pan= also serves the code pane's minimap and the sound grid. The move handle
-uses three's TransformControls (vendored), and ends its drag as =span= ops.
 #+end_decision
 
 #+begin_decision :id d10 :title "Split the kits, one keymap" :status proposed
-- [x] =studio-core= (apply, hot, remember, keymap table) + one primitive per behavior
+- [x] =studio-core= + one primitive per behavior, each with its =.test.st=
 - [ ] Keep two 700-line preludes
-Fixes the =i= conflict and the duplicated helpers; each piece gets its own =.test.st=.
 #+end_decision
 
 * Questions
-#+begin_ask :id q1 :title "Positions: keep posX/posY/posZ, or a vec3?" :options "vec3: pos: 0 3 -7|Keep posX/Y/Z, group them in the form|Both: vec3 with posX… still accepted"
-A vec3 makes the source shorter (=@gltf &robot (pos: 0 0 -7)=) and the widget
-one row, but channels then animate =pos: 0 0 -7 -> 0 0 0.4=, and every 3D form,
-score and demo changes. Grouping keeps the words and only changes the inspector.
+#+begin_ask :id q3 :title "Move the admin onto the shared widgets in this plan?" :options "Yes, right after the studio's widgets|After this plan|Leave the admin alone"
+The admin (=/__spacetime/admin=) edits =@data stored= entries. Its drawer
+renders ten =&fld-*= templates, and Rust's =widget_for= picks one per field from
+JSON schema and name rules (a field called =slug= or =id= is read-only). Moving it would mean:
+- the drawer renders =&w-*= from reflect, like the studio;
+- =widget_for='s cases move into the type table (enum → choice, =id(T)= → reference picker, richtext);
+- the brand pane's colour pill becomes =&w-color=.
+Gain: one look, one place to add a widget, and the studio gets relation pickers
+and rich text for free. Cost: the admin's screens and tests move. About one phase.
 #+end_ask
 
-#+begin_ask :id q2 :title "A model's clip names: where do they come from?" :options "The compiler reads the .glb|The live part reports them|Both"
-=clip: "Walking"= should be a menu of the model's animations. The compiler can
-read them from the .glb's JSON chunk (works in the code pane and offline); the
-running part knows them too, but only once loaded.
+#+begin_ask :id q5 :title "Choices written bare: type: point?" :options "Bare tags, strings still accepted through a migration window|Bare tags only|Keep strings"
+Bare tags read like =color: white= and get compile errors with suggestions.
+Strings stay legal through the migration window (W0715), then wave 4 rewrites them.
 #+end_ask
 
-#+begin_ask :id q3 :title "Move the admin drawer onto the shared widgets in this plan?" :options "Yes, in the same plan|After the studio works|Leave the admin alone"
-The admin has ten =&fld-*= templates and its own =widget_for=. Sharing is the
-point of D1, but it widens the change.
+#+begin_ask :id q6 :title "How do tools find clips without naming macros?" :options "%role declared on the macro|The studio matches form names in .st|Both"
+=%role timeline.clip= on the score macros lets reflect answer « every clip »,
+and survives renaming a macro. Matching names in .st is less language but more fragile.
 #+end_ask
 
-#+begin_ask :id q4 :title "Where should I start?" :options "P0 bugs, then widgets|Widgets first|Timeline zoom first|3D camera first"
-Each phase below lands with its tests, docs and PLAN-156 record in the same commit.
+#+begin_ask :id q7 :title "Start with the language or the studio?" :options "P0 bugs, then reflect and rewrite, then the waves|P0, then widgets on today's score.json, then migrate|Language waves first"
+The first keeps you working in the studio while the base moves under it. The
+second shows widgets sooner but builds them on the module we're deleting.
 #+end_ask
 
 * Roster
@@ -412,57 +651,72 @@ Each phase below lands with its tests, docs and PLAN-156 record in the same comm
 :JOBS: light long
 :AREA: stdlib/__studio__
 :END:
-Header and empty state follow the selection; open at 0 (or the remembered time);
-lanes and playhead use one duration; clip text clears its keyframes; =i= and Escape
-conflicts; =stuRules= / =stuBox= read a signal, not =S.el=.
+Header and empty state follow the selection; open at 0 or the remembered time;
+lanes and playhead use one duration; clip text clears its keys; =i= and Escape;
+=stuRules= / =stuBox= read a signal, not =S.el=.
 
-** TODO P1 · Widgets and descriptors
+** TODO P1 · Reflect and rewrite
 :PROPERTIES:
-:JOBS: light
-:AREA: stdlib/widgets src/studio/fields.rs stdlib/scalars
-:PROTO: inspector
+:AREA: src/reflect src/rewrite src/server.rs
 :END:
-=&w-number= (with =@scrub=), =&w-color=, =&w-toggle=, =&w-text=, =&w-choice=;
-=%widget= names templates; =fields.rs= projects parts, CSS declarations, clips,
-stops; one inspector renders =&$f.tpl($f)=.
+One projection (merging =src/introspect=, the LSP's =FormRegistry=, =outline.json=,
+=score.json=, =templates.json=) and one guarded writer (=studio/ops.rs= +
+=migrate.rs=), with undo. MCP gets both as tools.
 
-** TODO P2 · Types in the stdlib forms
+** TODO P2 · The migration engine learns the stdlib
+:PROPERTIES:
+:AREA: src/migrate.rs stdlib/migrations
+:END:
+=%scope stdlib=; rules over meta-syntax and across a declaration; dry-run diffs
+reviewed before applying.
+
+** TODO P3 · Waves 1–3: docs, examples, params once
+:PROPERTIES:
+:AREA: stdlib (all) src/parser
+:END:
+=///= on params and =%yield=; =%example= compiled by =check=; =...= forwarding;
+the 11 disagreeing defaults resolved by hand.
+
+** TODO P4 · Types: choices, scalar rows, vectors, facts, stops
+:PROPERTIES:
+:JOBS: light key block
+:AREA: stdlib/scalars stdlib/3d stdlib/capture-types src/type_system
+:END:
+Waves 4–5; =luminance=, =unit=, =meters=, =exposure=; =vec3= shorthand and longhands;
+=model= facts and =clip($src)=; =%capture_type stop=; L8 spans for =@data= and markup.
+
+** TODO P5 · Widgets and one inspector
 :PROPERTIES:
 :JOBS: light key
-:AREA: stdlib/3d stdlib/scalars
+:AREA: stdlib/widgets stdlib/__studio__
+:PROTO: inspector
 :END:
-Unions for the six choices; =unit=, =intensity=, =distance=, =exposure= rows;
-=&w-stop= (value, time, easing via =@curve=); clip names (Q2); positions (Q1).
+=&w-number= (with =@scrub=), =&w-color=, =&w-choice=, =&w-toggle=, =&w-text=, =&w-vec3=,
+=&w-asset=, =&w-stop= (with =@curve=); the admin too if Q3 says so.
 
-** TODO P3 · One selection, one commit, edit many
+** TODO P6 · One selection, one commit, edit many
 :PROPERTIES:
 :JOBS: key many
 :AREA: stdlib/__studio__
 :END:
-=@type Selection=; shift-click and list multi-select; mixed values; ◆ on driven
-fields; the =route= rule as the only commit path.
 
-** TODO P4 · Timeline navigation
+** TODO P7 · Timeline navigation
 :PROPERTIES:
 :JOBS: long
-:AREA: stdlib/__studio__/timeline.st stdlib/widgets/primitives
 :PROTO: timeline
 :END:
-=@zoom-pan= view window, overview strip, fit (=\=), marquee select, drag many,
-snap to beats, ticks and keys, rows grouped by part.
+=@zoom-pan=, overview strip, fit, marquee, drag many, snapping, rows grouped by part.
 
-** TODO P5 · 3D navigation
+** TODO P8 · 3D navigation
 :PROPERTIES:
 :JOBS: block many
-:AREA: stdlib/3d
 :PROTO: stage3d
 :END:
-=@editor-camera= (OrbitControls) with « look through », =F= to frame,
-=@gizmo= (TransformControls) writing words or stops, box select in the viewport.
+=@editor-camera= with « look through », =F= to frame, =@gizmo=, box select.
 
-** TODO P6 · Split the kits
+** TODO P9 · Delete src/studio and split the kits
 :PROPERTIES:
-:AREA: stdlib/__studio__/primitives
+:AREA: src/studio stdlib/__studio__/primitives
 :END:
-=studio-core= + behavior primitives; one keymap; each piece with its =.test.st=.
-Target: the studio's JS halves, and no JS builds DOM.
+Delete =literal.rs=, =markup.rs=, =outline.rs=, =ops.rs= and =score.rs=;
+=studio-core= + behaviors; one keymap. Target: no studio JS builds DOM.
