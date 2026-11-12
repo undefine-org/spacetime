@@ -139,6 +139,13 @@ enum Command {
         /// stdlib/migrations/entries/<today>-<id>.st (stdlib-authoring tool)
         #[arg(long)]
         scaffold: Option<String>,
+
+        /// Apply the `%scope meta` waves (PLAN-156) to a tree of declarations
+        /// — the stdlib itself (`spacetime migrate stdlib --meta`). Meta waves
+        /// rewrite `%macro`/`%primitive` declarations, not directive calls, and
+        /// are idempotent, so no `@version` is read or written.
+        #[arg(long)]
+        meta: bool,
     },
     /// Inspect compilation layers (parse, registry, keyframes, expansion, ir, emit, scopes, state)
     Inspect {
@@ -680,8 +687,9 @@ async fn main() {
                 dry_run,
                 explain,
                 scaffold,
+                meta,
             } => {
-                run_migrate(path, wave, dry_run, explain, scaffold);
+                run_migrate(path, wave, dry_run, explain, scaffold, meta);
                 return;
             }
             Command::Inspect {
@@ -1404,15 +1412,63 @@ fn today_iso_date() -> String {
     format!("{y:04}-{m:02}-{d:02}")
 }
 
+/// `spacetime migrate <dir> --meta`: the `%scope meta` waves over every `.st`
+/// file under `dir` (vendored trees skipped), through the one writer.
+fn run_migrate_meta(path: &std::path::Path, wave: Option<&str>, dry_run: bool) {
+    let (registry, _) = spacetime::compiler::load_stdlib_registry();
+    let mut files = std::collections::BTreeMap::new();
+    let mut stack = vec![path.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+        for e in rd.flatten() {
+            let p = e.path();
+            let name = e.file_name().to_string_lossy().to_string();
+            if p.is_dir() {
+                if !matches!(name.as_str(), "vendor" | "node_modules" | "target" | "dist") && !name.starts_with('.') {
+                    stack.push(p);
+                }
+            } else if name.ends_with(".st") {
+                if let Ok(text) = std::fs::read_to_string(&p) {
+                    files.insert(p.to_string_lossy().to_string(), text);
+                }
+            }
+        }
+    }
+    let (changed, refused) = spacetime::migrate::meta::apply_waves_partial(&files, &registry, None, wave);
+    for r in &refused {
+        eprintln!("\x1b[33m!\x1b[0m left as it was: {r}");
+    }
+    for (p, text) in &changed {
+        let before = files[p].lines().count();
+        let after = text.lines().count();
+        println!("{} {p} ({before} → {after} lines)", if dry_run { "would rewrite" } else { "rewrote" });
+        if !dry_run && let Err(e) = spacetime::rewrite::write_atomic(std::path::Path::new(p), text) {
+            eprintln!("\x1b[31m✗\x1b[0m {e}");
+            std::process::exit(1);
+        }
+    }
+    println!("{} file(s) {}", changed.len(), if dry_run { "would change" } else { "changed" });
+    if !refused.is_empty() {
+        eprintln!("{} file(s) need a hand: the wave would have left them unparseable", refused.len());
+        std::process::exit(1);
+    }
+}
+
 fn run_migrate(
     path: PathBuf,
     wave: Option<String>,
     dry_run: bool,
     explain: Option<String>,
     scaffold: Option<String>,
+    meta: bool,
 ) {
     use spacetime::compiler;
     use spacetime::migrate;
+
+    if meta {
+        run_migrate_meta(&path, wave.as_deref(), dry_run);
+        return;
+    }
 
     if let Some(id) = &scaffold {
         run_migrate_scaffold(id);

@@ -204,6 +204,10 @@ pub fn create_router_raw(state: AppState) -> Router {
         // source edit (src/studio). Dev-only, like the inspector it sits beside.
         .route("/__spacetime/studio/outline.json", get(studio_outline_handler))
         .route("/__spacetime/studio/apply", post(studio_apply_handler))
+        // PLAN-156: the program as every tool reads it, and the one writer
+        .route("/__spacetime/reflect.json", get(reflect_handler))
+        .route("/__spacetime/rewrite", post(rewrite_handler))
+        .route("/__spacetime/rewrite/undo", post(rewrite_undo_handler))
         .route("/__spacetime/studio/score.json", get(studio_score_handler))
         .route("/__spacetime/studio/hot.json", get(studio_hot_handler))
         .route("/__spacetime/studio/runtime.js", get(studio_runtime_js_handler))
@@ -3049,16 +3053,77 @@ async fn studio_apply_handler(
         Ok(changes) => changes,
         Err(e) => return fail(e),
     };
-    for (file, text) in &changes {
-        let path = match crate::sync::handlers::validate_file_path(site_dir, file) {
-            Ok(path) => path,
-            Err(e) => return fail(e),
-        };
-        if let Err(e) = std::fs::write(&path, text) {
-            return fail(format!("write {file}: {e}"));
+    for file in changes.keys() {
+        if let Err(e) = crate::sync::handlers::validate_file_path(site_dir, file) {
+            return fail(e);
         }
     }
+    // PLAN-156: the one writer — re-parsed, atomic, undoable
+    let before = site.files.iter().map(|f| (f.path.clone(), f.text.clone())).collect();
+    let changes: std::collections::BTreeMap<String, String> = changes.into_iter().collect();
+    if let Err(e) = crate::rewrite::commit(site_dir, &before, &changes) {
+        return fail(e.to_string());
+    }
     Json(serde_json::json!({ "ok": true, "changed": changes.keys().collect::<Vec<_>>() })).into_response()
+}
+
+/// PLAN-156 P1: `GET /__spacetime/reflect.json?entry=index.st` — the page's
+/// program as tools see it (`crate::reflect`): every form match, the params
+/// its form declares (written or defaulted), its doc, its `%registers`
+/// entries, and the spans an edit addresses.
+async fn reflect_handler(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    Query(query): Query<InspectorWidgetQuery>,
+) -> Response {
+    let AppMode::Dev { site_dir, .. } = &state.mode else {
+        return (StatusCode::NOT_FOUND, "Not found").into_response();
+    };
+    let entry = query.entry.unwrap_or_else(|| "index.st".to_string());
+    if let Err(e) = crate::sync::handlers::validate_file_path(site_dir, &entry) {
+        return Json(serde_json::json!({ "error": e })).into_response();
+    }
+    match crate::reflect::page(site_dir, &entry) {
+        Ok(v) => Json(v).into_response(),
+        Err(e) => Json(serde_json::json!({ "error": e })).into_response(),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct RewriteRequest {
+    entry: String,
+    #[serde(flatten)]
+    tx: crate::rewrite::Transaction,
+}
+
+/// PLAN-156 P1: `POST /__spacetime/rewrite` — apply a transaction of guarded
+/// edits to the page's files (`crate::rewrite`). Paths are the page's files,
+/// relative to the site, as reflect names them.
+async fn rewrite_handler(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    Json(req): Json<RewriteRequest>,
+) -> Response {
+    let AppMode::Dev { site_dir, .. } = &state.mode else {
+        return (StatusCode::NOT_FOUND, "Not found").into_response();
+    };
+    if let Err(e) = crate::sync::handlers::validate_file_path(site_dir, &req.entry) {
+        return Json(serde_json::json!({ "ok": false, "error": e })).into_response();
+    }
+    match crate::rewrite::page(site_dir, &req.entry, &req.tx) {
+        Ok(changed) => Json(serde_json::json!({ "ok": true, "changed": changed })).into_response(),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })).into_response(),
+    }
+}
+
+/// PLAN-156 P1: `POST /__spacetime/rewrite/undo` — put back the last commit's
+/// files, if nothing changed them since.
+async fn rewrite_undo_handler(axum::extract::State(state): axum::extract::State<AppState>) -> Response {
+    let AppMode::Dev { site_dir, .. } = &state.mode else {
+        return (StatusCode::NOT_FOUND, "Not found").into_response();
+    };
+    match crate::rewrite::undo(site_dir) {
+        Ok(files) => Json(serde_json::json!({ "ok": true, "changed": files })).into_response(),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })).into_response(),
+    }
 }
 
 async fn comments_runtime_js_handler(

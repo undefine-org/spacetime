@@ -316,6 +316,61 @@ composed into a host region. Unmount first.",
             }),
         ),
         tool(
+            "st_reflect",
+            "Read a page's program the way the studio does (PLAN-156): every form \
+match with its directive, the exact %macro, the `///` doc above it, the params its \
+%form declares (type, default, and — when written — the words and their byte span), \
+its %registers entries (e.g. kind `part`, `clip`) and the matches nested in it. \
+Spans address `st_rewrite` edits.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "The site directory, relative to the workspace root." },
+                    "entry": { "type": "string", "description": "The page's entry file, relative to the site (default index.st)." }
+                },
+                "required": ["path"],
+                "additionalProperties": false
+            }),
+        ),
+        tool(
+            "st_rewrite",
+            "Change a page's source with guarded edits, applied together or not at all \
+(PLAN-156): each edit names a file of the page, a byte span from `st_reflect`, the text \
+expected there, and the new text. Refused if any span no longer reads as expected \
+(STALE), if edits overlap, or if a file would stop parsing. Undo with `st_undo`.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "The site directory, relative to the workspace root." },
+                    "entry": { "type": "string", "description": "The page's entry file (default index.st)." },
+                    "edits": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "file": { "type": "string" }, "start": { "type": "integer" }, "end": { "type": "integer" },
+                                "expect": { "type": "string" }, "text": { "type": "string" }
+                            },
+                            "required": ["file", "start", "end", "expect", "text"]
+                        }
+                    }
+                },
+                "required": ["path", "edits"],
+                "additionalProperties": false
+            }),
+        ),
+        tool(
+            "st_undo",
+            "Undo the last rewrite of a site (studio gesture, agent edit, any writer), if \
+nothing changed its files since.",
+            json!({
+                "type": "object",
+                "properties": { "path": { "type": "string", "description": "The site directory, relative to the workspace root." } },
+                "required": ["path"],
+                "additionalProperties": false
+            }),
+        ),
+        tool(
             "st_elicit",
             "Ask the human a question DIRECTLY in their client (no browser) via MCP \
 elicitation: a native prompt with a typed form. Returns {action:accept|decline|\
@@ -360,6 +415,9 @@ pub fn call(name: &str, args: &Value, state: &mut McpState) -> Value {
         "st_unmount" => st_unmount(args, state),
         "st_env_close" => st_env_close(args, state),
         "st_fn_delete" => st_fn_delete(args, state),
+        "st_reflect" => st_reflect(args, state),
+        "st_rewrite" => st_rewrite(args, state),
+        "st_undo" => st_undo(args, state),
         other => Err(format!("Unknown tool: {other}")),
     };
     match result {
@@ -371,6 +429,41 @@ pub fn call(name: &str, args: &Value, state: &mut McpState) -> Value {
 // ---------------------------------------------------------------------------
 // Tool implementations. Each returns Ok((human_summary, structured_value)).
 // ---------------------------------------------------------------------------
+
+/// The site directory a reflect/rewrite tool names, under the workspace root.
+fn site_arg(args: &Value, state: &McpState) -> Result<std::path::PathBuf, String> {
+    let path = non_empty_arg(args, "path").ok_or("missing `path`")?;
+    let root = resolve_under_root(&state.workspace_root, path);
+    if !root.is_dir() {
+        return Err(format!("not a directory: {}", root.display()));
+    }
+    Ok(root)
+}
+
+fn st_reflect(args: &Value, state: &mut McpState) -> Result<(String, Value), String> {
+    let root = site_arg(args, state)?;
+    let entry = non_empty_arg(args, "entry").unwrap_or("index.st");
+    let v = crate::reflect::page(&root, entry)?;
+    let n = v["matches"].as_array().map(|a| a.len()).unwrap_or(0);
+    Ok((format!("{n} form matches in {entry}"), v))
+}
+
+fn st_rewrite(args: &Value, state: &mut McpState) -> Result<(String, Value), String> {
+    let root = site_arg(args, state)?;
+    let entry = non_empty_arg(args, "entry").unwrap_or("index.st");
+    let edits: Vec<crate::rewrite::Edit> =
+        serde_json::from_value(args.get("edits").cloned().unwrap_or(Value::Null)).map_err(|e| format!("edits: {e}"))?;
+    let tx = crate::rewrite::Transaction { edits, base: Default::default() };
+    let changed = crate::rewrite::page(&root, entry, &tx).map_err(|e| e.to_string())?;
+    Ok((format!("changed {}", changed.join(", ")), json!({ "changed": changed })))
+}
+
+fn st_undo(args: &Value, state: &mut McpState) -> Result<(String, Value), String> {
+    let root = site_arg(args, state)?;
+    let changed = crate::rewrite::undo(&root).map_err(|e| e.to_string())?;
+    let summary = if changed.is_empty() { "nothing to undo".to_string() } else { format!("restored {}", changed.join(", ")) };
+    Ok((summary, json!({ "changed": changed })))
+}
 
 fn st_health(state: &McpState) -> Result<(String, Value), String> {
     let data = json!({

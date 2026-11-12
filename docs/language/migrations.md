@@ -84,6 +84,38 @@ Migrations live in `stdlib/migrations/entries/<date>-<id>.st`:
   **or** a hint (coverage is validated at load — a silent retirement is a
   load error).
 
+## Meta waves (`%scope meta`)
+
+Some retirements change *declarations*: `%macro`, `%form`, `%primitive`,
+`///`. Those are read by the compiler's own parser, not by a `%form`, so a
+`%match`/`%into` rule can't reach them. A meta wave names built-in transforms
+instead (PLAN-156):
+
+```st
+%migration docs-on-declarations {
+  %date 2026-11-10
+  %scope meta
+  %docs "a /// @param line moves onto the param it describes"
+  %transform docs-onto-declarations
+}
+```
+
+| transform | rewrites |
+|---|---|
+| `docs-onto-declarations` | `/// @param name - text` → a `///` above the param in the `%form` (or the primitive's signature); `@yields $x` → above `$x` in `%exports`; a doc that only restated a default is dropped; a param a macro forwards is documented once, on the form |
+| `examples-to-clauses` | `/// @example title` blocks → `%example "title" { … }` |
+| `forward-binds` | `%binds` args that only forward a form param under its own name → one `...` |
+
+- A meta wave needs no embedded `%macro`. Its transforms must be known ones,
+  which is checked at load.
+- Edits go through the one writer (`crate::rewrite`). A file the wave would
+  leave unparseable is left as it was and reported; the others take it.
+- Transforms are idempotent: a second run changes nothing.
+- `spacetime migrate <dir> --meta` runs the meta waves over a tree of
+  declarations (`spacetime migrate stdlib --meta`). It reads and writes no
+  `@version`. A project's own `%macro`s take the waves with the rest of
+  `spacetime migrate <project>`.
+
 ## Three compile-time behaviors (the tri-branch)
 
 | the call… | compile-time | apply |

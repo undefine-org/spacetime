@@ -592,9 +592,34 @@ pub fn validate_migration(
         });
     }
 
+    // 2'. A meta wave (PLAN-156) retires no directive: it names transforms,
+    // which must be ones the migrator knows.
+    for name in &def.transforms {
+        if !crate::migrate::meta::KNOWN.contains(&name.as_str()) {
+            errors.push(ValidationError {
+                kind: ValidationErrorKind::InvalidMigration(format!(
+                    "migration `{}`: unknown %transform `{name}` (known: {})",
+                    def.id,
+                    crate::migrate::meta::KNOWN.join(", ")
+                )),
+                span: def.span,
+            });
+        }
+    }
+    if def.scope.as_deref().is_some_and(|s| s != "meta") {
+        errors.push(ValidationError {
+            kind: ValidationErrorKind::InvalidMigration(format!(
+                "migration `{}`: %scope is `meta` or absent",
+                def.id
+            )),
+            span: def.span,
+        });
+    }
+
     // 2. The capsule must embed ≥1 retired macro, each with a %form naming a
-    // directive (PLAN-079: the migration owns the old grammar).
-    if def.macros.is_empty() {
+    // directive (PLAN-079: the migration owns the old grammar). A meta wave
+    // carries transforms instead.
+    if def.macros.is_empty() && def.transforms.is_empty() {
         errors.push(ValidationError {
             kind: ValidationErrorKind::InvalidMigration(format!(
                 "migration `{}`: at least one embedded %macro (the retired definition) is required",

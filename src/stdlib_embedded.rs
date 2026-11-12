@@ -582,6 +582,18 @@ pub mod migrations {
             path: "entries/2026-07-26-on-cutover.st",
             content: include_str!("../stdlib/migrations/entries/2026-07-26-on-cutover.st"),
         },
+        EmbeddedFile {
+            path: "entries/2026-11-10-docs-on-declarations.st",
+            content: include_str!("../stdlib/migrations/entries/2026-11-10-docs-on-declarations.st"),
+        },
+        EmbeddedFile {
+            path: "entries/2026-11-10-examples-compile.st",
+            content: include_str!("../stdlib/migrations/entries/2026-11-10-examples-compile.st"),
+        },
+        EmbeddedFile {
+            path: "entries/2026-11-10-params-once.st",
+            content: include_str!("../stdlib/migrations/entries/2026-11-10-params-once.st"),
+        },
     ];
 }
 

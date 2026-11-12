@@ -21,6 +21,9 @@
 //! lose the unclaimed args when the whole directive span is replaced. Those
 //! degrade to E0910 with a split-or-migrate-manually hint.
 
+/// Meta waves: `%scope meta` migrations that rewrite declarations (PLAN-156).
+pub mod meta;
+
 use std::collections::HashSet;
 
 use crate::diagnostics::{Diagnostic, DiagnosticCode, SourceSpan as DiagSpan};
@@ -544,11 +547,18 @@ pub fn plan_file_apply(
         return None;
     };
     let outcome = apply_migration_shim_for_wave(content.clone(), ast, registry, version, wave);
-    let changed = outcome.source != content;
+    // PLAN-156: a project's own declarations (its `%macro`s) take the meta
+    // waves too; a file the waves would leave unparseable keeps the shim's text
+    let key = path.to_string_lossy().to_string();
+    let source = meta::apply_waves(&[(key.clone(), outcome.source.clone())].into(), registry, version, wave)
+        .ok()
+        .and_then(|mut c| c.remove(&key))
+        .unwrap_or(outcome.source);
+    let changed = source != content;
     Some(FileApplyPlan {
         path: path.to_path_buf(),
         old_source: content.clone(),
-        new_source: outcome.source,
+        new_source: source,
         changed,
         pending: outcome.pending,
         diagnostics: outcome.diagnostics,
@@ -685,9 +695,8 @@ pub fn write_apply_plans(
                 plan.path.display()
             ));
         }
-        let tmp = plan.path.with_extension("st.migrate-tmp");
-        std::fs::write(&tmp, &plan.new_source)
-            .and_then(|_| std::fs::rename(&tmp, &plan.path))
+        // the one writer (PLAN-156): a temp file and a rename
+        crate::rewrite::write_atomic(&plan.path, &plan.new_source)
             .map_err(|e| format!("failed to write {}: {e}", plan.path.display()))?;
         files_changed += 1;
         entries_applied += plan.pending.iter().filter(|e| e.is_automatic()).count();
@@ -698,9 +707,7 @@ pub fn write_apply_plans(
             let current = std::fs::read_to_string(root).unwrap_or_default();
             let bumped = upsert_version_decl(&current, d);
             if bumped != current {
-                let tmp = root.with_extension("st.migrate-tmp");
-                std::fs::write(&tmp, &bumped)
-                    .and_then(|_| std::fs::rename(&tmp, root))
+                crate::rewrite::write_atomic(root, &bumped)
                     .map_err(|e| format!("failed to bump @version in {}: {e}", root.display()))?;
             }
             Some(d.to_string())

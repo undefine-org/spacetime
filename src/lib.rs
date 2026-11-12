@@ -107,6 +107,8 @@ pub mod metasystem;
 pub mod migrate;
 pub mod parser;
 pub mod pipeline;
+pub mod reflect;
+pub mod rewrite;
 pub mod profiler;
 pub mod rung;
 pub mod serializer;
