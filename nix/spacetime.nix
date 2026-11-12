@@ -38,6 +38,10 @@ let
          && !(lib.hasSuffix ".snap.new" rel);
   };
 
+  # .patches on its own: the deps derivation must not depend on the whole tree,
+  # or every source edit rebuilds every dependency
+  patches = builtins.path { path = root + "/.patches"; name = "spacetime-patches"; };
+
   v8 = pkgs.fetchurl {
     url = "https://github.com/denoland/rusty_v8/releases/download/v137.3.0/librusty_v8_release_x86_64-unknown-linux-gnu.a.gz";
     sha256 = "0rv5nl4gcbvdpk3mdwbqvw180nfx2wk173q1cqrvv2h1agg1ys52";
@@ -63,7 +67,7 @@ let
       inherit src;
       extraDummyScript = ''
         rm -rf $out/.patches
-        cp -r ${src}/.patches $out/.patches
+        cp -r ${patches} $out/.patches
         chmod -R u+w $out/.patches
       '';
     };
