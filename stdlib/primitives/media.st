@@ -2,13 +2,9 @@
 ///
 /// Wraps the matchMedia API for responsive behavior.
 /// Reactively updates when media query match state changes.
-///
-/// @param query - CSS media query string
-///
-/// @yields $matches - Whether the query currently matches
-/// @yields $media - The media query string
 
 %primitive media(
+  /// CSS media query string
   query: string,
   styles: properties
 ) {
@@ -49,7 +45,9 @@
   }
 
   %exports {
+    /// Whether the query currently matches
     $matches: bool   // true if media query matches
+    /// The media query string
     $media: string   // the media query string
   }
 }
@@ -58,10 +56,6 @@
 /// Prefers Color Scheme Primitive
 ///
 /// Convenience wrapper for color scheme detection.
-///
-/// @yields $dark - Whether user prefers dark mode
-/// @yields $light - Whether user prefers light mode
-/// @yields $scheme - "dark" or "light"
 
 %primitive colorScheme(
   scheme: string
@@ -99,8 +93,11 @@
   }
 
   %exports {
+    /// Whether user prefers dark mode
     $dark: bool      // prefers dark mode
+    /// Whether user prefers light mode
     $light: bool     // prefers light mode
+    /// "dark" or "light"
     $scheme: string  // "dark" or "light"
   }
 }
@@ -109,9 +106,6 @@
 /// Prefers Reduced Motion Primitive
 ///
 /// Convenience wrapper for reduced motion detection.
-///
-/// @yields $reduced - Whether user prefers reduced motion
-/// @yields $allowed - Whether animations are allowed (inverse of reduced)
 
 %primitive reducedMotion() {
   %emit js {
@@ -132,7 +126,9 @@
   }
 
   %exports {
+    /// Whether user prefers reduced motion
     $reduced: bool   // prefers reduced motion
+    /// Whether animations are allowed (inverse of reduced)
     $allowed: bool   // animations allowed
   }
 }

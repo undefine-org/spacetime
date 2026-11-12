@@ -3,13 +3,6 @@
 /// Registers a template factory function with the global Spacetime.templates registry.
 /// Templates are compiled to factory functions that create DOM elements from data.
 ///
-/// @param name - Template name (without &)
-/// @param html - HTML template string with $param interpolation
-/// @param params - Array of parameter names (may include optional params with `?` suffix)
-/// @param animations - Optional keyframes for scoped template animations
-///
-/// @yields $factory - The registered factory function
-///
 /// ## Optional Parameters (`?` modifier)
 ///
 /// Parameters can be marked as optional using the `?` suffix in the @template definition.
@@ -37,9 +30,12 @@
 /// ```
 
 %primitive register-template(
+  /// Template name (without &)
   name: string,
   body: string,
+  /// Array of parameter names (may include optional params with `?` suffix)
   params: array = [],
+  /// Optional keyframes for scoped template animations
   animations: keyframes? = null
 ) {
   %emit js {
@@ -94,19 +90,16 @@
 /// Template Invocation Primitive
 ///
 /// Invokes a registered template with arguments and appends to container.
-///
-/// @param &container - Element to append rendered template to
-/// @param name - Template name to invoke
-/// @param args - Arguments to pass to factory
-/// @param ref - Optional ref name to store created element under
-///
-/// @yields $element - The created element
 
 %primitive invoke-template(
+  /// Element to append rendered template to
   &container,
+  /// Template name to invoke
   name: string,
+  /// Arguments to pass to factory
   args: array = [],
   body: string? = null,
+  /// Optional ref name to store created element under
   ref: string? = null,
   node: string? = null
 ) {
@@ -210,6 +203,7 @@
   }
 
   %exports {
+    /// The created element
     $element: element
   }
 }
@@ -219,20 +213,15 @@
 ///
 /// Iterates over a data source and invokes template(s) for each item.
 /// Uses Spacetime.templates registry for template lookup.
-///
-/// @param &container - Element to render items into
-/// @param source - Data source name (dispatches data:name:loaded events)
-/// @param item - Variable name for each item (used by compiler)
-/// @param invocations - Array of template invocations [{name, args}]
-/// @param key - Property to use as unique key for diffing
-///
-/// @yields $items - Array of rendered item elements
-/// @yields $update - Function to trigger re-render
 
 %primitive each-with-templates(
+  /// Element to render items into
   &container,
+  /// Data source name (dispatches data:name:loaded events)
   source: string,
+  /// Variable name for each item (used by compiler)
   item: string,
+  /// Array of template invocations [{name, args}]
   invocations: array,
   key: string = "id",
   filter: string? = null
@@ -552,7 +541,9 @@
   }
 
   %exports {
+    /// Array of rendered item elements
     $items: array
+    /// Function to trigger re-render
     $update: fn() ~> effect          // Trigger re-render
   }
 }

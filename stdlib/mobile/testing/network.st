@@ -10,6 +10,10 @@
 /// - fast-4g: 10Mbps, 50ms latency
 /// - wifi: 30Mbps, 10ms latency
 ///
+/// Network Condition Primitive
+///
+/// Sets up network condition simulation and exposes signals.
+///
 /// @example
 /// .api-consumer {
 ///   @network("slow-3g") {
@@ -25,20 +29,9 @@
 ///   @then .offline-banner should be_visible
 /// }
 
-
-/// Network Condition Primitive
-///
-/// Sets up network condition simulation and exposes signals.
-///
-/// @param $condition - Network condition preset
-/// @yields $isOffline - True when simulating offline
-/// @yields $isSlow - True when on slow connection (3g)
-/// @yields $isFast - True when on fast connection (4g/wifi)
-/// @yields $bandwidth - Current bandwidth in kbps
-/// @yields $latency - Current latency in ms
-/// @yields $condition - Current condition name
-
-%primitive network-condition($condition) {
+%primitive network-condition(
+  $condition
+) {
   %emit js {
     // Network condition presets
     const __networkPresets = {
@@ -91,11 +84,17 @@
   }
 
   %exports {
+    /// True when simulating offline
     $isOffline: bool
+    /// True when on slow connection (3g)
     $isSlow: bool
+    /// True when on fast connection (4g/wifi)
     $isFast: bool
+    /// Current bandwidth in kbps
     $bandwidth: number
+    /// Current latency in ms
     $latency: number
+    /// Current condition name
     $condition: string
   }
 }
@@ -104,13 +103,6 @@
 /// Network Condition Macro
 ///
 /// Applies styles based on network condition.
-///
-/// @example
-/// .loading-indicator {
-///   @network("slow-3g") {
-///     display: block
-///   }
-/// }
 
 %macro network {
 
@@ -133,19 +125,20 @@
       $styles
     }
   }
+
+  %example "@network" {
+    .loading-indicator {
+      @network("slow-3g") {
+        display: block
+      }
+    }
+  }
 }
 
 
 /// Offline Macro
 ///
 /// Shorthand for offline-only styles.
-///
-/// @example
-/// .offline-banner {
-///   @offline {
-///     display: flex
-///   }
-/// }
 
 %macro offline {
 
@@ -164,19 +157,20 @@
       $styles
     }
   }
+
+  %example "@offline" {
+    .offline-banner {
+      @offline {
+        display: flex
+      }
+    }
+  }
 }
 
 
 /// Slow Network Macro
 ///
 /// Applies styles when on slow connection (3g speeds).
-///
-/// @example
-/// .high-res-image {
-///   @slow-network {
-///     display: none
-///   }
-/// }
 
 %macro slow-network {
 
@@ -195,6 +189,14 @@
       $styles
     }
   }
+
+  %example "@slow-network" {
+    .high-res-image {
+      @slow-network {
+        display: none
+      }
+    }
+  }
 }
 
 
@@ -202,12 +204,6 @@
 ///
 /// Sets the network condition for testing purposes.
 /// Used in test bodies to simulate network changes.
-///
-/// @example
-/// @test "handles offline mode" {
-///   @network-set "offline"
-///   @then .offline-indicator should be_visible
-/// }
 
 %macro network-set {
 
@@ -252,6 +248,13 @@
       document.dispatchEvent(new CustomEvent('spacetime:network-change', {
         detail: globalThis.__spacetime_network_condition
       }));
+    }
+  }
+
+  %example "@network-set" {
+    @test "handles offline mode" {
+      @network-set "offline"
+      @then .offline-indicator should be_visible
     }
   }
 }

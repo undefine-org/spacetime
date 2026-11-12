@@ -2,34 +2,6 @@
 ///
 /// Creates toast/snackbar notifications with auto-dismiss functionality.
 /// Supports top and bottom positioning with customizable duration.
-///
-/// @example basic bottom toast
-/// .notification {
-///   @toast {
-///     showing {
-///       transform: translateY(0)
-///       opacity: 1
-///     }
-///     hidden {
-///       transform: translateY(100%)
-///       opacity: 0
-///     }
-///   }
-/// }
-///
-/// @example top toast with custom duration
-/// .alert {
-///   @toast(duration: 4000, position: "top") {
-///     showing {
-///       transform: translateY(0)
-///       opacity: 1
-///     }
-///     hidden {
-///       transform: translateY(-100%)
-///       opacity: 0
-///     }
-///   }
-/// }
 
 %macro toast {
 
@@ -96,6 +68,36 @@
   %when $visible {
     %applies {
       $styles
+    }
+  }
+
+  %example "basic bottom toast" {
+    .notification {
+      @toast {
+        showing {
+          transform: translateY(0)
+          opacity: 1
+        }
+        hidden {
+          transform: translateY(100%)
+          opacity: 0
+        }
+      }
+    }
+  }
+
+  %example "top toast with custom duration" {
+    .alert {
+      @toast(duration: 4000, position: "top") {
+        showing {
+          transform: translateY(0)
+          opacity: 1
+        }
+        hidden {
+          transform: translateY(-100%)
+          opacity: 0
+        }
+      }
     }
   }
 }

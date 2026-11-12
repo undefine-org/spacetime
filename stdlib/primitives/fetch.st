@@ -2,24 +2,17 @@
 ///
 /// Wraps the Fetch API for reactive data loading.
 /// Supports caching, refetching, and error handling.
-///
-/// @param url - URL to fetch
-/// @param options - Fetch options (method, headers, body, etc.)
-/// @param cache - Cache duration (0 = no cache)
-/// @param autoFetch - Fetch immediately on creation, default true
-/// @param transform - Transform function for response (default: json)
-///
-/// @yields $data - The fetched data
-/// @yields $loading - Whether a fetch is in progress
-/// @yields $error - Error if fetch failed
-/// @yields $status - HTTP status code
-/// @yields $refetch - Function to trigger a refetch
 
 %primitive fetch(
+  /// URL to fetch
   url: string,
+  /// Fetch options (method, headers, body, etc.)
   options: object = {},
+  /// Cache duration (0 = no cache)
   cache: number = 0,
+  /// Fetch immediately on creation
   autoFetch: bool = true,
+  /// Transform function for response
   transform: ("json" | "text" | "blob" | "arrayBuffer") = "json"
 ) {
   %emit js {
@@ -125,12 +118,17 @@
   }
 
   %exports {
+    /// The fetched data
     $data: any           // fetched data
+    /// Whether a fetch is in progress
     $loading: bool       // fetch in progress
+    /// Error if fetch failed
     $error: any?         // error if failed
+    /// HTTP status code
     $status: number      // HTTP status code
     $ok: bool            // response.ok
     $headers: object     // response headers
+    /// Function to trigger a refetch
     $refetch: fn() ~> effect         // trigger refetch
     $invalidate: fn() ~> effect      // clear cache
   }
@@ -140,16 +138,15 @@
 /// GraphQL Fetch Primitive
 ///
 /// Specialized fetch for GraphQL queries.
-///
-/// @param url - GraphQL endpoint URL
-/// @param query - GraphQL query string
-/// @param variables - Query variables
-/// @param headers - Additional headers
 
 %primitive graphql(
+  /// GraphQL endpoint URL
   url: string,
+  /// GraphQL query string
   query: string,
+  /// Query variables
   variables: object = {},
+  /// Additional headers
   headers: object = {}
 ) {
   %emit js {
@@ -233,15 +230,11 @@
 ///
 /// Wraps an async action with reactive signals for pending/success/error states.
 /// The action is not executed immediately - call $run() to execute.
-///
-/// @param action - The async action to execute (Promise or async function)
-///
-/// @yields $run - Function to execute the action
-/// @yields $pending - True while action is executing
-/// @yields $ok - True if action succeeded (resets on next run)
-/// @yields $error - Error object if action failed
 
-%primitive async-action(action: expr) {
+%primitive async-action(
+  /// The async action to execute (Promise or async function)
+  action: expr
+) {
   %emit js {
     %yield false -> $pending;
     %yield false -> $ok;
@@ -267,9 +260,13 @@
   }
 
   %exports {
+    /// Function to execute the action
     $run: fn() ~> effect          // execute the action
+    /// True while action is executing
     $pending: bool    // action in progress
+    /// True if action succeeded (resets on next run)
     $ok: bool         // action succeeded
+    /// Error object if action failed
     $error: any?      // error if failed
   }
 }

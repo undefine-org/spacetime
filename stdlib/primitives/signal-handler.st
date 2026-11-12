@@ -11,20 +11,17 @@
 /// per-arm variant DISPATCH (matching the decoded variant to its arm + binding
 /// the carried payload) lands with the decode codegen (deferred FUP) — until
 /// then the handler exposes the raw reply to the scope and runs the final clause.
-///
-/// @param signal     - the consumed signal binding name (`$add` → key `add`)
-/// @param optimistic - the optimistic clause statements (text; may be empty)
-/// @param arms       - the receive arms (variant => effect stmts; may be empty)
-/// @param sum        - the response sum NAME (the `to <Sum>` through-line; optional)
-/// @param final      - the final-clause statements (text; may be empty)
-///
-/// @yields $handled - whether a reply has been handled at least once
 %primitive signal-handler(
   &el,
+  /// the consumed signal binding name (`$add` → key `add`)
   signal: binding,
+  /// the optimistic clause statements (text; may be empty)
   optimistic: any?,
+  /// the receive arms (variant => effect stmts; may be empty)
   arms: any?,
+  /// the response sum NAME (the `to <Sum>` through-line; optional)
   sum: ident?,
+  /// the final-clause statements (text; may be empty)
   final: any?
 ) {
   %emit js {
@@ -121,6 +118,7 @@
   }
 
   %exports {
+    /// whether a reply has been handled at least once
     $handled: bool
   }
 }

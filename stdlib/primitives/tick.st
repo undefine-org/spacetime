@@ -2,18 +2,11 @@
 ///
 /// Wraps requestAnimationFrame for smooth animation loops.
 /// Optionally throttles to a target FPS.
-///
-/// @param fps - Target frames per second (0 = native refresh rate)
-/// @param autoStart - Start immediately, default true
-///
-/// @yields $t - Current timestamp (ms since page load)
-/// @yields $dt - Delta time since last frame (ms)
-/// @yields $frame - Frame count since start
-/// @yields $elapsed - Total elapsed time (ms)
-/// @yields $running - Whether the loop is currently running
 
 %primitive tick(
+  /// Target frames per second (0 = native refresh rate)
   fps: number = 0,
+  /// Start immediately
   autoStart: bool = true
 ) {
   %emit js {
@@ -116,10 +109,15 @@
   }
 
   %exports {
+    /// Current timestamp (ms since page load)
     $t: number         // current timestamp (ms)
+    /// Delta time since last frame (ms)
     $dt: number        // delta time (ms)
+    /// Frame count since start
     $frame: number     // frame count
+    /// Total elapsed time (ms)
     $elapsed: number   // total elapsed time (ms)
+    /// Whether the loop is currently running
     $running: bool     // is loop running
     $fps: number       // actual frames per second
     $start: fn() ~> effect         // start the loop
@@ -132,15 +130,11 @@
 /// Interval Primitive
 ///
 /// Simple interval timer (like setInterval but reactive).
-///
-/// @param interval - Interval duration in ms
-/// @param autoStart - Start immediately, default true
-///
-/// @yields $count - Number of times interval has fired
-/// @yields $running - Whether interval is running
 
 %primitive interval(
+  /// Interval duration in ms
   interval: number,
+  /// Start immediately
   autoStart: bool = true
 ) {
   %emit js {
@@ -190,7 +184,9 @@
   }
 
   %exports {
+    /// Number of times interval has fired
     $count: number     // tick count
+    /// Whether interval is running
     $running: bool     // is running
     $start: fn() ~> effect         // start interval
     $stop: fn() ~> effect          // stop interval

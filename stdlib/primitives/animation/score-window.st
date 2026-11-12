@@ -23,33 +23,30 @@
 /// Because this is a pure map, seeking is just evaluating it at another input:
 /// the score is seekable BY CONSTRUCTION, so render determinism (pressure test
 /// C4) falls out instead of being enforced.
-///
-/// @param &el      - the scope node the signals resolve through
-/// @param name     - the published signal name for this clip's progress
-/// @param parent   - the score's own progress signal name (0..1)
-/// @param offset   - when this clip starts, in the score's domain
-/// @param span     - how long it lasts, in the score's domain (0 = to the end)
-/// @param total    - the score's full extent in its own domain (the scale)
-/// @param offset_rel - when 1, `offset` is a FRACTION of `total` and is scaled
-///                   by the resolved total AT SAMPLE TIME (BUG-270: only set
-///                   under a runtime-total driver such as `.playback`, whose
-///                   total is the media duration). Compile-time totals keep the
-///                   constant folding in score.rs and emit this as 0.
-/// @param span_rel - the `for` counterpart of `offset_rel`.
-/// @param rate_from - progress rate at the window's start (1 = normal speed)
-/// @param rate_to   - progress rate at its end; equal to rate_from = constant
-///
-/// @yields $<name> - this clip's progress (0-1)
 %primitive score-window(
+  /// the scope node the signals resolve through
   &el,
+  /// the published signal name for this clip's progress
   name: string = "",
+  /// the score's own progress signal name (0..1)
   parent: string = "",
+  /// when this clip starts, in the score's domain
   offset: number = 0,
+  /// how long it lasts, in the score's domain (0 = to the end)
   span: number = 0,
+  /// the score's full extent in its own domain (the scale)
   total: number = 1,
+  /// when 1, `offset` is a FRACTION of `total` and is scaled
+  /// by the resolved total AT SAMPLE TIME (BUG-270: only set
+  /// under a runtime-total driver such as `.playback`, whose
+  /// total is the media duration). Compile-time totals keep the
+  /// constant folding in score.rs and emit this as 0.
   offset_rel: number = 0,
+  /// the `for` counterpart of `offset_rel`.
   span_rel: number = 0,
+  /// progress rate at the window's start (1 = normal speed)
   rate_from: number = 1,
+  /// progress rate at its end; equal to rate_from = constant
   rate_to: number = 1,
   bind: string = ""
 ) {

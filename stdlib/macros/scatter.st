@@ -27,10 +27,6 @@
 /// stamp — `:shape { --x; --y; }` binds `--x`/`--y` to the sampled point; the
 /// two-property form is the common case (x, y). Positions are sampled at
 /// hydration from a rasterised copy of the source via a canvas coverage pass.
-///
-/// @param from    - element selector to sample (`&tag`, `.headline`)
-/// @param count   - number of particles / children to stamp (default 300)
-/// @param x/y     - property names for the sampled point (default --x/--y)
 
 %macro scatter {
 
@@ -49,7 +45,9 @@
   // VALUE (here the sample axis), which is exactly what a slot declares.
   %form {
     @scatter(
+      /// element selector to sample (`&tag`, `.headline`)
       from: $from:element,
+      /// number of particles / children to stamp
       count: $count:number = 300
     ) {
       (:shape { $shape:properties })

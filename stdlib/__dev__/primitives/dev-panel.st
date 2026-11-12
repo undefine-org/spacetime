@@ -23,9 +23,6 @@
 ///   - >= 768px: normal sidebar (320px, max 40vw)
 ///   - < 768px: auto-collapses to 32px strip
 ///   - < 480px: full-width overlay when expanded
-///
-/// @yields $activeTab - Currently selected dashboard tab name
-/// @yields $minimized - Whether sidebar is collapsed (compat with old API)
 
 %primitive dev-panel() {
   %emit js {
@@ -848,7 +845,9 @@
   }
 
   %exports {
+    /// Currently selected dashboard tab name
     $activeTab: string
+    /// Whether sidebar is collapsed (compat with old API)
     $minimized: bool
   }
 }

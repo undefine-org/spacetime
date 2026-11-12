@@ -1,19 +1,6 @@
 /// Media Query Macro
 ///
 /// Applies styles and behaviors based on media queries.
-///
-/// @example
-/// .sidebar {
-///   @media("min-width: 768px") {
-///     width: 300px
-///     position: fixed
-///   }
-///
-///   @media("max-width: 767px") {
-///     width: 100%
-///     position: relative
-///   }
-/// }
 
 %macro media-query {
 
@@ -27,25 +14,26 @@
   %binds {
     media($query, styles: $styles) -> { $matches }
   }
+
+  %example "@media-query" {
+    .sidebar {
+      @media("min-width: 768px") {
+        width: 300px
+        position: fixed
+      }
+
+      @media("max-width: 767px") {
+        width: 100%
+        position: relative
+      }
+    }
+  }
 }
 
 
 /// Dark Mode Macro
 ///
 /// Convenience for dark/light mode switching.
-///
-/// @example
-/// .card {
-///   @dark {
-///     background: #1a1a1a
-///     color: #ffffff
-///   }
-///
-///   @light {
-///     background: #ffffff
-///     color: #1a1a1a
-///   }
-/// }
 
 %macro dark-mode {
 
@@ -58,6 +46,18 @@
 
   %binds {
     media("(prefers-color-scheme: dark)", styles: $styles) -> { $matches }
+  }
+
+  %example "@dark-mode" {
+    .card {
+      background: #ffffff;
+      color: #1a1a1a;
+      @dark {
+        background: #1a1a1a;
+        color: #ffffff;
+      }
+    }
+    <div class="card">Hello</div>
   }
 }
 
@@ -80,15 +80,6 @@
 /// Reduced Motion Macro
 ///
 /// Respects user's reduced motion preference.
-///
-/// @example
-/// .animated-element {
-///   @reduced-motion {
-///     // Disable or simplify animations
-///     animation: none
-///     transition: none
-///   }
-/// }
 
 %macro reduced-motion {
 
@@ -102,24 +93,22 @@
   %binds {
     media("(prefers-reduced-motion: reduce)", styles: $styles) -> { $matches as $reduced }
   }
+
+  %example "@reduced-motion" {
+    .animated-element {
+      @reduced-motion {
+        // Disable or simplify animations
+        animation: none
+        transition: none
+      }
+    }
+  }
 }
 
 
 /// Container Query Macro (future)
 ///
 /// Responds to container size changes.
-///
-/// @example
-/// .card {
-///   @container(min-width: 400px) {
-///     display: flex
-///     flex-direction: row
-///   }
-///
-///   @container(max-width: 399px) {
-///     display: block
-///   }
-/// }
 
 %macro container-query {
 
@@ -133,27 +122,25 @@
   %binds {
     media($query, styles: $styles) -> { $matches }
   }
+
+  %example "@container-query" {
+    .card {
+      @container(min-width: 400px) {
+        display: flex
+        flex-direction: row
+      }
+
+      @container(max-width: 399px) {
+        display: block
+      }
+    }
+  }
 }
 
 
 /// Breakpoint Macro
 ///
 /// Named breakpoint shortcuts.
-///
-/// @example
-/// .layout {
-///   @breakpoint(sm) {
-///     grid-template-columns: 1fr
-///   }
-///
-///   @breakpoint(md) {
-///     grid-template-columns: 1fr 1fr
-///   }
-///
-///   @breakpoint(lg) {
-///     grid-template-columns: 1fr 1fr 1fr
-///   }
-/// }
 
 %macro breakpoint {
 
@@ -185,23 +172,28 @@
       media("(min-width: 1536px)", styles: $styles) -> { $matches }
     }
   }
+
+  %example "@breakpoint" {
+    .layout {
+      @breakpoint(sm) {
+        grid-template-columns: 1fr
+      }
+
+      @breakpoint(md) {
+        grid-template-columns: 1fr 1fr
+      }
+
+      @breakpoint(lg) {
+        grid-template-columns: 1fr 1fr 1fr
+      }
+    }
+  }
 }
 
 
 /// Orientation Macro
 ///
 /// Responds to device orientation.
-///
-/// @example
-/// .gallery {
-///   @portrait {
-///     grid-template-columns: 1fr
-///   }
-///
-///   @landscape {
-///     grid-template-columns: 1fr 1fr 1fr
-///   }
-/// }
 
 %macro portrait {
 
@@ -214,6 +206,18 @@
 
   %binds {
     media("(orientation: portrait)", styles: $styles) -> { $matches }
+  }
+
+  %example "@portrait" {
+    .gallery {
+      @portrait {
+        grid-template-columns: 1fr
+      }
+
+      @landscape {
+        grid-template-columns: 1fr 1fr 1fr
+      }
+    }
   }
 }
 
@@ -236,13 +240,6 @@
 /// Print Macro
 ///
 /// Print-specific styles.
-///
-/// @example
-/// .navigation {
-///   @print {
-///     display: none
-///   }
-/// }
 
 %macro print {
 
@@ -255,6 +252,14 @@
 
   %binds {
     media("print", styles: $styles) -> { $matches }
+  }
+
+  %example "@print" {
+    .navigation {
+      @print {
+        display: none
+      }
+    }
   }
 }
 

@@ -2,18 +2,11 @@
 ///
 /// Wraps the ResizeObserver API to detect element size changes.
 /// Useful for responsive layouts and size-dependent animations.
-///
-/// @param &el - The element to observe
-/// @param box - Box model to observe: "content-box", "border-box", "device-pixel-content-box"
-///
-/// @yields $width - Content width in pixels
-/// @yields $height - Content height in pixels
-/// @yields $rect - Full DOMRectReadOnly
-/// @yields $blockSize - Block size (height in horizontal writing mode)
-/// @yields $inlineSize - Inline size (width in horizontal writing mode)
 
 %primitive resize(
+  /// The element to observe
   &el,
+  /// Box model to observe: "content-box", "border-box", "device-pixel-content-box"
   box: ("content-box" | "border-box" | "device-pixel-content-box") = "content-box"
 ) {
   %emit js {
@@ -60,10 +53,15 @@
   }
 
   %exports {
+    /// Content width in pixels
     $width: number        // content width
+    /// Content height in pixels
     $height: number       // content height
+    /// Full DOMRectReadOnly
     $rect: DOMRectReadOnly
+    /// Block size (height in horizontal writing mode)
     $blockSize: number    // block size (height in LTR)
+    /// Inline size (width in horizontal writing mode)
     $inlineSize: number   // inline size (width in LTR)
     $aspectRatio: number  // width / height
   }

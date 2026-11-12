@@ -3,6 +3,10 @@
 /// A visual test reporter built with Spacetime, demonstrating
 /// the language's own capabilities for its test framework.
 ///
+/// Test Reporter Primitive
+///
+/// Provides reactive data for the test reporter UI.
+///
 /// @example usage
 /// <test-reporter>
 ///   <div slot="summary">
@@ -13,15 +17,6 @@
 ///   <ul slot="tests"></ul>
 ///   <ul slot="errors"></ul>
 /// </test-reporter>
-
-
-/// Test Reporter Primitive
-///
-/// Provides reactive data for the test reporter UI.
-///
-/// @yields $status - Current reporter status (idle, running, passed, failed)
-/// @yields $progress - Test progress (0-1)
-/// @yields $summary - Summary text
 
 %primitive test_reporter_data(&container) {
   %emit js {
@@ -69,8 +64,11 @@
   }
 
   %exports {
+    /// Current reporter status (idle, running, passed, failed)
     $status: string
+    /// Test progress (0-1)
     $progress: number
+    /// Summary text
     $summary: string
   }
 }

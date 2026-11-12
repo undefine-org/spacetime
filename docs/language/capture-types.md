@@ -92,6 +92,73 @@ Two consequences worth knowing:
 
 ---
 
+## Typed numbers
+
+A param that takes a number with a *meaning* (a fraction, a distance, an
+angle) is typed with a scalar row whose `%capture` is `number` (PLAN-156):
+
+```st
+%scalar_type unit {
+  %capture "number"   // matches exactly as `number` does
+  %schema "number"
+  %zero "0"
+  %widget "number"
+  %range 0 1          // what an editor offers; `_` leaves an end open
+  %step 0.01          // one notch of a scrub or a slider
+  %loses_to "number"  // inference still calls a bare `0.3` a number
+  %docs "A number from 0 to 1."
+}
+```
+
+`penumbra: $penumbra:unit = 0.3` then matches like a `number`, and the
+captured value is a number, so primitives see no change. Tools that read the
+param (reflect, the studio's inspector) get the row too: a slider from 0 to 1,
+notches of 0.01. `%unit "m"` names what the number counts. The stdlib ships
+`unit`, `intensity`, `meters` and `degrees` in `stdlib/scalars/types.st`.
+
+Any type name works this way: a param typed with a row's name matches as the
+row's `%capture` does.
+
+## Keyword sets
+
+A `%capture_type` that is only a choice of words is a *keyword set*, the named
+twin of an inline union `("a" | "b")`. A `///` above a word documents it
+(PLAN-156):
+
+```st
+/// How a light shines.
+%capture_type light_kind {
+    /// light from everywhere at once, without shadows
+    "ambient"
+    /// parallel rays from far away, like the sun
+  | "directional"
+  | "point"
+  | "spot"
+}
+```
+
+`type: $type:light_kind = directional` takes `type: point` or `type: "point"`,
+which are one value. A word outside the set is an error (E0946) that names it.
+It used to be dropped silently. Use a keyword set for a closed set the source
+declares. A set that comes from outside the source (a model's clips, say) is
+a *fact*, written as a quoted string:
+
+## Facts
+
+```st
+%scalar_type model_clip {
+  %capture "string"
+  …
+  %facts src gltf-clips   // the sibling param `src` names the file; `gltf-clips` reads it
+}
+```
+
+`@gltf &robot (src: "models/robot.glb", clip: "Walkng")` is refused (E0971)
+with the clips `robot.glb` holds, plus a « did you mean `Walking` ». The studio
+offers those clips as the field's choices. The file is the only truth:
+three.js reads the same file when the page runs. Readers are file-format
+readers in `src/facts.rs` (`gltf-clips` reads a `.glb` or `.gltf`).
+
 ## Custom Capture Types (`%capture_type`)
 
 For structured patterns that combine primitives, you can define capture types in Spacetime itself:

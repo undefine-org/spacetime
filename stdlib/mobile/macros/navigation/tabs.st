@@ -2,22 +2,6 @@
 ///
 /// Creates a tab bar navigation component with configurable positioning.
 /// Supports top and bottom positioning for iOS and Android patterns.
-///
-/// @example basic bottom tabs
-/// .tab-bar {
-///   @tabs {
-///     background: #fff
-///     border-top: 1px solid #eee
-///   }
-/// }
-///
-/// @example top tabs (Android-style)
-/// .tab-bar {
-///   @tabs(position: "top") {
-///     background: #6200ee
-///     color: #fff
-///   }
-/// }
 
 %macro tabs {
 
@@ -68,6 +52,24 @@
   %when $isBottom {
     %applies {
       $styles
+    }
+  }
+
+  %example "basic bottom tabs" {
+    .tab-bar {
+      @tabs {
+        background: #fff
+        border-top: 1px solid #eee
+      }
+    }
+  }
+
+  %example "top tabs (Android-style)" {
+    .tab-bar {
+      @tabs(position: "top") {
+        background: #6200ee
+        color: #fff
+      }
     }
   }
 }

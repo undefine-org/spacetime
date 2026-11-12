@@ -182,6 +182,10 @@
   %order 700
   %form { @score $driver:driver_expr $as:score_as_name? { $entries:score_entry+ } }
   %binds { score(&self, driver: $driver, entries: $entries, as: $as) }
+  // PLAN-156: tools find timelines by what they are, not by this macro's name
+  %registers timeline($as) {
+    driver: $driver
+  }
 }
 
 

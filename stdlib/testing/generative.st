@@ -15,11 +15,6 @@
 /// The body uses `@assert (cond) "msg"`; the generated value is bound to the
 /// declared name. On failure the property shrinks + reports the seed.
 ///
-/// @example
-///   @property "min is bounded" forall (n: int 0..100) {
-///     @assert (Math.min(n, 10) <= 10) "min <= 10";
-///   }
-///
 ///   @fuzz "parser survives junk" inputs (s: string ~ unicode) {
 ///     @assert (ST.parseColor(s) === null || typeof ST.parseColor(s) === 'object') "no crash";
 ///   }
@@ -49,6 +44,12 @@
         return __ok;
       });
     }, { generative: 'property' });
+  }
+
+  %example "@property" {
+    @property "min is bounded" forall (n: int 0..100) {
+      @assert (Math.min(n, 10) <= 10) "min <= 10";
+    }
   }
 }
 

@@ -2,21 +2,6 @@
 ///
 /// Provides push/pop navigation between screens.
 /// Manages a stack of views with animated transitions.
-///
-/// @example basic
-/// .app-container {
-///   @stack {
-///     transform: translateX($offsetX)
-///   }
-/// }
-///
-/// @example with custom transition
-/// .screen {
-///   @stack(direction: "horizontal") {
-///     transform: translateX($offsetX)
-///     opacity: $visible ? 1 : 0
-///   }
-/// }
 
 %macro stack {
 
@@ -65,6 +50,23 @@
   %when $active {
     %applies {
       $styles
+    }
+  }
+
+  %example "basic" {
+    .app-container {
+      @stack {
+        transform: translateX($offsetX)
+      }
+    }
+  }
+
+  %example "with custom transition" {
+    .screen {
+      @stack(direction: "horizontal") {
+        transform: translateX($offsetX)
+        opacity: $visible ? 1 : 0
+      }
     }
   }
 }

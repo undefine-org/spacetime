@@ -7,12 +7,6 @@
 ///
 /// Handles graceful degradation when debug runtime or data registry
 /// haven't loaded yet — keeps polling until they appear.
-///
-/// @yields $timelines - Array of timeline objects
-/// @yields $errors - Array of error objects
-/// @yields $timelineCount - Number of active timelines
-/// @yields $errorCount - Number of errors
-/// @yields $dataSources - Array of data source info objects
 
 %primitive dev-inspect() {
   %emit js {
@@ -156,10 +150,15 @@
   }
 
   %exports {
+    /// Array of timeline objects
     $timelines: array
+    /// Array of error objects
     $errors: array
+    /// Number of active timelines
     $timelineCount: number
+    /// Number of errors
     $errorCount: number
+    /// Array of data source info objects
     $dataSources: array
   }
 }

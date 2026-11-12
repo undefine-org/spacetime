@@ -9,21 +9,15 @@
 /// (`__stDataSource`); each usage emits a single config call. The per-usage
 /// code declares no locals — the BUG-274 habitat (a branch-scoped const read
 /// from the catch) cannot re-form.
-///
-/// @param name - Unique identifier for this data source
-/// @param src - URL to fetch from, or "localStorage:key", or "inline"
-/// @param default - Default value if source is empty
-/// @param refresh - Auto-refresh interval in ms (0 = no refresh)
-///
-/// @yields $data - The loaded data
-/// @yields $loading - Whether data is currently loading
-/// @yields $error - Error message if load failed
-/// @yields $reload - Function to manually reload data
 
 %primitive data-source(
+  /// Unique identifier for this data source
   name: ident,
+  /// URL to fetch from, or "localStorage:key", or "inline"
   src: string,
+  /// if source is empty
   default: any?,
+  /// Auto-refresh interval in ms (0 = no refresh)
   refresh: number = 0
 ) %uses data-url, data-store, data-channel {
   %emit prelude-js {
@@ -189,9 +183,13 @@
   }
 
   %exports {
+    /// The loaded data
     $data: any
+    /// Whether data is currently loading
     $loading: bool
+    /// Error message if load failed
     $error: string?
+    /// Function to manually reload data
     $reload: fn() ~> effect
   }
 }
@@ -200,13 +198,6 @@
 /// Persist Data Primitive
 ///
 /// Saves data to localStorage with optional debouncing.
-///
-/// @param key - localStorage key
-/// @param data - Data to persist (reactive)
-/// @param debounce - Debounce delay in ms
-///
-/// @yields $save - Function to manually trigger save
-/// @yields $clear - Function to clear stored data
 
 %primitive persist(
   key: string,
@@ -246,7 +237,9 @@
   }
 
   %exports {
+    /// Function to manually trigger save
     $save: fn() ~> effect
+    /// Function to clear stored data
     $clear: fn() ~> effect
   }
 }
@@ -255,16 +248,13 @@
 /// Computed Value Primitive
 ///
 /// Creates a derived/computed value from a data source.
-///
-/// @param source - Source data to compute from
-/// @param compute - Computation expression
-/// @param deps - Additional dependencies to watch
-///
-/// @yields $value - The computed result
 
 %primitive computed(
+  /// Source data to compute from
   source: any,
+  /// Computation expression
   compute: expr,
+  /// Additional dependencies to watch
   deps: array = []
 ) {
   %emit js {
@@ -293,6 +283,7 @@
   }
 
   %exports {
+    /// The computed result
     $value: any
   }
 }

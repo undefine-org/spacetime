@@ -7,13 +7,13 @@
 /// - __stBinding: true
 /// - get(): returns current value
 /// - set(v): sets new value
-///
-/// @param name - The variable name to bind
-/// @param source - The source expression (evaluated)
-///
-/// @yields $value - The bound value
 
-%primitive reactive-binding(name: ident, source: expr) {
+%primitive reactive-binding(
+  /// The variable name to bind
+  name: ident,
+  /// The source expression (evaluated)
+  source: expr
+) {
   %emit js {
     (() => {
       const _source = %source;
@@ -70,6 +70,7 @@
   }
 
   %exports {
+    /// The bound value
     $value: any
   }
 }

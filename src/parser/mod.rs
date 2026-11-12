@@ -4779,6 +4779,31 @@ fn populate_macro_from_clauses(
                 // %form { pattern }
                 mac.form = convert_cst_directive_to_form_clause(&directive);
             }
+            "shorthand" => {
+                // %shorthand pos { posX posY posZ } (PLAN-156)
+                let name = directive.inline_tokens_text().unwrap_or_default().trim().to_string();
+                let longhands: Vec<String> = directive
+                    .body()
+                    .map(|b| extract_body_content(&b))
+                    .unwrap_or_default()
+                    .split(|c: char| c.is_whitespace() || c == ',')
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+                    .collect();
+                if !name.is_empty() && !longhands.is_empty() {
+                    mac.shorthands.push((name, longhands));
+                }
+            }
+            "example" => {
+                // %example "title" { source } (PLAN-156): a use of the macro that
+                // `spacetime check` compiles and the studio and LSP offer.
+                let title = directive
+                    .inline_tokens_text()
+                    .map(|t| t.trim().trim_matches('"').to_string())
+                    .unwrap_or_default();
+                let source = directive.body().map(|b| dedent(&extract_body_content(&b))).unwrap_or_default();
+                mac.examples.push(meta_ast::MacroExample { title, source });
+            }
             "binds" => {
                 // %binds { primitive(...) -> { outputs } ... }
                 // A single %binds block can contain multiple bind declarations
@@ -5013,6 +5038,62 @@ fn populate_macro_from_clauses(
             }
         }
     }
+    expand_bind_spreads(mac);
+}
+
+/// `...` in a `%binds` call forwards every param the macro's `%form` names
+/// (PLAN-156): `three-light(&self, name: $named, ...)` is
+/// `three-light(&self, name: $named, type: $type, color: $color, …)`. It is
+/// written out here, once, so everything downstream (resolution, the
+/// consumption lint, hot binds) sees plain named arguments. A param the call
+/// already names keeps its own value.
+fn expand_bind_spreads(mac: &mut meta_ast::MacroDefAst) {
+    use meta_ast::{BindArg, BindValue};
+    let forwarded: Vec<(String, String)> = mac
+        .form
+        .iter()
+        .flat_map(|f| f.params.iter().chain(f.body_params.iter()))
+        .filter(|p| !p.name.is_empty())
+        .filter_map(|p| p.capture().map(|c| (p.name.clone(), c.var_name.clone())))
+        .collect();
+    let expand = |decl: &mut meta_ast::BindDecl| {
+        let is_spread = |a: &BindArg| matches!(a, BindArg::Positional(BindValue::Ident(s)) if s == "...");
+        let Some(at) = decl.args.iter().position(is_spread) else { return };
+        let named: std::collections::HashSet<String> = decl
+            .args
+            .iter()
+            .filter_map(|a| match a {
+                BindArg::Named { name, .. } => Some(name.clone()),
+                _ => None,
+            })
+            .collect();
+        let spread: Vec<BindArg> = forwarded
+            .iter()
+            .filter(|(name, _)| !named.contains(name))
+            .map(|(name, var)| BindArg::Named { name: name.clone(), value: BindValue::Variable(var.clone()) })
+            .collect();
+        decl.args.splice(at..=at, spread);
+    };
+    fn walk(items: &mut [meta_ast::MacroBodyItem], expand: &dyn Fn(&mut meta_ast::BindDecl)) {
+        for item in items {
+            match item {
+                meta_ast::MacroBodyItem::Binds(decls) => decls.iter_mut().for_each(expand),
+                meta_ast::MacroBodyItem::If(c) => {
+                    walk(&mut c.then_body, expand);
+                    for elif in c.elif_clauses.iter_mut() {
+                        walk(&mut elif.body, expand);
+                    }
+                    if let Some(e) = c.else_body.as_mut() {
+                        walk(e, expand);
+                    }
+                }
+                meta_ast::MacroBodyItem::When(c) => walk(&mut c.body, expand),
+                _ => {}
+            }
+        }
+    }
+    mac.binds.iter_mut().for_each(expand);
+    walk(&mut mac.body, &expand);
 }
 /// Parse a syntax migration definition (PLAN-079 capsule):
 /// `%migration <id> { %date YYYY-MM-DD; %docs "…";
@@ -5136,6 +5217,16 @@ fn parse_migration_def(
                     }
                 }
                 mig.rewrites.push(rule);
+            }
+            Some("scope") => {
+                // %scope meta (PLAN-156)
+                mig.scope = directive.inline_tokens_text().map(|t| t.trim().to_string());
+            }
+            Some("transform") => {
+                // %transform <name> (PLAN-156)
+                if let Some(name) = directive.inline_tokens_text() {
+                    mig.transforms.push(name.chars().filter(|c| !c.is_whitespace()).collect());
+                }
             }
             Some("hint") => {
                 // %hint for @directive "text" — parse from the directive's
@@ -5320,6 +5411,22 @@ fn parse_scalar_type_def(
                 seen_widget = true;
             }
             Some("docs") => def.docs = unquote(inline),
+            // PLAN-156: what an editor needs to edit the value well
+            Some("range") => {
+                let ends: Vec<Option<f64>> =
+                    // the lexer may space-join a sign (`- 1`)
+                    unquote(inline).replace("- ", "-").split_whitespace().map(|s| s.parse::<f64>().ok()).collect();
+                def.range = (ends.first().copied().flatten(), ends.get(1).copied().flatten());
+            }
+            Some("step") => def.step = unquote(inline).trim().parse().ok(),
+            Some("unit") => def.unit = unquote(inline),
+            Some("facts") => {
+                let parts: Vec<String> = unquote(inline).split_whitespace().map(|s| s.trim_matches('"').to_string()).collect();
+                // `gltf - clips` may arrive space-split; the sibling is the first word
+                if let Some((sibling, reader)) = parts.split_first() {
+                    def.facts = Some((sibling.clone(), reader.concat()));
+                }
+            }
             // FEAT-109 W5. Which scalar wins when this one ALSO matches a value.
             // Space-separated, most-preferred first; a name here is a claim that
             // this scalar is a FALLBACK for that one.
@@ -5534,13 +5641,15 @@ fn parse_capture_type_def(
     span: SourceSpan,
 ) -> Option<meta_ast::MetaDef> {
     let body = meta.body()?;
-    let body_content = extract_body_content(&body);
+    // a `///` above a choice documents it; comments aren't part of the pattern
+    let (body_content, docs) = form_comments(&extract_body_content(&body));
     let pattern = parse_capture_pattern(&body_content)?;
 
     Some(meta_ast::MetaDef::CaptureType(
         meta_ast::CaptureTypeDefAst {
             name,
             pattern,
+            docs: docs.into_iter().collect(),
             span,
             source_file: None,
         },
@@ -6045,7 +6154,8 @@ fn convert_cst_meta_params(meta: &crate::syntax::cst::MetaDef) -> Vec<meta_ast::
     };
 
     for arg in arg_list.args() {
-        let arg_text = arg.text().to_string();
+        // a `///` above a param documents it; comments aren't part of the param
+        let (arg_text, _) = form_comments(&arg.text().to_string());
         let arg_text = arg_text.trim();
 
         // Parse different param types
@@ -7023,7 +7133,8 @@ fn parse_state_properties_from_text(text: &str) -> Vec<meta_ast::MetaStateProper
 /// Parse exports from a body
 fn parse_exports(body: &crate::syntax::cst::Body, _source: &str) -> Vec<meta_ast::ExportDecl> {
     let mut exports = Vec::new();
-    let body_text = extract_body_content(body);
+    // a `///` above an export documents it; its words are not declarations
+    let (body_text, _) = form_comments(&extract_body_content(body));
 
     // Parse $name: type patterns
     // Simple regex-like parsing: find $word then : then type
@@ -7354,10 +7465,112 @@ fn convert_cst_directive_to_form_clause(
     // Get the body and extract its text content
     let body = directive.body()?;
     let body_text = extract_body_content(&body);
+    // PLAN-156: comments are not part of a form's pattern. A `///` line above a
+    // param documents that param; every comment is blanked out (to spaces, so
+    // the text keeps its length) before the pattern is read.
+    let (body_text, docs) = form_comments(&body_text);
     let body_text = body_text.trim();
 
     // Parse the form pattern text
-    parse_form_pattern(body_text, body.syntax().text_range())
+    let mut form = parse_form_pattern(body_text, body.syntax().text_range())?;
+    if !docs.is_empty() {
+        for p in form.params.iter_mut().chain(form.body_params.iter_mut()) {
+            let key = if p.name.is_empty() {
+                p.capture().map(|c| format!("${}", c.var_name)).unwrap_or_default()
+            } else {
+                p.name.clone()
+            };
+            if let Some(doc) = docs.get(&key) {
+                p.doc = Some(doc.clone());
+            }
+        }
+    }
+    Some(form)
+}
+
+/// Remove the indentation every non-blank line of `text` shares.
+fn dedent(text: &str) -> String {
+    let indent = text
+        .lines()
+        .skip(1) // the first line follows `{` and was trimmed
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| l.len() - l.trim_start().len())
+        .min()
+        .unwrap_or(0);
+    let mut out: Vec<&str> = Vec::new();
+    for (i, line) in text.lines().enumerate() {
+        out.push(if i == 0 || line.len() < indent { line.trim_start() } else { &line[indent..] });
+    }
+    out.join("\n")
+}
+
+/// Blank out the comments of a `%form` body and collect its `///` docs.
+///
+/// Returns the text with every `//…` comment (outside a string) replaced by
+/// spaces, and the doc of each param: the `///` lines written directly above
+/// it, keyed by the param's name (`type` for `type: $type:…`) or, for a
+/// positional capture, by the capture (`$named`). A plain `//` comment
+/// documents nothing; a doc followed by no param is dropped.
+pub(crate) fn form_comments(text: &str) -> (String, std::collections::HashMap<String, String>) {
+    let bytes = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let mut docs = std::collections::HashMap::new();
+    let mut pending: Vec<String> = Vec::new();
+    let mut quote: Option<u8> = None;
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if let Some(q) = quote {
+            if c == b'\\' && i + 1 < bytes.len() {
+                out.push_str(&text[i..i + 2]);
+                i += 2;
+                continue;
+            }
+            if c == q {
+                quote = None;
+            }
+            out.push(c as char);
+            i += 1;
+            continue;
+        }
+        if c == b'"' {
+            quote = Some(c);
+            out.push('"');
+            i += 1;
+            continue;
+        }
+        if c == b'/' && bytes.get(i + 1) == Some(&b'/') {
+            let end = text[i..].find('\n').map(|n| i + n).unwrap_or(text.len());
+            let comment = &text[i..end];
+            if let Some(doc) = comment.strip_prefix("///") {
+                pending.push(doc.strip_prefix(' ').unwrap_or(doc).trim_end().to_string());
+            } else {
+                pending.clear();
+            }
+            out.extend(std::iter::repeat_n(' ', comment.chars().count()));
+            i = end;
+            continue;
+        }
+        if !pending.is_empty() && !c.is_ascii_whitespace() {
+            // the param this doc sits above: `name:` or a positional `$capture`;
+            // in a keyword set, the word (`| "point"`)
+            let rest = text[i..].trim_start_matches('|').trim_start().trim_start_matches('"');
+            let key: String = if let Some(cap) = rest.strip_prefix('$') {
+                format!("${}", cap.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect::<String>())
+            } else {
+                rest.chars().take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '-').collect()
+            };
+            if !key.is_empty() && key != "$" {
+                docs.insert(key, pending.join("\n"));
+            }
+            pending.clear();
+        }
+        // non-ASCII: copy the whole char
+        let ch = text[i..].chars().next().unwrap_or(' ');
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    (out, docs)
 }
 
 /// Parse a form pattern string into a FormClause
@@ -7631,6 +7844,7 @@ impl<'a> PseudoParser<'a> {
                 modifier,
             }],
             default: None,
+            doc: None,
         })
     }
 
@@ -7656,6 +7870,7 @@ impl<'a> PseudoParser<'a> {
                 modifier: crate::parser::meta_ast::CaptureModifier::Optional,
             }],
             default: None,
+            doc: None,
         })
     }
 
@@ -7699,6 +7914,7 @@ impl<'a> PseudoParser<'a> {
                         name: String::new(),
                         elements: vec![meta_ast::FormInlineElement::Capture(capture, None)],
                         default: None,
+                        doc: None,
                     });
                 }
             }
@@ -8198,6 +8414,7 @@ fn parse_form_params(params_str: &str) -> Vec<meta_ast::FormParam> {
                     name,
                     elements,
                     default: default_value,
+                    doc: None,
                 });
             }
         }
@@ -8386,6 +8603,12 @@ fn parse_param_default(text: &str) -> meta_ast::ParamDefault {
 }
 
 /// Split string on delimiter, respecting nested parens/brackets/braces and quoted strings
+/// [`split_respecting_nesting`], for the meta-syntax migrator (PLAN-156): one
+/// way to split a param list, the parser's.
+pub fn split_respecting_nesting_pub(s: &str, delim: char) -> Vec<&str> {
+    split_respecting_nesting(s, delim)
+}
+
 fn split_respecting_nesting(s: &str, delim: char) -> Vec<&str> {
     let mut result = Vec::new();
     let mut depth: usize = 0;

@@ -11,22 +11,21 @@
 /// Animates a CSS property based on a driver signal.
 /// Chooses CSS or JS implementation based on easing and value types.
 ///
-/// @param &el - Element to animate
-/// @param driver - Signal driving the animation (0-1 progress)
-/// @param property - CSS property name to animate
-/// @param from - Starting value
-/// @param to - Ending value
-/// @param easing - Easing function name (default: "linear")
-///
 /// Linear easing with numeric values uses pure CSS calc().
 /// Non-linear easing or color values use JavaScript.
 
 %primitive animate(
+  /// Element to animate
   &el,
+  /// Signal driving the animation (0-1 progress)
   driver: signal,
+  /// CSS property name to animate
   property: string,
+  /// Starting value
   from: any,
+  /// Ending value
   to: any,
+  /// Easing function name
   easing: string = "linear"
 ) {
   %if $easing == "linear" {
@@ -52,21 +51,20 @@
 ///
 /// Animates transform properties with proper composition.
 ///
-/// @param &el - Element to animate
-/// @param driver - Signal driving the animation
-/// @param transform - Transform function (translateX, rotate, scale, etc.)
-/// @param from - Starting value
-/// @param to - Ending value
-/// @param easing - Easing function name
-///
 /// Note: Multiple transforms on the same element are composed.
 
 %primitive animate-transform(
+  /// Element to animate
   &el,
+  /// Signal driving the animation
   driver: signal,
+  /// Transform function (translateX, rotate, scale, etc.)
   transform: string,
+  /// Starting value
   from: any,
+  /// Ending value
   to: any,
+  /// Easing function name
   easing: string = "linear"
 ) {
   %if $easing == "linear" {
@@ -92,20 +90,19 @@
 ///
 /// Animates color values with proper color space interpolation.
 /// Always uses JavaScript due to color interpolation complexity.
-///
-/// @param &el - Element to animate
-/// @param driver - Signal driving the animation
-/// @param property - CSS property (color, background-color, etc.)
-/// @param from - Starting color
-/// @param to - Ending color
-/// @param colorSpace - Color space for interpolation (default: "oklch")
 
 %primitive animate-color(
+  /// Element to animate
   &el,
+  /// Signal driving the animation
   driver: signal,
+  /// CSS property (color, background-color, etc.)
   property: string,
+  /// Starting color
   from: string,
+  /// Ending color
   to: string,
+  /// Color space for interpolation
   colorSpace: string = "oklch"
 ) {
   %emit js {
@@ -138,13 +135,12 @@
 /// Exposes a signal as a CSS custom property for use in calc() expressions.
 /// This is the bridge between JS signals and CSS animations.
 ///
-/// @param &el - Element to bind
-/// @param signal - Signal name to expose
-///
 /// Creates: --st-{signal} on the element
 
 %primitive bind-css-var(
+  /// Element to bind
   &el,
+  /// Signal name to expose
   signal: string
 ) {
   %emit js {

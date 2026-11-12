@@ -3,11 +3,6 @@
 /// Mobile-optimized type scale with font sizes, line heights, and weights.
 /// Uses CSS custom properties for easy theming and consistency.
 ///
-/// @example
-/// .container {
-///   @mobile-typography
-/// }
-///
 /// .heading {
 ///   font-size: var(--st-text-2xl);
 ///   font-weight: var(--st-font-bold);
@@ -49,6 +44,12 @@
       --st-font-bold: 700
     }
   }
+
+  %example "@mobile-typography" {
+    .container {
+      @mobile-typography
+    }
+  }
 }
 
 
@@ -56,18 +57,12 @@
 ///
 /// Applies typography settings for headings.
 /// Provides common heading sizes with appropriate weights and line heights.
-///
-/// @param size - Heading size level (1-6)
-///
-/// @example
-/// .page-title {
-///   @mobile-heading(size: 1)
-/// }
 
 %macro mobile-heading {
 
   %form {
     @mobile-heading(
+      /// Heading size level (1-6)
       size: $size:number = 1
     )
   }
@@ -118,19 +113,18 @@
       line-height: var(--st-leading-normal, 1.5)
     }
   }
+
+  %example "@mobile-heading" {
+    .page-title {
+      @mobile-heading(size: 1)
+    }
+  }
 }
 
 
 /// Body Text Typography Macro
 ///
 /// Applies typography settings for body text.
-///
-/// @param size - Text size (xs, sm, base, lg)
-///
-/// @example
-/// .paragraph {
-///   @mobile-text(size: "base")
-/// }
 ///
 /// .caption {
 ///   @mobile-text(size: "xs")
@@ -140,6 +134,7 @@
 
   %form {
     @mobile-text(
+      /// Text size (xs, sm, base, lg)
       size: $size:("xs" | "sm" | "base" | "lg") = "base"
     )
   }
@@ -174,6 +169,12 @@
       font-size: var(--st-text-lg, 18px)
       font-weight: var(--st-font-normal, 400)
       line-height: var(--st-leading-relaxed, 1.75)
+    }
+  }
+
+  %example "@mobile-text" {
+    .paragraph {
+      @mobile-text(size: "base")
     }
   }
 }

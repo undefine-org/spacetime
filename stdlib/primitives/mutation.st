@@ -2,25 +2,19 @@
 ///
 /// Wraps the MutationObserver API to detect DOM changes.
 /// Useful for reacting to dynamic content changes.
-///
-/// @param &el - The element to observe
-/// @param children - Observe child list changes, default true
-/// @param attributes - Observe attribute changes, default false
-/// @param characterData - Observe text content changes, default false
-/// @param subtree - Observe entire subtree, default false
-/// @param attributeFilter - List of attributes to observe (when attributes=true)
-///
-/// @yields $added - Nodes added in this mutation
-/// @yields $removed - Nodes removed in this mutation
-/// @yields $changed - Attribute/characterData changes
-/// @yields $mutations - Raw mutation records
 
 %primitive mutation(
+  /// The element to observe
   &el,
+  /// Observe child list changes
   children: bool = true,
+  /// Observe attribute changes
   attributes: bool = false,
+  /// Observe text content changes
   characterData: bool = false,
+  /// Observe entire subtree
   subtree: bool = false,
+  /// List of attributes to observe (when attributes=true)
   attributeFilter: string[]? = none,
   attributeOldValue: bool = false,
   characterDataOldValue: bool = false
@@ -85,9 +79,13 @@
   }
 
   %exports {
+    /// Nodes added in this mutation
     $added: Node[]                // newly added nodes
+    /// Nodes removed in this mutation
     $removed: Node[]              // removed nodes
+    /// Attribute/characterData changes
     $changed: MutationChange[]    // attribute/text changes
+    /// Raw mutation records
     $mutations: MutationRecord[]  // raw mutation records
     $hasMutations: bool           // true when any mutation occurred
   }

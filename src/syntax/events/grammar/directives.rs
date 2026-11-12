@@ -1235,6 +1235,7 @@ mod tests {
                         None,
                     )],
                     default: None,
+                    doc: None,
                 }],
                 post_arg_inline: vec![],
                 body_capture: None,

@@ -3,11 +3,9 @@
 /// Automatically pauses a video when it scrolls out of the viewport
 /// and resumes playback when it becomes visible again.
 /// Uses IntersectionObserver for efficient detection.
-///
-/// @param &el - The video element to control
-/// @param threshold - Intersection threshold (0-1), default 0
 
 %primitive video-visibility(
+  /// The video element to control
   &el,
   threshold: number = 0
 ) {

@@ -3,18 +3,15 @@
 /// Creates a reactive computed value with a full JavaScript function body.
 /// Unlike @computed which only supports array operations, @compute allows
 /// multi-statement custom logic for complex computations.
-///
-/// @param name - Name for the computed value (becomes SpacetimeLocal property)
-/// @param deps - Parameter list of dependencies (e.g., $cart, $config)
-/// @param body - JavaScript function body (multi-statement)
-/// @param returnType - Optional return type annotation
-///
-/// @yields $value - The computed result
 
 %primitive compute-fn(
+  /// Name for the computed value (becomes SpacetimeLocal property)
   name: ident,
+  /// Parameter list of dependencies (e.g., $cart, $config)
   deps: param_list,
+  /// JavaScript function body (multi-statement)
   body: expr,
+  /// Optional return type annotation
   returnType: typeref?
 ) {
   %emit js {
@@ -74,6 +71,7 @@
   }
 
   %exports {
+    /// The computed result
     $value: any
   }
 }

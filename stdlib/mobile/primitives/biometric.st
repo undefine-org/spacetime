@@ -2,16 +2,13 @@
 ///
 /// Provides biometric authentication (Face ID, Touch ID, fingerprint) on native platforms.
 /// In browser mode, returns an error since biometric auth requires native runtime.
-///
-/// @param &el - Element to bind authentication state to
-/// @param message - Prompt message to display (default: "Authenticate")
-///
-/// @yields $authenticated - True if authentication succeeded
-/// @yields $pending - True while authentication is in progress
-/// @yields $error - Error message if authentication failed
-/// @yields $trigger - Event name to dispatch to trigger authentication
 
-%primitive biometric(&el, message: string = "Authenticate") {
+%primitive biometric(
+  /// Element to bind authentication state to
+  &el,
+  /// Prompt message to display
+  message: string = "Authenticate"
+) {
   %emit js {
     // Import the SpacetimeMobile API
     const mobile = globalThis.__SpacetimeMobile || {
@@ -65,9 +62,13 @@
   }
 
   %exports {
+    /// True if authentication succeeded
     $authenticated: bool
+    /// True while authentication is in progress
     $pending: bool
+    /// Error message if authentication failed
     $error: string?
+    /// Event name to dispatch to trigger authentication
     $trigger: string
   }
 }
@@ -77,11 +78,6 @@
 ///
 /// Convenience macro for biometric authentication with state-machine integration.
 /// Binds the biometric primitive and exposes signals for use in other macros.
-///
-/// @example
-/// .auth-form {
-///   @biometric("Confirm your identity")
-/// }
 
 %macro biometric-auth {
 
@@ -91,5 +87,11 @@
 
   %binds {
     biometric(&self, message: $message) -> { $authenticated, $pending, $error, $trigger }
+  }
+
+  %example "@biometric-auth" {
+    .auth-form {
+      @biometric("Confirm your identity")
+    }
   }
 }

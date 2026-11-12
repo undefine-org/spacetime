@@ -2,11 +2,6 @@
 ///
 /// Reactive binding that computes cart total from $cart array.
 /// Updates automatically when cart changes via local:cart:updated events.
-///
-/// @example
-/// .jal-cart__total-price {
-///     @cart-total;
-/// }
 
 %primitive cart-total-binding(&el) {
   %emit js {
@@ -54,5 +49,11 @@
   
   %binds {
     cart-total-binding(&self)
+  }
+
+  %example "@cart-total" {
+    .jal-cart__total-price {
+        @cart-total;
+    }
   }
 }

@@ -15,23 +15,17 @@
 /// Drives animation progress based on scroll position.
 /// Progress 0->1 as element scrolls through viewport.
 /// Supports timeline registration for @after chaining.
-///
-/// @param &el - Element to track (trigger element)
-/// @param name - Optional timeline name for chaining (used by @after)
-/// @param scope - Reference frame: "cover" (default), "entry", "exit", "contain"
-/// @param start - Start percentage within scope (0-1)
-/// @param end - End percentage within scope (0-1)
-/// @param scrub - Continuous update vs single trigger
-///
-/// @yields $progress - Current scroll progress (0-1)
-/// @yields $destroy - Cleanup function
 
 %primitive scroll-driver(
+  /// Element to track (trigger element)
   &el,
+  /// Optional timeline name for chaining (used by @after)
   name: string = "",
+  /// Reference frame: "cover", "entry", "exit", "contain"
   scope: string = "cover",
   start: number = 0,
   end: number = 1,
+  /// Continuous update vs single trigger
   scrub: bool = true
 ) %uses scroll-registry {
 
@@ -132,7 +126,9 @@
   }
 
   %exports {
+    /// Current scroll progress (0-1)
     $progress: number
+    /// Cleanup function
     $destroy: fn() ~> effect
   }
 }
@@ -144,32 +140,22 @@
 /// Supports iteration count and alternate direction.
 /// Supports timeline registration for @after chaining.
 ///
-/// @param &el - Element to animate
-/// @param name - Optional timeline name for chaining (used by @after)
-/// @param duration - Animation duration in ms
-/// @param delay - Delay before starting in ms
-/// @param iterations - Number of times to play (0 = infinite)
-/// @param alternate - Reverse direction on alternate iterations
-/// @param autoplay - Start automatically
-///
-/// @yields $progress - Current progress (0-1)
-/// @yields $play - Start playback
-/// @yields $pause - Pause playback (holds the position; play resumes from it)
-/// @yields $seek - Move the playhead to a position in ms (shown at once)
-/// @yields $reset - Reset to start
-/// @yields $destroy - Cleanup function
-///
 /// The timeline also registers as `ST._transports[name]` ({play, pause, seek,
 /// loop(in, out), position, playing, duration}) and publishes
 /// `<name>__playing`, so a tool (a studio, a scrub bar) can hold it.
 
 %primitive time-driver(
+  /// Element to animate
   &el,
+  /// Optional timeline name for chaining (used by @after)
   name: string = "time",
   duration: number = 1000,
   delay: number = 0,
+  /// Number of times to play (0 = infinite)
   iterations: number = 1,
+  /// Reverse direction on alternate iterations
   alternate: bool = false,
+  /// Start automatically
   autoplay: bool = true
 ) {
   %emit js {
@@ -314,11 +300,17 @@
   }
 
   %exports {
+    /// Current progress (0-1)
     $progress: number
+    /// Start playback
     $play: fn() ~> effect
+    /// Pause playback (holds the position; play resumes from it)
     $pause: fn() ~> effect
+    /// Move the playhead to a position in ms (shown at once)
     $seek: fn(number) ~> effect
+    /// Reset to start
     $reset: fn() ~> effect
+    /// Cleanup function
     $destroy: fn() ~> effect
   }
 }
@@ -327,22 +319,16 @@
 /// Loop Driver Primitive
 ///
 /// Continuously loops animation (ping-pong or restart).
-///
-/// @param duration - One cycle duration in ms
-/// @param mode - "pingpong" or "restart"
-/// @param phase - Initial phase offset (0-1), e.g., 0.25 starts at 25%
-/// @param autoplay - Start automatically
-///
-/// @yields $progress - Current progress (0-1)
-/// @yields $start - Start loop
-/// @yields $stop - Stop loop
-/// @yields $destroy - Cleanup function
 
 %primitive loop-driver(
   name: string = "loop",
+  /// One cycle duration in ms
   duration: number = 1000,
+  /// "pingpong" or "restart"
   mode: string = "pingpong",
+  /// Initial phase offset (0-1), e.g., 0.25 starts at 25%
   phase: number = 0,
+  /// Start automatically
   autoplay: bool = true
 ) {
   %emit js {
@@ -420,9 +406,13 @@
   }
 
   %exports {
+    /// Current progress (0-1)
     $progress: number
+    /// Start loop
     $start: fn() ~> effect
+    /// Stop loop
     $stop: fn() ~> effect
+    /// Cleanup function
     $destroy: fn() ~> effect
   }
 }
@@ -431,15 +421,9 @@
 /// Mouse Driver Primitive
 ///
 /// Drives animation based on mouse position relative to element.
-///
-/// @param &el - Element to track mouse within
-/// @param axis - "x", "y", or "both"
-/// @param invert - Invert progress direction
-///
-/// @yields $progress - Current progress (0-1) or { x, y } for both
-/// @yields $destroy - Cleanup function
 
 %primitive mouse-driver(
+  /// Element to track mouse within
   &el,
   name: string = "mouse",
   axis: string = "both",
@@ -495,7 +479,9 @@
   }
 
   %exports {
+    /// Current progress (0-1) or { x, y } for both
     $progress: any
+    /// Cleanup function
     $destroy: fn() ~> effect
   }
 }
@@ -505,20 +491,15 @@
 ///
 /// Triggers animation playback on element events.
 /// Supports forward/reverse on enter/leave.
-///
-/// @param &el - Element to listen on
-/// @param trigger - Event name ("hover", "click", or custom)
-/// @param duration - Animation duration in ms
-/// @param reverse - Reverse on leave/toggle
-///
-/// @yields $progress - Current progress (0-1)
-/// @yields $destroy - Cleanup function
 
 %primitive event-driver(
+  /// Element to listen on
   &el,
   name: string = "event",
+  /// Event name ("hover", "click", or custom)
   trigger: string = "hover",
   duration: number = 300,
+  /// Reverse on leave/toggle
   reverse: bool = true,
   untrigger: string = "",
   toggle: bool = false,
@@ -648,7 +629,9 @@
   }
 
   %exports {
+    /// Current progress (0-1)
     $progress: number
+    /// Cleanup function
     $destroy: fn() ~> effect
   }
 }
@@ -671,17 +654,14 @@
 /// through the SAME registry the `@on` rail reads (member → `trigger:`), so a
 /// step fires on the same DOM event a `@on &.<event>` would listen for — no
 /// second event mechanism.
-///
-/// @param &el       - the element the deck is scoped to (advance events bind here)
-/// @param name      - the published progress signal name
-/// @param count     - number of steps in the deck
-/// @param advance   - DOM event name(s) that advance one step (default "click")
-///
-/// @yields $<name>  - the deck's progress (0..1)
 %primitive steps-driver(
+  /// the element the deck is scoped to (advance events bind here)
   &el,
+  /// the published progress signal name
   name: string = "steps",
+  /// number of steps in the deck
   count: number = 1,
+  /// DOM event name(s) that advance one step
   advance: string = "click"
 ) {
   %emit js {
@@ -751,15 +731,12 @@
 /// The media element itself may be that same node (a `&.playback` score ON the
 /// media element) or a named subject (`&voice.playback`), passed as `media` —
 /// resolved via ST.ref, the same rail `@on &voice.playback` would use.
-///
-/// @param &el      - the scope node the signals resolve through
-/// @param media    - optional named media element ref (`&voice`); when empty, &el IS the media element
-/// @param name     - the published progress signal name
-///
-/// @yields $<name>  - the media playhead's progress (0..1)
 %primitive media-driver(
+  /// the scope node the signals resolve through
   &el,
+  /// optional named media element ref (`&voice`); when empty, &el IS the media element
   media: string = "",
+  /// the published progress signal name
   name: string = "media",
   rate: number = 1
 ) {
@@ -856,13 +833,11 @@
 /// change, publishes the value it is leaving behind. At mount the previous
 /// value IS the initial value (the arms primed-guard convention), so guards
 /// and arms never see an undefined prev.
-///
-/// @param &el - Scope node the signal resolves through
-/// @param signal - Signal name to track
-/// @yields $prev - The previous value, republished on every change
 
 %primitive prev-signal(
+  /// Scope node the signal resolves through
   &el,
+  /// Signal name to track
   signal: string
 ) {
   %emit js {
@@ -874,6 +849,7 @@
       if (!el || typeof ST === 'undefined' || !ST.watch || !ST.resolve) return;
 
       let prev = ST.resolve(el, sig);
+      /// The previous value, republished on every change
       %yield prev -> $prev;
 
       const unwatch = ST.watch(el, sig, (next) => {
@@ -1033,24 +1009,20 @@
 /// inlined copy) — one vendoring rail for text layout across the whole
 /// stdlib, per the AGENTS elegance bar (no parallel implementations of the
 /// same stdlib dependency).
-///
-/// @param &el - Element to observe for text changes
-/// @param duration - Animation duration per character (content changes) / per
-///                    reflow move, in ms
-/// @param charStagger - Stagger delay between characters (content changes only)
-/// @param staggerFrom - Direction: "start", "end", "center", or "random"
-/// @param enterKeyframes - Keyframes for entering characters (content change)
-/// @param exitKeyframes - Keyframes for exiting characters (content change)
-///
-/// @yields $changing - True while animation is in progress
-/// @yields $destroy - Cleanup function
 
 %primitive text-change-driver(
+  /// Element to observe for text changes
   &el,
+  /// Animation duration per character (content changes) / per
+  /// reflow move, in ms
   duration: number = 300,
+  /// Stagger delay between characters (content changes only)
   charStagger: number = 30,
+  /// Direction: "start", "end", "center", or "random"
   staggerFrom: string = "start",
+  /// Keyframes for entering characters (content change)
   enterKeyframes: any?,
+  /// Keyframes for exiting characters (content change)
   exitKeyframes: any?
 ) {
   %emit js {
@@ -1890,7 +1862,9 @@
   }
 
   %exports {
+    /// True while animation is in progress
     $changing: bool
+    /// Cleanup function
     $destroy: fn() ~> effect
   }
 }
@@ -1898,26 +1872,6 @@
 ///
 /// Waits for a predecessor timeline to complete, then plays animation.
 /// Part of the Timeline Registration + Event System (Approach 2).
-///
-/// @param &el - Element to animate
-/// @param predecessor - Name of the timeline to wait for
-/// @param name - Name for this timeline (for chaining)
-/// @param duration - Animation duration in ms
-/// @param delay - Delay after predecessor completes before starting (ms)
-///
-/// @yields $progress - Current progress (0-1)
-/// @yields $destroy - Cleanup function
-///
-/// @example
-/// // In .st file:
-/// .hero {
-///   @load intro(600ms) { opacity: 0 -> 1 }
-/// }
-/// .subtitle {
-///   @after intro subtitle-fade(delay: 200ms, duration: 300ms) {
-///     opacity: 0 -> 1
-///   }
-/// }
 
 // after-driver DELETED (PLAN-126 W5): `@after` is retired — sequencing is
 // `@on $x.done { true => --form; }` (arms on the done facet of a published
@@ -1925,8 +1879,11 @@
 // deleted in the same wave.
 
 %primitive load-driver(
+  /// Element to animate
   &el,
+  /// Name for this timeline (for chaining)
   name: string = "",
+  /// Animation duration in ms
   duration: number = 1000,
   delay: number = 0,
   threshold: number = 0.1,
@@ -2017,8 +1974,10 @@
   }
 
   %exports {
+    /// Current progress (0-1)
     $progress: number
     $visible: bool        // true once `threshold` of the element is on screen
+    /// Cleanup function
     $destroy: fn() ~> effect
   }
 }
@@ -2029,21 +1988,20 @@
 /// Handles event-triggered mutations and @emit actions.
 /// This is the primitive backing for @on click { mutations } syntax.
 ///
-/// @param &el - Element to attach handler to
-/// @param event - Event type to listen for (click, submit, etc)
-/// @param actions - Array of action objects from on_body capture type
-/// @param target - Optional CSS selector for event delegation
-///
 /// @example
 /// %binds {
 ///   on-mutation-handler(&self, event: "click", actions: $body)
 /// }
 
 %primitive on-mutation-handler(
+  /// Element to attach handler to
   &el,
+  /// Event type to listen for (click, submit, etc)
   event: ident,
+  /// Optional CSS selector for event delegation
   target: selector?,
   key: string?,
+  /// Array of action objects from on_body capture type
   actions: expr
 ) {
   %emit js {

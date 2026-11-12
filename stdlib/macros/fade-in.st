@@ -8,50 +8,31 @@
 /// the element's innerHTML into per-unit spans, which would destroy the markup
 /// of a container.
 ///
-/// @param duration  - How long the fade runs (default 600ms)
-/// @param threshold - Visibility ratio that triggers it (default 0.1)
-/// @param distance  - How far the element travels while fading (default 20px;
-///                    `0` for a pure fade with no travel)
-/// @param easing    - A CSS keyword, or a curve you declared with
-///                    `@form easing --name { ... }` (default ease-out)
-/// @param delay     - Wait before starting (default 0)
-/// @param from      - Which side it travels FROM: bottom | top | left | right |
-///                    none (default bottom, i.e. it rises into place)
-/// @param once      - Fade only the first time it becomes visible (default true)
-///
 /// Honours `prefers-reduced-motion`: the element ARRIVES at its final state
 /// without animating, rather than not arriving at all.
 ///
-/// @example
-/// .hero {
-///   @fade-in(duration: 800ms, threshold: 0.2)
-/// }
-///
-/// @example a declared easing curve, and travel from the left
-/// @form easing --friendly { spring(300, 22, 1) }
-/// .panel {
-///   @fade-in(duration: 500ms, easing: --friendly, from: left, distance: 40px)
-/// }
-///
-/// @example custom keyframes — the body REPLACES the built-in fade, so describe
-/// the whole animation (an author writing keyframes is not decorating ours)
-/// .card {
-///   @fade-in(duration: 600ms) {
-///     opacity: 0 -> 1;
-///     scale: 0.95 -> 1;
-///   }
-/// }
+/// Custom keyframes: the body REPLACES the built-in fade, so describe the whole
+/// animation (an author writing keyframes is not decorating ours).
 
 %macro fade-in {
 
   %form {
     @fade-in(
+      /// How long the fade runs
       duration: $duration:time = 600ms,
+      /// Visibility ratio that triggers it
       threshold: $threshold:number = 0.1,
+      /// How far the element travels while fading
       distance: $distance:length = 20px,
+      /// A CSS keyword, or a curve you declared with
+      /// `@form easing --name { ... }`
       easing: $easing:easing = ease-out,
+      /// Wait before starting
       delay: $delay:time = 0,
+      /// Which side it travels FROM: bottom | top | left | right |
+      /// none
       from: $from:ident = bottom,
+      /// Fade only the first time it becomes visible
       once: $once:bool = true
     ) {
       $customKeyframes:keyframes?
@@ -68,17 +49,30 @@
   // real WAAPI animation. `fade-in-engine` is that primitive for the
   // whole-element case.
   %binds {
-    fade-in-engine(
-      &self,
-      duration: $duration,
-      delay: $delay,
-      distance: $distance,
-      easing: $easing,
-      threshold: $threshold,
-      direction: $from,
-      once: $once,
-      keyframes: $customKeyframes
-    )
+    fade-in-engine(&self, direction: $from, keyframes: $customKeyframes, ...)
+  }
+
+  %example "@fade-in" {
+    .hero {
+      @fade-in(duration: 800ms, threshold: 0.2)
+    }
+  }
+
+  %example "a declared easing curve, and travel from the left" {
+    @form easing --friendly { spring(300, 22, 1) }
+    .panel {
+      @fade-in(duration: 500ms, easing: --friendly, from: left, distance: 40px)
+    }
+  }
+
+  %example "custom keyframes" {
+    .card {
+      @fade-in(duration: 600ms) {
+        opacity: 0 -> 1;
+        scale: 0.95 -> 1;
+      }
+    }
+    <div class="card">Hello</div>
   }
 }
 
@@ -139,13 +133,6 @@
 /// Staggered Fade In Macro
 ///
 /// Fades in children with staggered timing.
-///
-/// @example
-/// .grid {
-///   @fade-in-stagger(stagger: 100ms) {
-///     > .item
-///   }
-/// }
 
 %macro fade-in-stagger {
 
@@ -153,7 +140,9 @@
     @fade-in-stagger(
       $duration:time = 600ms,
       stagger: $_stagger:stagger_value = 50ms,
+      /// Visibility ratio that triggers the fade
       threshold: $threshold:number = 0.1,
+      /// How far the element travels while fading (CSS length)
       distance: $distance:length = 20px
     ) {
       $_childSelector:selector
@@ -176,5 +165,17 @@
       distance: $distance,
       threshold: $threshold
     )
+  }
+
+  %example "@fade-in-stagger" {
+    .grid {
+      @fade-in-stagger(stagger: 100ms) {
+        > .item
+      }
+    }
+    <div class="grid">
+      <div class="item">One</div>
+      <div class="item">Two</div>
+    </div>
   }
 }

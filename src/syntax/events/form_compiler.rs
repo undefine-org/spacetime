@@ -81,6 +81,8 @@ pub struct CompiledForm {
     /// back to every default. Both look identical to the parser — "extra tokens
     /// before the arg list" — and only the declaration tells them apart.
     pub drops: Vec<String>,
+    /// The macro's `%shorthand`s (PLAN-156): applied to each match.
+    pub shorthands: Vec<(String, Vec<String>)>,
 }
 
 impl CompiledForm {
@@ -515,6 +517,8 @@ impl CompiledForm {
             }
         }
 
+        apply_shorthands(&self.shorthands, &mut captures, &mut capture_spans, source);
+
         Ok((FormMatch {
             macro_name: self.creates_name.clone(),
             namespace_qualifier,
@@ -944,9 +948,7 @@ impl CompiledForm {
             // type words like `array` that historically defaulted to Expr), fall back to the
             // Expr extractor so those forms keep their prior lenient behavior.
             CaptureType::Custom(name) => extractors
-                .custom
-                .get(name)
-                .map(|b| b.as_ref())
+                .named(name)
                 .or_else(|| extractors.get(&CaptureType::Expr)),
             _ => extractors.get(capture_type),
         };
@@ -1157,12 +1159,13 @@ impl CompiledForm {
                             },
                         });
                     }
-                    let span = cursor.span_for(consumed);
+                    let span = tight_span(cursor.span_for(consumed), &value, source);
                     captures.insert(var_name.to_string(), value);
+                    // the parts first: the capture's own (tight) span is the last word
+                    record_nested_spans(var_name, &tree, capture_spans);
                     if let Some(s) = span {
                         capture_spans.insert(var_name.to_string(), s);
                     }
-                    record_nested_spans(var_name, &tree, capture_spans);
                     cursor.advance(consumed);
                     return Ok(());
                 }
@@ -1184,7 +1187,7 @@ impl CompiledForm {
                         },
                         got_kind: remaining
                             .first()
-                            .map(|t| format!("{:?}", t.kind))
+                            .map(|t| format!("{:?} `{}`", t.kind, t.text(source)))
                             .unwrap_or_else(|| "EOF".to_string()),
                     },
                 })
@@ -1194,12 +1197,12 @@ impl CompiledForm {
                 let remaining = &cursor.remaining()[..bound(cursor.remaining())];
                 if let Some(ext) = extractor {
                     if let Some((value, consumed, tree)) = ext.extract_spanned(remaining, source) {
-                        let span = cursor.span_for(consumed);
+                        let span = tight_span(cursor.span_for(consumed), &value, source);
                         captures.insert(var_name.to_string(), value);
+                        record_nested_spans(var_name, &tree, capture_spans);
                         if let Some(s) = span {
                             capture_spans.insert(var_name.to_string(), s);
                         }
-                        record_nested_spans(var_name, &tree, capture_spans);
                         cursor.advance(consumed);
                     } else if let Some(def) = default {
                         captures.insert(var_name.to_string(), CapturedValue::from_default(def));
@@ -1499,7 +1502,22 @@ impl CompiledForm {
             }
         }
 
+        // A value the author WROTE must be a value of the param's type (PLAN-156):
+        // `direction: sideways` against `("horizontal" | "vertical" | "both")`
+        // used to fail its optional capture quietly, and the param vanished.
+        // Once `name:` is in the call, its single capture is required.
+        let written = !param.name.is_empty() && param.elements.len() == 1;
         for (i, element) in param.elements.iter().enumerate() {
+            let required;
+            let element = match element {
+                FormInlineElement::Capture(cap, _) if written && cap.modifier == CaptureModifier::Optional => {
+                    let mut cap = cap.clone();
+                    cap.modifier = CaptureModifier::Required;
+                    required = FormInlineElement::Capture(cap, None);
+                    &required
+                }
+                other => other,
+            };
             self.match_inline_element(
                 element,
                 cursor,
@@ -4935,6 +4953,7 @@ impl CompiledRegistry {
                         .as_ref()
                         .is_some_and(|r| r.name == "form"),
                     drops: registered.macro_def.drops.clone(),
+                    shorthands: registered.macro_def.shorthands.clone(),
                 };
                 forms.entry(prefix).or_default().push(compiled);
             }
@@ -4997,6 +5016,7 @@ mod tests {
                 None,
             )],
             default: Some(ParamDefault::Number(default)),
+            doc: None,
         }
     }
 
@@ -5077,6 +5097,7 @@ mod tests {
             scopes: vec![],
             registers_form: false,
             drops: Vec::new(),
+            shorthands: Vec::new(),
         };
 
         let mut captures = HashMap::new();
@@ -5178,6 +5199,7 @@ mod tests {
             scopes: vec![],
             registers_form: false,
             drops: Vec::new(),
+            shorthands: Vec::new(),
         };
 
         let mut captures = HashMap::new();
@@ -5248,6 +5270,7 @@ mod tests {
             scopes: vec![],
             registers_form: false,
             drops: Vec::new(),
+            shorthands: Vec::new(),
         };
         let mut captures = HashMap::new();
         let mut capture_spans = HashMap::new();
@@ -5490,6 +5513,7 @@ mod tests {
             scopes: vec![],
             registers_form: false,
             drops: Vec::new(),
+            shorthands: Vec::new(),
         };
 
         let mut ctx = NodeContext::new(SyntaxKind::DIRECTIVE);
@@ -5546,6 +5570,7 @@ mod tests {
                     None,
                 )],
                 default: None,
+                doc: None,
             }],
             post_arg_inline: vec![],
             body_capture: None,
@@ -5562,6 +5587,7 @@ mod tests {
             scopes: vec![],
             registers_form: false,
             drops: Vec::new(),
+            shorthands: Vec::new(),
         };
 
         let mut ctx = NodeContext::new(SyntaxKind::DIRECTIVE);
@@ -5602,6 +5628,7 @@ mod tests {
             scopes: vec![],
             registers_form: false,
             drops: Vec::new(),
+            shorthands: Vec::new(),
         };
 
         let mut ctx = NodeContext::new(SyntaxKind::DIRECTIVE);
@@ -5647,6 +5674,7 @@ mod tests {
                     None,
                 )],
                 default: None,
+                doc: None,
             }],
             post_arg_inline: vec![],
             body_capture: None,
@@ -5663,6 +5691,7 @@ mod tests {
             scopes: vec![],
             registers_form: false,
             drops: Vec::new(),
+            shorthands: Vec::new(),
         };
 
         // Context: ELEMENT_REF driver + ARG_LIST child
@@ -5813,6 +5842,7 @@ mod tests {
             scopes: vec![],
             registers_form: false,
             drops: Vec::new(),
+            shorthands: Vec::new(),
         };
 
         // Node context with & + "card" but NO body child
@@ -5870,6 +5900,7 @@ mod tests {
             scopes: vec![],
             registers_form: false,
             drops: Vec::new(),
+            shorthands: Vec::new(),
         };
 
         // Body child spans the "{ ... }" portion of source (offset 5..end)
@@ -5946,6 +5977,7 @@ mod tests {
             scopes: vec![],
             registers_form: false,
             drops: Vec::new(),
+            shorthands: Vec::new(),
         };
         let arg_list_child = ChildNode {
             kind: SyntaxKind::ARG_LIST,
@@ -6070,6 +6102,7 @@ mod tests {
                         None,
                     )],
                     default: None,
+                    doc: None,
                 },
                 FormParam {
                     name: "center".to_string(),
@@ -6086,6 +6119,7 @@ mod tests {
                         None,
                     )],
                     default: None,
+                    doc: None,
                 },
             ],
             post_arg_inline: vec![],
@@ -6103,6 +6137,7 @@ mod tests {
             scopes: vec![],
             registers_form: false,
             drops: Vec::new(),
+            shorthands: Vec::new(),
         };
 
         let mut ctx = NodeContext::new(SyntaxKind::DIRECTIVE);
@@ -6178,6 +6213,7 @@ mod tests {
                     None,
                 )],
                 default: None,
+                doc: None,
             }],
             post_arg_inline: vec![],
             body_capture: None,
@@ -6194,6 +6230,7 @@ mod tests {
             scopes: vec![],
             registers_form: false,
             drops: Vec::new(),
+            shorthands: Vec::new(),
         };
 
         let mut ctx = NodeContext::new(SyntaxKind::DIRECTIVE);
@@ -7552,6 +7589,80 @@ fn skip_leading_trivia(source: &str, mut start: usize) -> usize {
 
 /// A capture's nested parts keep their spans under dotted paths
 /// (`entries.3.at`, `body.0.values`) beside the capture's own (PLAN-155 F2).
+/// Turn each written shorthand (`pos: 0 3 -7`) into its longhands (PLAN-156).
+///
+/// One value sets every longhand (`scale: 0.42`). As in CSS, written order
+/// decides: a longhand written AFTER the shorthand keeps its own value; one
+/// written before it is overridden. Each longhand set this way gets the span of
+/// its own word inside the shorthand, so an edit to `posX` rewrites that word
+/// and the author's spelling stays. The shorthand's own span is kept (tools
+/// group by it); its capture goes, so it is never mistaken for a param.
+fn apply_shorthands(
+    shorthands: &[(String, Vec<String>)],
+    captures: &mut HashMap<String, CapturedValue>,
+    capture_spans: &mut HashMap<String, SourceSpan>,
+    source: &str,
+) {
+    for (short, longs) in shorthands {
+        let span = capture_spans.get(short).copied();
+        captures.remove(short);
+        let Some(span) = span else { continue };
+        let (a, b) = (span.start as usize, span.end as usize);
+        let Some(text) = source.get(a..b) else { continue };
+        // the words and where each one is
+        let mut words: Vec<(usize, &str)> = Vec::new();
+        let mut at = 0;
+        for w in text.split_whitespace() {
+            let off = text[at..].find(w).map(|o| at + o).unwrap_or(at);
+            words.push((a + off, w));
+            at = off + w.len();
+        }
+        if words.is_empty() || (words.len() != 1 && words.len() != longs.len()) {
+            continue;
+        }
+        for (i, long) in longs.iter().enumerate() {
+            if capture_spans.get(long).is_some_and(|s| s.start > span.start) {
+                continue; // written after the shorthand: it wins
+            }
+            let (off, w) = if words.len() == 1 { words[0] } else { words[i] };
+            let value = match w.parse::<f64>() {
+                Ok(n) => CapturedValue::Number(n),
+                Err(_) => CapturedValue::Expr(w.to_string()),
+            };
+            captures.insert(long.clone(), value);
+            capture_spans.insert(long.clone(), SourceSpan::new(off, off + w.len()));
+        }
+    }
+}
+
+/// A capture's span is its words. When a scalar capture's text is exactly what
+/// the source reads at the span's start, the span ends there: an extractor that
+/// consumed the directive's remaining head tokens (`@light &sun (…)`'s `$named`)
+/// used to hand an editor the whole call as `&sun`'s address (PLAN-156).
+fn tight_span(span: Option<SourceSpan>, value: &CapturedValue, source: &str) -> Option<SourceSpan> {
+    let s = span?;
+    // a one-part production (`stage_light_name { $name:element }`) is its part
+    fn scalar(v: &CapturedValue) -> Option<&str> {
+        match v {
+            CapturedValue::Element(t)
+            | CapturedValue::Ident(t)
+            | CapturedValue::Binding(t)
+            | CapturedValue::String(t)
+            | CapturedValue::Expr(t) => Some(t.as_str()),
+            CapturedValue::Named(f) if f.len() == 1 => f.values().next().and_then(scalar),
+            _ => None,
+        }
+    }
+    let Some(text) = scalar(value) else { return Some(s) };
+    let (a, b) = (s.start as usize, s.end as usize);
+    match source.get(a..b) {
+        Some(words) if !text.is_empty() && words.len() > text.len() && words.starts_with(text) => {
+            Some(SourceSpan::new(a, a + text.len()))
+        }
+        _ => Some(s),
+    }
+}
+
 fn record_nested_spans(
     var_name: &str,
     tree: &super::extractors::SpanTree,

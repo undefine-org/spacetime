@@ -2,31 +2,14 @@
 ///
 /// Mobile-optimized input with keyboard handling and touch-friendly styles.
 /// Tracks focus, filled, and error states for styling.
-///
-/// @param type - Input type: text, password, email, tel, number, search, url
-/// @param clearable - Show clear button when input has value (default: false)
-///
-/// @example basic email input
-/// .email-input {
-///   @mobile-input(type: "email", clearable: true) {
-///     focused { border-color: var(--primary); }
-///     filled { background: var(--surface-variant); }
-///   }
-/// }
-///
-/// @example password input
-/// .password-field {
-///   @mobile-input(type: "password") {
-///     focused { border-color: blue; }
-///     error { border-color: red; }
-///   }
-/// }
 
 %macro mobile-input {
 
   %form {
     @mobile-input(
+      /// Input type: text, password, email, tel, number, search, url
       type: $type:("text" | "password" | "email" | "tel" | "number" | "search" | "url") = "text",
+      /// Show clear button when input has value
       clearable: $clearable:bool = false
     ) {
       $styles:properties
@@ -74,6 +57,24 @@
       $styles
     }
   }
+
+  %example "basic email input" {
+    .email-input {
+      @mobile-input(type: "email", clearable: true) {
+        focused { border-color: var(--primary); }
+        filled { background: var(--surface-variant); }
+      }
+    }
+  }
+
+  %example "password input" {
+    .password-field {
+      @mobile-input(type: "password") {
+        focused { border-color: blue; }
+        error { border-color: red; }
+      }
+    }
+  }
 }
 
 
@@ -81,13 +82,6 @@
 ///
 /// Extended mobile input with label and error message support.
 /// Wraps the mobile-input with additional UI states.
-///
-/// @example with validation
-/// .email-field {
-///   @mobile-input-field(type: "email", required: true) {
-///     error { border-color: var(--error-color); }
-///   }
-/// }
 
 %macro mobile-input-field {
 
@@ -128,17 +122,20 @@
       $styles
     }
   }
+
+  %example "with validation" {
+    .email-field {
+      @mobile-input-field(type: "email", required: true) {
+        error { border-color: var(--error-color); }
+      }
+    }
+  }
 }
 
 
 /// Mobile Search Input Macro
 ///
 /// Search-optimized input with search icon and clear functionality.
-///
-/// @example
-/// .search-bar {
-///   @mobile-search(placeholder: "Search...")
-/// }
 
 %macro mobile-search {
 
@@ -172,6 +169,12 @@
       background-color: rgba(0, 0, 0, 0.08)
     }
   }
+
+  %example "@mobile-search" {
+    .search-bar {
+      @mobile-search(placeholder: "Search...")
+    }
+  }
 }
 
 
@@ -179,11 +182,6 @@
 ///
 /// Multi-line text input optimized for mobile.
 /// Auto-grows with content.
-///
-/// @example
-/// .message-input {
-///   @mobile-textarea(maxRows: 5)
-/// }
 
 %macro mobile-textarea {
 
@@ -213,6 +211,12 @@
     focused when $focused {
       outline: none
       box-shadow: 0 0 0 2px rgba(0, 122, 255, 0.3)
+    }
+  }
+
+  %example "@mobile-textarea" {
+    .message-input {
+      @mobile-textarea(maxRows: 5)
     }
   }
 }

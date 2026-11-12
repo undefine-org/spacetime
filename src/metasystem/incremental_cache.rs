@@ -558,6 +558,7 @@ mod tests {
         let mut registry = MetaRegistry::new();
 
         let ct_a = CaptureTypeDefAst {
+            docs: Default::default(),
             name: "type_a".to_string(),
             pattern: CapturePatternAst::Capture {
                 var_name: "x".to_string(),
@@ -568,6 +569,7 @@ mod tests {
             source_file: Some("file_a.st".to_string()),
         };
         let ct_b = CaptureTypeDefAst {
+            docs: Default::default(),
             name: "type_b".to_string(),
             pattern: CapturePatternAst::Capture {
                 var_name: "x".to_string(),
@@ -704,6 +706,7 @@ mod tests {
             ..Default::default()
         };
         let ct = CaptureTypeDefAst {
+            docs: Default::default(),
             name: "mixed_type".to_string(),
             pattern: CapturePatternAst::Capture {
                 var_name: "x".to_string(),

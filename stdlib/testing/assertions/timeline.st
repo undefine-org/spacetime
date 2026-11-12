@@ -17,9 +17,6 @@
 ///
 /// First-party capability: Direct access to animation progress (0-1).
 /// External frameworks can only guess via computed styles.
-///
-/// @example
-/// @then .element should have_timeline_progress "fadeIn" >= 0.5
 
 %macro then-timeline-progress-gte {
 
@@ -45,6 +42,10 @@
       throw new Error(`Expected timeline "${__timelineName}" progress >= ${__threshold}, got ${__progress.toFixed(3)}`);
     }
     }
+  }
+
+  %example "@then-timeline-progress-gte" {
+    @then .element should have_timeline_progress "fadeIn" >= 0.5
   }
 }
 
@@ -108,9 +109,6 @@
 // =============================================================================
 
 /// Assert timeline has completed
-///
-/// @example
-/// @then .hero should have_timeline_complete "intro"
 
 %macro then-timeline-complete {
 
@@ -136,12 +134,13 @@
     }
     }
   }
+
+  %example "@then-timeline-complete" {
+    @then .hero should have_timeline_complete "intro"
+  }
 }
 
 /// Assert timeline has not completed
-///
-/// @example
-/// @then .modal should have_timeline_running "expand"
 
 %macro then-timeline-running {
 
@@ -167,6 +166,10 @@
     }
     }
   }
+
+  %example "@then-timeline-running" {
+    @then .modal should have_timeline_running "expand"
+  }
 }
 
 // =============================================================================
@@ -177,10 +180,6 @@
 ///
 /// First-party capability: Subscribe to timeline completion events.
 /// External frameworks must poll or use arbitrary timeouts.
-///
-/// @example
-/// @wait_for_timeline "intro" timeout 2s
-/// @then .subtitle should be_visible
 
 %macro wait-for-timeline {
 
@@ -235,6 +234,17 @@
     });
     }
   }
+
+  %example "@wait-for-timeline" {
+    @test "the intro plays to the end" {
+      @mount { <h1 class="hero">Hello</h1> }
+      @given .hero {
+        @on &.load(name: intro, duration: 600ms) { opacity: 0 -> 1; }
+      }
+      @wait_for_timeline "intro" timeout 2s
+      @then .hero should be_visible
+    }
+  }
 }
 
 // =============================================================================
@@ -242,9 +252,6 @@
 // =============================================================================
 
 /// Assert a timeline exists/is registered
-///
-/// @example
-/// @then .element should have_timeline "fadeIn"
 
 %macro then-has-timeline {
 
@@ -265,6 +272,10 @@
     }
     }
   }
+
+  %example "@then-has-timeline" {
+    @then .element should have_timeline "fadeIn"
+  }
 }
 
 // =============================================================================
@@ -272,9 +283,6 @@
 // =============================================================================
 
 /// Assert an element has animation applied
-///
-/// @example
-/// @then .box should be_animating
 
 %macro then-animating {
 
@@ -302,12 +310,13 @@
     }
     }
   }
+
+  %example "@then-animating" {
+    @then .box should be_animating
+  }
 }
 
 /// Assert an element is not animating
-///
-/// @example
-/// @then .box should not_be_animating
 
 %macro then-not-animating {
 
@@ -328,6 +337,10 @@
     }
     }
   }
+
+  %example "@then-not-animating" {
+    @then .box should not_be_animating
+  }
 }
 
 // =============================================================================
@@ -338,11 +351,6 @@
 ///
 /// First-party capability: Know whether animation is scroll-driven,
 /// time-driven, event-driven, etc.
-///
-/// @example
-/// @then .parallax should have_driver_type "scroll"
-/// @then .intro should have_driver_type "time"
-/// @then .hover-effect should have_driver_type "event"
 
 %macro then-driver-type {
 
@@ -372,6 +380,16 @@
     }
     }
   }
+
+  %example "@then-driver-type" {
+    @test "the parallax is scroll-driven" {
+      @mount { <div class="parallax">Layer</div> }
+      @given .parallax {
+        @on &.scroll(name: drift) { translate-y: 0 -> -80px; }
+      }
+      @then .parallax should have_driver_type "scroll" for "drift"
+    }
+  }
 }
 
 // =============================================================================
@@ -379,12 +397,6 @@
 // =============================================================================
 
 /// Enable timing capture for performance analysis
-///
-/// @example
-/// @enable_timing
-/// @when .box scroll
-/// @wait 1s
-/// @capture_timing_report
 
 %macro enable-timing {
 
@@ -396,6 +408,18 @@
     {
     ST._timing.enable();
     __ctx.timingEnabled = true;
+    }
+  }
+
+  %example "@enable-timing" {
+    @test "the fade reports its frame timing" {
+      @enable_timing
+      @mount { <div class="box">Hi</div> }
+      @given .box {
+        @on &.load(name: fade, duration: 300ms) { opacity: 0 -> 1; }
+      }
+      @wait_for_timeline "fade" timeout 1s
+      @capture_timing_report
     }
   }
 }

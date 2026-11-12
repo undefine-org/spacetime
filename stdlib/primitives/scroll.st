@@ -2,22 +2,13 @@
 ///
 /// Tracks scroll position with optional progress normalization.
 /// Works with both window/document and scrollable elements.
-///
-/// @param &el - The scrollable element (or window/document)
-/// @param axis - Primary axis: "x", "y", or "both"
-/// @param throttle - Throttle updates (ms), 0 for every frame
-///
-/// @yields $x - Horizontal scroll position
-/// @yields $y - Vertical scroll position
-/// @yields $progressX - Normalized horizontal progress (0-1)
-/// @yields $progressY - Normalized vertical progress (0-1)
-/// @yields $progress - Progress on primary axis (0-1)
-/// @yields $velocity - Scroll velocity in px/s
-/// @yields $direction - Scroll direction: "up", "down", "left", "right", or "none"
 
 %primitive scroll(
+  /// The scrollable element (or window/document)
   &el,
+  /// Primary axis: "x", "y", or "both"
   axis: ("x" | "y" | "both") = "y",
+  /// Throttle updates (ms), 0 for every frame
   throttle: number = 0
 ) {
   %emit js {
@@ -128,12 +119,19 @@
   }
 
   %exports {
+    /// Horizontal scroll position
     $x: number           // horizontal scroll position (px)
+    /// Vertical scroll position
     $y: number           // vertical scroll position (px)
+    /// Normalized horizontal progress (0-1)
     $progressX: number   // horizontal progress (0-1)
+    /// Normalized vertical progress (0-1)
     $progressY: number   // vertical progress (0-1)
+    /// Progress on primary axis (0-1)
     $progress: number    // progress on primary axis (0-1)
+    /// Scroll velocity in px/s
     $velocity: number    // scroll velocity (px/s)
+    /// Scroll direction: "up", "down", "left", "right", or "none"
     $direction: string   // "up", "down", "left", "right", "none"
     $maxX: number        // maximum horizontal scroll
     $maxY: number        // maximum vertical scroll

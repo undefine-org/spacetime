@@ -2,16 +2,6 @@
 ///
 /// Wraps the push notification API for mobile and web.
 /// Requests permission on bind and provides signals for notification state.
-///
-/// @param title - Notification title (required)
-/// @param body - Notification body text (required)
-/// @param icon - Optional icon URL for the notification
-///
-/// @yields $permission - Permission state ('granted', 'denied', 'default')
-/// @yields $sent - True after notification was successfully sent
-/// @yields $pending - True while sending notification
-/// @yields $error - Error if notification failed
-/// @yields $send - Function to trigger sending the notification
 
 %primitive notification(
   title: string,
@@ -87,10 +77,15 @@
   }
 
   %exports {
+    /// Permission state ('granted', 'denied', 'default')
     $permission: string    // 'granted', 'denied', or 'default'
+    /// True after notification was successfully sent
     $sent: bool            // notification was sent successfully
+    /// True while sending notification
     $pending: bool         // sending in progress
+    /// Error if notification failed
     $error: Error?         // error if failed
+    /// Function to trigger sending the notification
     $send: fn              // trigger sending the notification
   }
 }
@@ -100,20 +95,16 @@
 ///
 /// Declarative wrapper for the notification primitive.
 /// Allows binding notifications to element events.
-///
-/// @example
-/// .notify-button {
-///   @notification(title: "Hello", body: "World") {
-///     on-click: $send()
-///   }
-/// }
 
 %macro notification-trigger {
 
   %form {
     @notification(
+      /// Notification title (required)
       title: $title:string,
+      /// Notification body text (required)
       body: $body:string,
+      /// Optional icon URL for the notification
       icon: $icon:string = ""
     ) {
       $styles:properties
@@ -121,11 +112,7 @@
   }
 
   %binds {
-    notification(
-      title: $title,
-      body: $body,
-      icon: $icon
-    ) -> {
+    notification(...) -> {
       $permission,
       $sent,
       $pending,
@@ -159,6 +146,14 @@
   %when $isGranted {
     %applies {
       $styles
+    }
+  }
+
+  %example "@notification-trigger" {
+    .notify-button {
+      @notification(title: "Hello", body: "World") {
+        on-click: $send()
+      }
     }
   }
 }

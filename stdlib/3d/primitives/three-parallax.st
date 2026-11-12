@@ -6,14 +6,9 @@
 /// camera's initial position each frame and the camera re-aims at the origin, so
 /// it composes cleanly with auto-spin objects. If @orbit is also present, orbit
 /// owns the camera and parallax is skipped (they would fight).
-///
-/// @param &el        - the canvas hosting the @stage
-/// @param strength   - max world-space offset at the screen edge (default 0.15)
-/// @param ease       - smoothing factor per frame 0..1 (default 0.06)
-///
-/// @yields $active   - true once tracking
 
 %primitive three-parallax(
+  /// the canvas hosting the @stage
   &el,
   strength: number = 0.15,
   ease: number = 0.06
@@ -57,6 +52,7 @@
   }
 
   %exports {
+    /// true once tracking
     $active: bool
   }
 }

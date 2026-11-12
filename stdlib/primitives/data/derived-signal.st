@@ -17,19 +17,16 @@
 ///
 /// The runtime lifecycle (watch deps → recompute → republish through the dual
 /// channel) lives ONCE in the prelude below; each usage emits only a call.
-///
-/// @param name  - signal name to publish under
-/// @param expr  - derivation expression (sexpr), may reference $signals
-/// @param fold  - when true, the expr is a reducer body over `acc`/`item`
-///                and accumulates statefully; when false, stateless recompute
-/// @param initial - initial accumulator value for fold
-///
-/// @yields $value - the derived result
 %primitive derived-signal(
+  /// signal name to publish under
   name: ident,
+  /// derivation expression (sexpr), may reference $signals
   expr: sexpr,
+  /// when true, the expr is a reducer body over `acc`/`item`
+  /// and accumulates statefully; when false, stateless recompute
   fold: bool = false,
   source: ident?,
+  /// initial accumulator value for fold
   initial: expr? = null
 ) %uses data-channel, signal-watch {
   %emit prelude-js {
@@ -102,6 +99,7 @@
   }
 
   %exports {
+    /// the derived result
     $value: any
   }
 }

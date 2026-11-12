@@ -3,22 +3,9 @@
 /// Lenis-style smooth scroll engine that overrides native scroll
 /// with rAF-based interpolation for a buttery-smooth experience.
 /// Intercepts wheel, keyboard, and anchor navigation.
-///
-/// @param &el - The scrollable element (or window/document)
-/// @param lerp - Interpolation factor (0-1, lower = smoother)
-/// @param duration - Scroll duration in seconds
-/// @param smoothWheel - Whether to smooth mouse wheel scrolling
-/// @param smoothTouch - Whether to smooth touch scrolling (false preserves native)
-/// @param infinite - Enable infinite scroll wrapping
-/// @param orientation - Scroll axis: "vertical" or "horizontal"
-///
-/// @yields $scrollY - Current interpolated scroll position
-/// @yields $velocity - Scroll velocity in px/s
-/// @yields $progress - Normalized scroll progress (0-1)
-/// @yields $isScrolling - Whether currently animating
-/// @yields $direction - Scroll direction: "up", "down", or "none"
 
 %primitive smooth-scroll(
+  /// The scrollable element (or window/document)
   &el,
   lerp: number = 0.1,
   duration: number = 1.2,
@@ -268,10 +255,15 @@
   }
 
   %exports {
+    /// Current interpolated scroll position
     $scrollY: number      // current interpolated scroll position (px)
+    /// Scroll velocity in px/s
     $velocity: number     // scroll velocity (px/s)
+    /// Normalized scroll progress (0-1)
     $progress: number     // normalized scroll progress (0-1)
+    /// Whether currently animating
     $isScrolling: bool    // whether currently animating
+    /// Scroll direction: "up", "down", or "none"
     $direction: string    // "up", "down", "left", "right", or "none"
   }
 }

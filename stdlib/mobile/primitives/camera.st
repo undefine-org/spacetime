@@ -3,14 +3,6 @@
 /// Wraps the camera/barcode scanning API for mobile devices.
 /// Provides signals for scan state and results. Does NOT auto-trigger -
 /// use $scan() to start scanning.
-///
-/// @param formats - Array of barcode formats to scan for (e.g., "QR_CODE", "EAN_13")
-///
-/// @yields $scannedValue - The scanned value (barcode content)
-/// @yields $scannedFormat - The format of the scanned code
-/// @yields $scanning - True while scanning is in progress
-/// @yields $error - Error if scan failed
-/// @yields $scan - Function to trigger a scan
 
 %primitive camera(
   formats: array = []
@@ -66,10 +58,15 @@
   }
 
   %exports {
+    /// The scanned value (barcode content)
     $scannedValue: string?   // scanned barcode value
+    /// The format of the scanned code
     $scannedFormat: string?  // format of scanned code
+    /// True while scanning is in progress
     $scanning: bool          // scan in progress
+    /// Error if scan failed
     $error: Error?           // error if scan failed
+    /// Function to trigger a scan
     $scan: fn                // trigger a scan
   }
 }
@@ -79,18 +76,12 @@
 ///
 /// Declarative wrapper for the camera primitive.
 /// Allows binding camera scans to element events.
-///
-/// @example
-/// .scan-button {
-///   @camera-scan(formats: ["QR_CODE", "EAN_13"]) {
-///     background: #007aff
-///   }
-/// }
 
 %macro camera-scan-trigger {
 
   %form {
     @camera-scan(
+      /// Array of barcode formats to scan for (e.g., "QR_CODE", "EAN_13")
       formats: $formats:array = []
     ) {
       $styles:properties
@@ -128,6 +119,14 @@
   %when $hasResult {
     %applies {
       $styles
+    }
+  }
+
+  %example "@camera-scan-trigger" {
+    .scan-button {
+      @camera-scan(formats: ["QR_CODE", "EAN_13"]) {
+        background: #007aff
+      }
     }
   }
 }

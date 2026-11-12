@@ -305,14 +305,6 @@
 /// signal. The array-query counterpart to scalar `@data derive`; binds the
 /// computed-source primitive (filter/sort/limit/transform/reduce). Replaces the
 /// legacy `@computed` query DSL. PLAN-023 W5.
-///
-/// @example
-///   @data query $active Product[] from $products {
-///     where: $.inStock == true;
-///     sort: $.price;
-///     dir: asc;
-///     limit: 6;
-///   }
 %macro data-query {
   %scope file | selector
   %order 250
@@ -348,6 +340,15 @@
     computed: true
     source_kind: "query"
     source_static: false
+  }
+
+  %example "@data-query" {
+    @data query $active Product[] from $products {
+      where: $.inStock == true;
+      sort: $.price;
+      dir: asc;
+      limit: 6;
+    }
   }
 }
 
@@ -388,12 +389,6 @@
 /// @data fetch (with options body) — remote source with refresh/initial.
 /// Companion to the bodyless `@data fetch` (mirrors @each / @each-filtered: a
 /// distinct %macro per body shape, since a %macro carries one %form). PLAN-023 W5.
-///
-/// @example
-///   @data fetch $products Product[] : "/api/products" {
-///     refresh: 5m;
-///     initial: [];
-///   }
 %macro data-fetch-opts {
   %scope file | selector
   %order 249
@@ -426,6 +421,13 @@
     refetch: ${$name}_refetch
     source_kind: "fetch"
     source_static: false
+  }
+
+  %example "@data-fetch-opts" {
+    @data fetch $products Product[] : "/api/products" {
+      refresh: 5m;
+      initial: [];
+    }
   }
 }
 

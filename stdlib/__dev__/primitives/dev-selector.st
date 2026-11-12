@@ -8,10 +8,6 @@
 ///
 /// Activation: window.__stDevSelector.activate() or Ctrl+Shift+C
 /// Deactivation: window.__stDevSelector.deactivate() or Escape key
-///
-/// @yields $active - Whether selector mode is active
-/// @yields $selectedEl - Currently selected DOM element (or null)
-/// @yields $selectedInfo - Object with tag, classes, and Spacetime annotations
 
 %primitive dev-selector() {
   %emit js {
@@ -376,8 +372,11 @@
   }
 
   %exports {
+    /// Whether selector mode is active
     $active: bool
+    /// Currently selected DOM element (or null)
     $selectedEl: object
+    /// Object with tag, classes, and Spacetime annotations
     $selectedInfo: object
   }
 }

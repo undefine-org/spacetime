@@ -15,22 +15,6 @@
 ///      hand-maintained Rust enum (AGENTS self-describing rule).
 ///   2. runtime registration into `ST.editable.marks` / `ST.editable.blocks`.
 ///
-/// @example inline marks
-/// @editable-mark &bold(&sel) { <strong>`&sel`</strong> }
-/// @editable-mark &italic(&sel) { <em>`&sel`</em> }
-/// @editable-mark &link(&sel, $href url) {
-///   <a href="`$href`">`&sel`</a>
-/// }
-///
-/// @example block containers
-/// @editable-block &h2(&sel) { <h2>`&sel`</h2> }
-/// @editable-block &figure(&sel, $src url, $alt string = "") {
-///   <figure>
-///     <img src="`$src`" alt="`$alt`">
-///     <figcaption>`&sel`</figcaption>
-///   </figure>
-/// }
-///
 /// ## Parameters
 /// - `&sel`      — the selection (an element param; its value is the selected
 ///                 content, inserted whole; a multi-node selection flattens).
@@ -79,6 +63,14 @@
       params: $params
     ) -> { $factory }
   }
+
+  %example "inline marks" {
+    @editable-mark &bold(&sel) { <strong>`&sel`</strong> }
+    @editable-mark &italic(&sel) { <em>`&sel`</em> }
+    @editable-mark &link(&sel, $href url) {
+      <a href="`$href`">`&sel`</a>
+    }
+  }
 }
 
 %macro editable-block {
@@ -104,6 +96,16 @@
       params: $params
     ) -> { $factory }
   }
+
+  %example "block containers" {
+    @editable-block &h2(&sel) { <h2>`&sel`</h2> }
+    @editable-block &figure(&sel, $src url, $alt string = "") {
+      <figure>
+        <img src="`$src`" alt="`$alt`">
+        <figcaption>`&sel`</figcaption>
+      </figure>
+    }
+  }
 }
 
 /// Editable Surface Macro (PLAN-031 / FEAT-098)
@@ -114,12 +116,6 @@
 /// intercepts beforeinput, and yields editor-state signals
 /// (`$doc $sel $activeMarks $blockType $empty`) so toolbars are ordinary bindings.
 ///
-/// @example
-/// @import "stdlib/editable"
-/// .post-body {
-///   @editable(bind: $post.body, marks: ["bold","italic","link"], blocks: ["p","h2"]);
-/// }
-///
 /// marks/blocks are arrays of registered mark/block NAMES (see @editable-mark /
 /// @editable-block). The schema descriptor is resolved at runtime from
 /// ST.editable.* (populated from editable-schema.json, FEAT-099).
@@ -128,16 +124,25 @@
   %order 200
 
   %form {
-    @editable(bind: $bind:expr, marks: $marks:expr? = [], blocks: $blocks:expr? = []);
+    @editable(
+      /// the persisted value path (AST object) this surface reads/writes
+      bind: $bind:expr,
+      /// array of allowed mark names (from the @editable marks: list)
+      marks: $marks:expr? = [],
+      /// array of allowed block names (from the @editable blocks: list)
+      blocks: $blocks:expr? = []
+    );
   }
 
   %binds {
-    editable-surface(
-      &self,
-      bind: $bind,
-      marks: $marks,
-      blocks: $blocks
-    ) -> { $doc, $sel, $activeMarks, $blockType, $empty }
+    editable-surface(&self, ...) -> { $doc, $sel, $activeMarks, $blockType, $empty }
+  }
+
+  %example "@editable" {
+    @import "stdlib/editable"
+    .post-body {
+      @editable(bind: $post.body, marks: ["bold","italic","link"], blocks: ["p","h2"]);
+    }
   }
 }
 
@@ -152,26 +157,30 @@
 ///
 /// Use `@editable` for always-on form fields (admin drawer); use `@richtext` for
 /// content on a page you want to read normally and edit on demand.
-///
-/// @example
-/// article {
-///   @richtext(bind: $post.body, marks: ["bold","italic","link"], blocks: ["p","h2","blockquote"]);
-/// }
 %macro richtext {
   %scope selector
   %order 200
 
   %form {
-    @richtext(bind: $bind:expr, marks: $marks:expr? = [], blocks: $blocks:expr? = []);
+    @richtext(
+      /// the persisted value path (AST object) this surface reads/writes
+      bind: $bind:expr,
+      /// array of allowed mark names (from the @editable marks: list)
+      marks: $marks:expr? = [],
+      /// array of allowed block names (from the @editable blocks: list)
+      blocks: $blocks:expr? = []
+    );
   }
 
   %binds {
-    editable-surface(
-      &self,
-      bind: $bind,
-      marks: $marks,
-      blocks: $blocks,
-      gate: "edit-mode"
-    ) -> { $doc, $sel, $activeMarks, $blockType, $empty }
+    editable-surface(&self, gate: "edit-mode", ...) -> { $doc, $sel, $activeMarks, $blockType, $empty }
+  }
+
+  %example "@richtext" {
+    @import "stdlib/editable"
+    article {
+      @richtext(bind: $post.body, marks: ["bold","italic","link"], blocks: ["p","h2","blockquote"]);
+    }
+    <article></article>
   }
 }

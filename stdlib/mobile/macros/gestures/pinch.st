@@ -2,13 +2,6 @@
 ///
 /// Tracks two-finger pinch gestures for zoom and scale.
 /// Uses the gesture primitive for basic touch tracking.
-///
-/// @example
-/// .image {
-///   @pinch {
-///     scale: $scale
-///   }
-/// }
 
 %macro pinch {
 
@@ -48,6 +41,14 @@
   %when $active {
     %applies {
       $styles
+    }
+  }
+
+  %example "@pinch" {
+    .image {
+      @pinch {
+        scale: $scale
+      }
     }
   }
 }

@@ -7,16 +7,15 @@
 /// the buffer plays in step with the score's progress, seeking when the
 /// transport jumps, silent while it is paused. Under a virtual clock (render, `@clock`) nothing plays: the
 /// film's sound is written by the renderer from the same program instead.
-///
-/// @param &el       - the score's element
-/// @param program   - the synth program (JSON)
-/// @param total     - the score's length (ms)
-/// @param progress  - the score's progress signal
 
 %primitive score-synth(
+  /// the score's element
   &el,
+  /// the synth program (JSON)
   program: string = "",
+  /// the score's length (ms)
   total: number = 0,
+  /// the score's progress signal
   progress: string = "time",
   bind: string = ""
 ) {

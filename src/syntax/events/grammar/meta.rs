@@ -49,7 +49,7 @@ pub fn meta_def(p: &mut Parser, source: &str) {
     // Body dispatch based on keyword
     if p.at(SyntaxKind::L_BRACE) {
         match keyword.as_str() {
-            "form" | "capture_type" | "captureType" => {
+            "form" | "capture_type" | "captureType" | "example" => {
                 // Pattern DSL — treat body as opaque text
                 raw_body(p);
             }

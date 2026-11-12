@@ -15,17 +15,6 @@
 /// - Cross-tab sync via storage events
 /// - CSS variable: --st-{key}
 /// - Event dispatch: local:{key}:updated
-///
-/// @example
-/// .shopping-cart {
-///   $cart CartItem[]: localStorage("demo-cart", []);
-///
-///   [slot="count"]: $cart.length;
-///
-///   @on click .add-item {
-///     $cart <- $cart.concat([newItem]);
-///   }
-/// }
 
 %macro localStorage {
 
@@ -35,5 +24,18 @@
 
   %binds {
     local-storage-source(key: $key, default: $default) -> { $binding }
+  }
+
+  %example "@localStorage" {
+    .shopping-cart {
+      $cart string[]: localStorage("demo-cart", []);
+
+      .count { text <- $cart.length; }
+      .add-item { @on &.click { $cart <- [...$cart, "tea"]; } }
+    }
+    <div class="shopping-cart">
+      <span class="count">0</span>
+      <button class="add-item">Add tea</button>
+    </div>
   }
 }

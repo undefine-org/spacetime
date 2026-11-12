@@ -3,18 +3,9 @@
 /// Creates an SVG overlay with particles that drift organically and repel
 /// from the cursor. Inter-particle soft repulsion prevents clumping.
 /// Designed for background ambient effects on dark sections.
-///
-/// @param &el - Container element (SVG overlay created inside)
-/// @param count - Number of particles (default 40)
-/// @param repulsion - Cursor flee intensity 0-1 (default 0.6)
-/// @param spread - Inter-particle spacing force 0-1 (default 0.5)
-/// @param drift - Ambient movement energy 0-1 (default 0.3)
-/// @param color - Base particle color (default "rgba(255,255,255,0.08)")
-///
-/// @yields $particleCount - Actual particle count
-/// @yields $destroy - Cleanup function
 
 %primitive particle-field(
+  /// Container element (SVG overlay created inside)
   &el,
   count: number = 40,
   repulsion: number = 0.6,
@@ -202,7 +193,9 @@
   }
 
   %exports {
+    /// Actual particle count
     $particleCount: number
+    /// Cleanup function
     $destroy: fn() ~> effect
   }
 }

@@ -3,18 +3,9 @@
 /// Attaches the vendored OrbitControls to the stage camera + canvas, with inertial
 /// damping and optional auto-rotation. The per-frame `controls.update()` is driven
 /// by the stage's frame loop (registerFrame), so it stays in lockstep with render.
-///
-/// @param &el          - the canvas hosting the @stage
-/// @param damping      - inertia factor (0 disables); default 0.08
-/// @param autoRotate   - auto-rotation speed (0 disables); maps to autoRotateSpeed
-/// @param enableZoom   - allow scroll-to-zoom (default false — avoids hijacking page scroll)
-/// @param enablePan    - allow right-drag pan (default false)
-/// @param minDistance/maxDistance - zoom clamps
-/// @param minPolar/maxPolar       - vertical orbit clamps (degrees)
-///
-/// @yields $ready      - true once controls are attached
 
 %primitive three-orbit(
+  /// the canvas hosting the @stage
   &el,
   damping: number = 0.08,
   autoRotate: number = 0,
@@ -59,6 +50,7 @@
   }
 
   %exports {
+    /// true once controls are attached
     $ready: bool
   }
 }

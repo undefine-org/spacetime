@@ -11,14 +11,6 @@
 /// Swipe Macro
 ///
 /// Detects swipe gestures and triggers actions.
-///
-/// @example
-/// .carousel-item {
-///   @swipe {
-///     on-left: nextSlide()
-///     on-right: prevSlide()
-///   }
-/// }
 
 %macro swipe {
   %form {
@@ -63,24 +55,28 @@
       }
     }
   }
+
+  %example "@swipe" {
+    .carousel-item {
+      @swipe {
+        on-left: nextSlide()
+        on-right: prevSlide()
+      }
+    }
+  }
 }
 
 
 /// Resize Handle Macro
 ///
 /// Makes an element resizable via a drag handle.
-///
-/// @example
-/// .resizable-panel {
-///   @resize(direction: "horizontal", min: 200px, max: 600px)
-/// }
 
 %macro resize-handle {
   %form {
     @resize(
       direction: $direction:("horizontal" | "vertical" | "both") = "both",
       min: $min:length = 0,
-      max: $max:length = none,
+      max: $max:length? = none,
       handle: $handle:selector = ".resize-handle"
     )
   }
@@ -110,6 +106,12 @@
       cursor: $direction == "horizontal" ? ew-resize
             : $direction == "vertical" ? ns-resize
             : nwse-resize
+    }
+  }
+
+  %example "@resize-handle" {
+    .resizable-panel {
+      @resize(direction: "horizontal", min: 200px, max: 600px)
     }
   }
 }

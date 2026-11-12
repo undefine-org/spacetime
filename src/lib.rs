@@ -90,6 +90,8 @@ pub mod edn;
 pub mod editable;
 pub mod emit;
 pub mod error;
+pub mod examples;
+pub mod facts;
 pub mod export;
 pub mod host_package;
 pub mod host_push_v2;

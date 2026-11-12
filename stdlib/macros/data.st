@@ -67,22 +67,26 @@
 /// Persist Macro
 ///
 /// Persists data to localStorage.
-///
-/// @example
-/// @persist(key: "user-preferences", data: $preferences)
 
 %macro persist-data {
 
   %form {
     @persist(
+      /// localStorage key
       key: $key:string,
+      /// Data to persist (reactive)
       data: $data:expr,
+      /// Debounce delay in ms
       debounce: $debounce:time = 300ms
     )
   }
 
   %binds {
-    persist(key: $key, data: $data, debounce: $debounce) -> { $save, $clear }
+    persist(...) -> { $save, $clear }
+  }
+
+  %example "@persist-data" {
+    @persist(key: "user-preferences", data: $preferences)
   }
 }
 
@@ -92,25 +96,34 @@
 /// Cycles through items in a data source on a timed interval,
 /// updating the element's textContent each tick.
 /// Pairs with @value-change for character-level animations.
-///
-/// @example
-/// .hero-flap {
-///   @cycle(source: heroTerms, interval: 3000ms, field: "text")
-///   @value-change(duration: 400ms, stagger: 50ms) { ... }
-/// }
 
 %macro cycle {
 
   %form {
     @cycle(
+      /// Name of the data source (registered via @data / ST.setData)
       source: $source:ident,
+      /// Milliseconds between cycles
       interval: $interval:time = 3000ms,
+      /// Optional object field to extract (for object arrays)
       field: $field:string? = ""
     )
   }
 
   %binds {
-    text-cycle(&self, source: $source, interval: $interval, field: $field)
+    text-cycle(&self, ...)
+  }
+
+  %example "@cycle" {
+    @data inline $heroTerms : [{ text: "faster" }, { text: "calmer" }];
+    .hero-flap {
+      @cycle(source: heroTerms, interval: 3000ms, field: "text")
+      @on &.text-change(duration: 400ms, stagger: 50ms) {
+        :entering { opacity: 0 -> 1; translate-y: 8px -> 0; }
+        :exiting { opacity: 1 -> 0; }
+      }
+    }
+    <span class="hero-flap">faster</span>
   }
 }
 

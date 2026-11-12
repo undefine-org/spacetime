@@ -1,21 +1,5 @@
 /// `@drop-zone` — a first-class place draggables can be dropped.
 ///
-/// @example basic
-/// [data-col="doing"] {
-///   @drop-zone(group: "cards") as $zone {
-///     over { background: rgba(255,255,255,0.04) }   // while a card hovers
-///   }
-/// }
-///
-/// @example accept / reject
-/// [data-col="done"] {
-///   @drop-zone(group: "cards") as $zone {
-///     accepts: $payload.subtasksOpen == 0;          // predicate over the dragged datum
-///     over   { background: rgba(110,231,183,0.06) } // hovering AND accepted
-///     reject { outline: 1px solid var(--bad) }      // hovering but NOT accepted
-///   }
-/// }
-///
 /// `group` namespaces zones↔draggables (default ""). `as $zone` names the zone
 /// descriptor; the drag's lifecycle clauses read its dataset as `$zone.col`
 /// (← `data-col`). `accepts:` is an optional predicate over `$payload` (the
@@ -24,7 +8,11 @@
 
 %macro drop-zone {
   %form {
-    @drop-zone(group: $group:string = "") as $zone:ident {
+    @drop-zone(
+      /// namespaces zones↔draggables (a draggable in group G hits
+      /// only group-G zones); default "" (one implicit global group)
+      group: $group:string = ""
+    ) as $zone:ident {
       accepts: $accepts:balanced(';')?
       $customStates:states?
     }
@@ -52,5 +40,23 @@
 
     // Merge the caller's over/reject (and any extra) state bodies.
     $customStates?
+  }
+
+  %example "basic" {
+    [data-col="doing"] {
+      @drop-zone(group: "cards") as $zone {
+        over { background: rgba(255,255,255,0.04) }   // while a card hovers
+      }
+    }
+  }
+
+  %example "accept / reject" {
+    [data-col="done"] {
+      @drop-zone(group: "cards") as $zone {
+        accepts: $payload.subtasksOpen == 0;          // predicate over the dragged datum
+        over   { background: rgba(110,231,183,0.06) } // hovering AND accepted
+        reject { outline: 1px solid var(--bad) }      // hovering but NOT accepted
+      }
+    }
   }
 }

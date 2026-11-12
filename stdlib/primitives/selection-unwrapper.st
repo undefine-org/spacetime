@@ -3,14 +3,17 @@
 /// Removes highlight wrapper spans from selected text, preserving the text content.
 /// Used to clear formatting/highlighting from inline text.
 ///
-/// @param &el - Element containing the selection
-/// @param trigger - Event that triggers the unwrapping action
-/// @param class_name - CSS class of wrapper spans to remove
-///
 /// @example
 /// selection-unwrapper(&self, trigger: __unwrap_handwritten, class_name: "jal-handwritten")
 
-%primitive selection-unwrapper(&el, trigger: ident, class_name: string) {
+%primitive selection-unwrapper(
+  /// Element containing the selection
+  &el,
+  /// Event that triggers the unwrapping action
+  trigger: ident,
+  /// CSS class of wrapper spans to remove
+  class_name: string
+) {
   %emit js {
     const unwrapHandler = () => {
       const selection = window.getSelection();

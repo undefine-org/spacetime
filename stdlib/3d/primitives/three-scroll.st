@@ -10,16 +10,9 @@
 ///
 /// Scroll work piggybacks the stage frame loop (eased toward the latest scroll
 /// sample) so it never fights rAF or stutters. One scroll listener, passive.
-///
-/// @param &el      - the canvas hosting the @stage
-/// @param drive    - "morph"|"dollyZ"|"spinY"|"camY"
-/// @param from     - value at progress 0 (for dollyZ/camY)
-/// @param to       - value at progress 1
-/// @param ease     - per-frame smoothing 0..1 (default 0.08)
-///
-/// @yields $progress - eased scroll progress 0..1
 
 %primitive three-scroll(
+  /// the canvas hosting the @stage
   &el,
   drive: string = "morph",
   from: number = 0,
@@ -64,6 +57,7 @@
   }
 
   %exports {
+    /// eased scroll progress 0..1
     $progress: number
   }
 }

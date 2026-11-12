@@ -13,17 +13,14 @@
 /// SSG note: for a STATIC source (source_static:true) the unroll happens at
 /// compile time (see the macro's emit branch); this primitive is the DYNAMIC
 /// (hydrate) path — it re-renders whenever the source signal changes.
-///
-/// @param &container - element to render rows into
-/// @param source     - source signal/data name
-/// @param item       - the per-item binding name (e.g. "t" for `$t`)
-/// @param html       - raw inline row HTML (string)
-///
-/// @yields $items - array of rendered row elements
 %primitive each-inline(
+  /// element to render rows into
   &container,
+  /// source signal/data name
   source: string,
+  /// the per-item binding name (e.g. "t" for `$t`)
   item: string,
+  /// raw inline row HTML (string)
   html: string,
   filter: string? = null
 ) {
@@ -424,6 +421,7 @@
   }
 
   %exports {
+    /// array of rendered row elements
     $items: array
   }
 }

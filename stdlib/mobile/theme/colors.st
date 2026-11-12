@@ -3,13 +3,6 @@
 /// Color palette with automatic dark mode support.
 /// Uses CSS custom properties for consistent theming.
 ///
-/// @example
-/// .app {
-///   @mobile-colors
-///   background: var(--st-color-background);
-///   color: var(--st-color-text);
-/// }
-///
 /// .card {
 ///   background: var(--st-color-surface);
 ///   border: 1px solid var(--st-color-border);
@@ -74,6 +67,14 @@
       --st-color-on-info: #ffffff
     }
   }
+
+  %example "@mobile-colors" {
+    .app {
+      @mobile-colors
+      background: var(--st-color-background);
+      color: var(--st-color-text);
+    }
+  }
 }
 
 
@@ -81,12 +82,6 @@
 ///
 /// Dark mode color palette that applies when system prefers dark mode.
 /// Uses the colorScheme primitive binding to detect dark mode preference.
-///
-/// @example
-/// .app {
-///   @mobile-colors
-///   @mobile-colors-dark
-/// }
 
 %macro mobile-colors-dark {
 
@@ -146,6 +141,13 @@
       --st-color-on-info: #0f172a
     }
   }
+
+  %example "@mobile-colors-dark" {
+    .app {
+      @mobile-colors
+      @mobile-colors-dark
+    }
+  }
 }
 
 
@@ -153,11 +155,6 @@
 ///
 /// Convenience macro that applies light colors with automatic dark mode support.
 /// Combines @mobile-colors base with @mobile-colors-dark responsive behavior.
-///
-/// @example
-/// :root {
-///   @mobile-theme
-/// }
 
 %macro mobile-theme {
 
@@ -266,6 +263,12 @@
       --st-color-info: #60a5fa
       --st-color-info-bg: #1e3a5f
       --st-color-on-info: #0f172a
+    }
+  }
+
+  %example "@mobile-theme" {
+    :root {
+      @mobile-theme
     }
   }
 }

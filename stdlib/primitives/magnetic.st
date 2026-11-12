@@ -3,21 +3,9 @@
 /// Proximity-based magnetic pull that draws an element toward the cursor
 /// when the mouse enters a configurable radius. Uses lerp interpolation
 /// for smooth GPU-accelerated movement via translate3d.
-///
-/// @param &el - The element to apply magnetic effect to
-/// @param strength - Pull strength (0-1, how much element moves toward cursor)
-/// @param radius - Activation radius from element center (px)
-/// @param lerp - Interpolation smoothness (0-1)
-/// @param axis - Movement axis: "both", "x", or "y"
-/// @param trigger - What triggers the effect: "self" or "parent"
-/// @param tolerance - Minimum distance ratio to start effect (0-1)
-///
-/// @yields $magnetX - Current X translation offset
-/// @yields $magnetY - Current Y translation offset
-/// @yields $distance - Distance from mouse to element center
-/// @yields $isActive - Whether magnetic pull is currently active
 
 %primitive magnetic-effect(
+  /// The element to apply magnetic effect to
   &el,
   strength: number = 0.3,
   radius: number = 100,
@@ -254,9 +242,13 @@
   }
 
   %exports {
+    /// Current X translation offset
     $magnetX: number    // current X translation offset (px)
+    /// Current Y translation offset
     $magnetY: number    // current Y translation offset (px)
+    /// Distance from mouse to element center
     $distance: number   // distance from mouse to element center (px)
+    /// Whether magnetic pull is currently active
     $isActive: bool     // whether magnetic pull is currently active
   }
 }

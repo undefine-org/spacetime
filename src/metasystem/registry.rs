@@ -1728,6 +1728,7 @@ mod tests {
                     None,
                 )],
                 default: None,
+                doc: None,
             }],
             body_groups: Vec::new(),
             span: SourceSpan::default(),
@@ -1812,6 +1813,7 @@ mod tests {
         let mut registry = MetaRegistry::new();
 
         let def = CaptureTypeDefAst {
+            docs: Default::default(),
             name: "test_type".to_string(),
             pattern: CapturePatternAst::Capture {
                 var_name: "x".to_string(),

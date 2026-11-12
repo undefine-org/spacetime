@@ -2,20 +2,6 @@
 ///
 /// Provides slide-out drawer navigation from left or right.
 /// Supports swipe-to-open gestures and backdrop overlay.
-///
-/// @example basic
-/// .drawer-menu {
-///   @drawer {
-///     transform: translateX($translateX)
-///   }
-/// }
-///
-/// @example right-side drawer
-/// .settings-drawer {
-///   @drawer(side: "right", width: 320) {
-///     transform: translateX($translateX)
-///   }
-/// }
 
 %macro drawer {
 
@@ -23,6 +9,7 @@
     @drawer(
       side: $side:("left" | "right") = "left",
       width: $width:number = 280,
+      /// Minimum movement to start drag (prevents accidental drags)
       threshold: $threshold:number = 20
     ) {
       $styles:properties
@@ -67,6 +54,22 @@
   %when $active {
     %applies {
       $styles
+    }
+  }
+
+  %example "basic" {
+    .drawer-menu {
+      @drawer {
+        transform: translateX($translateX)
+      }
+    }
+  }
+
+  %example "right-side drawer" {
+    .settings-drawer {
+      @drawer(side: "right", width: 320) {
+        transform: translateX($translateX)
+      }
     }
   }
 }

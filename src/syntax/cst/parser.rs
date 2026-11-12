@@ -2100,7 +2100,8 @@ impl Parser {
         // Body block (like %emit js { ... } or %binds { ... })
         if self.at(SyntaxKind::L_BRACE) {
             // %form bodies contain pattern DSL - treat as raw text
-            if keyword.as_deref() == Some("form") {
+            if keyword.as_deref() == Some("form") || keyword.as_deref() == Some("example") {
+                // an %example body is .st source, read as written
                 self.parse_raw_body();
             } else if keyword.as_deref() == Some("emit") {
                 // %emit bodies contain JS/CSS with embedded %yield, %cleanup, etc.

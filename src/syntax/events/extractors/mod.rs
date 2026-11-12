@@ -118,6 +118,8 @@ pub struct ExtractorRegistry {
     extractors: HashMap<CaptureType, Box<dyn CaptureExtractor>>,
     /// Custom extractors from %capture_type definitions, keyed by name.
     pub custom: HashMap<String, Box<dyn CaptureExtractor>>,
+    /// `%scalar_type` row names → the capture they match as (PLAN-156).
+    pub aliases: HashMap<String, CaptureType>,
 }
 
 impl Default for ExtractorRegistry {
@@ -192,12 +194,22 @@ impl ExtractorRegistry {
         Self {
             extractors,
             custom: HashMap::new(),
+            aliases: HashMap::new(),
         }
     }
 
     /// Get the extractor for a given CaptureType.
     pub fn get(&self, capture_type: &CaptureType) -> Option<&dyn CaptureExtractor> {
         self.extractors.get(capture_type).map(|b| b.as_ref())
+    }
+
+    /// The extractor a type NAME resolves to: a `%capture_type`, else the
+    /// capture a `%scalar_type` row of that name points at.
+    pub fn named(&self, name: &str) -> Option<&dyn CaptureExtractor> {
+        self.custom.get(name).map(|b| b.as_ref()).or_else(|| match self.aliases.get(name)? {
+            CaptureType::Custom(c) => self.custom.get(c).map(|b| b.as_ref()),
+            other => self.get(other),
+        })
     }
 
     /// Register a custom extractor (from %capture_type).

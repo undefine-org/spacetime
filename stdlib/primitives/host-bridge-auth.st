@@ -49,12 +49,6 @@
 ///      `@data inline`/`@handle`-driven re-fire of the status signal can react
 ///      (the call site's own responsibility — this primitive only completes
 ///      the token handoff, it does not know which signal to re-fire).
-///
-/// @param bindingName - the JS identifier this primitive's start()/
-///                      sessionStorage key are exposed under (no `$`) — lets
-///                      multiple widgets on one page (unlikely today, but
-///                      keeps this primitive instance-scoped rather than a
-///                      single hardcoded global name) coexist.
 %primitive host-bridge-auth(bindingName: ident) %uses host-register {
   %emit prelude-js {
     window.__stHostBridgeAuth = window.__stHostBridgeAuth || {};

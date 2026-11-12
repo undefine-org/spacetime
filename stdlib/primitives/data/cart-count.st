@@ -2,11 +2,6 @@
 ///
 /// Reactive binding that shows the number of items in $cart array.
 /// Updates automatically when cart changes via local:cart:updated events.
-///
-/// @example
-/// .jal-nav__cart-badge {
-///     @cart-count;
-/// }
 
 %primitive cart-count-binding(&el) {
   %emit js {
@@ -52,5 +47,11 @@
 
   %binds {
     cart-count-binding(&self)
+  }
+
+  %example "@cart-count" {
+    .jal-nav__cart-badge {
+        @cart-count;
+    }
   }
 }

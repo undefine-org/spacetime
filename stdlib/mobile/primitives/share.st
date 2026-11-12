@@ -2,18 +2,14 @@
 ///
 /// Provides native share functionality (share sheet on mobile, Web Share API on browser).
 /// Allows sharing content with other apps like social media, messaging, or email.
-///
-/// @param &el - Element to bind share state to
-/// @param title - Title of shared content (optional)
-/// @param text - Text content to share (optional)
-/// @param url - URL to share (optional)
-///
-/// @yields $shared - True if share completed successfully
-/// @yields $pending - True while share sheet is open
-/// @yields $error - Error message if share failed
-/// @yields $trigger - Event name to dispatch to trigger share
 
-%primitive share(&el, title: string = "", text: string = "", url: string = "") {
+%primitive share(
+  /// Element to bind share state to
+  &el,
+  title: string = "",
+  text: string = "",
+  url: string = ""
+) {
   %emit js {
     // Import the SpacetimeMobile API
     const mobile = globalThis.__SpacetimeMobile || {
@@ -77,9 +73,13 @@
   }
 
   %exports {
+    /// True if share completed successfully
     $shared: bool
+    /// True while share sheet is open
     $pending: bool
+    /// Error message if share failed
     $error: string?
+    /// Event name to dispatch to trigger share
     $trigger: string
   }
 }
@@ -89,23 +89,27 @@
 ///
 /// Convenience macro for native share with state integration.
 /// Binds the share primitive and exposes signals for use in other macros.
-///
-/// @example
-/// .share-button {
-///   @share(title: "Check this out", url: "https://example.com")
-/// }
 
 %macro share-native {
 
   %form {
     @share(
+      /// Title of shared content (optional)
       title: $title:string = "",
+      /// Text content to share (optional)
       text: $text:string = "",
+      /// URL to share (optional)
       url: $url:string = ""
     )
   }
 
   %binds {
-    share(&self, title: $title, text: $text, url: $url) -> { $shared, $pending, $error, $trigger }
+    share(&self, ...) -> { $shared, $pending, $error, $trigger }
+  }
+
+  %example "@share-native" {
+    .share-button {
+      @share(title: "Check this out", url: "https://example.com")
+    }
   }
 }

@@ -4,21 +4,9 @@
 /// four light types that compose the studio-lighting look: ambient (fill),
 /// directional (key/sun), point (local), spot (focused). Positions/targets are
 /// flat numeric params.
-///
-/// @param &el        - the canvas hosting the @stage
-/// @param type       - "ambient"|"directional"|"point"|"spot"
-/// @param color      - light color
-/// @param intensity  - light intensity
-/// @param posX/Y/Z   - position (directional uses this as its direction-from-origin)
-/// @param targetX/Y/Z- aim point (directional / spot)
-/// @param distance   - point/spot falloff distance (0 = infinite)
-/// @param decay      - point/spot physical decay
-/// @param angle      - spot cone half-angle (degrees)
-/// @param penumbra   - spot soft-edge 0..1
-///
-/// @yields $added    - true once added
 
 %primitive three-light(
+  /// the canvas hosting the @stage
   &el,
   type: string = "directional",
   color: color = white,
@@ -71,6 +59,7 @@
   }
 
   %exports {
+    /// true once added
     $added: bool
   }
 }

@@ -3,13 +3,9 @@
 /// A PART in raea's vocabulary (`Fog { color, near, far }`): far things fade
 /// into `color` — match the stage's `background` so the horizon dissolves. A
 /// named fog answers to a score: `&haze { near: 4 -> 12; far: 30 -> 60; }`.
-///
-/// @param &el    - the canvas hosting the @stage
-/// @param color  - the fog's colour
-/// @param near   - where it begins (world units)
-/// @param far    - where it is total
 
 %primitive three-fog(
+  /// the canvas hosting the @stage
   &el,
   name: string = "",
   color: color = black,

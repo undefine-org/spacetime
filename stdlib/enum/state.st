@@ -86,16 +86,12 @@
 
 /// State Reflect Primitive (PLAN-077 W6) — the ONE reactive writer for
 /// data-st-state / data-st-<sig>-type. See the module header for the model.
-///
-/// @param &el    - the element to reflect state onto
-/// @param signal - the signal to watch (bare name, no `$`)
-/// @param value  - the state VALUE this declaration gates on (the string
-///   condition, or the variant name) — drives the emitted `[attr=value]` CSS
-/// @param styles - the properties to apply while the state is active
 %primitive state-reflect(
+  /// the element to reflect state onto
   &el,
   signal: string = "",
   value: string = "",
+  /// the properties to apply while the state is active
   styles: properties
 ) {
   %emit css {

@@ -10,18 +10,15 @@
 /// Wave Function Primitive
 ///
 /// Generates oscillating values based on progress.
-///
-/// @param type - Wave type: "sin", "cos", "triangle", "sawtooth", "square"
-/// @param frequency - Number of cycles per progress unit
-/// @param amplitude - Peak amplitude (can include unit like "20px")
-/// @param phase - Phase offset in radians
-///
-/// @yields $getValue - Function that takes progress and returns wave value
 
 %primitive wave(
+  /// Wave type: "sin", "cos", "triangle", "sawtooth", "square"
   type: string = "sin",
+  /// Number of cycles per progress unit
   frequency: number = 1,
+  /// Peak amplitude (can include unit like "20px")
   amplitude: string = "1",
+  /// Phase offset in radians
   phase: number = 0
 ) {
   %emit js {
@@ -67,6 +64,7 @@
   }
 
   %exports {
+    /// Function that takes progress and returns wave value
     $getValue: fn(progress: number) ~> any
   }
 }
@@ -75,16 +73,13 @@
 /// Random Function Primitive
 ///
 /// Generates seeded random values for consistent per-element randomness.
-///
-/// @param min - Minimum value (can include unit)
-/// @param max - Maximum value (can include unit)
-/// @param seed - Seed for random generator
-///
-/// @yields $value - Random value between min and max
 
 %primitive random(
+  /// Minimum value (can include unit)
   min: string = "0",
+  /// Maximum value (can include unit)
   max: string = "1",
+  /// Seed for random generator
   seed: number = 1
 ) {
   %emit js {
@@ -113,6 +108,7 @@
   }
 
   %exports {
+    /// Random value between min and max
     $value: any
   }
 }
@@ -121,16 +117,13 @@
 /// Noise Function Primitive
 ///
 /// Generates Perlin-like noise based on position and progress.
-///
-/// @param &el - Element for position-based noise
-/// @param frequency - Noise frequency
-/// @param amplitude - Noise amplitude (can include unit)
-///
-/// @yields $getValue - Function that takes progress and returns noise value
 
 %primitive noise(
+  /// Element for position-based noise
   &el,
+  /// Noise frequency
   frequency: number = 1,
+  /// Noise amplitude (can include unit)
   amplitude: string = "1"
 ) {
   %emit js {
@@ -163,6 +156,7 @@
   }
 
   %exports {
+    /// Function that takes progress and returns noise value
     $getValue: fn(progress: number) ~> any
   }
 }
@@ -171,14 +165,11 @@
 /// Parallax Function Primitive
 ///
 /// Maps progress to position offset for parallax effects.
-///
-/// @param range - Total movement range (can include unit like "100px")
-/// @param center - Center offset position
-///
-/// @yields $getValue - Function that takes progress and returns parallax offset
 
 %primitive parallax(
+  /// Total movement range (can include unit like "100px")
   range: string = "0px",
+  /// Center offset position
   center: string = "0px"
 ) {
   %emit js {
@@ -203,6 +194,7 @@
   }
 
   %exports {
+    /// Function that takes progress and returns parallax offset
     $getValue: fn(progress: number) ~> any
   }
 }
@@ -211,16 +203,13 @@
 /// Spring Function Primitive
 ///
 /// Generates spring-physics based motion.
-///
-/// @param stiffness - Spring stiffness (higher = faster)
-/// @param damping - Damping ratio (0-1, 1 = critically damped)
-/// @param mass - Mass of the object
-///
-/// @yields $getValue - Function that takes progress and returns spring value
 
 %primitive spring(
+  /// Spring stiffness (higher = faster)
   stiffness: number = 100,
+  /// Damping ratio (0-1, 1 = critically damped)
   damping: number = 10,
+  /// Mass of the object
   mass: number = 1
 ) {
   %emit js {
@@ -262,6 +251,7 @@
   }
 
   %exports {
+    /// Function that takes progress and returns spring value
     $getValue: fn(progress: number) ~> number
   }
 }

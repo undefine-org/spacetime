@@ -35,14 +35,11 @@
 ///
 /// Manages test registration and execution in the browser.
 /// Sets up global test infrastructure.
-///
-/// @param &container - Container element for test results
-/// @yields $tests - Array of registered tests
-/// @yields $results - Current test results
-/// @yields $runTests - Function to run tests
-/// @yields $currentTest - Name of currently running test
 
-%primitive test_runner(&container) {
+%primitive test_runner(
+  /// Container element for test results
+  &container
+) {
   %emit js {
     const __st_tests = [];
     const __st_results = { passed: 0, failed: 0, skipped: 0, errors: [] };
@@ -130,9 +127,13 @@
   }
 
   %exports {
+    /// Array of registered tests
     $tests: TestDef[]
+    /// Current test results
     $results: TestResults
+    /// Function to run tests
     $runTests: fn(filter?: string) ~> object  // Run tests, returns results
+    /// Name of currently running test
     $currentTest: string?
   }
 }
@@ -141,13 +142,6 @@
 /// @test Macro
 ///
 /// Registers a test with a name and body containing @given, @when, @then directives.
-///
-/// @example
-/// @test "element becomes visible on click" {
-///   @given .box { opacity: 0 }
-///   @when .box click
-///   @then .box should be_visible
-/// }
 
 %macro test {
 
@@ -181,6 +175,14 @@
       }
     });
   }
+
+  %example "@test" {
+    @test "element becomes visible on click" {
+      @given .box { opacity: 0 }
+      @when .box click
+      @then .box should be_visible
+    }
+  }
 }
 
 
@@ -189,12 +191,6 @@
 /// Declares the fidelity RUNG a test needs. `needs` may only RAISE the floor
 /// above what the assertions infer; a backend that can't provide it refuses to
 /// run the test (reports FAILED) rather than faking it.
-///
-/// @example
-/// @test "hero wraps to two lines" needs layout {
-///   @mount @self .hero
-///   @then .hero should have_height 96
-/// }
 %macro test-needs {
 
   %form {
@@ -211,6 +207,15 @@
       %$body.js
     }, { needs: %$rung });
   }
+
+  %example "@test-needs" {
+    @test "hero wraps to two lines" needs layout {
+      @mount {
+        <h1 class="hero">A headline long enough to wrap onto a second line</h1>
+      }
+      @then .hero should have_height 96
+    }
+  }
 }
 
 
@@ -218,11 +223,6 @@
 ///
 /// Registers a test that will be skipped during execution.
 /// Useful for temporarily disabling tests.
-///
-/// @example
-/// @test-skip "not yet implemented" {
-///   @then .feature should exist
-/// }
 
 %macro test-skip {
 
@@ -235,6 +235,12 @@
   %emit js {
     window.__spacetime_register_test(%$name, async () => {}, { skip: true });
   }
+
+  %example "@test-skip" {
+    @test-skip "not yet implemented" {
+      @then .feature should exist
+    }
+  }
 }
 
 
@@ -242,12 +248,6 @@
 ///
 /// Only runs this test (and other .only tests), skipping all others.
 /// Useful during development to focus on specific tests.
-///
-/// @example
-/// @test-only "focus on this test" {
-///   @given .box { opacity: 1 }
-///   @then .box should be_visible
-/// }
 
 %macro test-only {
 
@@ -263,6 +263,13 @@
       %$body.js
     }, { only: true });
   }
+
+  %example "@test-only" {
+    @test-only "focus on this test" {
+      @given .box { opacity: 1 }
+      @then .box should be_visible
+    }
+  }
 }
 
 
@@ -270,10 +277,6 @@
 ///
 /// Sets up initial state for an element by selector.
 /// Can set data attributes, CSS properties, or content.
-///
-/// @example
-/// @given [data-toggle] { data-state: "off" }
-/// @given .box { opacity: 0; transform: translateY(20px) }
 
 %macro given {
 
@@ -309,6 +312,11 @@
       __ctx.element = __givenEl;
     }
   }
+
+  %example "@given" {
+    @given [data-toggle] { data-state: "off" }
+    @given .box { opacity: 0; transform: translateY(20px) }
+  }
 }
 
 
@@ -316,9 +324,6 @@
 ///
 /// Applies directive macros (e.g., @on, @cycle, scoped state + reactive class)
 /// to an element selected by CSS selector.
-///
-/// @example
-/// @given .toggle { $on bool: false; .is-on: $on; @on click { $on <- !$on; } }
 
 %macro given-directives {
 
@@ -380,16 +385,25 @@
       %$body.scoped_js
     }
   }
+
+  %example "@given-directives" {
+    @test "the toggle flips on click" {
+      @fixture { <button class="toggle">Power</button> }
+      @given .toggle {
+        $on bool: false;
+        .is-on: $on;
+        @on &.click { $on <- !$on; }
+      }
+      @when .toggle click
+      @then .toggle should have_class "is-on"
+    }
+  }
 }
 
 
 /// @given Macro - Data Binding
 ///
 /// Sets up initial value for a data binding.
-///
-/// @example
-/// @given $count = 0
-/// @given $items = []
 
 %macro given-data {
 
@@ -402,16 +416,19 @@
     __ctx.data = __ctx.data || {};
     __ctx.data['%$binding'] = %$value;
   }
+
+  %example "@given-data" {
+    @test "an empty cart totals zero" {
+      @given $items = []
+      @assert (__ctx.data.items.length === 0) "the cart starts empty"
+    }
+  }
 }
 
 
 /// @given Macro - Visibility/State
 ///
 /// Sets an element's visibility or interactive state.
-///
-/// @example
-/// @given .modal is hidden
-/// @given .button is disabled
 
 %macro given-visibility {
 
@@ -450,6 +467,11 @@
       __ctx.element = __givenEl;
     }
   }
+
+  %example "@given-visibility" {
+    @given .modal is hidden
+    @given .button is disabled
+  }
 }
 
 
@@ -458,12 +480,6 @@
 /// Test-only helper: registers a transition table on an element via the test
 /// runtime (window.__st_register_machine) so a test can drive scripted state
 /// changes. Page code uses $-signals + reactive class instead.
-///
-/// @example
-/// @behavior .toggle-switch machine(initial: "off") {
-///     @transition(from: "off", to: "on", on: click)
-///     @transition(from: "on", to: "off", on: click)
-/// }
 
 %macro test-behavior {
 
@@ -498,6 +514,18 @@
       __ctx.element = __behaviorEl;
     }
   }
+
+  %example "@test-behavior" {
+    @test "the switch toggles on click" {
+      @fixture { <button class="switch" data-st-state="off">Power</button> }
+      @behavior .switch machine(initial: "off") {
+        @transition(from: "off", to: "on", on: click)
+        @transition(from: "on", to: "off", on: click)
+      }
+      @when .switch click
+      @then .switch should have_state "on"
+    }
+  }
 }
 
 
@@ -505,12 +533,6 @@
 ///
 /// Performs an action on an element - click, input, focus, etc.
 /// After the action, waits for a frame to allow DOM updates.
-///
-/// @example
-/// @when .button click
-/// @when .input input "hello world"
-/// @when .field focus
-/// @when .item keydown "Enter"
 
 %macro when {
 
@@ -644,6 +666,22 @@
     __ctx.lastAction = __action;
     }
   }
+
+  %example "@when" {
+    @test "the search form takes a query" {
+      @fixture {
+        <form class="search">
+          <input class="query">
+          <button class="submit">Search</button>
+        </form>
+      }
+      @when .query focus
+      @when .query input "hello world"
+      @when .query keydown "Enter"
+      @when .submit click
+      @then .query should have_value "hello world"
+    }
+  }
 }
 
 
@@ -658,15 +696,6 @@
 /// Claim shapes: `<prop> <op> <value>;` or bare `<prop>;` (truthy/exists).
 /// Props: state | text | value | count | exist | be_visible | be_hidden | <attr>.
 /// Ops: == != >= <= < > ~=(contains) ~>(sequence) matches(regex).
-///
-/// @example
-/// @then .wizard {
-///   state == "complete";
-///   count >= 3;
-///   text ~= "Done";
-///   exist;
-/// }
-/// @then { <nested directives> } — the GROUPING form (no subject).
 ///
 /// Sibling of `then-claims` below, and the distinction is the SUBJECT:
 ///   `@then .sel { state == "x"; }`  → claims about ONE element (then-claims)
@@ -685,12 +714,6 @@
 /// tests/fixtures/native-template/*) with NO declaration behind it. It rode
 /// the same trailing-token leniency `@use`'s clauses rode (BUG-299), and
 /// surfaced as E0946 when BUG-264 closed that leniency.
-///
-/// @example
-/// @then {
-///   @find ".ed p" { have_text "Hello"; }
-///   @assert (window.__x === 1) "the side effect ran";
-/// }
 %macro then-group {
 
   %form {
@@ -712,6 +735,23 @@
   %emit js {
     {
       %$body.js
+    }
+  }
+
+  %example "@then-group" {
+    @test "the wizard finishes" {
+      @fixture { <div class="wizard" data-st-state="complete">Done</div> }
+      @then {
+        @then .wizard should have_state "complete"
+        @then .wizard should contain "Done"
+      }
+    }
+  }
+
+  %example "@then-group (2)" {
+    @then {
+      @find ".ed p" { have_text "Hello"; }
+      @assert (window.__x === 1) "the side effect ran";
     }
   }
 }
@@ -842,13 +882,6 @@
 ///
 /// Asserts a condition on an element.
 /// Supports many assertion types: exist, be_visible, have_text, have_class, etc.
-///
-/// @example
-/// @then .box should exist
-/// @then .modal should be_visible
-/// @then [data-toggle] should have_state "on"
-/// @then .title should have_text "Hello"
-/// @then .items should have_length 5
 
 %macro then {
 
@@ -1038,16 +1071,20 @@
     }
     }
   }
+
+  %example "@then" {
+    @then .box should exist
+    @then .modal should be_visible
+    @then [data-toggle] should have_state "on"
+    @then .title should have_text "Hello"
+    @then .items should have_length 5
+  }
 }
 
 
 /// @wait Macro
 ///
 /// Waits for a specified duration before continuing.
-///
-/// @example
-/// @wait 500ms
-/// @wait 1s
 
 %macro wait {
 
@@ -1080,16 +1117,20 @@
     }
     }
   }
+
+  %example "@wait" {
+    @test "the toast fades after a moment" {
+      @fixture { <div class="toast">Saved</div> }
+      @wait 500ms
+      @then .toast should exist
+    }
+  }
 }
 
 
 /// @wait_until Macro
 ///
 /// Waits for a condition to become true, with timeout.
-///
-/// @example
-/// @wait_until document.querySelector('.ready') timeout: 5s
-/// @wait_until $loading == false timeout: 3s
 
 %macro wait-until {
 
@@ -1116,16 +1157,20 @@
     }
     }
   }
+
+  %example "@wait-until" {
+    @test "the page finishes loading" {
+      @fixture { <div class="page ready"></div> }
+      @wait_until (document.querySelector('.page.ready') !== null) timeout: 5s
+      @then .page should have_class "ready"
+    }
+  }
 }
 
 
 /// @wait_for Macro
 ///
 /// Waits for an element to appear in the DOM.
-///
-/// @example
-/// @wait_for .loading-complete timeout: 10s
-/// @wait_for [data-loaded] timeout: 5s
 
 %macro wait-for {
 
@@ -1151,6 +1196,14 @@
     }
     }
   }
+
+  %example "@wait-for" {
+    @test "the results arrive" {
+      @fixture { <div class="results" data-loaded>3 results</div> }
+      @wait_for [data-loaded] timeout: 5s
+      @then .results should contain "3 results"
+    }
+  }
 }
 
 
@@ -1158,11 +1211,6 @@
 ///
 /// Yields to the microtask queue, allowing pending reactive updates
 /// (signal watchers, derived recomputations, DOM bindings) to settle.
-///
-/// @example
-/// @eval (ST.set(el, "count", 1))
-/// @flush
-/// @then [.counter] should have_text "1"
 
 %macro flush {
 
@@ -1173,6 +1221,20 @@
   %emit js {
     await new Promise(function(r) { queueMicrotask(r) });
   }
+
+  %example "@flush" {
+    @test "a set lands after one microtask" {
+      @fixture { <div class="counter"><span class="count"></span></div> }
+      @given .counter {
+        $count number: 0;
+        .count { text <- $count; }
+      }
+      @let (el = document.querySelector('.counter'))
+      @eval (ST.set(el, "count", 1))
+      @flush
+      @then .count should have_text "1"
+    }
+  }
 }
 
 
@@ -1180,11 +1242,6 @@
 ///
 /// Creates a temporary DOM fixture for testing.
 /// The fixture is automatically cleaned up after the test.
-///
-/// @example
-/// @fixture {
-///   <div data-toggle data-state="off">Toggle</div>
-/// }
 
 %macro fixture {
 
@@ -1208,6 +1265,12 @@
     __ctx.cleanup.push(() => __fixture.remove());
     }
   }
+
+  %example "@fixture" {
+    @fixture {
+      <div data-toggle data-state="off">Toggle</div>
+    }
+  }
 }
 
 
@@ -1217,11 +1280,6 @@
 /// real .st (markup + nested primitives/directives), not faked HTML. This is the
 /// canonical replacement for @fixture — a test body is a real program. Multiple
 /// @mount blocks compose into one world.
-///
-/// @example
-/// @mount {
-///   .box { $open bool: false; @on click { $open <- !$open } }
-/// }
 ///
 /// File-reference (`@mount "path.st"`) and self-reference (`@mount @self`) are
 /// tracked as a follow-up (FEAT-066); inline real-.st mounting works today.
@@ -1249,17 +1307,27 @@
     __ctx.cleanup.push(() => __mount.remove());
     }
   }
+
+  %example "@mount" {
+    @test "clicking the box opens it" {
+      @mount {
+        <button class="box">Open</button>
+      }
+      @given .box {
+        $open bool: false;
+        .is-open: $open;
+        @on &.click { $open <- !$open; }
+      }
+      @when .box click
+      @then .box should have_class "is-open"
+    }
+  }
 }
 
 
 /// @cleanup Macro
 ///
 /// Registers cleanup code to run after the test.
-///
-/// @example
-/// @cleanup {
-///   document.querySelector('.test-element').remove();
-/// }
 
 %macro cleanup {
 
@@ -1273,6 +1341,16 @@
     __ctx.cleanup = __ctx.cleanup || [];
     __ctx.cleanup.push(() => { %$code });
   }
+
+  %example "@cleanup" {
+    @test "a stray node is removed afterwards" {
+      @eval (document.body.append(Object.assign(document.createElement('div'), { className: 'stray' })))
+      @cleanup {
+        document.querySelector('.stray').remove()
+      }
+      @then .stray should exist
+    }
+  }
 }
 
 
@@ -1280,10 +1358,6 @@
 ///
 /// Takes a DOM snapshot for visual regression testing.
 ///
-/// @example
-/// @snapshot "component initial state"
-/// @snapshot "component after interaction" of .modal
-
 /// Two SIBLING forms, not one with an optional clause (BUG-217).
 ///
 /// `@snapshot $name:string of: $selector:selector? = ""` reads as "the selector is
@@ -1321,6 +1395,14 @@
     // Store for comparison
     window.__spacetime_snapshots = window.__spacetime_snapshots || {};
     window.__spacetime_snapshots[__snapName] = __snapshot;
+    }
+  }
+
+  %example "@snapshot-of" {
+    @test "the modal opens" {
+      @fixture { <div class="modal">Hello</div> }
+      @snapshot "modal opened" of: .modal
+      @then .modal should exist
     }
   }
 }
@@ -1362,9 +1444,6 @@
 /// 'this compiles' (no claim to make) marks its body with this directive to
 /// register that running without assertions is intentional, so the runner does
 /// not fail it as vacuous. Any @test that genuinely asserts must NOT use it.
-///
-/// @example
-/// @test "macro x compiles" { @no_assert }
 %macro no-assert {
 
   %form {
@@ -1374,6 +1453,12 @@
   %emit js {
     window.__st_markNoAssert();
   }
+
+  %example "@no-assert" {
+    @test "macro x compiles" {
+      @no_assert
+    }
+  }
 }
 
 
@@ -1381,10 +1466,6 @@
 ///
 /// General-purpose assertion for custom conditions.
 ///
-/// @example
-/// @assert $count > 0 "count should be positive"
-/// @assert document.querySelectorAll('.item').length === 3
-
 /// A failure message is most useful when it reports the value that failed
 /// ("expected 3, got " + rows.length), which needs an EXPRESSION, not a literal.
 ///
@@ -1410,6 +1491,15 @@
     }
     }
   }
+
+  %example "@assert" {
+    @test "three items render" {
+      @fixture {
+        <ul><li class="item">a</li><li class="item">b</li><li class="item">c</li></ul>
+      }
+      @assert (document.querySelectorAll('.item').length === 3) "three items render"
+    }
+  }
 }
 
 
@@ -1417,10 +1507,6 @@
 ///
 /// Evaluates a raw JavaScript expression in test context.
 /// Use for setup code that can't be expressed with other testing macros.
-///
-/// @example
-/// @eval (window.__testVar = true)
-/// @eval (document.body.innerHTML = '<div class="test"></div>')
 
 %macro eval {
 
@@ -1430,6 +1516,11 @@
 
   %emit js {
     %$expr;
+  }
+
+  %example "@eval" {
+    @eval (window.__testVar = true)
+    @eval (document.body.innerHTML = '<div class="test"></div>')
   }
 }
 
@@ -1449,10 +1540,6 @@
 /// test runtime that creates a property on the global object, which every later
 /// step's IIFE closes over by the same bare name. One binding, visible suite-step
 /// to suite-step, no IIFE-isolation regression for other directives.
-///
-/// @example
-/// @let (obj = { name: 'Alice', age: 30 })
-/// @assert (obj.name === 'Alice')
 
 %macro let {
 
@@ -1463,15 +1550,17 @@
   %emit js {
     %$assignment;
   }
+
+  %example "@let" {
+    @let (obj = { name: 'Alice', age: 30 })
+    @assert (obj.name === 'Alice')
+  }
 }
 
 
 /// @mock Macro
 ///
 /// Mocks a function or API for testing.
-///
-/// @example
-/// @mock fetch returns { ok: true, json: () => ({ data: [] }) }
 
 %macro mock {
 
@@ -1497,6 +1586,14 @@
     });
     }
   }
+
+  %example "@mock" {
+    @test "the list loads from a mocked fetch" {
+      @mock fetch returns (() => Promise.resolve({ ok: true, json: () => ({ data: [] }) }))
+      @let (res = await fetch('/api/items'))
+      @assert (res.ok) "the mock answered"
+    }
+  }
 }
 
 
@@ -1513,10 +1610,6 @@
 /// references an `el` that selectorless test directives no longer bind after
 /// FUP-072). Like @let, it is a bare (global) assignment so the binding survives
 /// the per-step IIFE and is visible to the following @assert step by the same name.
-///
-/// @example
-/// @try { throwingFn() }
-/// @assert ($error !== null) "Should have thrown"
 
 %macro try {
 
@@ -1534,6 +1627,11 @@
       $$error = __e;
     }
   }
+
+  %example "@try" {
+    @try { throwingFn() }
+    @assert ($error !== null) "Should have thrown"
+  }
 }
 
 
@@ -1541,9 +1639,6 @@
 ///
 /// Executes arbitrary JavaScript expression within a test.
 /// Use sparingly - prefer declarative @given/@when/@then.
-///
-/// @example
-/// @run document.querySelector('.item').textContent = 'Updated'
 
 %macro run {
 
@@ -1553,6 +1648,14 @@
 
   %emit js {
     %$code;
+  }
+
+  %example "@run" {
+    @test "the label can be rewritten" {
+      @fixture { <p class="item">Draft</p> }
+      @run (document.querySelector('.item').textContent = 'Updated')
+      @then .item should have_text "Updated"
+    }
   }
 }
 

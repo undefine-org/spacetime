@@ -8,13 +8,7 @@
 ///   name - Custom property name (e.g., "--nav-fg")
 ///   styles - CSS descriptors (syntax, initial-value, inherits)
 ///
-/// @example
-/// Used via the @property macro:
-///   @property("--nav-fg") {
-///       syntax: '<color>';
-///       initial-value: #1A1A1A;
-///       inherits: true;
-///   }
+/// Used via the @property macro.
 
 %primitive property-registration-emit(
   name: string,

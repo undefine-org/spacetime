@@ -4,23 +4,6 @@
 /// and capabilities. Each profile includes viewport dimensions,
 /// pixel ratio, safe areas, and platform information.
 ///
-/// @example basic usage
-/// .test-container {
-///   @device("iPhone 15 Pro")
-/// }
-///
-/// @example with custom device
-/// .test-container {
-///   @device-custom(
-///     width: 375,
-///     height: 812,
-///     pixel-ratio: 3,
-///     safe-top: 44,
-///     safe-bottom: 34
-///   )
-/// }
-
-
 /// Device Profile Macro
 ///
 /// Applies device dimensions and safe areas as CSS variables
@@ -32,8 +15,6 @@
 /// - iPhone 15 Pro Max
 /// - Pixel 8
 /// - Galaxy S24
-///
-/// @param name - Device name to emulate
 
 %macro device-profile {
 
@@ -138,45 +119,50 @@
       }
     }
   }
+
+  %example "basic usage" {
+    .test-container {
+      @device("iPhone 15 Pro")
+    }
+  }
+
+  %example "with custom device" {
+    .test-container {
+      @device-custom(
+        width: 375,
+        height: 812,
+        pixel-ratio: 3,
+        safe-top: 44,
+        safe-bottom: 34
+      )
+    }
+  }
 }
 
 
 /// Custom Device Profile Macro
 ///
 /// Define a custom device profile with specific dimensions.
-///
-/// @param width - Viewport width in pixels
-/// @param height - Viewport height in pixels
-/// @param pixel-ratio - Device pixel ratio
-/// @param safe-top - Top safe area inset
-/// @param safe-bottom - Bottom safe area inset
-/// @param safe-left - Left safe area inset
-/// @param safe-right - Right safe area inset
-/// @param platform - Platform identifier (ios or android)
-///
-/// @example
-/// .custom-device {
-///   @device-custom(
-///     width: 400,
-///     height: 800,
-///     pixel-ratio: 2,
-///     safe-top: 40,
-///     safe-bottom: 20,
-///     platform: "android"
-///   )
-/// }
 
 %macro device-custom {
 
   %form {
     @device-custom(
+      /// Viewport width in pixels
       width: $width:number = 393,
+      /// Viewport height in pixels
       height: $height:number = 852,
+      /// Device pixel ratio
       pixel-ratio: $pixelRatio:number = 3,
+      /// Top safe area inset
       safe-top: $safeTop:number = 59,
+      /// Bottom safe area inset
       safe-bottom: $safeBottom:number = 34,
+      /// Left safe area inset
       safe-left: $safeLeft:number = 0,
+      /// Right safe area inset
       safe-right: $safeRight:number = 0,
+      /// Platform identifier (ios or android)
       platform: $platform:string = "ios"
     )
   }
@@ -194,6 +180,19 @@
       --st-platform: "%$platform"
     }
   }
+
+  %example "@device-custom" {
+    .custom-device {
+      @device-custom(
+        width: 400,
+        height: 800,
+        pixel-ratio: 2,
+        safe-top: 40,
+        safe-bottom: 20,
+        platform: "android"
+      )
+    }
+  }
 }
 
 
@@ -201,13 +200,6 @@
 ///
 /// Applies the device profile and constrains the element
 /// to match the device viewport dimensions.
-///
-/// @param name - Device name to emulate
-///
-/// @example
-/// .app-preview {
-///   @device-frame("iPhone 15 Pro")
-/// }
 
 %macro device-frame {
 
@@ -301,6 +293,12 @@
         --st-platform: android
         border-radius: 28px
       }
+    }
+  }
+
+  %example "@device-frame" {
+    .app-preview {
+      @device-frame("iPhone 15 Pro")
     }
   }
 }

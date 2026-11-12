@@ -20,12 +20,6 @@
 /// and passes them to `stops:`, exactly as `three-scroll.st`'s `drive:` params
 /// are supplied today — no new grammar, no new dispatch-ambiguity risk.
 ///
-/// @param &el       - the <canvas> hosting the @stage (reads canvas._stThree)
-/// @param stops     - an array of { at: number, pos: {x,y,z}, face: quat } —
-///                    `at` is the scroll-progress fraction (0..1) this stop
-///                    applies at; MUST be sorted ascending by `at`.
-/// @param ease      - per-frame smoothing 0..1 (default 0.08, matches
-///                    three-scroll's default — same visual feel)
 /// BINDING (BUG-263 item 4): each `@pose-track` binds its PRECEDING `@object`
 ///                    by SOURCE ORDER — the compiler emits sibling primitive
 ///                    inits in author order, so when this track's init runs,
@@ -33,10 +27,9 @@
 ///                    immediately before it. No `objectIndex` exists: to drive
 ///                    a specific object, author `@object` then `@pose-track`
 ///                    as an adjacent PAIR in the `@stage` body.
-///
-/// @yields $progress - eased scroll progress 0..1 (same shape as three-scroll)
 
 %primitive three-pose-track(
+  /// the <canvas> hosting the @stage (reads canvas._stThree)
   &el,
   stops: expr,
   ease: number = 0.08
@@ -132,6 +125,7 @@
   }
 
   %exports {
+    /// eased scroll progress 0..1 (same shape as three-scroll)
     $progress: number
   }
 }

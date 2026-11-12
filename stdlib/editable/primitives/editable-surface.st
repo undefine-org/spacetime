@@ -13,28 +13,18 @@
 /// Commands ride the signal-method rail: `$doc.apply("bold")`,
 /// `$doc.setBlock("h2")`, `$doc.apply("link", { href })` — a custom toolbar is
 /// plain `@on click { $doc.apply("bold"); }`.
-///
-/// @param &host    - the contenteditable host element
-/// @param bind     - the persisted value path (AST object) this surface reads/writes
-/// @param marks    - array of allowed mark names (from the @editable marks: list)
-/// @param blocks   - array of allowed block names (from the @editable blocks: list)
-/// @param schema   - the editable schema descriptor { marks, blocks } (from editable-schema.json)
-/// @param gate     - editing gate: null = always editable (forms/admin); 'edit-mode'
-///                   = contenteditable mirrors html[data-st-edit-mode] (published pages,
-///                   the @richtext default — reads as final HTML, edits in place on toggle)
-///
-/// @yields $doc        - the document AST (+ command methods apply/setBlock/split)
-/// @yields $sel        - the selection { from, to } in integer positions
-/// @yields $activeMarks- mark types active across the current selection
-/// @yields $blockType  - block type at the selection head
-/// @yields $empty      - whether the document is effectively empty
 
 %primitive editable-surface(
+  /// the contenteditable host element
   &host,
   bind: string? = null,
   marks: array = [],
   blocks: array = [],
+  /// the editable schema descriptor { marks, blocks } (from editable-schema.json)
   schema: any = null,
+  /// editing gate: null = always editable (forms/admin); 'edit-mode'
+  /// = contenteditable mirrors html[data-st-edit-mode] (published pages,
+  /// the @richtext default — reads as final HTML, edits in place on toggle)
   gate: string? = null
 ) {
   %emit js {
@@ -337,10 +327,15 @@
   }
 
   %exports {
+    /// the document AST (+ command methods apply/setBlock/split)
     $doc: any
+    /// the selection { from, to } in integer positions
     $sel: any
+    /// mark types active across the current selection
     $activeMarks: array
+    /// block type at the selection head
     $blockType: string
+    /// whether the document is effectively empty
     $empty: bool
   }
 }

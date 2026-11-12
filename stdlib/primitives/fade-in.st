@@ -15,22 +15,9 @@
 /// observer and drives a real WAAPI animation. This is that primitive for the
 /// whole-element case — `reveal-engine` splits text into per-character units,
 /// which is the wrong shape for "fade this box in".
-///
-/// @param &el       - Element to fade in
-/// @param duration  - Animation duration in ms
-/// @param delay     - Delay before the animation starts, in ms
-/// @param distance  - How far the element travels while fading (CSS length)
-/// @param direction - Which way it travels FROM ("bottom" moves up into place)
-/// @param easing    - Easing function name; a declared `@form easing --name`
-///                    curve resolves through `ST.ease` exactly as elsewhere
-/// @param threshold - Visibility ratio that triggers the fade
-/// @param once      - Fade only the first time it becomes visible
-///
-/// @param keyframes - Optional custom keyframes body (`@fade-in(...) { scale: 0.95 -> 1 }`)
-///
-/// @yields $faded - true once the fade has finished
 
 %primitive fade-in-engine(
+  /// Element to fade in
   &el,
   duration: number = 600,
   delay: number = 0,
@@ -39,6 +26,7 @@
   easing: string = "ease-out",
   threshold: number = 0.1,
   once: bool = true,
+  /// Optional custom keyframes body (`@fade-in(...) { scale: 0.95 -> 1 }`)
   keyframes: any = null
 ) {
   %emit js {
@@ -131,6 +119,7 @@
           // by a finished animation (which blocks later style changes).
           node.style.opacity = '1';
           node.style.transform = '';
+          /// true once the fade has finished
           %yield true -> $faded;
         };
       };

@@ -18,21 +18,16 @@
 /// Declarative WebSocket with message-type routing.
 /// Connection lifecycle is reflected via reactive signals; message types are
 /// routed via @on directives.
-///
-/// @example
-/// .live-connection {
-///   @websocket(url: "ws://localhost:3030/ws") {
-///     @ws-on Reload { trigger("reload-tests") }
-///     @ws-on TestResults { $testResults <- $.results }
-///     @ws-on Ping { send({ type: "Pong" }) }
-///     @ws-on Error { $lastError <- $.message }
-///   }
-/// }
 
 %macro websocket {
 
   %form {
-    @websocket(url: $url:string = "/ws", reconnect: $reconnect:time = 2000ms) {
+    @websocket(
+      /// WebSocket URL
+      url: $url:string = "/ws",
+      /// Auto-reconnect delay (0 to disable)
+      reconnect: $reconnect:time = 2000ms
+    ) {
       $_handlers:message_handlers*
     }
   }
@@ -44,15 +39,20 @@
 
   // TODO: Connection lifecycle signal (nested %macro not yet supported)
   // TODO: Route each message type to its handler
+
+  %example "@websocket" {
+    .live-connection {
+      @websocket(url: "ws://localhost:3030/ws", reconnect: 5s) {}
+      .is-online: $connected;
+    }
+    <div class="live-connection">Live</div>
+  }
 }
 
 
 /// WebSocket Message Handler
 ///
 /// Used within @websocket blocks to define message type handlers.
-///
-/// @example
-/// @ws-on Reload { $files <- $.files }
 
 %macro ws-message-handler {
 
@@ -66,6 +66,10 @@
     type: $messageType
     action: $actions
   }
+
+  %example "@ws-message-handler" {
+    @ws-on Reload { $files <- $.files; }
+  }
 }
 
 // =============================================================================
@@ -76,9 +80,6 @@
 ///
 /// Subscribe to a real-time data collection with optimistic CRUD.
 /// Automatically syncs with server and handles optimistic updates.
-///
-/// @example
-/// @type Todo { id: string; text: string; done: bool }
 ///
 /// @realtime todos: Todo[] {
 ///   channel: "todos"
@@ -122,15 +123,23 @@
       optimistic: $optimistic
     ) -> { $items, $loading, $insert, $update, $remove }
   }
+
+  %example "@realtime" {
+    @type Todo { id: string; text: string; done: bool }
+    .todo-list {
+      @realtime todos: Todo[] {
+        channel: "todos";
+        url: "/sync";
+      }
+    }
+    <ul class="todo-list"></ul>
+  }
 }
 
 
 /// Realtime Collection (short form)
 ///
 /// Simpler form for common use cases.
-///
-/// @example
-/// @realtime todos: Todo[] on "todos"
 
 %macro realtime-short {
 
@@ -140,6 +149,10 @@
 
   %binds {
     realtime-source(&self, channel: $channel) -> { $items, $loading, $insert, $update, $remove }
+  }
+
+  %example "@realtime-short" {
+    @realtime todos: Todo[] on "todos"
   }
 }
 
@@ -151,9 +164,6 @@
 ///
 /// Join a presence room to track and broadcast user state.
 /// Great for collaborative features like cursors, selections, typing indicators.
-///
-/// @example
-/// @type Cursor { x: number; y: number; color: string; name: string }
 ///
 /// .canvas {
 ///   @presence(room: $docId, throttle: 50ms) as cursors: Cursor
@@ -180,17 +190,28 @@
 %macro presence {
 
   %form {
-    @presence(room: $room:string, throttle: $throttle:time = 50ms, url: $url:string = "/ws")
+    @presence(
+      /// Room name to join
+      room: $room:string,
+      /// Throttle interval for state updates
+      throttle: $throttle:time = 50ms,
+      /// WebSocket URL
+      url: $url:string = "/ws"
+    )
       as $_name:ident : $type:typeref? = any
   }
 
   // Bind the presence primitive
   %binds {
-    presence(&self,
-      room: $room,
-      url: $url,
-      throttle: $throttle
-    ) -> { $users, $myId, $set, $leave }
+    presence(&self, ...) -> { $users, $myId, $set, $leave }
+  }
+
+  %example "@presence" {
+    @type Cursor { x: number; y: number; color: string; name: string }
+    .canvas {
+      @presence(room: "doc-123", throttle: 50ms) as cursors: Cursor
+    }
+    <div class="canvas"></div>
   }
 }
 
@@ -226,18 +247,22 @@
 
 
 /// Presence (short form)
-///
-/// @example
-/// @presence(room: "doc-123") as viewers
 
 %macro presence-short {
 
   %form {
-    @presence(room: $room:string) as $_name:ident
+    @presence(
+      /// Room name to join
+      room: $room:string
+    ) as $_name:ident
   }
 
   %binds {
     presence(&self, room: $room) -> { $users, $myId, $set, $leave }
+  }
+
+  %example "@presence-short" {
+    @presence(room: "doc-123") as viewers
   }
 }
 
@@ -249,13 +274,6 @@
 ///
 /// Subscribe to a typed message channel for custom protocols.
 /// Provides structured send/receive with type safety.
-///
-/// @example
-/// @channel Notifications {
-///   @in Subscribe { topics: string[] }
-///   @out Alert { level: "info" | "warn" | "error"; message: string }
-///   @out Badge { count: number }
-/// }
 ///
 /// .notifications {
 ///   @connect(Notifications, url: "/ws") as notif
@@ -285,6 +303,14 @@
   %registers channel_def {
     name: $name
     messages: $messages
+  }
+
+  %example "@channel" {
+    @channel Notifications {
+      @in Subscribe { topics: string[] }
+      @out Alert { level: "info" | "warn" | "error"; message: string }
+      @out Badge { count: number }
+    }
   }
 }
 
@@ -320,18 +346,23 @@
 /// Connect to a Channel
 ///
 /// Binds a channel definition to an element.
-///
-/// @example
-/// @connect(Notifications) as notif
 
 %macro connect {
 
   %form {
-    @connect($channel:ident, url: $url:string = "/ws") as $name:ident
+    @connect(
+      $channel:ident,
+      /// WebSocket URL
+      url: $url:string = "/ws"
+    ) as $name:ident
   }
 
   %binds {
     channel(&self, name: $channel, url: $url) -> { $connected, $lastMessage, $send }
+  }
+
+  %example "@connect" {
+    @connect(Notifications) as notif
   }
 }
 
@@ -342,22 +373,6 @@
 /// Realtime with custom backend protocol
 ///
 /// For servers that don't use the Spacetime sync protocol.
-///
-/// @example
-/// @realtime items: Item[] {
-///   channel: "items"
-///   messages: {
-///     snapshot: "ITEMS_SNAPSHOT"
-///     inserted: "ITEM_CREATED"
-///     updated: "ITEM_UPDATED"
-///     deleted: "ITEM_DELETED"
-///   }
-///   actions: {
-///     insert: (item) => { type: "CREATE_ITEM", payload: item }
-///     update: (id, patch) => { type: "UPDATE_ITEM", id, ...patch }
-///     delete: (id) => { type: "DELETE_ITEM", id }
-///   }
-/// }
 
 %macro realtime-custom {
 
@@ -378,24 +393,32 @@
       actions: $actions
     ) -> { $items, $loading, $insert, $update, $remove }
   }
+
+  %example "@realtime-custom" {
+    @type Item { id: string; name: string }
+    .inventory {
+      @realtime items: Item[] {
+        channel: "items";
+        messages: { snapshot: "ITEMS_SNAPSHOT", inserted: "ITEM_CREATED", updated: "ITEM_UPDATED", deleted: "ITEM_DELETED" };
+        actions: { insert: "CREATE_ITEM", update: "UPDATE_ITEM", delete: "DELETE_ITEM" };
+      }
+    }
+    <ul class="inventory"></ul>
+  }
 }
 
 
 /// Presence with custom backend protocol
-///
-/// @example
-/// @presence(room: "doc-123") as cursors {
-///   messages: {
-///     state: "PRESENCE_STATE"
-///     joined: "USER_JOINED"
-///     left: "USER_LEFT"
-///   }
-/// }
 
 %macro presence-custom {
 
   %form {
-    @presence(room: $room:string, throttle: $throttle:time = 50ms) as $_name:ident {
+    @presence(
+      /// Room name to join
+      room: $room:string,
+      /// Throttle interval for state updates
+      throttle: $throttle:time = 50ms
+    ) as $_name:ident {
       url: $url:string = "/ws"
       messages: $messages:object
     }
@@ -409,6 +432,16 @@
       messages: $messages
     ) -> { $users, $myId, $set, $leave }
   }
+
+  %example "@presence-custom" {
+    @presence(room: "doc-123") as cursors {
+      messages: {
+        state: "PRESENCE_STATE"
+        joined: "USER_JOINED"
+        left: "USER_LEFT"
+      }
+    }
+  }
 }
 
 
@@ -421,25 +454,29 @@
 ///
 /// WebSocket connection with typed union state for pattern matching.
 /// Invokes the socket primitive and yields $state as the aliased signal.
-///
-/// @example
-/// .socket-demo {
-///   @socket(&self, url: attr(url) or "/ws") as $ws
-///
-///   @state(when: $ws is Connected { $send, $received }) {
-///     opacity: 1;
-///   }
-/// }
 
 %macro socket {
 
   %form {
-    @socket(url: $url:expr = "/ws") as $state:ident
+    @socket(
+      /// WebSocket URL
+      url: $url:expr = "/ws"
+    ) as $state:ident
   }
 
   // Bind the socket primitive - yields typed union state
   // The $state from the form becomes the output binding name
   %binds {
     socket(&self, url: $url) -> { $state }
+  }
+
+  %example "@socket" {
+    .socket-demo {
+      @socket(&self, url: attr(url) or "/ws") as $ws
+
+      @state(when: $ws is Connected { $send, $received }) {
+        opacity: 1;
+      }
+    }
   }
 }

@@ -7,9 +7,6 @@
 /// Does NOT handle saving — only captures edits and emits events
 /// via `window.__stDevEditable` API. The dev-save primitive
 /// subscribes to these events to persist changes.
-///
-/// @yields $activeEdit - Current edit in progress or null
-/// @yields $editCount - Number of completed edits this session
 
 %primitive dev-editable() %uses locale {
   %emit js {
@@ -481,7 +478,9 @@
   }
 
   %exports {
+    /// Current edit in progress or null
     $activeEdit: object
+    /// Number of completed edits this session
     $editCount: number
     $editModeActive: bool
   }

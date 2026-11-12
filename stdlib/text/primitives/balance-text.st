@@ -8,9 +8,6 @@
 /// Sets the element's `max-inline-size` (px) to the balanced width. Recomputes
 /// on resize via ResizeObserver. CSS `text-wrap: balance` is the cheap default;
 /// this primitive is the precise, resize-stable, CJK/RTL-correct alternative.
-///
-/// @yields $balancedWidth - the chosen max-inline-size in px
-/// @yields $lines         - resulting line count
 
 %primitive balance-text(&el, lineHeight: number = 1.2) {
   %emit js {
@@ -76,7 +73,9 @@
   }
 
   %exports {
+    /// the chosen max-inline-size in px
     $balancedWidth: number
+    /// resulting line count
     $lines: number
   }
 }

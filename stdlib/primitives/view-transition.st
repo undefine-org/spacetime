@@ -6,9 +6,7 @@
 /// Parameters:
 ///   styles - descriptors for the rule (`navigation: auto;`, `types: …;`)
 ///
-/// @example
-/// Used via the @view-transition macro:
-///   @view-transition { navigation: auto; }
+/// Used via the @view-transition macro.
 
 %primitive view-transition-emit(
   styles: any

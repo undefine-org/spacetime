@@ -3,14 +3,17 @@
 /// Wraps selected text within an element in a styled span.
 /// Used for inline text highlighting (handwritten, accent, highlight, quote).
 ///
-/// @param &el - Element containing the selection
-/// @param trigger - Event that triggers the wrapping action
-/// @param class_name - CSS class to apply to the wrapper span
-///
 /// @example
 /// selection-wrapper(&self, trigger: __wrap_handwritten, class_name: "jal-handwritten")
 
-%primitive selection-wrapper(&el, trigger: ident, class_name: string) {
+%primitive selection-wrapper(
+  /// Element containing the selection
+  &el,
+  /// Event that triggers the wrapping action
+  trigger: ident,
+  /// CSS class to apply to the wrapper span
+  class_name: string
+) {
   %emit js {
     const wrapHandler = () => {
       const selection = window.getSelection();

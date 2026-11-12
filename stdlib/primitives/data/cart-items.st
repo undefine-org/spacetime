@@ -2,11 +2,6 @@
 ///
 /// Reactive binding that renders cart items and re-renders on cart changes.
 /// Updates automatically when cart changes via local:cart:updated events.
-///
-/// @example
-/// .jal-cart__items {
-///     @cart-items;
-/// }
 
 %primitive cart-items-binding(&el) {
   %emit js {
@@ -84,5 +79,11 @@
 
   %binds {
     cart-items-binding(&self)
+  }
+
+  %example "@cart-items" {
+    .jal-cart__items {
+        @cart-items;
+    }
   }
 }

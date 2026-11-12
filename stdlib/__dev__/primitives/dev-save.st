@@ -6,10 +6,6 @@
 /// triggers @each re-rendering on DataUpdate via ST.setData().
 ///
 /// Handles JSON edits (EditJson) and content edits (EditAst).
-///
-/// @yields $saving - Whether any edits are currently in-flight
-/// @yields $lastSaveError - Last error message from a rejected edit
-/// @yields $savedCount - Total number of successfully saved edits
 
 %primitive dev-save() {
   %emit js {
@@ -422,8 +418,11 @@
   }
 
   %exports {
+    /// Whether any edits are currently in-flight
     $saving: bool
+    /// Last error message from a rejected edit
     $lastSaveError: string
+    /// Total number of successfully saved edits
     $savedCount: number
   }
 }

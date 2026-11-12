@@ -2,18 +2,13 @@
 ///
 /// Requests the device's current geolocation. Uses the native location API
 /// when running in a Tauri mobile app, or the Web Geolocation API as fallback.
-///
-/// @param &el - Element to bind location data to
-/// @param highAccuracy - Whether to use high accuracy mode (GPS)
-/// @param timeout - Request timeout in milliseconds
-///
-/// @yields $latitude - Current latitude coordinate
-/// @yields $longitude - Current longitude coordinate
-/// @yields $accuracy - Accuracy of the position in meters
-/// @yields $loading - Whether the location request is in progress
-/// @yields $error - Error message if request failed, empty string otherwise
 
-%primitive location(&el, highAccuracy: bool = true, timeout: number = 10000) {
+%primitive location(
+  /// Element to bind location data to
+  &el,
+  highAccuracy: bool = true,
+  timeout: number = 10000
+) {
   %emit js {
     // Import the SpacetimeMobile API
     const mobile = globalThis.__SpacetimeMobile || {
@@ -63,10 +58,15 @@
   }
 
   %exports {
+    /// Current latitude coordinate
     $latitude: number
+    /// Current longitude coordinate
     $longitude: number
+    /// Accuracy of the position in meters
     $accuracy: number
+    /// Whether the location request is in progress
     $loading: bool
+    /// Error message if request failed, empty string otherwise
     $error: string
   }
 }
@@ -76,11 +76,6 @@
 ///
 /// Declarative macro for requesting location on element mount.
 ///
-/// @example
-/// .location-display {
-///   @location(highAccuracy: true)
-/// }
-///
 /// .map-container {
 ///   @location(highAccuracy: true, timeout: 15000)
 /// }
@@ -89,7 +84,9 @@
 
   %form {
     @location(
+      /// Whether to use high accuracy mode (GPS)
       highAccuracy: $highAccuracy:bool = true,
+      /// Request timeout in milliseconds
       timeout: $timeout:number = 10000
     )
   }
@@ -101,6 +98,12 @@
       $accuracy,
       $loading,
       $error
+    }
+  }
+
+  %example "@location-request" {
+    .location-display {
+      @location(highAccuracy: true)
     }
   }
 }

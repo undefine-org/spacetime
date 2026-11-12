@@ -90,6 +90,61 @@ The `%form` declaration:
 - Captures block contents with type annotations
 - Enables the compiler to parse and validate user code
 
+**Documenting a param.** A `///` line documents the declaration directly below
+it, and a param is a declaration (PLAN-156):
+
+```st
+%form {
+  @light $named:part_name? (
+    /// how it shines
+    type: $type:light_kind = directional,
+    /// how soft the spot's edge is
+    penumbra: $penumbra:unit = 0.3
+  )
+}
+```
+
+The doc says what the type and the default can't. A range, a unit or a set of
+choices belongs in the type: a [scalar row](./capture-types.md#typed-numbers) (`unit`, `meters`)
+or a keyword set. There is no `/// @param name` tag: repeating the name is how
+a doc drifts from its param. The LSP, `reflect.json` and the studio's
+inspector read the doc from here. Other comments in a `%form` are just comments.
+
+### `%shorthand name { longhands }`
+
+A shorthand writes several params at once, as CSS's `margin` writes
+`margin-top`, `margin-right`, … (PLAN-156):
+
+```st
+%form { @object(posX: $posX:number = 0, posY: $posY:number = 0, posZ: $posZ:number = 0) }
+%shorthand pos { posX posY posZ }
+```
+
+- `@object (pos: 0 3 -7)` is `@object (posX: 0, posY: 3, posZ: -7)`: the same
+  match, so the same page. The longhands are what the binds and the IR carry.
+- One value sets them all: `scale: 0.42`.
+- Written order decides, as in CSS: `pos: 0 0 0, posX: 5` puts x at 5;
+  `posX: 5, pos: 0 0 0` puts it at 0.
+- Each longhand set by a shorthand keeps the span of its own word, so a tool
+  that edits `posX` rewrites that word. The author's spelling stays.
+
+### `%example "title" { }`
+
+A use of the macro, written as a page. `spacetime check --examples` compiles
+every stdlib example, and fails one that has an error or no longer uses its
+macro. The studio and the LSP offer examples as insertable snippets.
+
+```st
+%macro light {
+  %form { … }
+  %example "a warm lamp the score can switch on" {
+    @import "stdlib/3d"
+    canvas.world { @stage { @light &lamp (type: point, color: #ffcf8a, distance: 9) } }
+    <canvas class="world"></canvas>
+  }
+}
+```
+
 ### `%binds { }`
 
 Connects to primitives and captures their reactive outputs.
@@ -110,6 +165,18 @@ You can rename bindings:
   intersection(&self) -> { $visible as $isShown, $ratio as $amount }
 }
 ```
+
+**Forwarding every param: `...`.** When a primitive takes the form's params
+under their own names, `...` forwards every named `%form` param the call
+doesn't name itself:
+
+```st
+%binds { three-light(&self, name: $named, ...) -> { $added } }
+```
+
+It expands at parse time into `type: $type, color: $color, …`. The form stays
+the one signature: its defaults are the ones that run (a bound primitive's own
+defaults are never used, since the bind always passes the arg).
 
 ### `%derives { }`
 

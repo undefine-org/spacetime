@@ -33,24 +33,9 @@
 ///
 /// The frame loop ticks through `ST._raf`, so under a virtual clock (`render`,
 /// `@clock`) the 3D moves on the same instants as the DOM.
-///
-/// @param &el       - the <canvas> to render into
-/// @param fov       - perspective vertical field of view (degrees)
-/// @param near      - camera near plane
-/// @param far       - camera far plane
-/// @param camX/Y/Z  - initial camera position
-/// @param exposure  - tone-mapping exposure
-/// @param tone      - tone-mapping: "aces" | "linear" | "reinhard" | "none"
-/// @param alpha     - transparent canvas background
-/// @param shadows   - "" (off) | "soft" | "hard": shadow maps for every light that casts and every part
-/// @param background - the 3D's clear colour (hex); "" keeps the canvas transparent
-/// @param bloom     - glow around bright and emissive parts (0 none, 1 natural, 2 strong); raea's `Bloom`
-///
-/// @yields $ready   - true once the renderer + loop are live
-/// @yields $frame   - frame counter (reactive)
-/// @yields $fps     - frames per second (updated ~1Hz)
 
 %primitive three-stage(
+  /// the <canvas> to render into
   &el,
   fov: number = 50,
   near: number = 0.1,
@@ -728,8 +713,11 @@
   }
 
   %exports {
+    /// true once the renderer + loop are live
     $ready: bool
+    /// frame counter (reactive)
     $frame: number
+    /// frames per second (updated ~1Hz)
     $fps: number
   }
 }

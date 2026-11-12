@@ -1080,6 +1080,13 @@ pub fn directive_property_match_diagnostics(
             if !type_is_enforceable(expected) {
                 continue;
             }
+            // Only the author's words are judged. A param left out is filled
+            // from its form's default and has no span: `@resize(min: 10px)` used
+            // to fail on `max`, whose default `none` arrives as `null`, at a
+            // place the author never wrote and can't fix.
+            let Some(span) = fm.capture_spans.get(name).copied() else {
+                continue;
+            };
             // Only a literal carries a value to measure. A binding or an
             // expression resolves elsewhere, and a structural capture is a body,
             // not a value.
@@ -1096,9 +1103,8 @@ pub fn directive_property_match_diagnostics(
             if crate::syntax::events::capture_type_accepts(expected, text) {
                 continue;
             }
-            // Point at the capture itself when the parse recorded where it was;
-            // a diagnostic on the whole directive makes the author hunt.
-            let span = fm.capture_spans.get(name).copied().unwrap_or(fm.span);
+            // The caret goes to the capture itself; a diagnostic on the whole
+            // directive makes the author hunt.
             out.push(
                 Diagnostic::error(
                     DiagnosticCode::E0967,

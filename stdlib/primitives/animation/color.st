@@ -2,10 +2,6 @@
 ///
 /// Provides color parsing and interpolation in multiple color spaces.
 /// Supports RGB, HSL, and OKLCH color spaces.
-///
-/// @yields $parseColor - Parse color string to internal format
-/// @yields $interpolateColor - Interpolate between two colors
-/// @yields $colorToString - Convert internal format to CSS string
 
 %primitive color-interpolate() {
   %emit js {
@@ -238,7 +234,9 @@
   }
 
   %exports {
+    /// Parse color string to internal format
     $parseColor: fn(color: string) ~> object
+    /// Interpolate between two colors
     $interpolateColor: fn(from: object, to: object, t: number, mode: string?) ~> string
   }
 }

@@ -2,20 +2,13 @@
 ///
 /// Detects long press gestures with configurable timing.
 /// Tracks press duration and provides progress signal.
-///
-/// @example
-/// .item {
-///   @long-press {
-///     scale: 0.96
-///     opacity: 0.8
-///   }
-/// }
 
 %macro long-press {
 
   %form {
     @long-press(
       duration: $duration:number = 400,
+      /// Minimum movement to start drag (prevents accidental drags)
       threshold: $threshold:number = 10
     ) {
       $styles:properties
@@ -49,6 +42,15 @@
   %when $active {
     %applies {
       $styles
+    }
+  }
+
+  %example "@long-press" {
+    .item {
+      @long-press {
+        scale: 0.96
+        opacity: 0.8
+      }
     }
   }
 }

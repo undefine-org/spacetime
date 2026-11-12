@@ -20,11 +20,12 @@
 /// structural ids shift when markup is inserted above the target, so an anchor
 /// keyed on position resolves cleanly to the WRONG element after an edit —
 /// which is exactly why identity is content, not place.
-///
-/// @param &el     - the widget host (scope root for signal resolution)
-/// @param picking - name of the boolean signal that gates pick mode
-/// @param onpick  - name of the object signal the picked content is written to
-%primitive comments-pick(&el, picking: string = "", onpick: string = "") {
+%primitive comments-pick(
+  /// the widget host (scope root for signal resolution)
+  &el,
+  picking: string = "",
+  onpick: string = ""
+) {
   %emit js {
     (() => {
       const host = %&el;

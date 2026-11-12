@@ -1,16 +1,6 @@
 /// Type Definition Macro
 ///
 /// Defines a named type for use in data bindings.
-///
-/// @example
-/// @type Product {
-///   id: string
-///   name: string
-///   price: number
-///   inStock: bool
-///   tags: string[]
-///   category: "electronics" | "clothing" | "food"
-/// }
 
 %macro type {
   %scope file
@@ -24,6 +14,17 @@
 
   %registers type($name) {
     $fields
+  }
+
+  %example "@type" {
+    @type Product {
+      id: string
+      name: string
+      price: number
+      inStock: bool
+      tags: string[]
+      category: "electronics" | "clothing" | "food"
+    }
   }
 }
 
@@ -72,11 +73,6 @@
 ///
 /// Defines a reusable helper function.
 ///
-/// @example
-/// @fn formatPrice($price number): string {
-///   "$" + price.toFixed(2)
-/// }
-///
 /// // Usage: $.price | formatPrice
 ///
 /// Parameters use the SPACE-form type annotation (`$price number`), matching
@@ -115,6 +111,12 @@
       returnType: $returnType
     ) -> { $fn as $$name }
   }
+
+  %example "@fn" {
+    @fn formatPrice($price number): string {
+      price.toFixed(2) + " EUR"
+    }
+  }
 }
 
 
@@ -123,19 +125,6 @@
 /// Declares a computed value with full multi-statement JavaScript logic.
 /// Unlike @computed which only supports array operations (filter/sort/limit/map),
 /// @compute allows arbitrary JavaScript for complex computations.
-///
-/// @example
-/// @compute cartTotal($cart, $config) : number {
-///   if (!$cart || $cart.length === 0) return 0;
-///   const discounts = $config?.packDiscounts || {};
-///   let total = $cart.reduce((sum, item) => sum + (item.price || 0), 0);
-///   let maxDiscount = 0;
-///   $cart.forEach(item => {
-///     const d = discounts[item.packId]?.percentage || 0;
-///     if (d > maxDiscount) maxDiscount = d;
-///   });
-///   return Math.round(total * (1 - maxDiscount));
-/// }
 
 %macro compute {
   %scope file | selector
@@ -153,5 +142,11 @@
       body: $body,
       returnType: $returnType
     ) -> { $value as $$name }
+  }
+
+  %example "@compute" {
+    @compute cartTotal($cart) : number {
+      return cart.reduce((sum, item) => sum + item.price, 0);
+    }
   }
 }

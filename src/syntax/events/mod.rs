@@ -81,6 +81,16 @@ pub fn parse_matches(
             .map(|c| (c.name.clone(), c.clone()))
             .collect();
     for ct in registry.capture_types() {
+        // A keyword set (`%capture_type light_kind { "ambient" | "point" }`) is the
+        // named twin of an inline union, and takes a word the same way: bare or
+        // quoted, one value (PLAN-156).
+        if let Some(words) = keyword_set(&ct.pattern) {
+            extractors.register_custom(
+                ct.name.clone(),
+                Box::new(self::extractors::pattern::UnionExtractor { variants: words }),
+            );
+            continue;
+        }
         let inner = self::extractors::custom::compile_pattern_with_defs(
             &ct.pattern,
             &extractors,
@@ -89,6 +99,13 @@ pub fn parse_matches(
         );
         let extractor = self::extractors::custom::wrap_reifier(&ct.name, inner);
         extractors.register_custom(ct.name.clone(), extractor);
+    }
+    for (id, capture) in registry.scalar_rows() {
+        if !extractors.custom.contains_key(id) {
+            extractors
+                .aliases
+                .insert(id.clone(), crate::parser::parse_capture_type_public(capture));
+        }
     }
     let compiled = CompiledRegistry::from_registry(registry, &extractors);
 
@@ -109,6 +126,30 @@ pub fn parse_matches(
     process(&mut events, source, &input, &mut match_sink);
 
     match_sink.finish()
+}
+
+/// The words of a keyword set: a production that is only a choice of
+/// single-word literals (plain identifiers: a dashed word may lex as several
+/// tokens, and those grammars keep their compiled matcher).
+pub fn keyword_set(pattern: &crate::parser::meta_ast::CapturePatternAst) -> Option<Vec<String>> {
+    use crate::parser::meta_ast::CapturePatternAst as P;
+    let alts = match pattern {
+        P::Choice(alts) => alts,
+        P::Group { pattern, modifier: None } => return keyword_set(pattern),
+        _ => return None,
+    };
+    let word = |p: &P| -> Option<String> {
+        match p {
+            P::Literal(w) if !w.is_empty() && w.chars().all(|c| c.is_alphanumeric() || c == '_') => Some(w.clone()),
+            P::Sequence(items) if items.len() == 1 => match &items[0] {
+                P::Literal(w) if !w.is_empty() && w.chars().all(|c| c.is_alphanumeric() || c == '_') => Some(w.clone()),
+                _ => None,
+            },
+            _ => None,
+        }
+    };
+    let words: Option<Vec<String>> = alts.iter().map(word).collect();
+    words.filter(|w| w.len() >= 2)
 }
 
 #[cfg(test)]

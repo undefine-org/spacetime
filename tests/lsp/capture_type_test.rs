@@ -314,6 +314,7 @@ mod form_registry_integration {
                 default,
             )],
             default: None,
+            doc: None,
         }
     }
 

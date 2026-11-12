@@ -234,6 +234,7 @@ mod tests {
                 None,
             )],
             default: None,
+            doc: None,
         }
     }
 

@@ -2,33 +2,6 @@
 ///
 /// Creates a scroll container with mobile optimizations including
 /// momentum scrolling and optional snap behavior.
-///
-/// @example vertical scrolling
-/// .content-list {
-///   @scroll-view(direction: "y", momentum: true) {
-///     scrolling {
-///       pointer-events: none
-///     }
-///   }
-/// }
-///
-/// @example horizontal carousel with snap
-/// .carousel {
-///   @scroll-view(direction: "x", momentum: true, snap: true) {
-///     scrolling {
-///       pointer-events: none
-///     }
-///   }
-/// }
-///
-/// @example bidirectional scroll
-/// .canvas {
-///   @scroll-view(direction: "both") {
-///     scrolling {
-///       cursor: grabbing
-///     }
-///   }
-/// }
 
 %macro scroll-view {
 
@@ -102,6 +75,36 @@
   %when $isScrolling {
     %applies {
       $styles
+    }
+  }
+
+  %example "vertical scrolling" {
+    .content-list {
+      @scroll-view(direction: "y", momentum: true) {
+        scrolling {
+          pointer-events: none
+        }
+      }
+    }
+  }
+
+  %example "horizontal carousel with snap" {
+    .carousel {
+      @scroll-view(direction: "x", momentum: true, snap: true) {
+        scrolling {
+          pointer-events: none
+        }
+      }
+    }
+  }
+
+  %example "bidirectional scroll" {
+    .canvas {
+      @scroll-view(direction: "both") {
+        scrolling {
+          cursor: grabbing
+        }
+      }
     }
   }
 }

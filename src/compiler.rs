@@ -2106,6 +2106,9 @@ fn compile_pipeline(ast: &StFile, options: CompileOptions) -> CompiledSpacetime 
             // table written beside them.
             diags
                 .extend(crate::validation::css::directive_property_match_diagnostics(form_matches));
+            // PLAN-156: a value that names something in a file is checked
+            // against that file (`%facts`: a model's clips)
+            diags.extend(crate::validation::facts::fact_diagnostics(form_matches));
             // PLAN-136 W6 / FUP-179: `@style`/`@media`/`@supports`/`@keyframes`
             // bodies are raw text and never became `CssDeclaration`s, so the
             // same value was refused at file scope and silent inside a block.

@@ -278,9 +278,25 @@ impl MacroScope {
     }
 }
 
+/// `%example "title" { source }` inside a `%macro` (PLAN-156): a use of the
+/// macro, compiled by `spacetime check` so it can't drift from its `%form`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct MacroExample {
+    pub title: String,
+    pub source: String,
+}
+
 /// %macro name { body }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct MacroDefAst {
+    /// `%example` clauses, in order (PLAN-156)
+    #[serde(default)]
+    pub examples: Vec<MacroExample>,
+    /// `%shorthand pos { posX posY posZ }` (PLAN-156): `pos: 1 2 3` sets the
+    /// longhands, as CSS's `margin` sets `margin-top`…; one value sets them all.
+    /// Written order decides, as in CSS. The longhands stay the IR.
+    #[serde(default)]
+    pub shorthands: Vec<(String, Vec<String>)>,
     pub name: String,
     /// %form { pattern }
     pub form: Option<FormClause>,
@@ -483,6 +499,10 @@ pub struct FormParam {
     pub elements: Vec<FormInlineElement>,
     /// Default value (if any) - only valid for simple single-element params
     pub default: Option<ParamDefault>,
+    /// The `///` lines written directly above the param in its `%form`
+    /// (PLAN-156): what the param is for, beyond what its type and default say.
+    #[serde(default)]
+    pub doc: Option<String>,
 }
 
 impl FormParam {
@@ -1182,6 +1202,9 @@ pub enum CapturePatternAst {
 pub struct CaptureTypeDefAst {
     pub name: String,
     pub pattern: CapturePatternAst,
+    /// A keyword set's `///` docs, by word (PLAN-156): what each choice means.
+    #[serde(default)]
+    pub docs: std::collections::BTreeMap<String, String>,
     #[serde(default)]
     pub span: SourceSpan,
     /// Which stdlib file this was loaded from (for incremental cache invalidation)
@@ -1323,6 +1346,16 @@ pub struct MigrationDefAst {
     /// Manual guidance (per directive)
     #[serde(default)]
     pub hints: Vec<MigrationHintAst>,
+    /// `%scope meta` (PLAN-156): the wave rewrites META-syntax (`%macro`,
+    /// `%form`, `%primitive`, `///`) in any `.st` file, the stdlib's included,
+    /// instead of directive calls in a project's pages.
+    #[serde(default)]
+    pub scope: Option<String>,
+    /// `%transform <name>` (PLAN-156): built-in rewrites of meta-syntax, run on
+    /// apply (`crate::migrate::meta`). Meta-syntax is read by the compiler's
+    /// own parser, not by a `%form`, so a `%match`/`%into` rule can't reach it.
+    #[serde(default)]
+    pub transforms: Vec<String>,
     #[serde(default)]
     pub span: SourceSpan,
     /// Source file where this migration is defined (for error traces)
@@ -1606,6 +1639,21 @@ pub struct ScalarTypeDefAst {
     /// `Inferred::Ambiguous`, which is the answer that never guesses.
     #[serde(default)]
     pub loses_to: Vec<String>,
+    /// `%range 0 1` (PLAN-156): the values an editor offers; a slider spans it.
+    /// Either end may be open (`%range 0 _`).
+    #[serde(default)]
+    pub range: (Option<f64>, Option<f64>),
+    /// `%step 0.01` (PLAN-156): how far one notch of a scrub or a slider moves.
+    #[serde(default)]
+    pub step: Option<f64>,
+    /// `%unit "m"` (PLAN-156): what the number counts, shown next to it.
+    #[serde(default)]
+    pub unit: String,
+    /// `%facts src gltf-clips` (PLAN-156): the value is one of the things the
+    /// file named by the sibling param `src` holds, as the reader
+    /// `gltf-clips` lists them (`crate::facts`).
+    #[serde(default)]
+    pub facts: Option<(String, String)>,
     /// Required sub-clauses (`%schema`, `%zero`, `%widget`) that were MISSING
     /// from the declaration, kept so load-time validation can name them.
     /// Presence, not content: a declared `%zero ""` is fine, an absent `%zero`

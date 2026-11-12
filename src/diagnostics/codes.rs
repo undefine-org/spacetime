@@ -654,6 +654,10 @@ pub enum DiagnosticCode {
     /// reserved set turns "unknown directive, ignored" into "known directive,
     /// not yet built" — a hard error that names its wave.
     E0970,
+    /// A value that names something in a file (a model's clip) isn't one of the
+    /// things that file has (PLAN-156): `clip: "Walkng"` against `robot.glb`.
+    /// The file is the truth; the message lists what it holds.
+    E0971,
     /// A directive body failed the `%capture_type` grammar it declared (BUG-229).
     /// The directive's prefix DID match, so this form was the author's intent; the
     /// declared capture type then rejected the body's content. Before this code
@@ -941,6 +945,7 @@ impl DiagnosticCode {
             DiagnosticCode::E0968 => "E0968",
             DiagnosticCode::E0969 => "E0969",
             DiagnosticCode::E0970 => "E0970",
+            DiagnosticCode::E0971 => "E0971",
             DiagnosticCode::W0700 => "W0700",
             DiagnosticCode::W0701 => "W0701",
             DiagnosticCode::W0702 => "W0702",
@@ -1085,6 +1090,7 @@ impl DiagnosticCode {
             "E0968" => Some(DiagnosticCode::E0968),
             "E0969" => Some(DiagnosticCode::E0969),
             "E0970" => Some(DiagnosticCode::E0970),
+            "E0971" => Some(DiagnosticCode::E0971),
             "E100" => Some(DiagnosticCode::E100),
             "E101" => Some(DiagnosticCode::E101),
             "E102" => Some(DiagnosticCode::E102),

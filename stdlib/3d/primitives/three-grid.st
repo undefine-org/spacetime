@@ -8,14 +8,6 @@
 ///
 ///   pulse — how lit the floor is overall (0..1); drive it on the beat
 ///   phase — the pattern's own clock (seconds); drive it, or leave it to run
-///
-/// @param cols/rows  - tiles across / deep
-/// @param tile       - a tile's size (world units)
-/// @param gap        - space between tiles
-/// @param palette    - space-separated colours the tiles cycle through
-/// @param pattern    - checker | ripple | sweep | random | chase
-/// @param glow       - a lit tile's emissive strength
-/// @param posY       - the floor's height
 
 %primitive three-grid(
   &el,

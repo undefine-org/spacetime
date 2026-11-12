@@ -19,14 +19,13 @@
 /// primitive owns the signal — only the FINAL path segment is the real signal
 /// name (`isActive`), matching how the yielding primitive stores it with
 /// `ST.set(el, "isActive", …)`.
-///
-/// @param &el    - the host element whose signal is watched
-/// @param signal - the dotted signal path; the last segment is the signal name
-/// @param body   - captured mutation_actions { js_statements, macro_calls }
 
 %primitive when-guard(
+  /// the host element whose signal is watched
   &el,
+  /// the dotted signal path; the last segment is the signal name
   signal: string = "",
+  /// captured mutation_actions { js_statements, macro_calls }
   body: expr
 ) {
   %emit js {

@@ -2,21 +2,6 @@
 ///
 /// Creates a modal overlay with fullscreen or card presentation.
 /// Supports state-based visibility and backdrop interactions.
-///
-/// @example card modal
-/// .modal-container {
-///   @modal {
-///     background: white
-///     border-radius: 12px
-///   }
-/// }
-///
-/// @example fullscreen modal
-/// .fullscreen-modal {
-///   @modal(type: "fullscreen") {
-///     background: white
-///   }
-/// }
 
 %macro modal {
 
@@ -80,6 +65,23 @@
   %when $isOver {
     %applies {
       $styles
+    }
+  }
+
+  %example "card modal" {
+    .modal-container {
+      @modal {
+        background: white
+        border-radius: 12px
+      }
+    }
+  }
+
+  %example "fullscreen modal" {
+    .fullscreen-modal {
+      @modal(type: "fullscreen") {
+        background: white
+      }
     }
   }
 }

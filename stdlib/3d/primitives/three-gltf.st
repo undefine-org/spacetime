@@ -16,24 +16,14 @@
 /// every time the referenced signal changes — no full page/region remount
 /// needed to change which model a `@gltf` shows.
 ///
-/// @param &el         - the canvas hosting the @stage
-/// @param src         - URL/path to the .glb/.gltf, OR a `$signal`/`$signal.field` reference
-/// @param size        - target bounding size to fit the model into (0 = no rescale); default 2
-/// @param posX/Y/Z    - position offset applied after centering
-/// @param spinY       - auto-rotation speed (radians/second)
-///
-/// @yields $loaded    - true once the CURRENT model is in the scene (re-fires on hot-swap)
-/// @yields $progress  - load progress 0..1 (when the server reports lengthComputable)
-/// @yields $error     - error message string, or empty
-
 /// PLAN-152: the model is a PART (raea's `Model`). A named model answers to a
 /// score: `&robot { clip: "Walking" -> "Death" at 60% --steps(1); posZ: -6 -> 0; }`.
 /// `clip` names the glTF animation clip playing; the clip runs from the moment
 /// it began, at `rate`. The pose is a SEEK into the clip (not a step), so a
 /// virtual-clock render is deterministic. `scale` is the model's world scale
 /// (both engines); `size` auto-fits instead, in a browser only.
-///
 %primitive three-gltf(
+  /// the canvas hosting the @stage
   &el,
   name: string = "",
   src: string = "",
@@ -101,8 +91,11 @@
   }
 
   %exports {
+    /// true once the CURRENT model is in the scene (re-fires on hot-swap)
     $loaded: bool
+    /// load progress 0..1 (when the server reports lengthComputable)
     $progress: number
+    /// error message string, or empty
     $error: string
   }
 }

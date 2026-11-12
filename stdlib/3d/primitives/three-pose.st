@@ -53,8 +53,6 @@
 ///   slerpQuat(a, b, t)           -> spherical-linear interpolation between
 ///                                   two {x,y,z,w} quaternion-shaped objects
 ///                                   (pure math, no THREE dependency).
-///
-/// @yields (none — prelude-only primitive, mirrors dnd-runtime's shape)
 
 %primitive three-pose() {
   %emit prelude-js {

@@ -13,13 +13,9 @@
 ///
 /// When the signal is falsy the element is returned to its original position and
 /// all of the above is undone.
-///
-/// @param &el    - the modal element (relocated to body while open)
-/// @param signal - the controlling signal name (without `$`); truthy = open
-/// @param closeSignal - optional: the body-scope signal to set false on Esc/close
-///                      (defaults to `signal` so `@portal(when: $open)` closes $open)
 
 %primitive portal-mount(
+  /// the modal element (relocated to body while open)
   &el,
   signal: string = "",
   closeSignal: string = ""

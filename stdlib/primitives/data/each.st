@@ -2,19 +2,15 @@
 ///
 /// Renders a template for each item in a data source.
 /// Handles dynamic updates when data changes.
-///
-/// @param &container - Element to render items into
-/// @param source - Data source name or array
-/// @param template - Template element ID or selector
-/// @param key - Property to use as unique key for diffing
-///
-/// @yields $items - Array of rendered item elements
-/// @yields $update - Function to trigger re-render
 
 %primitive each(
+  /// Element to render items into
   &container,
+  /// Data source name or array
   source: string,
+  /// Template element ID or selector
   template: string,
+  /// Property to use as unique key for diffing
   key: string = "id",
   bindings: array = []
 ) {
@@ -235,7 +231,9 @@
   }
 
   %exports {
+    /// Array of rendered item elements
     $items: array
+    /// Function to trigger re-render
     $update: fn() ~> effect
   }
 }
@@ -245,19 +243,15 @@
 ///
 /// Optimized each with key-based diffing for efficient updates.
 /// Only updates changed items instead of re-rendering all.
-///
-/// @param &container - Element to render items into
-/// @param source - Data source name or array
-/// @param template - Template element ID or selector
-/// @param key - Property to use as unique key
-///
-/// @yields $items - Map of key -> element
-/// @yields $update - Function to trigger re-render
 
 %primitive keyed-each(
+  /// Element to render items into
   &container,
+  /// Data source name or array
   source: string,
+  /// Template element ID or selector
   template: string,
+  /// Property to use as unique key
   key: string = "id"
 ) {
   %emit js {
@@ -422,7 +416,9 @@
   }
 
   %exports {
+    /// Map of key -> element
     $items: object
+    /// Function to trigger re-render
     $update: fn() ~> effect
   }
 }

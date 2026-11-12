@@ -11,30 +11,27 @@
 ///
 /// The lifecycle (pipeline, dual-channel subscription, publish) lives ONCE in
 /// the prelude (`__stComputed`); each usage emits a single config object.
-///
-/// @param name - Name for the computed value
-/// @param source - Source signal NAME to derive from (root or member path)
-/// @param filter - Optional `where` predicate (row expr: `$.field` / `$sig`)
-/// @param sortBy - Optional sort key expr (e.g., $.price)
-/// @param sortDir - Optional sort direction (asc or desc)
-/// @param limit - Optional limit count
-/// @param transform - Optional `map` projection — an expr or the declarative
-///   object form `{ label: $.name, kind: "photo" }` (leaves compile as exprs,
-///   quoted constants survive verbatim)
-/// @param reduce - Optional reduce step — a bare step expr (`acc + item.price`)
-///   or an arrow (`(s, $) => s + $.price`); `$` binds the row
-/// @param initial - Optional initial accumulator for reduce
-///
-/// @yields $value - The computed result
 %primitive computed-source(
+  /// Name for the computed value
   name: ident,
+  /// Source signal NAME to derive from (root or member path)
   source: string,
+  /// Optional `where` predicate (row expr: `$.field` / `$sig`)
   filter: sexpr-row?,
+  /// Optional sort key expr (e.g., $.price)
   sortBy: sexpr-row?,
+  /// Optional sort direction (asc or desc)
   sortDir: ident?,
+  /// Optional limit count
   limit: number?,
+  /// Optional `map` projection — an expr or the declarative
+  /// object form `{ label: $.name, kind: "photo" }` (leaves compile as exprs,
+  /// quoted constants survive verbatim)
   transform: sexpr-row?,
+  /// Optional reduce step — a bare step expr (`acc + item.price`)
+  /// or an arrow (`(s, $) => s + $.price`); `$` binds the row
   reduce: sexpr-row?,
+  /// Optional initial accumulator for reduce
   initial: expr?
 ) %uses data-channel {
   %emit prelude-js {
@@ -214,6 +211,7 @@
   }
 
   %exports {
+    /// The computed result
     $value: any
   }
 }

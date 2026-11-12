@@ -212,5 +212,10 @@
   %order 708
   %form { @on $driver:driver_expr $as:on_as? { $body:on_motion_body } }
   %binds { drive-body(&self, driver: $driver, body: $body, as: $as) }
+  // PLAN-156: a motion, with what drives it; the studio's timeline draws the
+  // ones a score's clip drives (`@on &.clip { … }`)
+  %registers motion($as) {
+    driver: $driver
+  }
 }
 

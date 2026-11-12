@@ -17,26 +17,23 @@
 /// Keyframes arrive as the same `{properties:[…]}` shape apply-animations
 /// consumes; this primitive reuses ST's interpolation so a transition is
 /// exactly a pair of clip animations, no new interpolation path.
-///
-/// @param &el       - the score's scope owner (used only to resolve signals)
-/// @param fromSel   - selector of the outgoing clip element
-/// @param toSel     - selector of the incoming clip element
-/// @param fromSig   - the outgoing clip's window signal name (`__clip_open`)
-/// @param toSig     - the incoming clip's window signal name (`__clip_grid`)
-/// @param fromKf    - the `&from` keyframes (apply-animations `properties` shape)
-/// @param toKf      - the `&to` keyframes
-/// @param overlap   - 0..1 fraction of each clip's window the transition covers
-///
-/// @yields $ready   - true once wired
 
 %primitive transition-edge(
+  /// the score's scope owner (used only to resolve signals)
   &el,
+  /// selector of the outgoing clip element
   fromSel: string = "",
+  /// selector of the incoming clip element
   toSel: string = "",
+  /// the outgoing clip's window signal name (`__clip_open`)
   fromSig: string = "",
+  /// the incoming clip's window signal name (`__clip_grid`)
   toSig: string = "",
+  /// the `&from` keyframes (apply-animations `properties` shape)
   fromKf: any = null,
+  /// the `&to` keyframes
   toKf: any = null,
+  /// 0..1 fraction of each clip's window the transition covers
   overlap: number = 0.2
 ) {
   %emit js {
@@ -135,6 +132,7 @@
   }
 
   %exports {
+    /// true once wired
     $ready: bool
   }
 }

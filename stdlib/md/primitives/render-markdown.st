@@ -10,11 +10,12 @@
 /// compiler inlines the file's bytes at build time (see compiler.rs
 /// `inject_doc_content`), so the served HTML is produced from the same markdown
 /// the docs are written in — the page cannot drift from the docs.
-///
-/// @param &el      - Element whose innerHTML to populate
-/// @param content  - Raw markdown source text
 
-%primitive render-markdown(&el, content: string) {
+%primitive render-markdown(
+  /// Element whose innerHTML to populate
+  &el,
+  content: string
+) {
   %emit js {
     const md = %content;
     if (typeof snarkdown === 'undefined') {

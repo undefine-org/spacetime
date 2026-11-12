@@ -8,12 +8,6 @@
 /// with `data-t="key"` has its textContent replaced with the matching value
 /// from the locale's JSON dictionary.
 ///
-/// @param default - Default locale identifier (e.g. `en`). Used for the
-///   root redirect and the hreflang x-default.
-/// @param available - Array of locale identifiers to generate (e.g. `[en, fr]`).
-/// @param src - Path pattern for locale JSON files. Use `{locale}` as
-///   placeholder (e.g. `"locales/{locale}.json"`).
-///
 /// Build-time output:
 ///   - `<locale>/index.html` for each locale in `available`
 ///   - `index.html` root redirect to `/<default>/`
@@ -23,13 +17,6 @@
 /// Runtime API (injected via %emit js):
 ///   - `window.__st_locale` — current locale string
 ///   - `window.__st_setLocale(locale)` — navigates to the given locale prefix
-///
-/// @example
-/// @locale(
-///   default: en,
-///   available: [en, fr],
-///   src: "locales/{locale}.json"
-/// )
 ///
 /// <!-- In HTML, mark translatable elements: -->
 /// <h1 data-t="hero_title">Welcome</h1>

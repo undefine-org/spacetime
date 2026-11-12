@@ -713,7 +713,7 @@
   }
 
   %binds {
-    mcp-action-event(&self, action: $action, target: $target, value: $value, targetAttr: $targetAttr, valueAttr: $valueAttr, on: $on) -> {
+    mcp-action-event(&self, ...) -> {
       $sent as $mcpActionSent,
       $lastMessage as $mcpActionLastMessage,
       $error as $mcpActionError

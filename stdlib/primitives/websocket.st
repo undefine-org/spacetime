@@ -16,15 +16,13 @@
 ///
 /// Thin wrapper around WebSocket API using SpacetimeRealtime for connection pooling.
 /// Yields signals for connection state and incoming messages.
-///
-/// @param &el - Element to bind lifecycle to
-/// @param url - WebSocket URL (default: '/ws')
-/// @param reconnect - Auto-reconnect delay (0 to disable)
-/// @yields $connected - Connection state
-/// @yields $message - Last received message (parsed JSON)
-/// @yields send - Function to send messages
 
-%primitive websocket(&el, url: string = "/ws", reconnect: time = 2000ms) {
+%primitive websocket(
+  /// Element to bind lifecycle to
+  &el,
+  url: string = "/ws",
+  reconnect: time = 2000ms
+) {
   %emit js {
     // Use SpacetimeRealtime for connection pooling
     const conn = SpacetimeRealtime.connect('%url');
@@ -70,8 +68,11 @@
   }
 
   %exports {
+    /// Connection state
     $connected: bool
+    /// Last received message (parsed JSON)
     $message: object
+    /// Function to send messages
     $send: fn(object) ~> void
   }
 }
@@ -84,28 +85,21 @@
 ///
 /// Subscribe to a real-time data collection with optimistic CRUD operations.
 /// Automatically syncs with server and handles optimistic updates with rollback.
-///
-/// @param &el - Element to bind lifecycle to
-/// @param channel - Channel/collection name to subscribe to
-/// @param url - WebSocket URL (default: '/ws')
-/// @param query - Optional query/filter for the subscription
-/// @param optimistic - Enable optimistic updates (default: true)
-/// @param messages - Custom message type mapping for backend-agnostic mode
-/// @param actions - Custom action creators for backend-agnostic mode
-///
-/// @yields $items - Current collection items
-/// @yields $loading - True while loading initial data
-/// @yields insert - Function to insert new item
-/// @yields update - Function to update item by id
-/// @yields remove - Function to remove item by id
 
 %primitive realtime-source(
+  /// Element to bind lifecycle to
   &el,
+  /// Channel/collection name to subscribe to
   channel: string,
+  /// WebSocket URL
   url: string = "/ws",
+  /// Optional query/filter for the subscription
   query: object? = null,
+  /// Enable optimistic updates
   optimistic: bool = true,
+  /// Custom message type mapping for backend-agnostic mode
   messages: object? = null,
+  /// Custom action creators for backend-agnostic mode
   actions: object? = null
 ) {
   %emit js {
@@ -180,10 +174,15 @@
   }
 
   %exports {
+    /// Current collection items
     $items: array
+    /// True while loading initial data
     $loading: bool
+    /// Function to insert new item
     $insert: fn(object) ~> void
+    /// Function to update item by id
     $update: fn(string, object) ~> void
+    /// Function to remove item by id
     $remove: fn(string) ~> void
   }
 }
@@ -196,25 +195,16 @@
 ///
 /// Join a presence room to track and broadcast user state.
 /// Automatically handles throttled updates and user lifecycle.
-///
-/// @param &el - Element to bind lifecycle to
-/// @param room - Room name to join
-/// @param url - WebSocket URL (default: '/ws')
-/// @param throttle - Throttle interval for state updates (default: 50ms)
-/// @param initial - Initial presence state
-/// @param messages - Custom message type mapping for backend-agnostic mode
-///
-/// @yields $users - Array of users in the room
-/// @yields $myId - Current user's ID
-/// @yields set - Function to update presence state (throttled)
-/// @yields leave - Function to leave the room
 
 %primitive presence(
+  /// Element to bind lifecycle to
   &el,
   room: string,
   url: string = "/ws",
   throttle: time = 50ms,
+  /// Initial presence state
   initial: object? = null,
+  /// Custom message type mapping for backend-agnostic mode
   messages: object? = null
 ) {
   %emit js {
@@ -282,9 +272,13 @@
   }
 
   %exports {
+    /// Array of users in the room
     $users: array
+    /// Current user's ID
     $myId: string
+    /// Function to update presence state (throttled)
     $set: fn(object) ~> void
+    /// Function to leave the room
     $leave: fn() ~> void
   }
 }
@@ -297,17 +291,11 @@
 ///
 /// Subscribe to a typed message channel for custom protocols.
 /// Provides structured send/receive for specific message types.
-///
-/// @param &el - Element to bind lifecycle to
-/// @param name - Channel name
-/// @param url - WebSocket URL (default: '/ws')
-///
-/// @yields $connected - Connection state
-/// @yields $lastMessage - Last received message
-/// @yields send - Function to send typed messages
 
 %primitive channel(
+  /// Element to bind lifecycle to
   &el,
+  /// Channel name
   name: string,
   url: string = "/ws"
 ) {
@@ -350,8 +338,11 @@
   }
 
   %exports {
+    /// Connection state
     $connected: bool
+    /// Last received message
     $lastMessage: object
+    /// Function to send typed messages
     $send: fn(string, object) ~> void
   }
 }

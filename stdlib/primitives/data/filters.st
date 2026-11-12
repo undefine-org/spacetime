@@ -7,16 +7,13 @@
 /// Filter Primitive
 ///
 /// Filters array based on predicate.
-///
-/// @param data - Array to filter
-/// @param predicate - Filter function or property name
-/// @param value - Value to match (for property filter)
-///
-/// @yields $result - Filtered array
 
 %primitive filter(
+  /// Array to filter
   data: array,
+  /// Filter function or property name
   predicate: any,
+  /// Value to match (for property filter)
   value: any?
 ) {
   %emit js {
@@ -46,6 +43,7 @@
   }
 
   %exports {
+    /// Filtered array
     $result: array
   }
 }
@@ -54,14 +52,11 @@
 /// Map Primitive
 ///
 /// Transforms each item in array.
-///
-/// @param data - Array to map
-/// @param transform - Transform function or property name
-///
-/// @yields $result - Mapped array
 
 %primitive map(
+  /// Array to map
   data: array,
+  /// Transform function or property name
   transform: any
 ) {
   %emit js {
@@ -85,6 +80,7 @@
   }
 
   %exports {
+    /// Mapped array
     $result: array
   }
 }
@@ -93,16 +89,13 @@
 /// Sort Primitive
 ///
 /// Sorts array by property or comparator.
-///
-/// @param data - Array to sort
-/// @param by - Property name or comparator function
-/// @param order - "asc" or "desc"
-///
-/// @yields $result - Sorted array
 
 %primitive sort(
+  /// Array to sort
   data: array,
+  /// Property name or comparator function
   by: any?,
+  /// "asc" or "desc"
   order: string = "asc"
 ) {
   %emit js {
@@ -140,6 +133,7 @@
   }
 
   %exports {
+    /// Sorted array
     $result: array
   }
 }
@@ -148,16 +142,13 @@
 /// Slice Primitive
 ///
 /// Takes a portion of an array.
-///
-/// @param data - Array to slice
-/// @param start - Start index
-/// @param end - End index (exclusive)
-///
-/// @yields $result - Sliced array
 
 %primitive slice(
+  /// Array to slice
   data: array,
+  /// Start index
   start: number = 0,
+  /// End index (exclusive)
   end: number?
 ) {
   %emit js {
@@ -178,6 +169,7 @@
   }
 
   %exports {
+    /// Sliced array
     $result: array
   }
 }
@@ -186,16 +178,13 @@
 /// First/Last Primitive
 ///
 /// Gets first or last N items from array.
-///
-/// @param data - Source array
-/// @param count - Number of items
-/// @param from - "first" or "last"
-///
-/// @yields $result - Subset array
 
 %primitive take(
+  /// Source array
   data: array,
+  /// Number of items
   count: number = 1,
+  /// "first" or "last"
   from: string = "first"
 ) {
   %emit js {
@@ -216,6 +205,7 @@
   }
 
   %exports {
+    /// Subset array
     $result: array
   }
 }
@@ -224,16 +214,13 @@
 /// Reduce Primitive
 ///
 /// Reduces array to single value.
-///
-/// @param data - Array to reduce
-/// @param reducer - Reduce function
-/// @param initial - Initial value
-///
-/// @yields $result - Reduced value
 
 %primitive reduce(
+  /// Array to reduce
   data: array,
+  /// Reduce function
   reducer: fn,
+  /// Initial value
   initial: any = 0
 ) {
   %emit js {
@@ -251,6 +238,7 @@
   }
 
   %exports {
+    /// Reduced value
     $result: any
   }
 }
@@ -259,14 +247,11 @@
 /// Unique Primitive
 ///
 /// Removes duplicate values from array.
-///
-/// @param data - Source array
-/// @param by - Property to check for uniqueness
-///
-/// @yields $result - Array with unique values
 
 %primitive unique(
+  /// Source array
   data: array,
+  /// Property to check for uniqueness
   by: string?
 ) {
   %emit js {
@@ -295,6 +280,7 @@
   }
 
   %exports {
+    /// Array with unique values
     $result: array
   }
 }
@@ -303,14 +289,11 @@
 /// Group By Primitive
 ///
 /// Groups array items by property value.
-///
-/// @param data - Source array
-/// @param by - Property to group by
-///
-/// @yields $result - Object with groups
 
 %primitive group-by(
+  /// Source array
   data: array,
+  /// Property to group by
   by: string
 ) {
   %emit js {
@@ -333,6 +316,7 @@
   }
 
   %exports {
+    /// Object with groups
     $result: object
   }
 }

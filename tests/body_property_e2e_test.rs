@@ -190,3 +190,31 @@ fn a_directive_body_reaches_the_validator() {
     );
 }
 
+
+/// A param the author left out is filled from its form's default, and the
+/// default is not the author's words. `@resize(min: 10px)` used to fail with
+/// "`null` is not a valid length for `max`": the form's `max: … = none`
+/// arrived as `null` and was judged like a written value, at a place the author
+/// never wrote and could not fix (PLAN-156 P0).
+#[test]
+fn a_default_the_author_never_wrote_is_not_judged() {
+    let src = "
+.box { @resize(direction: horizontal, min: 10px) }
+<div class=\"box\"><div class=\"resize-handle\"></div></div>
+";
+    let errs = errors_for(src);
+    assert!(
+        !errs.iter().any(|e| e.contains("E0967")),
+        "an omitted `max` must not be refused, got: {errs:?}"
+    );
+    // ...while a written value is still checked
+    let bad = "
+.box { @resize(direction: horizontal, min: 10px, max: banana) }
+<div class=\"box\"><div class=\"resize-handle\"></div></div>
+";
+    let errs = errors_for(bad);
+    assert!(
+        errs.iter().any(|e| e.contains("E0946") || e.contains("E0967")),
+        "a written `max: banana` must still be refused, got: {errs:?}"
+    );
+}

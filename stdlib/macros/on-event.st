@@ -51,7 +51,7 @@
 
   %binds {
     event-driver(&self, name: $name, trigger: "mouseenter", untrigger: "mouseleave", duration: $duration, reverse: true) -> { $progress }
-    apply-animations(&self, driver: $name, animations: $body, easing: $easing, stagger: $stagger, staggerFrom: $staggerFrom, interactive: true)
+    apply-animations(&self, driver: $name, animations: $body, interactive: true, ...)
   }
 }
 
@@ -75,7 +75,7 @@
 
   %binds {
     event-driver(&self, name: $name, trigger: "click", toggle: true, duration: $duration, reverse: true) -> { $progress }
-    apply-animations(&self, driver: $name, animations: $body, easing: $easing, stagger: $stagger, staggerFrom: $staggerFrom, interactive: true)
+    apply-animations(&self, driver: $name, animations: $body, interactive: true, ...)
   }
 }
 
@@ -99,7 +99,7 @@
 
   %binds {
     event-driver(&self, name: $name, trigger: "focus", duration: $duration, reverse: true) -> { $progress }
-    apply-animations(&self, driver: $name, animations: $body, easing: $easing, stagger: $stagger, staggerFrom: $staggerFrom, interactive: true)
+    apply-animations(&self, driver: $name, animations: $body, interactive: true, ...)
   }
 }
 
@@ -125,8 +125,18 @@
   }
 
   %binds {
-    load-driver(&self, name: $name, duration: $duration, delay: $delay, threshold: $threshold, immediate: $immediate) -> { $progress }
-    apply-animations(&self, driver: $name, animations: $body, easing: $easing, stagger: $stagger, staggerFrom: $staggerFrom)
+    load-driver(&self, name: $name, duration: $duration, ...) -> { $progress }
+    apply-animations(&self, driver: $name, animations: $body, ...)
+  }
+
+  %example "@on-visible" {
+    .hero {
+      @on-visible intro(600ms, threshold: 0.3) {
+        opacity: 0 -> 1;
+        translate-y: 20px -> 0;
+      }
+    }
+    <section class="hero"><h1>Hello</h1></section>
   }
 }
 
@@ -151,7 +161,7 @@
 
   %binds {
     scroll-driver(&self, name: $name, start: $start, end: $end, scrub: true) -> { $progress }
-    apply-animations(&self, driver: $name, animations: $body, easing: $easing, stagger: $stagger, staggerFrom: $staggerFrom)
+    apply-animations(&self, driver: $name, animations: $body, ...)
   }
 }
 
@@ -168,39 +178,10 @@
 /// This is distinct from animation @on which creates timelines.
 /// Mutation handlers run code when events occur.
 ///
-/// @example click handler
-/// .pack-card {
-///   @on click {
-///     $currentPackId <- $.dataset.packId;
-///   }
-/// }
-///
-/// @example with event delegation
-/// .variant-grid {
-///   @on click [data-option-id] {
-///     $selectedVariant <- $.dataset.optionId;
-///   }
-/// }
-///
-/// @example form submit
-/// form {
-///   @on submit.prevent {
-///     $formData <- new FormData($);
-///   }
-/// }
-
 /// On Mutation Dispatcher
 ///
 /// Routes @on to mutation handling when no animation name is provided.
 /// This handles the mutation-only form: @on event { mutations }
-///
-/// @example click handler
-/// .pack-card {
-///   @on click {
-///     $currentPackId <- $.dataset.packId;
-///     @emit open_configurator;
-///   }
-/// }
 
 // BUG-329 CUTOVER (2026-08-07): the bare-event heads are RETIRED.
 //
@@ -270,6 +251,30 @@
         ST.cleanup(el, () => el.removeEventListener('%$event', handler));
       }
     })();
+  }
+
+  %example "click handler" {
+    .pack-card {
+      @on-mutation(event: click, mutations: [{ target: "currentPackId", expr: "$.dataset.packId" }])
+    }
+    <div class="pack-card" data-pack-id="starter">Starter pack</div>
+  }
+
+  %example "with event delegation" {
+    .variant-grid {
+      @on-mutation(event: click, target: [data-option-id], mutations: [{ target: "selectedVariant", expr: "$.dataset.optionId" }])
+    }
+    <div class="variant-grid">
+      <button data-option-id="red">Red</button>
+      <button data-option-id="blue">Blue</button>
+    </div>
+  }
+
+  %example "form submit" {
+    form {
+      @on-mutation(event: submit, mutations: [{ target: "formData", expr: "new FormData($)" }])
+    }
+    <form><input name="email"></form>
   }
 }
 

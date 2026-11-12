@@ -8,16 +8,9 @@
 /// Both effects are individually gated: bloomStrength <= 0 omits bloom,
 /// rgbShift <= 0 omits the chromatic-aberration pass — so the composer only does
 /// the work the author asked for.
-///
-/// @param &el           - the canvas hosting the @stage
-/// @param bloomStrength - UnrealBloom strength (0 = no bloom); default 0.6
-/// @param bloomRadius   - bloom radius; default 0.4
-/// @param bloomThreshold- luminance threshold above which pixels bloom; default 0.85
-/// @param rgbShift      - chromatic-aberration amount (0 = none); default 0
-///
-/// @yields $ready       - true once the composer is driving the stage
 
 %primitive three-post(
+  /// the canvas hosting the @stage
   &el,
   bloomStrength: number = 0.6,
   bloomRadius: number = 0.4,
@@ -66,6 +59,7 @@
   }
 
   %exports {
+    /// true once the composer is driving the stage
     $ready: bool
   }
 }

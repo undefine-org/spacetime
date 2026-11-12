@@ -136,6 +136,7 @@ mod tests {
             name: name.to_string(),
             elements: vec![FormInlineElement::Capture(capture, None)],
             default: None,
+            doc: None,
         }
     }
 

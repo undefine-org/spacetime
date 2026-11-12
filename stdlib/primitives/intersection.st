@@ -2,22 +2,17 @@
 ///
 /// Wraps the IntersectionObserver API to detect when elements
 /// enter or exit the viewport (or a specified root element).
-///
-/// @param &el - The element to observe
-/// @param threshold - Visibility threshold (0-1), default 0.5
-/// @param once - Disconnect after first intersection, default false
-/// @param root - Root element for intersection, default viewport
-/// @param margin - Root margin (CSS margin syntax), default "0px"
-///
-/// @yields $visible - Whether element is currently visible
-/// @yields $ratio - Intersection ratio (0-1)
-/// @yields $rect - Bounding client rect of observed element
 
 %primitive intersection(
+  /// The element to observe
   &el,
+  /// Visibility threshold (0-1)
   threshold: number = 0.5,
+  /// Disconnect after first intersection
   once: bool = false,
+  /// Root element for intersection
   root: element? = none,
+  /// Root margin (CSS margin syntax)
   margin: string = "0px"
 ) {
   %emit js {
@@ -83,8 +78,11 @@
   }
 
   %exports {
+    /// Whether element is currently visible
     $visible: bool        // true when element intersects root
+    /// Intersection ratio (0-1)
     $ratio: number        // 0-1 intersection ratio
+    /// Bounding client rect of observed element
     $rect: DOMRect        // bounding rect of observed element
     $rootBounds: DOMRect? // bounding rect of root
     $time: number         // timestamp of intersection change

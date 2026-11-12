@@ -2,14 +2,6 @@
 ///
 /// Re-exports and extends the core swipe gesture for mobile use.
 /// The core @swipe is available from stdlib/macros/drag.st
-///
-/// @example
-/// .carousel-item {
-///   @swipe {
-///     on-left: nextSlide()
-///     on-right: prevSlide()
-///   }
-/// }
 
 // Mobile-specific swipe variant with visual feedback
 %macro mobile-swipe {
@@ -17,6 +9,7 @@
   %form {
     @mobile-swipe(
       direction: $direction:("left" | "right" | "up" | "down" | "horizontal" | "vertical") = "horizontal",
+      /// Minimum movement to start drag (prevents accidental drags)
       threshold: $threshold:number = 50
     ) {
       $styles:properties
@@ -56,6 +49,15 @@
   %when $active {
     %applies {
       $styles
+    }
+  }
+
+  %example "@mobile-swipe" {
+    .carousel-item {
+      @swipe {
+        on-left: nextSlide()
+        on-right: prevSlide()
+      }
     }
   }
 }

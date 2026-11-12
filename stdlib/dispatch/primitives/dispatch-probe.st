@@ -8,12 +8,9 @@
 ///
 /// No bespoke scoring in JS: the playground is a thin view over the same Rust
 /// resolution `inspect --layer dispatch --probe` prints.
-///
-/// @param &el - the <input> the user types a call into
-/// @param out - selector of the element to render the resolution table into
-/// @param endpoint - dispatch endpoint (default the dev route)
 
 %primitive dispatch-probe(
+  /// the <input> the user types a call into
   &el,
   out: string,
   endpoint: string = "/__spacetime/dispatch"

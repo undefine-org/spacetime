@@ -12,19 +12,17 @@
 /// element clipped to its own box — it glows, but cannot bleed OUTSIDE the box
 /// the way a shader can. It is the same INTENT as the stage pass, and under
 /// `spacetime render` both are captured by the same screenshot.
-///
-/// @param &el       - the element to put the lens over
-/// @param styles    - the `@post { … }` block: `bloom`/`grain`/`vignette` keys
-///                    with their initial values (a map, e.g. `{bloom: "0.45"}`)
-///
-/// @yields $ready   - true once the layers are mounted
 
 %primitive post-dom(
+  /// the element to put the lens over
   &el,
+  /// the `@post { … }` block: `bloom`/`grain`/`vignette` keys
+  /// with their initial values (a map, e.g. `{bloom: "0.45"}`)
   styles: any
 ) {
   %emit js {
     const el = %&el;
+    /// true once the layers are mounted
     if (!el || el._stPost) { %yield true -> $ready; return; }
     el._stPost = true;
 

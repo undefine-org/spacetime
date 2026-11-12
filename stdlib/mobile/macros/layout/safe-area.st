@@ -2,39 +2,18 @@
 ///
 /// Applies safe area padding using CSS env() for mobile devices.
 /// Handles notches, home indicators, and other system UI intrusions.
-///
-/// @param top - Apply safe area padding to top (default: true)
-/// @param bottom - Apply safe area padding to bottom (default: true)
-/// @param left - Apply safe area padding to left (default: true)
-/// @param right - Apply safe area padding to right (default: true)
-///
-/// @example basic
-/// .app-container {
-///   @safe-area(top: true, bottom: true)
-/// }
-///
-/// @example only bottom for tab bar
-/// .tab-bar {
-///   @safe-area(top: false, bottom: true, left: false, right: false)
-/// }
-///
-/// @example custom properties access
-/// .custom-layout {
-///   @safe-area(top: true, bottom: true)
-///   // Access via CSS custom properties:
-///   // var(--st-safe-area-top)
-///   // var(--st-safe-area-bottom)
-///   // var(--st-safe-area-left)
-///   // var(--st-safe-area-right)
-/// }
 
 %macro safe-area {
 
   %form {
     @safe-area(
+      /// Apply safe area padding to top
       top: $top:bool = true,
+      /// Apply safe area padding to bottom
       bottom: $bottom:bool = true,
+      /// Apply safe area padding to left
       left: $left:bool = true,
+      /// Apply safe area padding to right
       right: $right:bool = true
     )
   }
@@ -81,6 +60,29 @@
       }
     }
   }
+
+  %example "basic" {
+    .app-container {
+      @safe-area(top: true, bottom: true)
+    }
+  }
+
+  %example "only bottom for tab bar" {
+    .tab-bar {
+      @safe-area(top: false, bottom: true, left: false, right: false)
+    }
+  }
+
+  %example "custom properties access" {
+    .custom-layout {
+      @safe-area(top: true, bottom: true)
+      // Access via CSS custom properties:
+      // var(--st-safe-area-top)
+      // var(--st-safe-area-bottom)
+      // var(--st-safe-area-left)
+      // var(--st-safe-area-right)
+    }
+  }
 }
 
 
@@ -88,13 +90,6 @@
 ///
 /// Adds safe area insets to existing padding values.
 /// Use when you already have padding and want to add safe areas on top.
-///
-/// @example
-/// .header {
-///   padding: 16px
-///   @safe-area-inset(top: true)
-///   // Results in padding-top: calc(16px + env(safe-area-inset-top))
-/// }
 
 %macro safe-area-inset {
 
@@ -116,6 +111,14 @@
       --st-safe-area-right: env(safe-area-inset-right, 0px)
     }
   }
+
+  %example "@safe-area-inset" {
+    .header {
+      padding: 16px
+      @safe-area-inset(top: true)
+      // Results in padding-top: calc(16px + env(safe-area-inset-top))
+    }
+  }
 }
 
 
@@ -123,11 +126,6 @@
 ///
 /// Creates a container that handles all safe areas automatically.
 /// Useful for full-screen app containers.
-///
-/// @example
-/// .app {
-///   @safe-area-container
-/// }
 
 %macro safe-area-container {
 
@@ -153,6 +151,12 @@
       --st-safe-area-bottom: env(safe-area-inset-bottom, 0px)
       --st-safe-area-left: env(safe-area-inset-left, 0px)
       --st-safe-area-right: env(safe-area-inset-right, 0px)
+    }
+  }
+
+  %example "@safe-area-container" {
+    .app {
+      @safe-area-container
     }
   }
 }

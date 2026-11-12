@@ -4,37 +4,14 @@
 /// The actual mocking happens in JavaScript; these macros provide
 /// declarative test configuration.
 ///
-/// @example
-/// @test "handles camera permission denied" {
-///   @mock-native("camera") {
-///     permission: "denied"
-///   }
-///   @when .camera-button click
-///   @then .permission-error should be_visible
-/// }
-///
-/// @example
-/// @test "geolocation returns mock position" {
-///   @mock-native("geolocation") {
-///     latitude: 37.7749
-///     longitude: -122.4194
-///   }
-///   @when .locate-button click
-///   @then .location-display should have_text "San Francisco"
-/// }
-
-
 /// Mock Native Primitive
 ///
 /// Sets up mock configuration for a native API.
-///
-/// @param $api - Name of the native API to mock
-/// @param $config - Configuration object for the mock
-/// @yields $mockActive - Whether the mock is currently active
-/// @yields $mockApi - Name of the mocked API
-/// @yields $mockCalls - Number of times the mock was called
 
-%primitive mock-native($api, $config) {
+%primitive mock-native(
+  $api,
+  $config
+) {
   %emit js {
     const __mockApi = %$api;
     const __mockConfig = %$config || {};
@@ -281,8 +258,11 @@
   }
 
   %exports {
+    /// Whether the mock is currently active
     $mockActive: bool
+    /// Name of the mocked API
     $mockApi: string
+    /// Number of times the mock was called
     $mockCalls: number
   }
 }
@@ -291,13 +271,6 @@
 /// Mock Native API Macro
 ///
 /// Declarative macro for setting up native API mocks.
-///
-/// @example
-/// .camera-test {
-///   @mock-native("camera") {
-///     permission: "granted"
-///   }
-/// }
 
 %macro mock-native {
 
@@ -310,16 +283,41 @@
   %binds {
     mock-native($api, $config) -> { $mockActive, $mockApi, $mockCalls }
   }
+
+  %example "@mock-native" {
+    .camera-test {
+      @mock-native("camera") {
+        permission: "granted"
+      }
+    }
+  }
+
+  %example "@mock-native (2)" {
+    @test "handles camera permission denied" {
+      @mock-native("camera") {
+        permission: "denied"
+      }
+      @when .camera-button click
+      @then .permission-error should be_visible
+    }
+  }
+
+  %example "@mock-native (3)" {
+    @test "geolocation returns mock position" {
+      @mock-native("geolocation") {
+        latitude: 37.7749
+        longitude: -122.4194
+      }
+      @when .locate-button click
+      @then .location-display should have_text "San Francisco"
+    }
+  }
 }
 
 
 /// Mock Permission Macro
 ///
 /// Shorthand for mocking permission-based APIs.
-///
-/// @example
-/// @mock-permission("camera", "denied")
-/// @mock-permission("geolocation", "granted")
 
 %macro mock-permission {
 
@@ -348,18 +346,17 @@
       root.style.setProperty('--st-mock-' + __api + '-permission', __status);
     }
   }
+
+  %example "@mock-permission" {
+    @mock-permission("camera", "denied")
+    @mock-permission("geolocation", "granted")
+  }
 }
 
 
 /// Mock Response Macro
 ///
 /// Sets up a mock fetch response for testing API calls.
-///
-/// @example
-/// @mock-response("/api/user") {
-///   status: 200
-///   json: { name: "Test User", id: 1 }
-/// }
 
 %macro mock-response {
 
@@ -403,19 +400,19 @@
       };
     }
   }
+
+  %example "@mock-response" {
+    @mock-response("/api/user") {
+      status: 200
+      json: { name: "Test User", id: 1 }
+    }
+  }
 }
 
 
 /// Assert Mock Called Macro
 ///
 /// Asserts that a mock was called during the test.
-///
-/// @example
-/// @test "calls geolocation API" {
-///   @mock-native("geolocation") { latitude: 0, longitude: 0 }
-///   @when .locate-button click
-///   @assert-mock-called "geolocation"
-/// }
 
 %macro assert-mock-called {
 
@@ -440,15 +437,20 @@
       throw new Error('Expected mock "' + __api + '" to be called at least once');
     }
   }
+
+  %example "@assert-mock-called" {
+    @test "calls geolocation API" {
+      @mock-native("geolocation") { latitude: 0, longitude: 0 }
+      @when .locate-button click
+      @assert-mock-called "geolocation"
+    }
+  }
 }
 
 
 /// Clear Mocks Macro
 ///
 /// Clears all mock call history. Useful between test cases.
-///
-/// @example
-/// @clear-mocks
 
 %macro clear-mocks {
 
@@ -462,5 +464,9 @@
         globalThis.__spacetime_mocks[api].calls = [];
       }
     }
+  }
+
+  %example "@clear-mocks" {
+    @clear-mocks
   }
 }

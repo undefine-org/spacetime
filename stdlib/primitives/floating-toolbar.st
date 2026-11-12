@@ -3,14 +3,17 @@
 /// Creates and manages a floating WYSIWYG toolbar that appears near text selections.
 /// Positions above or below the selection and dispatches events when buttons are clicked.
 ///
-/// @param &el - Element that the toolbar is associated with
-/// @param position - Toolbar position: "above", "below", or "auto"
-/// @param buttons - Array of button identifiers (e.g., ["handwritten", "accent", "highlight", "quote"])
-///
 /// @example
 /// floating-toolbar(&self, position: "above", buttons: ["handwritten", "accent", "highlight", "quote"])
 
-%primitive floating-toolbar(&el, position: string = "above", buttons: array) {
+%primitive floating-toolbar(
+  /// Element that the toolbar is associated with
+  &el,
+  /// Toolbar position: "above", "below", or "auto"
+  position: string = "above",
+  /// Array of button identifiers (e.g., ["handwritten", "accent", "highlight", "quote"])
+  buttons: array
+) {
   %emit js {
     let toolbar = null;
     let isToolbarVisible = false;

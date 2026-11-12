@@ -6,8 +6,6 @@
 /// Focus Primitive
 ///
 /// Tracks focus state of an element.
-///
-/// @yields $focused - True when element has focus
 
 %primitive focus(&el) {
   %emit js {
@@ -26,6 +24,7 @@
   }
 
   %exports {
+    /// True when element has focus
     $focused: bool
   }
 }
@@ -34,12 +33,11 @@
 /// Element Reference Primitive
 ///
 /// Gets a reference to an element by selector and tracks its rect.
-///
-/// @param selector - CSS selector to find element(s)
-/// @yields $ref - The element or NodeList
-/// @yields $rect - Bounding client rect (for single elements)
 
-%primitive element-ref(selector: string) {
+%primitive element-ref(
+  /// CSS selector to find element(s)
+  selector: string
+) {
   %emit js {
     const el = %selector.startsWith('.')
       ? document.querySelector(%selector)
@@ -60,7 +58,9 @@
   }
 
   %exports {
+    /// The element or NodeList
     $ref: Element
+    /// Bounding client rect (for single elements)
     $rect: DOMRect?
   }
 }
@@ -70,11 +70,11 @@
 ///
 /// Executes a DOM action and yields completion signal.
 /// Used for DOM mutations that should be tracked.
-///
-/// @param action - The action to execute
-/// @yields $done - True when action completes
 
-%primitive dom-action(action: expr) {
+%primitive dom-action(
+  /// The action to execute
+  action: expr
+) {
   %emit js {
     %yield false -> $done;
     %action;
@@ -82,6 +82,7 @@
   }
 
   %exports {
+    /// True when action completes
     $done: bool
   }
 }
@@ -90,15 +91,13 @@
 /// Persist Primitive
 ///
 /// Persists data to a URL endpoint.
-///
-/// @param url - URL to persist to
-/// @param data - Data to persist
-/// @yields $run - Function to trigger persistence
-/// @yields $pending - True while persisting
-/// @yields $ok - True on success
-/// @yields $error - Error if failed
 
-%primitive persist-remote(url: string, data: expr) {
+%primitive persist-remote(
+  /// URL to persist to
+  url: string,
+  /// Data to persist
+  data: expr
+) {
   %emit js {
     %yield false -> $pending;
     %yield false -> $ok;
@@ -127,9 +126,13 @@
   }
 
   %exports {
+    /// Function to trigger persistence
     $run: fn() ~> effect
+    /// True while persisting
     $pending: bool
+    /// True on success
     $ok: bool
+    /// Error if failed
     $error: any?
   }
 }

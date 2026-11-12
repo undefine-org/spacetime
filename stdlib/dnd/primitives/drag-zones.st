@@ -13,17 +13,12 @@
 ///
 /// Self-contained pointer tracking (its own pointerdown/move/up listeners on the
 /// element) keeps `gesture` generic: dnd logic lives ENTIRELY in the dnd module.
-///
-/// @param group   - the draggable's group; hit-tests only `__stDnd.zones[group]`
-/// @param payload - the dragged datum (object expr text), bound as `$payload`
-/// @param arms    - the lifecycle arms [{ clause, zone?, body } | { cancel, cbody }]
-///
-/// @yields $overZone - true while the pointer is over an accepting zone
 
 %primitive drag-zones(
   &el,
   group: string = "",
   payload: any? = none,
+  /// the lifecycle arms [{ clause, zone?, body } | { cancel, cbody }]
   arms: any? = none
 ) {
   %emit js {
@@ -201,6 +196,7 @@
   }
 
   %exports {
+    /// true while the pointer is over an accepting zone
     $overZone: bool   // pointer is over an accepting zone during a drag
   }
 }

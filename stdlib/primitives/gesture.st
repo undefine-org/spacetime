@@ -2,21 +2,11 @@
 ///
 /// Tracks drag gestures with pointer capture.
 /// Provides delta movement, velocity, and gesture state.
-///
-/// @param &el - The element to make draggable
-/// @param capture - Use pointer capture for reliable tracking
-/// @param threshold - Minimum movement to start drag (prevents accidental drags)
-///
-/// @yields $active - Currently in drag state
-/// @yields $deltaX - Total X movement from start
-/// @yields $deltaY - Total Y movement from start
-/// @yields $velocityX - Current X velocity (px/s)
-/// @yields $velocityY - Current Y velocity (px/s)
-/// @yields $startX - Starting X position
-/// @yields $startY - Starting Y position
 
 %primitive gesture(
+  /// The element to make draggable
   &el,
+  /// Use pointer capture for reliable tracking
   capture: bool = true,
   threshold: number = 0
 ) {
@@ -179,12 +169,19 @@
   }
 
   %exports {
+    /// Currently in drag state
     $active: bool          // currently dragging
+    /// Total X movement from start
     $deltaX: number        // total X movement from start
+    /// Total Y movement from start
     $deltaY: number        // total Y movement from start
+    /// Current X velocity (px/s)
     $velocityX: number     // current X velocity (px/s)
+    /// Current Y velocity (px/s)
     $velocityY: number     // current Y velocity (px/s)
+    /// Starting X position
     $startX: number        // gesture start X
+    /// Starting Y position
     $startY: number        // gesture start Y
     $distance: number      // distance from start
     $angle: number         // angle from start (radians)

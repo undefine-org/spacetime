@@ -84,21 +84,30 @@ pub fn bootstrap_stdlib(stdlib_path: &Path) -> Result<SyntaxRegistry, BootstrapE
     // The `%scalar_type` rows travel the same road: a scalar's `%capture` names
     // the production whose value flattens to its source text, and the extractor
     // that consults it runs before the meta registry finishes loading.
-    for capture in load_scalar_captures_from_dir(stdlib_path)? {
-        registry.register_scalar_capture(capture);
+    for row in load_scalar_captures_from_dir(stdlib_path)? {
+        registry.register_scalar_row(row.id.clone(), row.capture.clone());
+        if let Some(f) = row.facts {
+            registry.register_scalar_facts(row.id.clone(), f);
+        }
+        registry.register_scalar_capture(row.capture);
     }
 
     Ok(registry)
 }
 
 /// Load the `%capture` production named by each `%scalar_type` row.
-pub fn load_scalar_captures_from_dir(dir: &Path) -> Result<Vec<String>, BootstrapError> {
+pub fn load_scalar_captures_from_dir(
+    dir: &Path,
+) -> Result<Vec<crate::parser::meta_ast::ScalarTypeDefAst>, BootstrapError> {
     let mut out = Vec::new();
     load_scalar_captures_recursive(dir, &mut out)?;
     Ok(out)
 }
 
-fn load_scalar_captures_recursive(dir: &Path, out: &mut Vec<String>) -> Result<(), BootstrapError> {
+fn load_scalar_captures_recursive(
+    dir: &Path,
+    out: &mut Vec<crate::parser::meta_ast::ScalarTypeDefAst>,
+) -> Result<(), BootstrapError> {
     if !dir.is_dir() {
         return Ok(());
     }
@@ -116,7 +125,7 @@ fn load_scalar_captures_recursive(dir: &Path, out: &mut Vec<String>) -> Result<(
             };
             for meta_def in parsed.meta_defs {
                 if let MetaDef::ScalarType(s) = meta_def {
-                    out.push(s.capture);
+                    out.push(s);
                 }
             }
         }
@@ -213,6 +222,10 @@ pub fn bootstrap_stdlib_from_embedded() -> SyntaxRegistry {
                         }
                     }
                     MetaDef::ScalarType(scalar) => {
+                        registry.register_scalar_row(scalar.id.clone(), scalar.capture.clone());
+                        if let Some(f) = scalar.facts.clone() {
+                            registry.register_scalar_facts(scalar.id.clone(), f);
+                        }
                         registry.register_scalar_capture(scalar.capture);
                     }
                     MetaDef::CaptureType(mut ct) => {

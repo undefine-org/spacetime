@@ -10,11 +10,6 @@
 /// can be exercised standalone (e.g. by `stdlib/3d/tests/pose.test.st`, which has
 /// no need for a full `@stage`/`@object` scene since the module has zero THREE.js
 /// dependency).
-///
-/// @example install the pose runtime with no scene at all
-/// .pose-test-host {
-///   @pose-runtime
-/// }
 
 %macro pose-runtime {
   %scope selector
@@ -25,6 +20,12 @@
 
   %binds {
     three-pose() -> {}
+  }
+
+  %example "install the pose runtime with no scene at all" {
+    .pose-test-host {
+      @pose-runtime
+    }
   }
 }
 
@@ -40,20 +41,6 @@
 /// and `&stage.camera.bounds` (Wave 1's `ctx.bounds(z)`) is available inside
 /// the SAME `%emit js` scope a project's stop-builder runs in.
 ///
-/// @example a two-stop pose track (flat -> a 60deg tumble around Z)
-/// canvas.hero {
-///   @stage(fov: 32, camZ: 5.5) {
-///     @object icosahedron(size: 1)
-///     @pose-track(stops: [
-///       { at: 0,   pos: {x:0,y:0,z:0}, face: window.__stPose.flat() },
-///       { at: 1,   pos: {x:0,y:0,z:2}, face: window.__stPose.tumble(0,0,1, Math.PI/3) }
-///     ])
-///   }
-/// }
-///
-/// @param stops - array of { at: number, pos: {x,y,z}, face: quat } stops
-/// @param ease  - per-frame smoothing 0..1 (default 0.08)
-///
 /// BINDING (BUG-263 item 4): a track drives the `@object` authored immediately
 /// before it (source-order interleaving — sibling primitive inits emit in
 /// author order, so `canvas._stObject` at track-init is its preceding object).
@@ -67,7 +54,9 @@
 
   %form {
     @pose-track(
+      /// array of { at: number, pos: {x,y,z}, face: quat } stops
       stops: $stops:expr,
+      /// per-frame smoothing 0..1
       ease: $ease:number = 0.08
     )
   }
@@ -88,6 +77,18 @@
       $progress
     }
     three-pose(&self) -> {}
+  }
+
+  %example "a two-stop pose track (flat -> a 60deg tumble around Z)" {
+    canvas.hero {
+      @stage(fov: 32, camZ: 5.5) {
+        @object icosahedron(size: 1)
+        @pose-track(stops: [
+          { at: 0,   pos: {x:0,y:0,z:0}, face: window.__stPose.flat() },
+          { at: 1,   pos: {x:0,y:0,z:2}, face: window.__stPose.tumble(0,0,1, Math.PI/3) }
+        ])
+      }
+    }
   }
 }
 

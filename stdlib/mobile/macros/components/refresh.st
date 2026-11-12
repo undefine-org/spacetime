@@ -2,21 +2,6 @@
 ///
 /// Creates a pull-to-refresh gesture for mobile scrollable containers.
 /// Tracks pull distance and provides progress signals for custom indicators.
-///
-/// @example basic
-/// .feed {
-///   @pull-refresh(threshold: 80) {
-///     pulling { transform: translateY($progress * 80); }
-///     refreshing { opacity: 0.7; }
-///   }
-/// }
-///
-/// @example with resistance
-/// .list-container {
-///   @pull-refresh(threshold: 100, resistance: 0.4) {
-///     pulling { transform: translateY($progress * 100 * 0.5); }
-///   }
-/// }
 
 %macro pull-refresh {
 
@@ -75,6 +60,23 @@
   %when $active {
     %applies {
       $styles
+    }
+  }
+
+  %example "basic" {
+    .feed {
+      @pull-refresh(threshold: 80) {
+        pulling { transform: translateY($progress * 80); }
+        refreshing { opacity: 0.7; }
+      }
+    }
+  }
+
+  %example "with resistance" {
+    .list-container {
+      @pull-refresh(threshold: 100, resistance: 0.4) {
+        pulling { transform: translateY($progress * 100 * 0.5); }
+      }
     }
   }
 }

@@ -17,10 +17,6 @@
 ///
 /// First-party capability: Direct access to signal values.
 /// External frameworks must query DOM or computed styles.
-///
-/// @example
-/// @then $count should equal 6
-/// @then $name should equal "Alice"
 
 %macro then-signal-equals {
 
@@ -65,12 +61,23 @@
     }
     }
   }
+
+  %example "@then-signal-equals" {
+    @test "clicking + counts up" {
+      @fixture {
+        <div class="counter"><button class="inc">+</button></div>
+      }
+      @given .counter {
+        $count number: 0;
+        .inc { @on &.click { $count <- $count + 1; } }
+      }
+      @when .inc click
+      @then $count on .counter should equal 1
+    }
+  }
 }
 
 /// Assert a signal does NOT equal a specific value
-///
-/// @example
-/// @then $status on .form] should not_equal "error"
 
 %macro then-signal-not-equals {
 
@@ -94,12 +101,17 @@
     }
     }
   }
+
+  %example "@then-signal-not-equals" {
+    @test "a fresh form is not in error" {
+      @fixture { <form class="signup"></form> }
+      @given .signup { $status string: "idle"; }
+      @then $status on .signup should not_equal "error"
+    }
+  }
 }
 
 /// Assert a signal is greater than a value
-///
-/// @example
-/// @then $progress on .loader should be_gt 0.5
 
 %macro then-signal-gt {
 
@@ -127,12 +139,13 @@
     }
     }
   }
+
+  %example "@then-signal-gt" {
+    @then $progress on .loader should be_gt 0.5
+  }
 }
 
 /// Assert a signal is greater than or equal to a value
-///
-/// @example
-/// @then $count on .counter] should be_gte 0
 
 %macro then-signal-gte {
 
@@ -160,12 +173,17 @@
     }
     }
   }
+
+  %example "@then-signal-gte" {
+    @test "the counter never goes negative" {
+      @fixture { <div class="counter"></div> }
+      @given .counter { $count number: 0; }
+      @then $count on .counter should be_gte 0
+    }
+  }
 }
 
 /// Assert a signal is less than a value
-///
-/// @example
-/// @then $errors on .form] should be_lt 5
 
 %macro then-signal-lt {
 
@@ -193,12 +211,17 @@
     }
     }
   }
+
+  %example "@then-signal-lt" {
+    @test "the form starts with few errors" {
+      @fixture { <form class="signup"></form> }
+      @given .signup { $errors number: 0; }
+      @then $errors on .signup should be_lt 5
+    }
+  }
 }
 
 /// Assert a signal is less than or equal to a value
-///
-/// @example
-/// @then $retries on .fetch] should be_lte 3
 
 %macro then-signal-lte {
 
@@ -226,6 +249,14 @@
     }
     }
   }
+
+  %example "@then-signal-lte" {
+    @test "the fetch stays within its retry budget" {
+      @fixture { <div class="fetch"></div> }
+      @given .fetch { $retries number: 2; }
+      @then $retries on .fetch should be_lte 3
+    }
+  }
 }
 
 // =============================================================================
@@ -233,10 +264,6 @@
 // =============================================================================
 
 /// Assert a signal is of a specific type
-///
-/// @example
-/// @then $items on .list] should be_type "array"
-/// @then $name on .user] should be_type "string"
 
 %macro then-signal-type {
 
@@ -272,12 +299,21 @@
     }
     }
   }
+
+  %example "@then-signal-type" {
+    @test "the list holds an array and the user a name" {
+      @fixture { <div class="profile"></div> }
+      @given .profile {
+        $items number[]: [];
+        $name string: "Ada";
+      }
+      @then $items on .profile should be_type "array"
+      @then $name on .profile should be_type "string"
+    }
+  }
 }
 
 /// Assert a signal is truthy
-///
-/// @example
-/// @then $isLoggedIn on .app should be_truthy
 
 %macro then-signal-truthy {
 
@@ -299,12 +335,13 @@
     }
     }
   }
+
+  %example "@then-signal-truthy" {
+    @then $isLoggedIn on .app should be_truthy
+  }
 }
 
 /// Assert a signal is falsy
-///
-/// @example
-/// @then $hasErrors on .form] should be_falsy
 
 %macro then-signal-falsy {
 
@@ -326,6 +363,14 @@
     }
     }
   }
+
+  %example "@then-signal-falsy" {
+    @test "a fresh form has no errors" {
+      @fixture { <form class="signup"></form> }
+      @given .signup { $hasErrors bool: false; }
+      @then $hasErrors on .signup should be_falsy
+    }
+  }
 }
 
 // =============================================================================
@@ -336,9 +381,6 @@
 ///
 /// First-party capability: Track exact update count.
 /// External frameworks cannot track internal signal updates.
-///
-/// @example
-/// @then $count on .counter] should have_update_count 3
 
 %macro then-signal-update-count {
 
@@ -366,12 +408,26 @@
     }
     }
   }
+
+  %example "@then-signal-update-count" {
+    @test "three clicks, three updates" {
+      @fixture {
+        <div class="counter"><button class="inc">+</button></div>
+      }
+      @enable_signal_tracking
+      @given .counter {
+        $count number: 0;
+        .inc { @on &.click { $count <- $count + 1; } }
+      }
+      @when .inc click
+      @when .inc click
+      @when .inc click
+      @then $count on .counter should have_update_count 3
+    }
+  }
 }
 
 /// Assert a signal has been updated at least N times
-///
-/// @example
-/// @then $position on .draggable] should have_update_count >= 10
 
 %macro then-signal-update-count-gte {
 
@@ -399,6 +455,16 @@
     }
     }
   }
+
+  %example "@then-signal-update-count-gte" {
+    @test "the slider reports every step" {
+      @fixture { <div class="slider"></div> }
+      @enable_signal_tracking
+      @let (el = document.querySelector('.slider'))
+      @eval ([1, 2, 3].forEach(v => ST.set(el, 'position', v)))
+      @then $position on .slider should have_update_count >= 3
+    }
+  }
 }
 
 // =============================================================================
@@ -409,9 +475,6 @@
 ///
 /// First-party capability: Track all values a signal has held.
 /// External frameworks can only see current value.
-///
-/// @example
-/// @then $count on .counter] should have_value_history [0, 1, 2, 3]
 
 %macro then-signal-value-history {
 
@@ -451,6 +514,22 @@
     }
     }
   }
+
+  %example "@then-signal-value-history" {
+    @test "the counter steps through every value" {
+      @fixture {
+        <div class="counter"><button class="inc">+</button></div>
+      }
+      @enable_signal_tracking
+      @given .counter {
+        $count number: 0;
+        .inc { @on &.click { $count <- $count + 1; } }
+      }
+      @when .inc click
+      @when .inc click
+      @then $count on .counter should have_value_history [1, 2]
+    }
+  }
 }
 
 // =============================================================================
@@ -461,9 +540,6 @@
 ///
 /// First-party capability: Know when derivations recalculate.
 /// External frameworks cannot track internal computations.
-///
-/// @example
-/// @then $fullName on .user] should have_recomputed
 
 %macro then-signal-recomputed {
 
@@ -487,12 +563,21 @@
     }
     }
   }
+
+  %example "@then-signal-recomputed" {
+    @test "renaming recomputes the full name" {
+      @fixture { <div class="user"></div> }
+      @enable_signal_tracking
+      @let (el = document.querySelector('.user'))
+      @eval (ST.set(el, 'first', 'Ada'))
+      @eval (ST.derive(el, 'fullName', ['first'], () => ST.get(el, 'first') + ' Lovelace'))
+      @eval (ST.set(el, 'first', 'Grace'))
+      @then $fullName on .user should have_recomputed
+    }
+  }
 }
 
 /// Assert recompute count for a derived signal
-///
-/// @example
-/// @then $total on .cart] should have_recompute_count 2
 
 %macro then-signal-recompute-count {
 
@@ -520,6 +605,18 @@
     }
     }
   }
+
+  %example "@then-signal-recompute-count" {
+    @test "each price change recomputes the total once" {
+      @fixture { <div class="cart"></div> }
+      @enable_signal_tracking
+      @let (el = document.querySelector('.cart'))
+      @eval (ST.set(el, 'price', 10))
+      @eval (ST.derive(el, 'total', ['price'], () => ST.get(el, 'price') * 2))
+      @eval (ST.set(el, 'price', 12))
+      @then $total on .cart should have_recompute_count 2
+    }
+  }
 }
 
 // =============================================================================
@@ -527,9 +624,6 @@
 // =============================================================================
 
 /// Assert an element has a specific signal
-///
-/// @example
-/// @then .counter should have_signal "count"
 
 %macro then-has-signal {
 
@@ -555,12 +649,13 @@
     }
     }
   }
+
+  %example "@then-has-signal" {
+    @then .counter should have_signal "count"
+  }
 }
 
 /// Assert an element does NOT have a specific signal
-///
-/// @example
-/// @then .static-element should not_have_signal "reactive"
 
 %macro then-not-has-signal {
 
@@ -582,6 +677,10 @@
     }
     }
   }
+
+  %example "@then-not-has-signal" {
+    @then .static-element should not_have_signal "reactive"
+  }
 }
 
 // =============================================================================
@@ -592,9 +691,6 @@
 ///
 /// First-party capability: Know how many effects are subscribed.
 /// External frameworks cannot see subscription counts.
-///
-/// @example
-/// @then $theme on .app should have_watcher_count 3
 
 %macro then-signal-watcher-count {
 
@@ -626,6 +722,10 @@
     }
     }
   }
+
+  %example "@then-signal-watcher-count" {
+    @then $theme on .app should have_watcher_count 3
+  }
 }
 
 // =============================================================================
@@ -636,9 +736,6 @@
 ///
 /// First-party capability: Subscribe to signal changes.
 /// External frameworks must poll or use arbitrary timeouts.
-///
-/// @example
-/// @wait_for_signal $status on .loader to_equal "complete" timeout 5s
 
 %macro wait-for-signal {
 
@@ -684,12 +781,21 @@
     });
     }
   }
+
+  %example "@wait-for-signal" {
+    @test "the loader finishes" {
+      @fixture { <div class="loader"><button class="go">Load</button></div> }
+      @given .loader {
+        $status string: "idle";
+        .go { @on &.click { $status <- "complete"; } }
+      }
+      @when .go click
+      @wait_for_signal $status on .loader to_equal "complete" timeout 5s
+    }
+  }
 }
 
 /// Wait for a signal to become truthy
-///
-/// @example
-/// @wait_for_signal $isReady on .app to_be_truthy timeout 3s
 
 %macro wait-for-signal-truthy {
 
@@ -732,6 +838,18 @@
     });
     }
   }
+
+  %example "@wait-for-signal-truthy" {
+    @test "the app becomes ready" {
+      @fixture { <div class="app"><button class="start">Start</button></div> }
+      @given .app {
+        $isReady bool: false;
+        .start { @on &.click { $isReady <- true; } }
+      }
+      @when .start click
+      @wait_for_signal $isReady on .app to_be_truthy timeout 3s
+    }
+  }
 }
 
 // =============================================================================
@@ -739,11 +857,6 @@
 // =============================================================================
 
 /// Enable detailed signal tracking for debugging
-///
-/// @example
-/// @enable_signal_tracking
-/// @when .counter click .increment
-/// @then $count on .counter] should have_update_count 1
 
 %macro enable-signal-tracking {
 
@@ -793,6 +906,21 @@
       ST.set = __originalSet;
       ST.derive = __originalDerive;
     });
+    }
+  }
+
+  %example "@enable-signal-tracking" {
+    @test "one click, one update" {
+      @fixture {
+        <div class="counter"><button class="inc">+</button></div>
+      }
+      @enable_signal_tracking
+      @given .counter {
+        $count number: 0;
+        .inc { @on &.click { $count <- $count + 1; } }
+      }
+      @when .inc click
+      @then $count on .counter should have_update_count 1
     }
   }
 }
@@ -849,9 +977,6 @@
 // =============================================================================
 
 /// Assert signal array contains a value
-///
-/// @example
-/// @then $selectedIds on .list] should contain 5
 
 %macro then-signal-contains {
 
@@ -886,12 +1011,21 @@
     }
     }
   }
+
+  %example "@then-signal-contains" {
+    @test "picking an item selects it" {
+      @fixture { <ul class="list"><li class="pick">5</li></ul> }
+      @given .list {
+        $selectedIds number[]: [];
+        .pick { @on &.click { $selectedIds <- [...$selectedIds, 5]; } }
+      }
+      @when .pick click
+      @then $selectedIds on .list should contain 5
+    }
+  }
 }
 
 /// Assert signal array length
-///
-/// @example
-/// @then $items on .cart] should have_length 3
 
 %macro then-signal-length {
 
@@ -920,6 +1054,19 @@
         `got ${__actual.length}`
       );
     }
+    }
+  }
+
+  %example "@then-signal-length" {
+    @test "each add puts one item in the cart" {
+      @fixture { <div class="cart"><button class="add">Add</button></div> }
+      @given .cart {
+        $items string[]: [];
+        .add { @on &.click { $items <- [...$items, "tea"]; } }
+      }
+      @when .add click
+      @when .add click
+      @then $items on .cart should have_length 2
     }
   }
 }

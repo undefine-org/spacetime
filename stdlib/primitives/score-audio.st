@@ -11,22 +11,19 @@
 /// Under the browser's `.time` transport the audio plays in real time and seeks
 /// on scrub; under a virtual clock (render) it stays muted geometry — the mux is
 /// a render-side follow-up. Either way the score, not the audio, owns the clock.
-///
-/// @param &el      - the score's scope owner (the transport signal resolves here)
-/// @param src      - the audio source URL
-/// @param name     - the entity name (`bed` from `&bed`), for @on addressing
-/// @param at       - the start offset in the score's domain (ms)
-/// @param total    - the score's full duration (ms), to map progress -> time
-/// @param progress - the score's own progress signal name (`time`)
-///
-/// @yields $ready  - true once the audio element is wired
 
 %primitive score-audio(
+  /// the score's scope owner (the transport signal resolves here)
   &el,
+  /// the audio source URL
   src: string = "",
+  /// the entity name (`bed` from `&bed`), for @on addressing
   name: string = "",
+  /// the start offset in the score's domain (ms)
   at: number = 0,
+  /// the score's full duration (ms), to map progress -> time
   total: number = 0,
+  /// the score's own progress signal name (`time`)
   progress: string = "time"
 ) {
   %emit js {
@@ -91,6 +88,7 @@
   }
 
   %exports {
+    /// true once the audio element is wired
     $ready: bool
   }
 }

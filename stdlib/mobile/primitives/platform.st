@@ -2,16 +2,11 @@
 ///
 /// Detects the current platform (iOS, Android, browser) and provides
 /// signals for conditional styling and behavior.
-///
-/// @param &el - Element to bind platform classes to
-///
-/// @yields $os - Current OS ('ios', 'android', 'browser', 'ios-browser', 'android-browser')
-/// @yields $isNative - Whether running in native Tauri app
-/// @yields $isMobile - Whether on a mobile device (native or browser)
-/// @yields $isIOS - Whether on iOS (native or browser)
-/// @yields $isAndroid - Whether on Android (native or browser)
 
-%primitive platform(&el) {
+%primitive platform(
+  /// Element to bind platform classes to
+  &el
+) {
   %emit js {
     // Import the SpacetimeMobile API
     const mobile = globalThis.__SpacetimeMobile || {
@@ -59,23 +54,21 @@
   }
 
   %exports {
+    /// Current OS ('ios', 'android', 'browser', 'ios-browser', 'android-browser')
     $os: string
+    /// Whether running in native Tauri app
     $isNative: bool
+    /// Whether on a mobile device (native or browser)
     $isMobile: bool
+    /// Whether on iOS (native or browser)
     $isIOS: bool
+    /// Whether on Android (native or browser)
     $isAndroid: bool
   }
 }
 
 
 /// iOS-only conditional macro
-///
-/// @example
-/// .nav-bar {
-///   @ios {
-///     backdrop-filter: blur(20px);
-///   }
-/// }
 
 %macro ios-only {
   %form {
@@ -91,6 +84,14 @@
   %when $isIOS {
     %applies {
       $styles
+    }
+  }
+
+  %example "@ios-only" {
+    .nav-bar {
+      @ios {
+        backdrop-filter: blur(20px);
+      }
     }
   }
 }

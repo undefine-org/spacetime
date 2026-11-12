@@ -11,13 +11,6 @@
 /// map from a geom + aesthetic mappings; a caller may also pass a hand-built
 /// option for a chart the grammar does not yet cover.
 ///
-/// @param &el     - The container element the chart mounts into
-/// @param option  - The initial ECharts option map
-/// @param theme   - Optional ECharts theme name (registered theme, or "")
-/// @yields $chart  - The ECharts instance handle (for imperative escape hatches)
-/// @yields $ready  - True once the instance has mounted
-/// @yields setOption - A function to push a new option map (data refresh)
-///
 /// Reactivity model: the primitive renders the initial `option` and yields a
 /// `setOption` function. A page refreshes the chart by calling that function
 /// with a new option map (e.g. from an `@handle` arm when analytics data
@@ -25,7 +18,14 @@
 /// This follows the established yielded-function pattern (cf. websocket's
 /// `send`) rather than a bespoke observe directive.
 
-%primitive echarts-chart(&el, option: any, theme: string = "") {
+%primitive echarts-chart(
+  /// The container element the chart mounts into
+  &el,
+  /// The initial ECharts option map
+  option: any,
+  /// Optional ECharts theme name (registered theme, or "")
+  theme: string = ""
+) {
   %emit js {
     const el = %&el;
 
@@ -34,12 +34,14 @@
     // than throwing deep inside a render and blanking the page.
     if (typeof echarts === "undefined") {
       console.error("echarts-chart: global `echarts` is not loaded on the page");
+      /// True once the instance has mounted
       %yield false -> $ready;
       return;
     }
 
     const theme = %theme;
     const chart = theme ? echarts.init(el, theme) : echarts.init(el);
+    /// The ECharts instance handle (for imperative escape hatches)
     %yield chart -> $chart;
     %yield true -> $ready;
 

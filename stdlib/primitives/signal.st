@@ -23,35 +23,29 @@
 /// Phoenix channel and the `{:reply, %{tag, reply}}` maps back through the
 /// SAME receive arms (discriminator = tag, `$.reply` = the reply payload).
 /// Correlation is Phoenix's own ref — no client-side __corr bookkeeping.
-///
-/// @param name    - the signal binding name (JS identifier, no `$`)
-/// @param params  - the call signature (param_list)
-/// @param host    - the @host binding the signal sends to
-/// @param verb    - the send HTTP method (POST/PUT/PATCH/GET/DELETE)
-/// @param target  - the send target url (relative to the host base)
-/// @param body    - the send request body (object expression text)
-/// @param sum     - the response sum NAME (the `to <Sum>` through-line; may be empty)
-/// @param arms    - the receive decode arms (status => variant constructors)
-/// @param policy  - the race policy mode (latest|queue|parallel|drop)
-/// @param stream  - true for @data stream (many replies), false for one-shot signal
-///
-/// @yields $call    - the callable that fires the signal
-/// @yields $pending - whether a call is in flight
-/// @yields $error   - last error message
-/// @yields $cancel  - function to abort the in-flight call
 %primitive signal-call(
+  /// the signal binding name (JS identifier, no `$`)
   name: ident,
+  /// the call signature (param_list)
   params: any?,
+  /// the @host binding the signal sends to
   host: binding,
+  /// the send HTTP method (POST/PUT/PATCH/GET/DELETE)
   verb: ident,
+  /// the send target url (relative to the host base)
   target: string,
+  /// the send request body (object expression text)
   body: any?,
+  /// the response sum NAME (the `to <Sum>` through-line; may be empty)
   sum: ident?,
+  /// the receive decode arms (status => variant constructors)
   arms: any?,
+  /// the race policy mode (latest|queue|parallel|drop)
   policy: ident?,
   timeout: any?,
   retry: any?,
   ephemeral: any?,
+  /// true for @data stream (many replies), false for one-shot signal
   stream: bool = false
 ) %uses host-register {
   %emit prelude-js {
@@ -565,9 +559,13 @@
   }
 
   %exports {
+    /// the callable that fires the signal
     $call: fn() ~> effect
+    /// whether a call is in flight
     $pending: bool
+    /// last error message
     $error: string?
+    /// function to abort the in-flight call
     $cancel: fn() ~> effect
   }
 }

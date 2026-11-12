@@ -4,14 +4,6 @@
 /// Handles nested selectors, stagger, ranges, and easing.
 /// This primitive processes the $body:keyframes structure captured from timeline macros.
 ///
-/// @param &el - Root element (scope for nested selectors)
-/// @param driver - Signal driving the animation (0-1 progress from scroll-driver, time-driver, etc.)
-/// @param animations - Captured keyframes structure from $body:keyframes
-/// @param easing - Default easing function name
-/// @param stagger - Delay between elements (ms)
-/// @param staggerFrom - Stagger origin ("first", "last", "center")
-/// @param colorSpace - Color interpolation space ("rgb" or "oklch", default "rgb")
-///
 /// The animations parameter expects a structure like:
 /// {
 ///   properties: [{ property: "opacity", keyframes: [{ at: 0, value: 0 }, { at: 1, value: 1 }] }],
@@ -27,13 +19,17 @@
 /// }
 
 %primitive apply-animations(
+  /// Root element (scope for nested selectors)
   &el,
+  /// Signal driving the animation (0-1 progress from scroll-driver, time-driver, etc.)
   driver: signal,
+  /// Captured keyframes structure from $body:keyframes
   animations: any,
   easing: string = "linear",
   stagger: number = 0,
   staggerFrom: string = "first",
   interactive: bool = false,
+  /// Color interpolation space ("rgb" or "oklch", default "rgb")
   colorSpace: string = "rgb",
   bind: string = ""
 ) {

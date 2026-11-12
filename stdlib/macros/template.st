@@ -3,23 +3,6 @@
 /// Defines reusable templates with value and element parameters.
 /// Templates compile to factory functions in Spacetime.templates registry.
 ///
-/// @example basic value params
-/// @template &service-card($s) {
-///   <div class="service" data-id="`$s.id`">
-///     <span>`$s.number`</span>
-///     <h3>`$s.title`</h3>
-///   </div>
-/// }
-///
-/// @example with element params (composition)
-/// @template &modal($title, &content, &footer?) {
-///   <div class="modal">
-///     <h2>`$title`</h2>
-///     <div class="modal__body">`&content`</div>
-///     <div class="modal__footer">`&footer`</div>
-///   </div>
-/// }
-///
 /// NOTE — `@if` does not work ANYWHERE yet (BUG-362), so a template cannot
 /// render conditionally. `%macro conditional` declares a `%form` but has no
 /// `%emit` block and no primitive behind it; outside a template the compiler
@@ -30,18 +13,6 @@
 /// So: render the slot UNCONDITIONALLY, as above. An omitted optional param
 /// renders as empty, which is the intended shape anyway. Verified, not
 /// assumed: `tests/template_body_directive_test.rs`.
-///
-/// @example with scoped animations
-/// @template &card($item) {
-///   <article class="card">
-///     <h3>`$item.title`</h3>
-///     <p>`$item.desc`</p>
-///   </article>
-///
-///   @on visible(300ms) {
-///     & { opacity: 0 -> 1; translate-y: 20px -> 0; }
-///   }
-/// }
 ///
 /// Param types:
 /// - `$name` - value param (string, number, object)
@@ -126,17 +97,44 @@
       params: $params
     ) -> { $factory }
   }
+
+  %example "basic value params" {
+    @template &service-card($s) {
+      <div class="service" data-id="`$s.id`">
+        <span>`$s.number`</span>
+        <h3>`$s.title`</h3>
+      </div>
+    }
+  }
+
+  %example "with element params (composition)" {
+    @template &modal($title, &content, &footer?) {
+      <div class="modal">
+        <h2>`$title`</h2>
+        <div class="modal__body">`&content`</div>
+        <div class="modal__footer">`&footer`</div>
+      </div>
+    }
+  }
+
+  %example "with scoped animations" {
+    @template &card($item) {
+      <article class="card">
+        <h3>`$item.title`</h3>
+        <p>`$item.desc`</p>
+      </article>
+
+      @on &.visible(300ms) {
+        & { opacity: 0 -> 1; translate-y: 20px -> 0; }
+      }
+    }
+  }
 }
 
 /// Unlinked ref: &name(`$params`) { html }
 ///
 /// Same as @template but without the directive prefix. Defines a template
 /// as an element reference that can be invoked inline.
-///
-/// @example
-/// &greeting(`$name`) {
-///   <p>Hello, `$name`!</p>
-/// }
 %macro template-inline {
   %scope file
 
@@ -158,6 +156,12 @@
       params: $params
     ) -> { $factory }
   }
+
+  %example "@template-inline" {
+    &greeting($name) {
+      <p>Hello, `$name`!</p>
+    }
+  }
 }
 
 /// Template invocation with body: &name(args) { body_html }
@@ -165,13 +169,6 @@
 /// Invokes a registered template inside a selector body, passing
 /// inline body HTML as the last argument (fills the first unbound &param).
 /// Body is required — use regular &name(args); for invocations without body.
-///
-/// @example
-/// .card-list {
-///   &card("Title") {
-///     <p>Body content</p>
-///   }
-/// }
 %macro template-invoke {
   %scope selector
   %order 200
@@ -190,6 +187,21 @@
       body: $body
     )
   }
+
+  %example "@template-invoke" {
+    @template &card($title, &body) {
+      <article class="card">
+        <h3>`$title`</h3>
+        `&body`
+      </article>
+    }
+    .card-list {
+      &card("Title") {
+        <p>Body content</p>
+      }
+    }
+    <section class="card-list"></section>
+  }
 }
 
 /// Bare template invocation: &name(args);
@@ -197,16 +209,6 @@
 /// Invokes a registered template inside a selector body without an inline
 /// body block.  The semicolon terminator (or end-of-block) distinguishes
 /// this from the body-form `&name(args) { body }`.
-///
-/// @example
-/// .nav-wrap {
-///   &psr-nav();
-/// }
-///
-/// @example positional args
-/// .header {
-///   &greeting("World");
-/// }
 %macro template-invoke-bare {
   %scope selector
   %order 199
@@ -222,17 +224,30 @@
       args: $args
     )
   }
+
+  %example "@template-invoke-bare" {
+    @template &site-nav() {
+      <nav><a href="/">Home</a> <a href="/about">About</a></nav>
+    }
+    .nav-wrap {
+      &site-nav();
+    }
+    <header class="nav-wrap"></header>
+  }
+
+  %example "positional args" {
+    @template &greeting($name) {
+      <p>Hello, `$name`!</p>
+    }
+    .header {
+      &greeting("World");
+    }
+    <header class="header"></header>
+  }
 }
 
-///
 /// Invokes a registered template with a named ref inside a selector body.
 /// The created element is stored under the ref name for later access.
-///
-/// @example
-/// .counter-wrap {
-///   &counter &psr-counter();
-/// }
-///
 %macro template-invoke-named {
   %scope selector
   %order 198
@@ -248,5 +263,15 @@
       args: $args,
       ref: $ref
     )
+  }
+
+  %example "@template-invoke-named" {
+    @template &counter-badge() {
+      <span class="badge">0</span>
+    }
+    .counter-wrap {
+      &counter &counter-badge();
+    }
+    <div class="counter-wrap"></div>
   }
 }

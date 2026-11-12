@@ -10,20 +10,26 @@
 /// logic) so `stdlib/__host__/index.st` can write a single declarative
 /// `@host-bridge-auth(binding: hostApi)` line rather than reaching for the
 /// primitive directly.
-///
-/// @example
-/// @host-bridge-auth(binding: hostApi)
 %macro host-bridge-auth {
   %scope file
   %order 50
 
   %form {
     @host-bridge-auth(
+      /// the JS identifier this primitive's start()/
+      /// sessionStorage key are exposed under (no `$`) — lets
+      /// multiple widgets on one page (unlikely today, but
+      /// keeps this primitive instance-scoped rather than a
+      /// single hardcoded global name) coexist.
       binding: $binding:ident
     )
   }
 
   %binds {
     host-bridge-auth(bindingName: $binding)
+  }
+
+  %example "@host-bridge-auth" {
+    @host-bridge-auth(binding: hostApi)
   }
 }

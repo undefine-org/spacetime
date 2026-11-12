@@ -7,23 +7,17 @@
 /// gesture hit-tests the pointer against `__stDnd.zones[group]` (NOT a magic
 /// selector) and toggles this zone's `$hovering` / `$accepting` signals, which
 /// drive the macro's `over` / `reject` states.
-///
-/// @param &el     - the zone element
-/// @param group   - namespaces zones↔draggables (a draggable in group G hits
-///                  only group-G zones); default "" (one implicit global group)
-/// @param accepts - OPTIONAL predicate over the dragged payload, as raw text
-///                  (`$payload.tag != "locked"`). Compiled to `acceptsFn(p)` and
-///                  evaluated BY the gesture at hover with the live payload — it
-///                  CANNOT be a zone-resident signal because the dragged datum
-///                  does not exist until a drag hovers. `$payload` → the datum;
-///                  `$zone` → this zone's dataset. Default: always accept.
-///
-/// @yields $hovering  - a compatible draggable is over this zone
-/// @yields $accepting - hovering AND the accepts predicate passes
 
 %primitive drop-zone(
+  /// the zone element
   &el,
   group: string = "",
+  /// OPTIONAL predicate over the dragged payload, as raw text
+  /// (`$payload.tag != "locked"`). Compiled to `acceptsFn(p)` and
+  /// evaluated BY the gesture at hover with the live payload — it
+  /// CANNOT be a zone-resident signal because the dragged datum
+  /// does not exist until a drag hovers. `$payload` → the datum;
+  /// `$zone` → this zone's dataset. Default: always accept.
   accepts: any? = none
 ) {
   %emit js {
@@ -91,7 +85,9 @@
   }
 
   %exports {
+    /// a compatible draggable is over this zone
     $hovering: bool   // a compatible draggable is over this zone
+    /// hovering AND the accepts predicate passes
     $accepting: bool  // hovering AND accepts(payload) passes
     $over: bool       // hovering AND accepting (drives the `over` state)
     $reject: bool     // hovering AND NOT accepting (drives the `reject` state)

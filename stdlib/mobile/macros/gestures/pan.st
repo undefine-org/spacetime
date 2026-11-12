@@ -2,27 +2,13 @@
 ///
 /// Enables free-form dragging in any direction with velocity tracking.
 /// Wraps the gesture primitive for mobile touch interactions.
-///
-/// @example basic
-/// .draggable {
-///   @pan {
-///     translate-x: $deltaX
-///     translate-y: $deltaY
-///   }
-/// }
-///
-/// @example constrained to axis
-/// .slider {
-///   @pan(axis: "x") {
-///     translate-x: $deltaX
-///   }
-/// }
 
 %macro pan {
 
   %form {
     @pan(
       axis: $axis:("x" | "y" | "both") = "both",
+      /// Minimum movement to start drag (prevents accidental drags)
       threshold: $threshold:number = 0
     ) {
       $styles:properties
@@ -62,6 +48,23 @@
   %when $active {
     %applies {
       $styles
+    }
+  }
+
+  %example "basic" {
+    .draggable {
+      @pan {
+        translate-x: $deltaX
+        translate-y: $deltaY
+      }
+    }
+  }
+
+  %example "constrained to axis" {
+    .slider {
+      @pan(axis: "x") {
+        translate-x: $deltaX
+      }
     }
   }
 }

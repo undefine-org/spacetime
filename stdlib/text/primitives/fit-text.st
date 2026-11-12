@@ -7,9 +7,6 @@
 ///
 /// pretext widths scale linearly with font-size for a given font, so we measure
 /// once at a reference size and scale, then verify the chosen size's line count.
-///
-/// @yields $fitSize - the chosen font-size in px
-/// @yields $lines   - resulting line count at that size
 
 %primitive fit-text(
   &el,
@@ -74,7 +71,9 @@
   }
 
   %exports {
+    /// the chosen font-size in px
     $fitSize: number
+    /// resulting line count at that size
     $lines: number
   }
 }

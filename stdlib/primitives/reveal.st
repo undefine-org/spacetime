@@ -3,26 +3,9 @@
 /// Splits text into characters, words, or lines and animates them
 /// with staggered reveals. Supports IntersectionObserver triggers,
 /// custom keyframes, and configurable stagger patterns.
-///
-/// @param &el - The text element to split and animate
-/// @param split - Split mode: "chars", "words", or "lines"
-/// @param trigger - Animation trigger: "visible", "load", or "scroll"
-/// @param stagger - Delay between each unit (ms)
-/// @param staggerFrom - Stagger pattern: "first", "last", "center", "edges", "random"
-/// @param duration - Animation duration per unit (ms)
-/// @param threshold - IntersectionObserver threshold for visible trigger
-/// @param easing - CSS easing function name
-/// @param from - Reveal direction: "bottom", "top", "left", "right", "none"
-/// @param distance - Travel distance from starting position
-/// @param once - Whether to animate only once
-/// @param keyframes - Optional compiled custom keyframes body (from `$body:keyframes`).
-///   When present, drives each unit's WAAPI animation instead of the built-in
-///   from/distance opacity+transform pair (gh-18).
-///
-/// @yields $revealProgress - Overall reveal progress (0-1)
-/// @yields $isRevealed - Whether the reveal is complete
 
 %primitive reveal-engine(
+  /// The text element to split and animate
   &el,
   split: ("chars" | "words" | "lines" | "outline") = "chars",
   trigger: ("visible" | "load" | "scroll") = "visible",
@@ -34,6 +17,9 @@
   from: ("bottom" | "top" | "left" | "right" | "none") = "bottom",
   distance: string = "100%",
   once: bool = true,
+  /// Optional compiled custom keyframes body (from `$body:keyframes`).
+  /// When present, drives each unit's WAAPI animation instead of the built-in
+  /// from/distance opacity+transform pair (gh-18).
   keyframes: any = null
 ) {
   %emit js {
@@ -630,7 +616,9 @@
   }
 
   %exports {
+    /// Overall reveal progress (0-1)
     $revealProgress: number  // overall reveal progress (0-1)
+    /// Whether the reveal is complete
     $isRevealed: bool        // whether the reveal animation is complete
   }
 }

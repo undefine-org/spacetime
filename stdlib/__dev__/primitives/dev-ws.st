@@ -7,10 +7,6 @@
 /// This is a global singleton — it doesn't attach to any element.
 /// Other dev tool primitives (dev-save, dev-editable) communicate
 /// with the server through `window.__stDevWs`.
-///
-/// @yields $connected - Whether the WebSocket is currently connected
-/// @yields $lastMessage - The last received message object
-/// @yields $error - Last error message, if any
 
 %primitive dev-ws() {
   %emit js {
@@ -187,8 +183,11 @@
   }
 
   %exports {
+    /// Whether the WebSocket is currently connected
     $connected: bool
+    /// The last received message object
     $lastMessage: object
+    /// Last error message, if any
     $error: string
   }
 }

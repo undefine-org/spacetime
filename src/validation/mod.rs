@@ -38,6 +38,8 @@ pub mod css;
 // GH-12 / PLAN-137 W6: `%scope element(<tag>)` constraint enforcement. Not
 // headless-gated — it runs on every compile path (check, build, serve).
 pub mod element_scope;
+/// PLAN-156: values checked against the file they name (`%facts`).
+pub mod facts;
 
 #[cfg(feature = "headless")]
 pub use js::{JsSyntaxError, validate_js};

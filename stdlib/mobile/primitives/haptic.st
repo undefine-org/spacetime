@@ -2,13 +2,12 @@
 ///
 /// Triggers haptic feedback on the device. Uses the native haptic API
 /// when running in a Tauri mobile app, or the Web Vibration API as fallback.
-///
-/// @param &el - Element to bind haptic feedback to
-/// @param style - Haptic style: 'light', 'medium', 'heavy', 'success', 'warning', 'error', 'selection'
-///
-/// @yields $triggered - Whether the haptic feedback was triggered
 
-%primitive haptic(&el, style: string = "medium") {
+%primitive haptic(
+  /// Element to bind haptic feedback to
+  &el,
+  style: string = "medium"
+) {
   %emit js {
     // Import the SpacetimeMobile API
     const mobile = globalThis.__SpacetimeMobile || {
@@ -37,6 +36,7 @@
   }
 
   %exports {
+    /// Whether the haptic feedback was triggered
     $triggered: bool
   }
 }
@@ -45,11 +45,6 @@
 /// Haptic Feedback Macro
 ///
 /// Declarative macro for triggering haptic feedback on element mount.
-///
-/// @example
-/// .button {
-///   @haptic("light")
-/// }
 ///
 /// .submit-button {
 ///   @haptic("success")
@@ -63,5 +58,11 @@
 
   %binds {
     haptic(&self, style: $style) -> { $triggered }
+  }
+
+  %example "@haptic-feedback" {
+    .button {
+      @haptic("light")
+    }
   }
 }

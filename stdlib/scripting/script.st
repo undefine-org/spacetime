@@ -39,14 +39,11 @@
 // =============================================================================
 
 /// Provides access to the current file being processed
-///
-/// @param &container - Script container element
-/// @yields $source - Raw source code string
-/// @yields $ast - Parsed AST as JSON object
-/// @yields $path - File path string
-/// @yields $forms - FormRegistry data for directive signatures
 
-%primitive file_context(&container) {
+%primitive file_context(
+  /// Script container element
+  &container
+) {
   %emit js {
     // These globals are injected by the script runner before execution:
     //   __st_file_source  - raw source string
@@ -61,9 +58,13 @@
   }
 
   %exports {
+    /// Raw source code string
     $source: string
+    /// Parsed AST as JSON object
     $ast: object
+    /// File path string
     $path: string
+    /// FormRegistry data for directive signatures
     $forms: object
   }
 }
@@ -74,12 +75,11 @@
 // =============================================================================
 
 /// Manages script registration and execution
-///
-/// @param &container - Script container element
-/// @yields $registerScript - Function to register a named script
-/// @yields $runScripts - Function to execute all registered scripts
 
-%primitive script_runner(&container) {
+%primitive script_runner(
+  /// Script container element
+  &container
+) {
   %emit js {
     globalThis.__st_scripts = globalThis.__st_scripts || [];
     globalThis.__st_edits = globalThis.__st_edits || [];
@@ -111,7 +111,9 @@
   }
 
   %exports {
+    /// Function to register a named script
     $registerScript: fn(name: string, callback: any) ~> effect
+    /// Function to execute all registered scripts
     $runScripts: fn() ~> array
   }
 }
@@ -122,13 +124,11 @@
 // =============================================================================
 
 /// Collects source edits for batch application
-///
-/// @param &container - Script container
-/// @yields $addEdit - Add a source edit (start, end, replacement)
-/// @yields $getEdits - Get all collected edits
-/// @yields $applyEdits - Apply edits to source and return transformed
 
-%primitive edit_collector(&container) {
+%primitive edit_collector(
+  /// Script container
+  &container
+) {
   %emit js {
     const edits = [];
 
@@ -158,8 +158,11 @@
   }
 
   %exports {
+    /// Add a source edit (start, end, replacement)
     $addEdit: fn(start: number, end: number, replacement: string) ~> effect
+    /// Get all collected edits
     $getEdits: fn() ~> array
+    /// Apply edits to source and return transformed
     $applyEdits: fn(source: string) ~> string
   }
 }
@@ -171,14 +174,7 @@
 
 /// Define a named transformation script
 ///
-/// @param $name - Script name for reporting
 /// @body - Script body with access to $source, $ast, $path, $forms
-///
-/// @example
-/// @script "My transformation" {
-///   // $source, $ast, $path available here
-///   console.log("Processing:", $path);
-/// }
 
 %macro script {
 
@@ -217,6 +213,13 @@
       };
     });
   }
+
+  %example "@script" {
+    @script "My transformation" {
+      // $source, $ast, $path available here
+      console.log("Processing:", $path);
+    }
+  }
 }
 
 
@@ -226,13 +229,7 @@
 
 /// Find and iterate over AST nodes matching a pattern
 ///
-/// @param $pattern - Pattern to match (directive name, node type, etc.)
 /// @body - Handler executed for each match, with $node and $span available
-///
-/// @example
-/// @find "@fade-in" {
-///   console.log("Found fade-in at", $span);
-/// }
 
 %macro find {
 
@@ -278,6 +275,12 @@
       %$body
     }
   }
+
+  %example "@find" {
+    @find "@fade-in" {
+      console.log("Found fade-in at", $span);
+    }
+  }
 }
 
 
@@ -286,12 +289,6 @@
 // =============================================================================
 
 /// Replace text patterns in source
-///
-/// @param $pattern - Text or regex pattern to find
-/// @param $replacement - Replacement text
-///
-/// @example
-/// @replace("@old-directive", "@new-directive")
 
 %macro replace {
 
@@ -311,6 +308,10 @@
       index += pattern.length;
     }
   }
+
+  %example "@replace" {
+    @replace("@old-directive", "@new-directive")
+  }
 }
 
 
@@ -319,13 +320,6 @@
 // =============================================================================
 
 /// Replace patterns using regular expressions
-///
-/// @param $pattern - Regex pattern string
-/// @param $replacement - Replacement (supports $1, $2 capture groups)
-/// @param $flags - Optional regex flags (default: "g")
-///
-/// @example
-/// @replace-regex("duration:\\s*(\\d+)ms", "duration: ${1}ms /* migrated */")
 
 %macro replace-regex {
 
@@ -359,6 +353,10 @@
       if (match[0].length === 0) regex.lastIndex++;
     }
   }
+
+  %example "@replace-regex" {
+    @replace-regex("duration:\\s*(\\d+)ms", "duration: ${1}ms /* migrated */")
+  }
 }
 
 
@@ -367,8 +365,6 @@
 // =============================================================================
 
 /// Log a message during script execution
-///
-/// @param $message - Message to log
 
 %macro log {
 
@@ -387,9 +383,6 @@
 // =============================================================================
 
 /// Assert a condition, throwing if false
-///
-/// @param $condition - Condition to check
-/// @param $message - Error message if assertion fails
 
 %macro assert {
 

@@ -15,4 +15,12 @@
   %binds {
     now(&self, every: $every) -> { $now }
   }
+
+  %example "@now-macro" {
+    .clock {
+      @now(every: 1s) {
+        text <- $now;
+      }
+    }
+  }
 }

@@ -10,16 +10,6 @@
 ///
 /// Dependency order: dev-ws → dev-editable → dev-save
 /// (dev-save subscribes to events from dev-editable and sends via dev-ws)
-///
-/// @example
-/// @dev-editor
-///
-/// @yields $connected - WebSocket connection status (from dev-ws)
-/// @yields $activeEdit - Current edit in progress (from dev-editable)
-/// @yields $editCount - Completed edits this session (from dev-editable)
-/// @yields $saving - Whether saves are in-flight (from dev-save)
-/// @yields $lastSaveError - Last save error message (from dev-save)
-/// @yields $savedCount - Successfully saved edits (from dev-save)
 
 %macro dev-editor {
   %scope file
@@ -50,5 +40,9 @@
       $lastSaveError,
       $savedCount
     }
+  }
+
+  %example "@dev-editor" {
+    @dev-editor
   }
 }

@@ -20,11 +20,12 @@
 ///   gone       — nothing matches (say so; the comment is an orphan)
 ///   ambiguous  — several identical candidates (say so; never guess)
 ///   unverified — a legacy record with no content descriptor (say so)
-///
-/// @param &el     - the widget host (scope root)
-/// @param request - name of the object signal carrying { selector, tag, class, id_attr, text }
-/// @param outcome - name of the string signal the outcome is written to
-%primitive comments-locate(&el, request: string = "", outcome: string = "") {
+%primitive comments-locate(
+  /// the widget host (scope root)
+  &el,
+  request: string = "",
+  outcome: string = ""
+) {
   %emit js {
     (() => {
       const host = %&el;

@@ -2,24 +2,13 @@
 ///
 /// Tracks pointer (mouse/touch/pen) position and state.
 /// Provides both viewport-relative and element-relative coordinates.
-///
-/// @param &el - The element to track pointer over
-/// @param events - Which pointer events to track: "move", "enter", "leave", "down", "up"
-/// @param normalize - Normalize coordinates to 0-1 within element bounds
-///
-/// @yields $x - Viewport X coordinate
-/// @yields $y - Viewport Y coordinate
-/// @yields $localX - Element-relative X coordinate
-/// @yields $localY - Element-relative Y coordinate
-/// @yields $normX - Normalized X (0-1) within element
-/// @yields $normY - Normalized Y (0-1) within element
-/// @yields $pressure - Pen pressure (0-1)
-/// @yields $pointerType - "mouse", "pen", or "touch"
-/// @yields $isOver - Whether pointer is currently over element
 
 %primitive pointer(
+  /// The element to track pointer over
   &el,
+  /// Which pointer events to track: "move", "enter", "leave", "down", "up"
   events: string[] = ["move"],
+  /// Normalize coordinates to 0-1 within element bounds
   normalize: bool = true
 ) {
   %emit js {
@@ -144,19 +133,28 @@
   }
 
   %exports {
+    /// Viewport X coordinate
     $x: number           // viewport X
+    /// Viewport Y coordinate
     $y: number           // viewport Y
+    /// Element-relative X coordinate
     $localX: number      // element-relative X
+    /// Element-relative Y coordinate
     $localY: number      // element-relative Y
     $mouseX: number      // alias for localX
     $mouseY: number      // alias for localY
+    /// Normalized X (0-1) within element
     $normX: number       // normalized X (0-1)
+    /// Normalized Y (0-1) within element
     $normY: number       // normalized Y (0-1)
     $centerX: number     // centered normalized X (-0.5 to 0.5)
     $centerY: number     // centered normalized Y (-0.5 to 0.5)
+    /// Pen pressure (0-1)
     $pressure: number    // pen pressure (0-1)
+    /// "mouse", "pen", or "touch"
     $pointerType: string // "mouse", "pen", "touch"
     $isPrimary: bool     // is primary pointer
+    /// Whether pointer is currently over element
     $isOver: bool        // pointer is over element
     $isDown: bool        // pointer button is down
     $isPressed: bool     // primary button pressed

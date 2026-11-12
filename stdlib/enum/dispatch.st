@@ -56,15 +56,14 @@
 }
 
 /// Dispatch Mount Primitive (PLAN-077 W5)
-///
-/// @param &el      - the host element (the matched arm's template mounts as a child)
-/// @param subject  - the subject signal name (with or without `$`, dotted paths ok)
-/// @param arms     - raw grammar arms: [{ pat: {lit|wild}, inv: [{name,args}] }]
-/// @param reactive - false: mount once (@match); true: re-mount on change (@view)
 %primitive dispatch-mount(
+  /// the host element (the matched arm's template mounts as a child)
   &el,
+  /// the subject signal name (with or without `$`, dotted paths ok)
   subject: string = "",
+  /// raw grammar arms: [{ pat: {lit|wild}, inv: [{name,args}] }]
   arms: expr,
+  /// false: mount once (@match); true: re-mount on change (@view)
   reactive: bool = false
 ) {
   %emit js {

@@ -2,18 +2,15 @@
 ///
 /// Registers a user-defined function for use in expressions and filters.
 /// Functions are stored in the global ST.functions namespace.
-///
-/// @param name - Function name for registration
-/// @param params - Parameter definitions
-/// @param body - Function body expression
-/// @param returnType - Expected return type (for validation)
-///
-/// @yields $fn - The registered function reference
 
 %primitive fn-registry(
+  /// Function name for registration
   name: ident,
+  /// Parameter definitions
   params: param_list,
+  /// Function body expression
   body: expr,
+  /// Expected return type (for validation)
   returnType: typeref?
 ) {
   %emit js {
@@ -44,6 +41,7 @@
   }
 
   %exports {
+    /// The registered function reference
     $fn: any                         // Dynamic function (signature depends on params)
   }
 }

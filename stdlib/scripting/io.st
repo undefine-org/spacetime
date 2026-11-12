@@ -22,13 +22,11 @@
 // =============================================================================
 
 /// Collects output for writing to files or stdout
-///
-/// @param &container - Script container
-/// @yields $write - Write content to a path (or stdout if path is "-")
-/// @yields $writeJson - Write JSON content to a path
-/// @yields $getOutputs - Get all pending outputs
 
-%primitive output_collector(&container) {
+%primitive output_collector(
+  /// Script container
+  &container
+) {
   %emit js {
     globalThis.__st_outputs = globalThis.__st_outputs || [];
 
@@ -56,8 +54,11 @@
   }
 
   %exports {
+    /// Write content to a path (or stdout if path is "-")
     $write: fn(path: string, content: string) ~> effect
+    /// Write JSON content to a path
     $writeJson: fn(path: string, data: object) ~> effect
+    /// Get all pending outputs
     $getOutputs: fn() ~> array
   }
 }
@@ -68,12 +69,6 @@
 // =============================================================================
 
 /// Write transformed content to a file
-///
-/// @param $path - Output file path (use "-" for stdout)
-/// @param $content - Content to write
-///
-/// @example
-/// @output "./migrated.st" content: $transformed
 
 %macro output {
 
@@ -84,6 +79,10 @@
   %emit js {
     globalThis.__st_write(%$path, %$content);
   }
+
+  %example "@output" {
+    @output "./migrated.st" content: $transformed
+  }
 }
 
 
@@ -92,12 +91,6 @@
 // =============================================================================
 
 /// Write JSON data to a file
-///
-/// @param $path - Output file path
-/// @param $data - Object to serialize as JSON
-///
-/// @example
-/// @output-json "./analysis.json" data: { edits: $edits, stats: $stats }
 
 %macro output-json {
 
@@ -107,5 +100,9 @@
 
   %emit js {
     globalThis.__st_write_json(%$path, %$data);
+  }
+
+  %example "@output-json" {
+    @output-json "./analysis.json" data: { edits: $edits, stats: $stats }
   }
 }

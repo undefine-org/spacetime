@@ -13,20 +13,15 @@
 /// into the actual ink of its own letters, not a bounding box. Deterministic:
 /// a fixed PRNG seeded from the source text, so a rebuild samples the same
 /// points (a film renders bit-identically).
-///
-/// @param &el     - the scatter host; its children are stamped
-/// @param from    - selector of the source to sample (`&tag`, `.headline`)
-/// @param count   - number of points / children to stamp
-/// @param shape   - the `:shape { --x; --y; }` slot: property names for the point
-/// @param rest    - optional `:rest { --rx; --ry; }` slot: a start arrangement
-///
-/// @yields $ready - true once positions are stamped
 
 %primitive scatter-sample(
+  /// the scatter host; its children are stamped
   &el,
   from: string = "",
   count: number = 300,
+  /// the `:shape { --x; --y; }` slot: property names for the point
   shape: any,
+  /// optional `:rest { --rx; --ry; }` slot: a start arrangement
   rest: any = null
 ) {
   %emit js {
@@ -167,6 +162,7 @@
   }
 
   %exports {
+    /// true once positions are stamped
     $ready: bool
   }
 }

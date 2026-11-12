@@ -3,25 +3,9 @@
 /// Creates a branded custom cursor that replaces the native browser cursor.
 /// Features smooth lerp-based following, hover state scaling, click compression,
 /// and mix-blend-mode effects.
-///
-/// @param &el - The element scope (cursor hides native cursor on this element)
-/// @param size - Cursor dot diameter
-/// @param color - Cursor fill color
-/// @param blend - CSS mix-blend-mode
-/// @param lerp - Follow smoothness (0-1, lower = smoother)
-/// @param borderWidth - Border width
-/// @param borderColor - Border color
-/// @param scale - Base scale
-/// @param hoverScale - Scale when hovering interactive elements
-/// @param clickScale - Scale on mousedown
-/// @param hoverElements - CSS selector for interactive elements
-///
-/// @yields $cursorX - Current cursor X position
-/// @yields $cursorY - Current cursor Y position
-/// @yields $isHovering - Whether cursor is over an interactive element
-/// @yields $isClicking - Whether mouse button is pressed
 
 %primitive cursor-engine(
+  /// The element scope (cursor hides native cursor on this element)
   &el,
   size: string = "24px",
   color: string = "#ff6b47",
@@ -307,9 +291,13 @@
   }
 
   %exports {
+    /// Current cursor X position
     $cursorX: number    // current cursor X position (px)
+    /// Current cursor Y position
     $cursorY: number    // current cursor Y position (px)
+    /// Whether cursor is over an interactive element
     $isHovering: bool   // cursor is over an interactive element
+    /// Whether mouse button is pressed
     $isClicking: bool   // mouse button is pressed
   }
 }

@@ -9,15 +9,6 @@
 /// PLAN-077 gate-2 fix: nearest-owner-wins — an element-scoped signal of the
 /// same name shadows the global one).
 ///
-/// @example
-///   @type BadgeState { Blue | Orange | Turquoise | Green }
-///   @data derive $badge BadgeState : @match {
-///     ($isOrange)       => Orange;
-///     ($isUnauthorized) => Blue;
-///     ($isTurquoise)    => Turquoise;
-///     _                 => Green;
-///   }
-///
 ///   // Inline anonymous union (nullary tags only) — no @type needed:
 ///   @data derive $badge (Blue | Orange | Green) : @match {
 ///     ($isOrange) => Orange;
@@ -64,6 +55,16 @@
     source_kind: "derive"
     source_static: false
   }
+
+  %example "@data-derive-match" {
+    @type BadgeState { Blue | Orange | Turquoise | Green }
+    @data derive $badge BadgeState : @match {
+      ($isOrange)       => Orange;
+      ($isUnauthorized) => Blue;
+      ($isTurquoise)    => Turquoise;
+      _                 => Green;
+    }
+  }
 }
 
 /// Derive Match Primitive (PLAN-077 W2; PLAN-133 sexpr-arms migration)
@@ -93,13 +94,10 @@
 /// destructures it by the same name. A single non-signal arg publishes as
 /// `value`; positional args in a multi-arg construct publish as `arg0`,
 /// `arg1`, …
-///
-/// @param name - signal name to publish under
-/// @param arms - cond_block arms record (compiled: f + deps per arm)
-///
-/// @yields $value - the derived `{type, ...}` union value
 %primitive derive-match(
+  /// signal name to publish under
   name: ident,
+  /// cond_block arms record (compiled: f + deps per arm)
   arms: sexpr-arms
 ) %uses data-channel, signal-watch {
   %emit prelude-js {
@@ -179,6 +177,7 @@
   }
 
   %exports {
+    /// the derived `{type, ...}` union value
     $value: any
   }
 }

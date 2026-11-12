@@ -182,3 +182,83 @@
   %widget "text"
   %docs "An easing curve: a keyword or a timing function."
 }
+
+// ---- numbers an editor can scrub well (PLAN-156) ----------------------------
+//
+// A row whose `%capture` is `number` is a number with a MEANING: a param typed
+// `$penumbra:unit` matches exactly as `$penumbra:number` does, and the studio
+// reads the row to give it a slider over its `%range`, notches of `%step` and
+// the `%unit` it counts. No new grammar: the row is the type.
+
+/// A fraction from 0 to 1: a mix, a softness, an opacity.
+%scalar_type unit {
+  %capture "number"
+  %schema "number"
+  %format ""
+  %zero "0"
+  %widget "number"
+  %loses_to "number"
+  %range 0 1
+  %step 0.01
+  %docs "A number from 0 to 1."
+}
+
+/// How strong a light is, in the stage's light units (≥ 0).
+%scalar_type intensity {
+  %capture "number"
+  %schema "number"
+  %format ""
+  %zero "0"
+  %widget "number"
+  %loses_to "number"
+  %range 0 _
+  %step 0.05
+  %docs "A light's strength: 0 is off."
+}
+
+/// A distance in the stage's world units, which are metres.
+%scalar_type meters {
+  %capture "number"
+  %schema "number"
+  %format ""
+  %zero "0"
+  %widget "number"
+  %loses_to "number"
+  %step 0.1
+  %unit "m"
+  %docs "A distance in metres."
+}
+
+/// An angle as a plain number of degrees (a 3D rotation, a cone), as the
+/// stage's primitives take it. `angle` is the CSS one, with its unit written.
+%scalar_type degrees {
+  %capture "number"
+  %schema "number"
+  %format ""
+  %zero "0"
+  %widget "number"
+  %loses_to "number"
+  %step 1
+  %unit "°"
+  %docs "An angle in degrees."
+}
+
+// ---- names that live in files (PLAN-156) ------------------------------------
+//
+// A value that names something inside a file has one truth: the file. `%facts`
+// names the sibling param that points at the file and the reader that lists
+// what the file holds; the compiler refuses a name the file doesn't have
+// (E0971), and the studio offers the file's names as the field's choices.
+
+/// One of a glTF model's animation clips, by name, as the model file names
+/// them: `clip: "Walking"` against `src: "models/robot.glb"`.
+%scalar_type model_clip {
+  %capture "string"
+  %schema "string"
+  %format ""
+  %zero ""
+  %widget "choice"
+  %facts src gltf-clips
+  %loses_to "string"
+  %docs "An animation clip of the model the src param names."
+}

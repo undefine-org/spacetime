@@ -18,9 +18,6 @@
 ///
 /// First-party capability: Direct access to state machine current state.
 /// External frameworks can only check data attributes or classes.
-///
-/// @example
-/// @then .accordion should have_state "expanded"
 
 %macro then-has-state {
 
@@ -48,12 +45,13 @@
     }
     }
   }
+
+  %example "@then-has-state" {
+    @then .accordion should have_state "expanded"
+  }
 }
 
 /// Assert element is NOT in a specific state
-///
-/// @example
-/// @then .modal should not_have_state "closed"
 
 %macro then-not-has-state {
 
@@ -75,6 +73,10 @@
     }
     }
   }
+
+  %example "@then-not-has-state" {
+    @then .modal should not_have_state "closed"
+  }
 }
 
 // =============================================================================
@@ -85,9 +87,6 @@
 ///
 /// First-party capability: Access full state history.
 /// External frameworks can only see current state.
-///
-/// @example
-/// @then .wizard should have_state_history ["intro", "step1", "step2"]
 
 %macro then-state-history {
 
@@ -127,12 +126,13 @@
     }
     }
   }
+
+  %example "@then-state-history" {
+    @then .wizard should have_state_history ["intro", "step1", "step2"]
+  }
 }
 
 /// Assert element has exact state history
-///
-/// @example
-/// @then .carousel should have_exact_state_history ["slide1", "slide2", "slide3"]
 
 %macro then-exact-state-history {
 
@@ -166,12 +166,13 @@
     }
     }
   }
+
+  %example "@then-exact-state-history" {
+    @then .carousel should have_exact_state_history ["slide1", "slide2", "slide3"]
+  }
 }
 
 /// Assert element's last state was a specific value
-///
-/// @example
-/// @then .notification should have_previous_state "showing"
 
 %macro then-previous-state {
 
@@ -199,6 +200,10 @@
     }
     }
   }
+
+  %example "@then-previous-state" {
+    @then .notification should have_previous_state "showing"
+  }
 }
 
 // =============================================================================
@@ -209,9 +214,6 @@
 ///
 /// First-party capability: Track exact transition count.
 /// External frameworks would need to watch for changes manually.
-///
-/// @example
-/// @then .toggle should have_transition_count 3
 
 %macro then-transition-count {
 
@@ -233,12 +235,13 @@
     }
     }
   }
+
+  %example "@then-transition-count" {
+    @then .toggle should have_transition_count 3
+  }
 }
 
 /// Assert element has transitioned at least N times
-///
-/// @example
-/// @then .slider should have_transition_count_gte 5
 
 %macro then-transition-count-gte {
 
@@ -260,6 +263,15 @@
     }
     }
   }
+
+  %example "@then-transition-count-gte" {
+    @test "the slider moved at least twice" {
+      @fixture { <div class="slider" data-st-state="first"></div> }
+      @let (el = document.querySelector('.slider'))
+      @eval (el.__stTransitionCount = 2)
+      @then .slider should have_transition_count >= 2
+    }
+  }
 }
 
 // =============================================================================
@@ -270,9 +282,6 @@
 ///
 /// First-party capability: Track how long each state lasted.
 /// External frameworks cannot measure internal state durations.
-///
-/// @example
-/// @then .loading should have_state_duration "pending" < 1000ms
 
 %macro then-state-duration-lt {
 
@@ -301,12 +310,13 @@
     }
     }
   }
+
+  %example "@then-state-duration-lt" {
+    @then .loading should have_state_duration "pending" < 1000ms
+  }
 }
 
 /// Assert element was in a state for at least a specific duration
-///
-/// @example
-/// @then .tooltip should have_state_duration "visible" >= 500ms
 
 %macro then-state-duration-gte {
 
@@ -335,6 +345,10 @@
     }
     }
   }
+
+  %example "@then-state-duration-gte" {
+    @then .tooltip should have_state_duration "visible" >= 500ms
+  }
 }
 
 // =============================================================================
@@ -345,9 +359,6 @@
 ///
 /// First-party capability: Know exact transition that occurred.
 /// External frameworks can only see current state.
-///
-/// @example
-/// @then .wizard should have_last_transition from "step1" to "step2"
 
 %macro then-last-transition {
 
@@ -378,6 +389,10 @@
     }
     }
   }
+
+  %example "@then-last-transition" {
+    @then .wizard should have_last_transition from "step1" to "step2"
+  }
 }
 
 // =============================================================================
@@ -385,9 +400,6 @@
 // =============================================================================
 
 /// Assert element has a state machine attached
-///
-/// @example
-/// @then .accordion should have_state_machine
 
 %macro then-has-state-machine {
 
@@ -410,6 +422,10 @@
     }
     }
   }
+
+  %example "@then-has-state-machine" {
+    @then .accordion should have_state_machine
+  }
 }
 
 // =============================================================================
@@ -419,9 +435,6 @@
 /// Assert that entering a state triggered a callback
 ///
 /// First-party capability: Hook into state entry events.
-///
-/// @example
-/// @then .modal should have_entered_state "open"
 
 %macro then-entered-state {
 
@@ -446,12 +459,13 @@
     }
     }
   }
+
+  %example "@then-entered-state" {
+    @then .modal should have_entered_state "open"
+  }
 }
 
 /// Assert that exiting a state triggered a callback
-///
-/// @example
-/// @then .modal should have_exited_state "loading"
 
 %macro then-exited-state {
 
@@ -476,6 +490,10 @@
     }
     }
   }
+
+  %example "@then-exited-state" {
+    @then .modal should have_exited_state "loading"
+  }
 }
 
 // =============================================================================
@@ -486,10 +504,6 @@
 ///
 /// First-party capability: Subscribe to state change events.
 /// External frameworks must poll or use arbitrary timeouts.
-///
-/// @example
-/// @wait_for_state .modal "open" timeout 2s
-/// @then .modal should be_visible
 
 %macro wait-for-state {
 
@@ -540,6 +554,15 @@
     });
     }
   }
+
+  %example "@wait-for-state" {
+    @test "the modal opens" {
+      @fixture { <div class="modal" data-st-state="closed">Hello</div> }
+      @eval (setTimeout(() => { document.querySelector('.modal').dataset.stState = 'open'; }, 50))
+      @wait_for_state .modal "open" timeout 2s
+      @then .modal should be_visible
+    }
+  }
 }
 
 // =============================================================================
@@ -547,9 +570,6 @@
 // =============================================================================
 
 /// Assert time between two states was within bounds
-///
-/// @example
-/// @then .form should have_transition_time from "validating" to "submitted" < 500ms
 
 %macro then-transition-time-lt {
 
@@ -586,6 +606,10 @@
     }
     }
   }
+
+  %example "@then-transition-time-lt" {
+    @then .form should have_transition_time from "validating" to "submitted" < 500ms
+  }
 }
 
 // =============================================================================
@@ -593,12 +617,6 @@
 // =============================================================================
 
 /// Enable detailed state tracking for performance analysis
-///
-/// @example
-/// @enable_state_tracking
-/// @when .wizard click
-/// @wait_for_state .wizard "complete"
-/// @capture_state_report
 
 %macro enable-state-tracking {
 
@@ -648,6 +666,16 @@
         return __originalSetState(el, newState);
       };
     }
+    }
+  }
+
+  %example "@enable-state-tracking" {
+    @test "the wizard reaches complete" {
+      @enable_state_tracking
+      @fixture { <div class="wizard" data-st-state="start"></div> }
+      @eval (document.querySelector('.wizard').dataset.stState = 'complete')
+      @wait_for_state .wizard "complete" timeout 2s
+      @capture_state_report
     }
   }
 }

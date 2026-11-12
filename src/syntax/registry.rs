@@ -51,9 +51,32 @@ impl RegisteredForm {
             specificity += RETIRED_RULE_BOOST;
         }
 
+        // A shorthand (PLAN-156) is a param the call may write: `pos: 0 3 -7`.
+        // It isn't one of the form's own params (the longhands are what the
+        // binds take); the matcher reads it, and the match turns it into them.
+        let mut form = form.clone();
+        for (short, _) in &macro_def.shorthands {
+            if !form.params.iter().any(|p| &p.name == short) {
+                form.params.push(crate::parser::meta_ast::FormParam {
+                    name: short.clone(),
+                    elements: vec![crate::parser::meta_ast::FormInlineElement::Capture(
+                        crate::parser::meta_ast::FormCapture {
+                            var_name: short.clone(),
+                            capture_type: crate::parser::meta_ast::CaptureType::Expr,
+                            modifier: crate::parser::meta_ast::CaptureModifier::Optional,
+                            alias_capture: None,
+                        },
+                        None,
+                    )],
+                    default: None,
+                    doc: None,
+                });
+            }
+        }
+
         Some(Self {
             macro_name: macro_def.name.clone(),
-            form: form.clone(),
+            form,
             macro_def: macro_def.clone(),
             specificity,
         })
@@ -206,6 +229,15 @@ pub struct SyntaxRegistry {
     /// while the meta registry is still being built — so it cannot reach for
     /// `cached_stdlib_registry()` without re-entering that lock.
     scalar_captures: std::collections::HashSet<String>,
+
+    /// Each `%scalar_type` row's name → its `%capture` (PLAN-156): a param typed
+    /// with a row's name (`$penumbra:unit`) matches as the row's capture does
+    /// (`number`), while keeping the row's name for the tools that read it.
+    scalar_rows: HashMap<String, String>,
+
+    /// Each `%scalar_type` row with `%facts` → (sibling param, reader): its
+    /// values are the things the sibling's file holds (PLAN-156).
+    scalar_facts: HashMap<String, (String, String)>,
 }
 
 impl SyntaxRegistry {
@@ -216,6 +248,8 @@ impl SyntaxRegistry {
             all_forms: Vec::new(),
             capture_types: HashMap::new(),
             scalar_captures: std::collections::HashSet::new(),
+            scalar_rows: HashMap::new(),
+            scalar_facts: HashMap::new(),
         }
     }
 
@@ -226,6 +260,28 @@ impl SyntaxRegistry {
         if !capture.is_empty() {
             self.scalar_captures.insert(capture);
         }
+    }
+
+    /// Record a `%scalar_type` row: its name and the production it names.
+    pub fn register_scalar_row(&mut self, id: String, capture: String) {
+        if !capture.is_empty() && id != capture {
+            self.scalar_rows.insert(id, capture);
+        }
+    }
+
+    /// Record a row's `%facts`.
+    pub fn register_scalar_facts(&mut self, id: String, facts: (String, String)) {
+        self.scalar_facts.insert(id, facts);
+    }
+
+    /// Row name → (sibling param, reader). See the field.
+    pub fn scalar_facts(&self) -> &HashMap<String, (String, String)> {
+        &self.scalar_facts
+    }
+
+    /// Row name → `%capture`. See the field.
+    pub fn scalar_rows(&self) -> &HashMap<String, String> {
+        &self.scalar_rows
     }
 
     /// The productions that flatten to their source text. See the field.

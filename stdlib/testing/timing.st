@@ -13,20 +13,22 @@
 ///                             test-visible series (window.__stTimelines[<name>]).
 ///
 /// These require the `timing` fidelity rung (real/seekable clock).
-///
-/// @example
-///   @test "reveal stagger is monotonic" needs timing {
-///     @mount { <p class="h">Hello world</p>
-///       .h { @reveal(split: chars, stagger: 30) } }
-///     @clock run-to-end
-///     @record-timeline reveal
-///     @then __timeline { name == "reveal"; monotonic; }
-///   }
 
 %macro clock-install {
   %form { @clock install }
   %emit js {
     if (ST._clock) ST._clock.install();
+  }
+
+  %example "@clock-install" {
+    @test "reveal stagger is monotonic" needs timing {
+      @mount { <p class="h">Hello world</p> }
+      @given .h { @reveal(split: chars, stagger: 30ms) }
+      @clock install
+      @clock run-to-end
+      @record-timeline reveal
+      @then __timeline { name == "reveal"; monotonic; }
+    }
   }
 }
 
@@ -76,10 +78,6 @@
 ///   ends-at-one     — final progress === 1 (±0.001)
 ///   in-unit         — every progress in [0, 1]
 ///   nonempty        — at least one sample
-///
-/// @example
-///   @record-timeline reveal
-///   @timeline reveal { monotonic; in-unit; }
 %macro timeline {
   %form {
     @timeline $name:ident {
@@ -114,5 +112,10 @@
       }
     }
     }
+  }
+
+  %example "@timeline" {
+    @record-timeline reveal
+    @timeline reveal { monotonic; in-unit; }
   }
 }

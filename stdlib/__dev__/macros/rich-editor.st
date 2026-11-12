@@ -5,9 +5,6 @@
 /// italic, link, code) and image replacement via upload.
 ///
 /// Dependency: Requires dev-editable to be active (from dev-editor macro)
-///
-/// @example
-/// @rich-editor
 
 %macro rich-editor {
   %scope file
@@ -25,5 +22,9 @@
   %binds {
     dev-hooks()
     dev-media-picker()
+  }
+
+  %example "@rich-editor" {
+    @rich-editor
   }
 }

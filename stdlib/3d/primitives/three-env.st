@@ -5,15 +5,9 @@
 /// `environment` so all PBR materials pick up realistic reflections — the single
 /// biggest contributor to the "studio glass" look. Optionally also sets it as the
 /// visible `background`.
-///
-/// @param &el         - the canvas hosting the @stage
-/// @param preset      - "studio" (RoomEnvironment); reserved for future presets
-/// @param intensity   - environment lighting intensity (scene.environmentIntensity)
-/// @param background  - also show the env map as the canvas background
-///
-/// @yields $ready     - true once the env map is applied
 
 %primitive three-env(
+  /// the canvas hosting the @stage
   &el,
   preset: string = "studio",
   intensity: number = 1.0,
@@ -53,6 +47,7 @@
   }
 
   %exports {
+    /// true once the env map is applied
     $ready: bool
   }
 }

@@ -2,13 +2,6 @@
 ///
 /// CSS custom properties for consistent design across mobile apps.
 /// Provides spacing, radius, shadows, and touch target values.
-///
-/// @example
-/// .container {
-///   @mobile-tokens
-///   padding: var(--st-space-md);
-///   border-radius: var(--st-radius-md);
-/// }
 
 %macro mobile-tokens {
 
@@ -39,6 +32,14 @@
       // Touch target minimums (iOS and Android guidelines)
       --st-touch-target-min: 44px
       --st-touch-target-comfortable: 48px
+    }
+  }
+
+  %example "@mobile-tokens" {
+    .container {
+      @mobile-tokens
+      padding: var(--st-space-md);
+      border-radius: var(--st-radius-md);
     }
   }
 }

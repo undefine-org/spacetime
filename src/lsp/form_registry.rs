@@ -1003,6 +1003,7 @@ mod tests {
                 None,
             )],
             default: None,
+            doc: None,
         }
     }
 
@@ -1023,6 +1024,7 @@ mod tests {
                 None,
             )],
             default,
+            doc: None,
         }
     }
 

@@ -16,16 +16,15 @@
 /// `via dev-ws` is the FIRST transport; the WS bridge (window.__stDevWs) is reused, not
 /// duplicated. The `transport` seam lets a production REST/PATCH transport drop in later
 /// without changing author syntax.
-///
-/// @param name      - the collection signal name (without `$`)
-/// @param file      - the backing data file (the `from "..."` source path)
-/// @param transport - persistence transport id ("dev-ws")
-/// @param initial   - initial array value when the source has not yet loaded
 
 %primitive collection(
+  /// the collection signal name (without `$`)
   name: string = "",
+  /// the backing data file (the `from "..."` source path)
   file: string = "",
+  /// persistence transport id ("dev-ws")
   transport: string = "dev-ws",
+  /// initial array value when the source has not yet loaded
   initial: expr = []
 ) %uses data-channel {
   %emit js {

@@ -2,18 +2,15 @@
 ///
 /// Provides keyframe interpolation and property application for animations.
 /// Handles numeric values, colors, transforms, and filters.
-///
-/// @param &el - Element to animate
-/// @param keyframes - Array of keyframe objects { at, value, easing? }
-/// @param property - CSS property to animate
-/// @param colorSpace - Color interpolation space (rgb, hsl, oklch)
-///
-/// @yields $setProgress - Function to update animation progress (0-1)
 
 %primitive animate-property(
+  /// Element to animate
   &el,
+  /// Array of keyframe objects { at, value, easing? }
   keyframes: array,
+  /// CSS property to animate
   property: string,
+  /// Color interpolation space (rgb, hsl, oklch)
   colorSpace: string = "rgb"
 ) %uses easing {
 
@@ -156,6 +153,7 @@
   }
 
   %exports {
+    /// Function to update animation progress (0-1)
     $setProgress: fn(progress: number, property: string?) ~> void
   }
 }
@@ -164,20 +162,17 @@
 /// Stagger Calculation Primitive
 ///
 /// Calculates stagger delays for multi-element animations.
-///
-/// @param index - Element index in the group
-/// @param total - Total number of elements
-/// @param delay - Base delay between elements (ms)
-/// @param from - Stagger origin: "first", "last", "center", "random", or index number
-/// @param grid - Optional grid dimensions [cols, rows] for 2D stagger
-///
-/// @yields $offset - Calculated stagger offset in ms
 
 %primitive stagger(
+  /// Element index in the group
   index: number,
+  /// Total number of elements
   total: number,
+  /// Base delay between elements (ms)
   delay: number,
+  /// Stagger origin: "first", "last", "center", "random", or index number
   from: string = "first",
+  /// Optional grid dimensions [cols, rows] for 2D stagger
   grid: array?
 ) {
   %emit js {
@@ -228,6 +223,7 @@
   }
 
   %exports {
+    /// Calculated stagger offset in ms
     $offset: number
   }
 }

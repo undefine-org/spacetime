@@ -14,12 +14,12 @@
 /// - Connecting: Connection in progress
 /// - Connected { $send, $received }: Active connection with send function and last message
 /// - Error { $error }: Connection error with message
-///
-/// @param &el - Element to bind lifecycle to
-/// @param url - WebSocket URL (default: '/ws')
-/// @yields $state - Typed union connection state
 
-%primitive socket(&el, url: string = "/ws") {
+%primitive socket(
+  /// Element to bind lifecycle to
+  &el,
+  url: string = "/ws"
+) {
   %emit js {
     // Initial state
     let state = { type: 'Disconnected' };
@@ -88,6 +88,7 @@
   }
 
   %exports {
+    /// Typed union connection state
     $state: Disconnected | Connecting | Connected { $send, $received } | Error { $error }
   }
 }

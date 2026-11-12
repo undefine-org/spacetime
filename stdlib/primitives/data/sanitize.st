@@ -2,8 +2,6 @@
 ///
 /// Provides a configurable HTML sanitizer that strips dangerous tags and attributes
 /// while preserving allowed formatting elements. Uses DOMParser for safe parsing.
-///
-/// @yields $sanitize - Function to sanitize HTML strings
 
 %primitive sanitize-html() {
   %emit js {
@@ -117,6 +115,7 @@
   }
 
   %exports {
+    /// Function to sanitize HTML strings
     $sanitize: fn(string) ~> string
   }
 }

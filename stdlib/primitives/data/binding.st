@@ -6,10 +6,6 @@
 /// Text Binding Primitive
 ///
 /// Binds data to element's text content.
-///
-/// @param &el - Element to bind
-/// @param value - Value expression to display
-/// @param format - Optional format function
 
 // TODO: bind-text is one-shot — it sets textContent once but never re-evaluates
 // when signals change. Making it reactive (listen for `local:*:updated` events
@@ -17,8 +13,11 @@
 // text updates, or @value-change for mutation-triggered animations.
 
 %primitive bind-text(
+  /// Element to bind
   &el,
+  /// Value expression to display
   value: expr,
+  /// Optional format function
   format: fn?
 ) {
   %emit js {
@@ -47,14 +46,13 @@
 /// Attribute Binding Primitive
 ///
 /// Binds data to an element attribute.
-///
-/// @param &el - Element to bind
-/// @param attr - Attribute name
-/// @param value - Value expression
 
 %primitive bind-attr(
+  /// Element to bind
   &el,
+  /// Attribute name
   attr: string,
+  /// Value expression
   value: expr
 ) {
   %emit js {
@@ -87,14 +85,13 @@
 /// Class Binding Primitive
 ///
 /// Conditionally adds/removes a CSS class.
-///
-/// @param &el - Element to bind
-/// @param className - Class name to toggle
-/// @param condition - Boolean condition
 
 %primitive bind-class(
+  /// Element to bind
   &el,
+  /// Class name to toggle
   className: string,
+  /// Boolean condition
   condition: expr
 ) {
   %emit js {
@@ -126,14 +123,13 @@
 /// Style Binding Primitive
 ///
 /// Binds data to a CSS style property.
-///
-/// @param &el - Element to bind
-/// @param property - CSS property name
-/// @param value - Value expression
 
 %primitive bind-style(
+  /// Element to bind
   &el,
+  /// CSS property name
   property: string,
+  /// Value expression
   value: expr
 ) {
   %emit js {
@@ -158,18 +154,15 @@
 /// Two-Way Input Binding Primitive
 ///
 /// Creates two-way binding between input element and data.
-///
-/// @param &el - Input element to bind
-/// @param value - Reference to data value
-/// @param event - Event to listen for changes
-/// @param debounce - Debounce delay in ms
-///
-/// @yields $value - Current input value
 
 %primitive bind-input(
+  /// Input element to bind
   &el,
+  /// Reference to data value
   value: any,
+  /// Event to listen for changes
   event: string = "input",
+  /// Debounce delay in ms
   debounce: number = 0
 ) {
   %emit js {
@@ -215,6 +208,7 @@
   }
 
   %exports {
+    /// Current input value
     $value: any
   }
 }
@@ -223,14 +217,13 @@
 /// Visibility Binding Primitive
 ///
 /// Shows/hides element based on condition.
-///
-/// @param &el - Element to show/hide
-/// @param condition - Boolean condition
-/// @param mode - "display" or "visibility"
 
 %primitive bind-visible(
+  /// Element to show/hide
   &el,
+  /// Boolean condition
   condition: expr,
+  /// "display" or "visibility"
   mode: string = "display"
 ) {
   %emit js {
@@ -263,14 +256,11 @@
 ///
 /// Inserts/removes element from DOM based on condition.
 /// More efficient than visibility for rarely-shown content.
-///
-/// @param &el - Element to conditionally render
-/// @param condition - Boolean condition
-///
-/// @yields $mounted - Whether element is currently in DOM
 
 %primitive bind-if(
+  /// Element to conditionally render
   &el,
+  /// Boolean condition
   condition: expr
 ) {
   %emit js {
@@ -307,6 +297,7 @@
   }
 
   %exports {
+    /// Whether element is currently in DOM
     $mounted: bool
   }
 }

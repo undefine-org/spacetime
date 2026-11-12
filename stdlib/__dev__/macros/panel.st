@@ -14,14 +14,6 @@
 ///
 /// This macro serves as the formal declaration of that composition,
 /// making the dependency graph explicit in the metasystem.
-///
-/// @yields $activeTab - Currently selected tab name (from dev-panel)
-/// @yields $minimized - Whether panel is minimized (from dev-panel)
-/// @yields $timelines - Array of timeline objects (from dev-inspect)
-/// @yields $errors - Array of error objects (from dev-inspect)
-/// @yields $timelineCount - Number of active timelines (from dev-inspect)
-/// @yields $errorCount - Number of errors (from dev-inspect)
-/// @yields $dataSources - Array of data source info objects (from dev-inspect)
 
 %macro dev-panel {
   %scope file

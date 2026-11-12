@@ -52,10 +52,6 @@
 ///      widget never displayed one, so that WorkOS screen was correctly
 ///      showing a security prompt with nothing on this side to compare it
 ///      against.
-///
-/// @param bindingName - the JS identifier this primitive's start() is
-///                      exposed under (no `$`) -- instance-scoped, mirrors
-///                      `host-bridge-auth.st`'s identical param.
 %primitive host-device-poll(bindingName: ident) {
   %emit prelude-js {
     window.__stHostDevicePoll = window.__stHostDevicePoll || {};

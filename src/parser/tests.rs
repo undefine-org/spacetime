@@ -3141,3 +3141,67 @@ fn counted_malformed_brace_does_not_swallow_the_class() {
         }
     }
 }
+
+/// PLAN-156: a `///` above a `%form` param documents it, and comments are not
+/// part of the pattern (they used to glue onto the next param's name).
+#[test]
+fn form_param_docs_and_comments() {
+    let src = r#"
+%macro glow {
+  %form {
+    @glow(
+      /// how bright, in stops
+      gain: $gain:number = 1, // trailing note, with a comma
+      // not a doc
+      tint: $tint:color = white
+    )
+  }
+}
+"#;
+    let ast = crate::parser::parse(src).expect("parses");
+    let m = ast
+        .meta_defs
+        .iter()
+        .find_map(|d| match d {
+            crate::parser::meta_ast::MetaDef::Macro(m) if m.name == "glow" => Some(m),
+            _ => None,
+        })
+        .expect("glow");
+    let form = m.form.as_ref().expect("form");
+    let names: Vec<&str> = form.params.iter().map(|p| p.name.as_str()).collect();
+    assert_eq!(names, ["gain", "tint"]);
+    assert_eq!(form.params[0].doc.as_deref(), Some("how bright, in stops"));
+    assert_eq!(form.params[1].doc, None);
+}
+
+/// PLAN-156: `...` in a `%binds` call forwards every named `%form` param by
+/// name; a param the call names itself keeps its own value.
+#[test]
+fn bind_spread_forwards_every_form_param() {
+    let src = r#"
+%macro lamp {
+  %form { @lamp $named:element? (kind: $kind:string = "point", power: $power:number = 1, tint: $tint:color = white) }
+  %binds { three-light(&self, name: $named, power: 2, ...) }
+}
+"#;
+    let ast = crate::parser::parse(src).expect("parses");
+    let m = ast
+        .meta_defs
+        .iter()
+        .find_map(|d| match d {
+            crate::parser::meta_ast::MetaDef::Macro(m) if m.name == "lamp" => Some(m),
+            _ => None,
+        })
+        .expect("lamp");
+    let args: Vec<String> = m.binds[0]
+        .args
+        .iter()
+        .map(|a| match a {
+            meta_ast::BindArg::Element { name, .. } => format!("&{name}"),
+            meta_ast::BindArg::Named { name, value: meta_ast::BindValue::Variable(v) } => format!("{name}=${v}"),
+            meta_ast::BindArg::Named { name, value } => format!("{name}={value:?}"),
+            meta_ast::BindArg::Positional(v) => format!("{v:?}"),
+        })
+        .collect();
+    assert_eq!(args, ["&self", "name=$named", "power=Number(2.0)", "kind=$kind", "tint=$tint"]);
+}

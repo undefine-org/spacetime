@@ -109,6 +109,11 @@ enum Command {
         /// exist so a warning-only file cannot pass silently.
         #[arg(long)]
         deny_warnings: bool,
+
+        /// Also compile every `%example` of every stdlib macro (PLAN-156): an
+        /// example must compile and must still use the macro it documents
+        #[arg(long)]
+        examples: bool,
     },
     /// Apply pending syntax migrations (PLAN-076): rewrite old .st syntax
     /// on disk, wave by wave, and bump the project's @version fact
@@ -650,7 +655,22 @@ async fn main() {
                 at_version,
                 quiet,
                 deny_warnings,
+                examples,
             } => {
+                if examples {
+                    let (registry, _) = spacetime::compiler::cached_stdlib_registry();
+                    let failures = spacetime::examples::check(&registry, std::path::Path::new("."));
+                    for f in &failures {
+                        eprintln!("✗ @{} example \"{}\"", f.macro_name, f.title);
+                        for p in &f.problems {
+                            eprintln!("    {p}");
+                        }
+                    }
+                    if !failures.is_empty() {
+                        eprintln!("{} example(s) don't hold", failures.len());
+                        std::process::exit(1);
+                    }
+                }
                 run_check(paths, verbose, at_version, quiet, deny_warnings);
                 return;
             }

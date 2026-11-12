@@ -8,10 +8,6 @@
 /// stdlib/text/MODULE.st `%vendor`), which is emitted into the page ONLY when a
 /// primitive that references it fires — so pages that never measure text ship
 /// none of pretext's bytes.
-///
-/// @yields $lines  - number of visual lines at the element's current width
-/// @yields $height - total laid-out text height in px
-/// @yields $widest - widest single-line natural width in px
 
 %primitive measure-text(&el, lineHeight: number = 1.5) {
   %emit js {
@@ -47,8 +43,11 @@
   }
 
   %exports {
+    /// number of visual lines at the element's current width
     $lines: number
+    /// total laid-out text height in px
     $height: number
+    /// widest single-line natural width in px
     $widest: number
   }
 }

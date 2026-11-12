@@ -8,27 +8,30 @@
 ///
 /// The markdown→HTML conversion runs in the browser via the vendored snarkdown
 /// engine, demand-injected only on pages that use `@doc`.
-///
-/// @example render a guide
-/// .doc-body {
-///   @doc(src: "docs/testing/GUIDE.md")
-/// }
-///
-/// @example inline markdown (no file)
-/// .note {
-///   @doc(content: "# Heading\n\nSome **bold** prose.")
-/// }
 
 %macro doc {
 
   %form {
     @doc(
       src: $src:string? = "",
+      /// Raw markdown source text
       content: $content:string? = ""
     )
   }
 
   %binds {
     render-markdown(&self, content: $content)
+  }
+
+  %example "render a guide" {
+    .doc-body {
+      @doc(src: "docs/testing/GUIDE.md")
+    }
+  }
+
+  %example "inline markdown (no file)" {
+    .note {
+      @doc(content: "# Heading\n\nSome **bold** prose.")
+    }
   }
 }

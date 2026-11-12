@@ -9,14 +9,10 @@
 /// Publishes via the same dual channel as data-source (ST.setData + the global
 /// signal store + local:<name>:updated), so @each / : / <- consumers react
 /// identically whether the source is static or dynamic.
-///
-/// @param name     - signal name to publish the fetched array/value under
-/// @param urlName  - name of the signal holding the URL to fetch
-///
-/// @yields $value   - the fetched data (null until the first load resolves)
-/// @yields $loading - whether a fetch is in flight
 %primitive reactive-source(
+  /// signal name to publish the fetched array/value under
   name: ident,
+  /// name of the signal holding the URL to fetch
   urlName: ident
 ) %uses data-store, data-url, data-channel {
   %emit js {

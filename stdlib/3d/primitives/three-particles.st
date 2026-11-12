@@ -9,19 +9,9 @@
 /// The morph value is read live from `canvas._stParticleMorph` so other directives
 /// (e.g. a scroll binding) can drive it: set `el._stParticleMorph = n`. It also
 /// auto-rotates slowly for life.
-///
-/// @param &el        - the canvas hosting the @stage
-/// @param count      - particle count (default 24000)
-/// @param size       - point size in world units (default 0.02)
-/// @param radius     - overall cloud radius (default 2)
-/// @param color      - particle color (default white)
-/// @param morph      - initial morph position 0..(shapes-1) (default 0)
-/// @param spin       - auto-rotation speed (radians/second, default 0.05)
-///
-/// @yields $ready    - true once the cloud is in the scene
-/// @yields $shapes   - number of morph targets available
 
 %primitive three-particles(
+  /// the canvas hosting the @stage
   &el,
   count: number = 24000,
   size: number = 0.02,
@@ -130,7 +120,9 @@
   }
 
   %exports {
+    /// true once the cloud is in the scene
     $ready: bool
+    /// number of morph targets available
     $shapes: number
   }
 }

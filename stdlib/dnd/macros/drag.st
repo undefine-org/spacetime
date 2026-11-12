@@ -4,25 +4,6 @@
 /// imports `stdlib/dnd`. (`@swipe` / `@resize` are distinct gestures and stay in
 /// stdlib/macros/drag.st.)
 ///
-/// @example plain (no drop zones)
-/// .slider-handle {
-///   @drag(axis: "x") {
-///     dragging { scale: 1.1 }
-///     on-drop: handleRelease($deltaX)        // zero-zone short form (the `$` is the element)
-///   }
-/// }
-///
-/// @example with drop zones (the declarative lifecycle)
-/// .card {
-///   @drag(group: "cards", payload: $c) {
-///     dragging { scale: 1.04 }               // visual state while active
-///     on-enter $zone { ... }                  // pointer entered a compatible zone
-///     on-leave $zone { ... }                  // pointer left it
-///     on-drop  $zone { $move({ card: $payload.id, to: $zone.col }); } // over an ACCEPTING zone
-///     on-cancel { ... }                       // released over nothing / a rejecting zone
-///   }
-/// }
-///
 /// `group` pairs with `@drop-zone(group:)`. `payload: $c` names the dragged datum
 /// (`$payload` in the clauses). `on-drop $zone` fires only over an ACCEPTING zone;
 /// otherwise `on-cancel` runs (declarative spring-back, no manual JS). `$zone`
@@ -33,10 +14,13 @@
 %macro drag {
   %form {
     @drag(
+      /// the draggable's group; hit-tests only `__stDnd.zones[group]`
       group: $group:string = "",
+      /// the dragged datum (object expr text), bound as `$payload`
       payload: $payload:expr? = none,
       axis: $axis:("x" | "y" | "both") = "both",
       bounds: $bounds:element? = none,
+      /// Minimum movement to start drag (prevents accidental drags)
       threshold: $threshold:number = 0,
       momentum: $momentum:bool = false
     ) {
@@ -112,5 +96,26 @@
     // action `$` is the dragged element. When the lifecycle `on-drop $zone { }`
     // arm is used instead, this is empty (drag-zones owns the zone-aware drop).
     $onDrop
+  }
+
+  %example "plain (no drop zones)" {
+    .slider-handle {
+      @drag(axis: "x") {
+        dragging { scale: 1.1 }
+        on-drop: handleRelease($deltaX)        // zero-zone short form (the `$` is the element)
+      }
+    }
+  }
+
+  %example "with drop zones (the declarative lifecycle)" {
+    .card {
+      @drag(group: "cards", payload: $c) {
+        dragging { scale: 1.04 }               // visual state while active
+        on-enter $zone { ... }                  // pointer entered a compatible zone
+        on-leave $zone { ... }                  // pointer left it
+        on-drop  $zone { $move({ card: $payload.id, to: $zone.col }); } // over an ACCEPTING zone
+        on-cancel { ... }                       // released over nothing / a rejecting zone
+      }
+    }
   }
 }

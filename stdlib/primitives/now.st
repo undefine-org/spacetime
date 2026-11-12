@@ -2,17 +2,6 @@
 ///
 /// Yields a live, reactive string of the current time-of-day, updated on a
 /// configurable interval. Backed by `Date` and `Intl.DateTimeFormat`.
-///
-/// @example
-/// .clock {
-///   @now(every: 1s) {
-///     text <- $now;
-///   }
-/// }
-///
-/// @param every - Update interval (default 1s)
-///
-/// @yields $now - Formatted current time string
 
 %primitive now(
   &el,
@@ -53,6 +42,7 @@
   }
 
   %exports {
+    /// Formatted current time string
     $now: string  // formatted current time
   }
 }

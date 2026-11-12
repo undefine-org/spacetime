@@ -4,14 +4,11 @@
 /// Uses IntersectionObserver with rootMargin to create a detection band
 /// at the viewport center line. Reports which section is active,
 /// scroll progress within the section, and scroll direction.
-///
-/// @param &el - The section element to track
-///
-/// @yields $isActive - Whether this section is currently the active one
-/// @yields $progress - Scroll progress within section (0-1)
-/// @yields $direction - Last scroll direction: "up" or "down"
 
-%primitive scroll-spy(&el) {
+%primitive scroll-spy(
+  /// The section element to track
+  &el
+) {
   %emit js {
     const section = %&el;
     let lastScrollY = window.scrollY;
@@ -66,8 +63,11 @@
   }
 
   %exports {
+    /// Whether this section is currently the active one
     $isActive: bool     // true when this section is the active one
+    /// Scroll progress within section (0-1)
     $progress: number   // 0.0 (just entered) to 1.0 (about to leave)
+    /// Last scroll direction: "up" or "down"
     $direction: string  // "up" or "down" — last scroll direction
   }
 }

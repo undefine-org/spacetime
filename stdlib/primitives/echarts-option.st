@@ -10,23 +10,21 @@
 /// means SPLITTING the rows into one series per distinct colour value (ECharts'
 /// model is "a series is a group"), so a coloured line/bar becomes several
 /// series sharing an axis. Without a colour mapping there is a single series.
-///
-/// @param geom   - "line" | "bar" | "area" | "scatter" | "heatmap"
-/// @param data   - a list of row objects (the resolved data)
-/// @param x      - the column name for the x aesthetic
-/// @param y      - the column name for the y aesthetic
-/// @param color  - optional column name → one series per distinct value
-/// @param size   - optional column name → mark size (scatter)
-/// @param weight - optional column name → intensity (heatmap)
-/// @yields $option - the assembled ECharts option map (reactive to `data`)
 
 %primitive echarts-option(
+  /// "line" | "bar" | "area" | "scatter" | "heatmap"
   geom: string = "line",
+  /// a list of row objects (the resolved data)
   data: any = [],
+  /// the column name for the x aesthetic
   x: string = "",
+  /// the column name for the y aesthetic
   y: string = "",
+  /// optional column name → one series per distinct value
   color: string = "",
+  /// optional column name → mark size (scatter)
   size: string = "",
+  /// optional column name → intensity (heatmap)
   weight: string = ""
 ) {
   %emit js {
@@ -116,6 +114,7 @@
       };
     };
 
+    /// the assembled ECharts option map (reactive to `data`)
     %yield build(%data) -> $option;
   }
 }

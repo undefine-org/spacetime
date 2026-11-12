@@ -1019,6 +1019,7 @@ mod tests {
             name: name.to_string(),
             elements: vec![FormInlineElement::Capture(capture(cap_name, ct), None)],
             default: None,
+            doc: None,
         }
     }
 
@@ -1027,6 +1028,7 @@ mod tests {
             name: name.to_string(),
             elements: vec![FormInlineElement::Capture(capture(cap_name, ct), None)],
             default: Some(ParamDefault::String("default".to_string())),
+            doc: None,
         }
     }
 
@@ -1039,6 +1041,7 @@ mod tests {
                 None,
             )],
             default: None,
+            doc: None,
         }
     }
 

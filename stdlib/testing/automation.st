@@ -5,12 +5,6 @@
 /// @wait-for / @capture) run against it. Requires a real-browser backend (CDP):
 /// the runner navigates the page to <url> before running the body.
 ///
-/// @example
-///   @drive "https://example.com" {
-///     @then h1 { exist; text ~= "Example"; }
-///     @capture screenshot "example.png";
-///   }
-///
 /// `via kernel <wsUrl>` (remote CDP, kernel.sh :9222) is the same surface with a
 /// swapped endpoint — selected at the CLI/runner level, not in the macro.
 %macro drive {
@@ -29,6 +23,13 @@
       // against whatever is loaded, so @drive degrades to a no-network check.
       %$body.js
     }, { drive: %$url });
+  }
+
+  %example "@drive" {
+    @drive "https://example.com" {
+      @then h1 { exist; text ~= "Example"; }
+      @capture screenshot "example.png";
+    }
   }
 }
 

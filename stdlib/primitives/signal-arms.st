@@ -15,12 +15,11 @@
 /// (src/pipeline/drivers.rs): each arm's form is looked up in the form
 /// registry, its keyframes param-substituted, so this primitive is pure
 /// dispatch — it never learns what a "form" is.
-///
-/// @param signal - the watched binding (`$open` → head key `open`)
-/// @param arms   - [{ match, animations, duration, easing, guard? }]
 %primitive signal-arms(
   &el,
+  /// the watched binding (`$open` → head key `open`)
   signal: binding,
+  /// [{ match, animations, duration, easing, guard? }]
   arms: any
 ) {
   %emit js {

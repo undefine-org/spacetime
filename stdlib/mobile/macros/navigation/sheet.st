@@ -2,23 +2,6 @@
 ///
 /// Creates a draggable bottom sheet with detent positions.
 /// Supports drag-to-dismiss and snap-to-detent behavior.
-///
-/// @example basic
-/// .sheet-container {
-///   @sheet {
-///     transform: translateY($offset)
-///     background: white
-///     border-radius: 16px 16px 0 0
-///   }
-/// }
-///
-/// @example with custom height
-/// .tall-sheet {
-///   @sheet(height: 600) {
-///     transform: translateY($offset)
-///     background: #f5f5f5
-///   }
-/// }
 
 %macro sheet {
 
@@ -68,6 +51,25 @@
   %when $active {
     %applies {
       $styles
+    }
+  }
+
+  %example "basic" {
+    .sheet-container {
+      @sheet {
+        transform: translateY($offset)
+        background: white
+        border-radius: 16px 16px 0 0
+      }
+    }
+  }
+
+  %example "with custom height" {
+    .tall-sheet {
+      @sheet(height: 600) {
+        transform: translateY($offset)
+        background: #f5f5f5
+      }
     }
   }
 }

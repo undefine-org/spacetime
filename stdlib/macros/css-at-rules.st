@@ -10,14 +10,6 @@
 /// Font Face Macro
 ///
 /// Registers a web font via @font-face CSS at-rule.
-///
-/// @example
-/// @font("Aspekta") {
-///     src: url("/fonts/AspektaVF.woff2") format("woff2-variations");
-///     font-weight: 50 1000;
-///     font-style: normal;
-///     font-display: swap;
-/// }
 
 %macro font-face {
     %form {
@@ -29,6 +21,15 @@
     %binds {
         font-face-emit($family, styles: $styles) -> {}
     }
+
+  %example "@font-face" {
+    @font("Aspekta") {
+        src: url("/fonts/AspektaVF.woff2") format("woff2-variations");
+        font-weight: 50 1000;
+        font-style: normal;
+        font-display: swap;
+    }
+  }
 }
 
 
@@ -37,13 +38,6 @@
 /// Registers a CSS custom property with @property for smooth transitions.
 /// Enables CSS to interpolate custom properties (e.g., colors) that would
 /// otherwise snap between values.
-///
-/// @example
-/// @property("--nav-fg") {
-///     syntax: '<color>';
-///     initial-value: #1A1A1A;
-///     inherits: true;
-/// }
 
 %macro css-property-registration {
     %form {
@@ -55,6 +49,14 @@
     %binds {
         property-registration-emit($name, styles: $styles) -> {}
     }
+
+  %example "@css-property-registration" {
+    @property("--nav-fg") {
+        syntax: '<color>';
+        initial-value: #1A1A1A;
+        inherits: true;
+    }
+  }
 }
 
 
@@ -66,9 +68,6 @@
 /// one, and cross-fades every element carrying a `view-transition-name`.
 /// Style the pair with `::view-transition-old(name)` / `::view-transition-new(name)`.
 /// Browsers without support simply navigate.
-///
-/// @example
-/// @view-transition { navigation: auto; }
 ///
 /// .masthead { view-transition-name: masthead; }
 /// ::view-transition-old(root) { animation: 300ms ease both fade-out; }
@@ -83,4 +82,8 @@
     %binds {
         view-transition-emit(styles: $styles) -> {}
     }
+
+  %example "@view-transition" {
+    @view-transition { navigation: auto; }
+  }
 }

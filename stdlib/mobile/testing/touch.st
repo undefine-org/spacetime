@@ -42,22 +42,16 @@
 ///
 /// Defines CSS variables for a tap gesture at specific coordinates.
 /// Test frameworks read these variables to dispatch touch events.
-///
-/// @param x - X coordinate for tap
-/// @param y - Y coordinate for tap
-/// @param duration - Tap duration in milliseconds
-///
-/// @example
-/// .tap-target {
-///   @touch-tap(x: 100, y: 100, duration: 100)
-/// }
 
 %macro touch-tap {
 
   %form {
     @touch-tap(
+      /// X coordinate for tap
       x: $x:number = 0,
+      /// Y coordinate for tap
       y: $y:number = 0,
+      /// Tap duration in milliseconds
       duration: $duration:number = 100
     )
   }
@@ -71,49 +65,32 @@
       --st-touch-identifier: 0
     }
   }
+
+  %example "@touch-tap" {
+    .tap-target {
+      @touch-tap(x: 100, y: 100, duration: 100)
+    }
+  }
 }
 
 
 /// Touch Swipe Simulation
 ///
 /// Defines CSS variables for a swipe gesture between two points.
-///
-/// @param start-x - Starting X coordinate
-/// @param start-y - Starting Y coordinate
-/// @param end-x - Ending X coordinate
-/// @param end-y - Ending Y coordinate
-/// @param duration - Swipe duration in milliseconds
-///
-/// @example left swipe
-/// .swipeable {
-///   @touch-swipe(
-///     start-x: 300,
-///     start-y: 200,
-///     end-x: 50,
-///     end-y: 200,
-///     duration: 250
-///   )
-/// }
-///
-/// @example up swipe
-/// .scrollable {
-///   @touch-swipe(
-///     start-x: 200,
-///     start-y: 500,
-///     end-x: 200,
-///     end-y: 100,
-///     duration: 200
-///   )
-/// }
 
 %macro touch-swipe {
 
   %form {
     @touch-swipe(
+      /// Starting X coordinate
       start-x: $startX:number = 0,
+      /// Starting Y coordinate
       start-y: $startY:number = 0,
+      /// Ending X coordinate
       end-x: $endX:number = 0,
+      /// Ending Y coordinate
       end-y: $endY:number = 0,
+      /// Swipe duration in milliseconds
       duration: $duration:number = 250
     )
   }
@@ -129,6 +106,30 @@
       --st-touch-identifier: 0
     }
   }
+
+  %example "left swipe" {
+    .swipeable {
+      @touch-swipe(
+        start-x: 300,
+        start-y: 200,
+        end-x: 50,
+        end-y: 200,
+        duration: 250
+      )
+    }
+  }
+
+  %example "up swipe" {
+    .scrollable {
+      @touch-swipe(
+        start-x: 200,
+        start-y: 500,
+        end-x: 200,
+        end-y: 100,
+        duration: 200
+      )
+    }
+  }
 }
 
 
@@ -136,43 +137,20 @@
 ///
 /// Defines CSS variables for a two-finger pinch gesture.
 /// Used for testing zoom interactions.
-///
-/// @param center-x - Center X coordinate of pinch
-/// @param center-y - Center Y coordinate of pinch
-/// @param start-distance - Initial distance between fingers
-/// @param end-distance - Final distance between fingers
-/// @param duration - Pinch duration in milliseconds
-///
-/// @example pinch to zoom out
-/// .zoomable {
-///   @touch-pinch(
-///     center-x: 200,
-///     center-y: 300,
-///     start-distance: 200,
-///     end-distance: 50,
-///     duration: 300
-///   )
-/// }
-///
-/// @example pinch to zoom in
-/// .zoomable {
-///   @touch-pinch(
-///     center-x: 200,
-///     center-y: 300,
-///     start-distance: 50,
-///     end-distance: 200,
-///     duration: 300
-///   )
-/// }
 
 %macro touch-pinch {
 
   %form {
     @touch-pinch(
+      /// Center X coordinate of pinch
       center-x: $centerX:number = 0,
+      /// Center Y coordinate of pinch
       center-y: $centerY:number = 0,
+      /// Initial distance between fingers
       start-distance: $startDistance:number = 100,
+      /// Final distance between fingers
       end-distance: $endDistance:number = 50,
+      /// Pinch duration in milliseconds
       duration: $duration:number = 300
     )
   }
@@ -188,28 +166,46 @@
       --st-touch-scale: calc($endDistance / $startDistance)
     }
   }
+
+  %example "pinch to zoom out" {
+    .zoomable {
+      @touch-pinch(
+        center-x: 200,
+        center-y: 300,
+        start-distance: 200,
+        end-distance: 50,
+        duration: 300
+      )
+    }
+  }
+
+  %example "pinch to zoom in" {
+    .zoomable {
+      @touch-pinch(
+        center-x: 200,
+        center-y: 300,
+        start-distance: 50,
+        end-distance: 200,
+        duration: 300
+      )
+    }
+  }
 }
 
 
 /// Touch Long Press Simulation
 ///
 /// Defines CSS variables for a long press gesture.
-///
-/// @param x - X coordinate for press
-/// @param y - Y coordinate for press
-/// @param duration - Hold duration in milliseconds
-///
-/// @example
-/// .context-menu-trigger {
-///   @touch-long-press(x: 100, y: 100, duration: 500)
-/// }
 
 %macro touch-long-press {
 
   %form {
     @touch-long-press(
+      /// X coordinate for press
       x: $x:number = 0,
+      /// Y coordinate for press
       y: $y:number = 0,
+      /// Hold duration in milliseconds
       duration: $duration:number = 500
     )
   }
@@ -223,6 +219,12 @@
       --st-touch-identifier: 0
     }
   }
+
+  %example "@touch-long-press" {
+    .context-menu-trigger {
+      @touch-long-press(x: 100, y: 100, duration: 500)
+    }
+  }
 }
 
 
@@ -230,32 +232,20 @@
 ///
 /// Defines CSS variables for a drag gesture with multiple waypoints.
 /// Uses start/end points; for complex paths use touch-path.
-///
-/// @param start-x - Starting X coordinate
-/// @param start-y - Starting Y coordinate
-/// @param end-x - Ending X coordinate
-/// @param end-y - Ending Y coordinate
-/// @param duration - Drag duration in milliseconds
-///
-/// @example
-/// .draggable-item {
-///   @touch-drag(
-///     start-x: 50,
-///     start-y: 100,
-///     end-x: 250,
-///     end-y: 100,
-///     duration: 400
-///   )
-/// }
 
 %macro touch-drag {
 
   %form {
     @touch-drag(
+      /// Starting X coordinate
       start-x: $startX:number = 0,
+      /// Starting Y coordinate
       start-y: $startY:number = 0,
+      /// Ending X coordinate
       end-x: $endX:number = 0,
+      /// Ending Y coordinate
       end-y: $endY:number = 0,
+      /// Drag duration in milliseconds
       duration: $duration:number = 400
     )
   }
@@ -273,6 +263,18 @@
       --st-touch-identifier: 0
     }
   }
+
+  %example "@touch-drag" {
+    .draggable-item {
+      @touch-drag(
+        start-x: 50,
+        start-y: 100,
+        end-x: 250,
+        end-y: 100,
+        duration: 400
+      )
+    }
+  }
 }
 
 
@@ -280,11 +282,6 @@
 ///
 /// Provides CSS variables for tracking current touch state.
 /// Useful for visual feedback during test execution.
-///
-/// @example
-/// .test-overlay {
-///   @touch-state
-/// }
 
 %macro touch-state {
 
@@ -301,14 +298,18 @@
       --st-touch-identifier: 0
     }
   }
+
+  %example "@touch-state" {
+    .test-overlay {
+      @touch-state
+    }
+  }
 }
 
 
 /// Touch Gesture Presets
 ///
 /// Common gesture configurations as a convenience wrapper.
-///
-/// @param gesture - Preset gesture name
 ///
 /// Supported presets:
 /// - swipe-left: Left swipe from center-right to center-left
@@ -317,11 +318,6 @@
 /// - swipe-down: Down swipe from top-center to bottom-center
 /// - pinch-in: Pinch to zoom out
 /// - pinch-out: Pinch to zoom in
-///
-/// @example
-/// .card {
-///   @touch-preset("swipe-left")
-/// }
 
 %macro touch-preset {
 
@@ -418,6 +414,12 @@
         --st-touch-duration: 300
         --st-touch-scale: 4
       }
+    }
+  }
+
+  %example "@touch-preset" {
+    .card {
+      @touch-preset("swipe-left")
     }
   }
 }

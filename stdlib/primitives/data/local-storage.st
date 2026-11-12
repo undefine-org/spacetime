@@ -5,13 +5,13 @@
 /// - Debounced auto-save on set()
 /// - Cross-tab sync via storage events
 /// - Proper cleanup
-///
-/// @param key - The localStorage key
-/// @param default - Default value if nothing stored
-///
-/// @yields $binding - The binding-protocol object
 
-%primitive local-storage-source(key: string, default: any?) {
+%primitive local-storage-source(
+  /// The localStorage key
+  key: string,
+  /// if nothing stored
+  default: any?
+) {
   %emit js {
     (() => {
       const storageKey = %key;
@@ -113,6 +113,7 @@
   }
 
   %exports {
+    /// The binding-protocol object
     $binding: any
   }
 }

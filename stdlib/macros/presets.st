@@ -72,10 +72,6 @@
 /// Import Macro
 ///
 /// Imports presets and macros from other files.
-///
-/// @example
-/// @import "stdlib/presets.st"
-/// @import "./my-presets.st"
 
 %macro import {
 
@@ -95,6 +91,11 @@
 
   %registers import {
     path: $path
+  }
+
+  %example "@import" {
+    @import "stdlib/editable"
+    @import "stdlib/dnd"
   }
 }
 
@@ -178,9 +179,6 @@
 ///
 /// This replaces the spec-reserved `%public (…)` manifest clause, which was
 /// parsed but never enforced and had zero uses: one export mechanism, not two.
-///
-/// @example
-/// @exports { $host, $session: mut }
 %macro exports {
 
   %form {
@@ -193,6 +191,10 @@
   // emit runtime behaviour.
   %registers exports {
     body: $body
+  }
+
+  %example "@exports" {
+    @exports { $host, $session: mut }
   }
 }
 

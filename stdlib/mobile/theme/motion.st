@@ -2,18 +2,6 @@
 ///
 /// CSS custom properties for consistent animations and transitions.
 /// Provides duration, easing, and spring presets for smooth mobile UX.
-///
-/// @example
-/// .card {
-///   @mobile-motion
-///   transition: transform var(--st-duration-normal) var(--st-ease-out);
-/// }
-///
-/// @example spring animation
-/// .sheet {
-///   @mobile-motion
-///   transition: transform var(--st-duration-slow) var(--st-spring);
-/// }
 
 %macro mobile-motion {
 
@@ -39,6 +27,20 @@
 
       // Linear for progress indicators
       --st-linear: linear
+    }
+  }
+
+  %example "@mobile-motion" {
+    .card {
+      @mobile-motion
+      transition: transform var(--st-duration-normal) var(--st-ease-out);
+    }
+  }
+
+  %example "spring animation" {
+    .sheet {
+      @mobile-motion
+      transition: transform var(--st-duration-slow) var(--st-spring);
     }
   }
 }

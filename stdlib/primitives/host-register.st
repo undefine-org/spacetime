@@ -16,17 +16,16 @@
 /// receive subject + chooses the transport; this RUNTIME registration carries the
 /// same config (url/headers/socket) into the browser. The primitive is config-only
 /// (no element), mirroring `signal-call`'s global phase.
-///
-/// @param name      - the host binding name (JS identifier, no `$`)
-/// @param transport - "http" | "ws" | "live"
-/// @param url       - the http base url expression (empty for ws/live)
-/// @param headers   - the http headers object expression (may be empty)
-/// @param socket    - the ws socket expression (empty for http/live)
 %primitive host-register(
+  /// the host binding name (JS identifier, no `$`)
   name: ident,
+  /// "http" | "ws" | "live"
   transport: ident,
+  /// the http base url expression (empty for ws/live)
   url: any? = "",
+  /// the http headers object expression (may be empty)
   headers: any? = {},
+  /// the ws socket expression (empty for http/live)
   socket: any? = ""
 ) {
   %emit prelude-js {

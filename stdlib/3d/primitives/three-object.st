@@ -10,30 +10,9 @@
 /// The created object is stored on the canvas as `el._stObjects[…]` and the most
 /// recent one as `el._stObject` so sibling child directives (`@orbit` acts on the
 /// camera; transforms act on the object) can find it.
-///
-/// @param &el         - the canvas hosting the @stage (children share its scope)
-/// @param shape       - "icosahedron"|"sphere"|"box"|"torus"|"torusknot"|"cone"|"cylinder"|"plane"
-/// @param size        - overall scale (radius / half-extent), default 1
-/// @param detail      - subdivision level for polyhedra (higher = smoother), default 3
-/// @param material    - "standard"|"physical"|"glass"|"basic", default "standard"
-/// @param color       - base color
-/// @param roughness   - PBR roughness 0..1
-/// @param metalness   - PBR metalness 0..1
-/// @param transmission- glass transmission 0..1 (physical/glass only)
-/// @param ior         - index of refraction (physical/glass)
-/// @param thickness   - refraction thickness (physical/glass)
-/// @param clearcoat   - clearcoat layer 0..1 (physical/glass)
-/// @param iridescence    - thin-film iridescence 0..1 (soap-bubble/oil-slick sheen, physical/glass)
-/// @param iridescenceIOR - iridescence film IOR 1.0..2.333 (shifts the colour band)
-/// @param emissive    - emissive color
-/// @param emissiveIntensity - emissive strength
-/// @param spinX/Y/Z   - auto-rotation speed (radians/second)
-/// @param posX/Y/Z    - position offset
-/// @param flatShading - render flat per-face normals (crisp faceted/low-poly look)
-///
-/// @yields $added     - true once the mesh is in the scene
 
 %primitive three-object(
+  /// the canvas hosting the @stage (children share its scope)
   &el,
   name: string = "",
   shape: string = "icosahedron",
@@ -130,6 +109,7 @@
   }
 
   %exports {
+    /// true once the mesh is in the scene
     $added: bool
   }
 }
