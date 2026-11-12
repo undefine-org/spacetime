@@ -2,8 +2,25 @@
 #+subtitle: Typed widget templates, one reflection, one rewriter, and the language changes that make the studio fall out of them, with no studio code in Rust.
 #+kicker: spacetime · PLAN-156 design dossier · v2
 #+date: 2026-11-09
-#+status: v3 · rounds 1–2 folded in · building P0 → P9
+#+status: v4 · P0–P3 and P5–P8 built and tested · P4 mostly · P9 not started
 #+author: Claude for Othman
+
+* What was built
+#+begin_rosetta
+| Piece | State | Evidence |
+| P0 the review's bugs | done | =tests/studio/film_studio_e2e.sh= |
+| P1 reflect + rewrite (HTTP, MCP, undo journal) | done | =src/reflect=, =src/rewrite=, unit tests; Ctrl+Z in the e2e |
+| P2 meta waves (=%scope meta=, three transforms, =migrate --meta=) | done | =src/migrate/meta.rs= + tests |
+| P3 the waves on the stdlib | done | =@param= 692 → 1, =@yields= 307 → 0, 291 =%example=s; 12 examples pin broken macros |
+| P4 keyword sets, typed numbers, facts (E0971), shorthands, =%registers= | done | =tests/keyword_values_test.rs=, =tests/facts_test.rs= |
+| P4 stops as a capture type, lossless =@data=/markup spans | not done | both rewrite the compiler's core paths |
+| P5 typed widgets in the film inspector | done | e2e: clip choices from robot.glb, keyword sets, sliders, docs, scrub |
+| P5 the admin on the same widgets | not done | a follow-up |
+| P6 driven fields, box-select and group moves | done | e2e |
+| P7 zoom about the cursor, pan, fit | done | e2e |
+| P8 editor camera, frame, move tool | done (a plane drag, not three's gizmo) | e2e |
+| P9 delete src/studio, split the kits | not started | waits on L7/L8 |
+#+end_rosetta
 
 * What changed since your notes
 ** Round 2 (your answers in chat, 2026-11-09)
@@ -291,12 +308,17 @@ Cells that read the real repository; their results are the evidence above.
 (def hidden (set (mapcat (fn [t] (map (fn [m] (nth m 1))
                                       (Regex/scan #"@param\s+(\w+)\s+-[^\n]*\"\w*\"\s*\|" t)))
                          (concat forms prims))))
-(assert (>= (count hidden) 5))
+;; before the waves (2026-11-09): 6 choices written as prose. After: none,
+;; they are keyword sets, each word with its doc.
+(def keyword-sets (mapcat (fn [t] (map second (Regex/scan #"%capture_type (\w+) \{\s*(?:///[^\n]*\n\s*)?\"" t))) forms))
+(assert (= 0 (count hidden)))
+(assert (>= (count keyword-sets) 5))
 {:param-types-in-3d-forms (into (sorted-map) types)
- :choices-written-as-prose (sort hidden)}
+ :choices-written-as-prose (sort hidden)
+ :keyword-sets (sort keyword-sets)}
 #+end_src
 #+RESULTS: coverage
-: {:param-types-in-3d-forms {"bool" 6, "color" 5, "expr" 2, "number" 80, "string" 11}, :choices-written-as-prose ("drive" "material" "shadows" "shape" "tone" "type")}
+: {:param-types-in-3d-forms {"bool" 6, "color" 5, "degrees" 5, "expr" 2, "intensity" 2, "light_kind" 1, "meters" 3, "model_clip" 1, "number" 64, "object_material" 1, "object_shape" 1, "scroll_drive" 1, "stage_tone" 1, "string" 5, "unit" 6}, :choices-written-as-prose (), :keyword-sets ("light_kind" "object_material" "object_shape" "scroll_drive" "stage_tone")}
 
 
 #+begin_src beam-lisp :id drift
@@ -352,13 +374,20 @@ Cells that read the real repository; their results are the evidence above.
         same (filter (fn [a] (let [m (Regex/run #"^(\w+):\s*\$(\w+)$" a)] (and m (= (nth m 1) (nth m 2))))) named)]
     (and (>= (count named) 3) (>= (count same) (- (count named) 1)))))
 (def wide (filter (fn [[_ args]] (>= (count (filter (fn [a] (String/contains? a ":")) (String/split args ","))) 3)) binds))
-(assert (= 692 (count (filter (fn [[_ t]] (= t "param")) lines))))
-{:tags (into (sorted-map) (frequencies (map kind lines)))
+(def examples (count (mapcat (fn [t] (Regex/scan #"%example \"" t)) texts)))
+;; before the waves (2026-11-09): 692 @param, 307 @yields, 320 @example; 79 pure
+;; forwards. After: the tags left are in module headers and a migration's own text;
+;; the forwards left pass POSITIONAL captures (`$subject`), which `...` (named
+;; params only) deliberately doesn't cover.
+(assert (<= (count (filter (fn [[_ t]] (= t "param")) lines)) 2))
+(assert (>= examples 280))
+{:examples examples
+ :tags (into (sorted-map) (frequencies (map kind lines)))
  :binds-with-3+-args (count wide)
  :pure-forwards (count (filter forwards? wide))}
 #+end_src
 #+RESULTS: docs
-: {:tags {"example" 320, "param: a range → a scalar row" 33, "param: a unit → a scalar row" 36, "param: choices → a sum type" 9, "param: prose → /// on the param" 523, "param: restates the default → deleted" 91, "yields" 307}, :binds-with-3+-args 105, :pure-forwards 79}
+: {:tags {"example" 30, "param: restates the default → deleted" 1}, :binds-with-3+-args 75, :pure-forwards 50, :examples 285}
 
 
 #+begin_src beam-lisp :id clips
@@ -692,16 +721,17 @@ colour pill becomes =&w-color=.
 #+end_decision
 
 * Roster
-** TODO P0 · The bugs from the review
+** DONE P0 · The bugs from the review
 :PROPERTIES:
 :JOBS: light long
 :AREA: stdlib/__studio__
 :END:
 Header and empty state follow the selection; open at 0 or the remembered time;
 lanes and playhead use one duration; clip text clears its keys; =i= and Escape;
-=stuRules= / =stuBox= read a signal, not =S.el=.
+=stuRules= / =stuBox= read a signal, not =S.el=. Done: e2e 30/30. The cut-off ruler was layout, not
+a duration mismatch: the lanes ran flush to the panel's edge.
 
-** TODO P1 · Reflect and rewrite
+** DONE P1 · Reflect and rewrite
 :PROPERTIES:
 :AREA: src/reflect src/rewrite src/server.rs
 :END:
@@ -709,21 +739,21 @@ One projection (merging =src/introspect=, the LSP's =FormRegistry=, =outline.jso
 =score.json=, =templates.json=) and one guarded writer (=studio/ops.rs= +
 =migrate.rs=), with undo. MCP gets both as tools.
 
-** TODO P2 · The migration engine learns the stdlib
+** DONE P2 · The migration engine learns the stdlib
 :PROPERTIES:
 :AREA: src/migrate.rs stdlib/migrations
 :END:
 =%scope stdlib=; rules over meta-syntax and across a declaration; dry-run diffs
 reviewed before applying.
 
-** TODO P3 · Waves 1–3: docs, examples, params once
+** DONE P3 · Waves 1–3: docs, examples, params once
 :PROPERTIES:
 :AREA: stdlib (all) src/parser
 :END:
 =///= on params and =%yield=; =%example= compiled by =check=; =...= forwarding;
 the 11 disagreeing defaults resolved by hand.
 
-** TODO P4 · Types: choices, scalar rows, vectors, facts, stops
+** DOING P4 · Types: choices, scalar rows, vectors, facts, stops
 :PROPERTIES:
 :JOBS: light key block
 :AREA: stdlib/scalars stdlib/3d stdlib/capture-types src/type_system
@@ -731,7 +761,7 @@ the 11 disagreeing defaults resolved by hand.
 Waves 4–5; =luminance=, =unit=, =meters=, =exposure=; =vec3= shorthand and longhands;
 =model= facts and =clip($src)=; =%capture_type stop=; L8 spans for =@data= and markup.
 
-** TODO P5 · Widgets and one inspector
+** DONE P5 · Widgets and one inspector
 :PROPERTIES:
 :JOBS: light key
 :AREA: stdlib/widgets stdlib/__studio__
@@ -740,20 +770,20 @@ Waves 4–5; =luminance=, =unit=, =meters=, =exposure=; =vec3= shorthand and lon
 =&w-number= (with =@scrub=), =&w-color=, =&w-choice=, =&w-toggle=, =&w-text=, =&w-vec3=,
 =&w-asset=, =&w-stop= (with =@curve=); the admin too if Q3 says so.
 
-** TODO P6 · One selection, one commit, edit many
+** DONE P6 · One selection, one commit, edit many
 :PROPERTIES:
 :JOBS: key many
 :AREA: stdlib/__studio__
 :END:
 
-** TODO P7 · Timeline navigation
+** DONE P7 · Timeline navigation
 :PROPERTIES:
 :JOBS: long
 :PROTO: timeline
 :END:
 =@zoom-pan=, overview strip, fit, marquee, drag many, snapping, rows grouped by part.
 
-** TODO P8 · 3D navigation
+** DONE P8 · 3D navigation
 :PROPERTIES:
 :JOBS: block many
 :PROTO: stage3d

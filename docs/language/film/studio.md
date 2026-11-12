@@ -79,6 +79,12 @@ never guessed.
 | Scene list | hovering a part outlines it in the 3D |
 | a sound / pattern | the inspector shows where the playhead is in it; the step grid lights the step playing |
 | keyboard | a chord: a key toggles its note; a melodic cell (click it in the grid): a key sets its note |
+| Ctrl+wheel / Shift+wheel, `=` `-`, `\`, Fit | zoom about the cursor / pan the timeline, zoom about the playhead, fit the film |
+| a box drag on empty lane | selects the keyframes inside it (Shift adds); dragging one moves them all, in one write |
+| Film camera (C) | see the 3D through a free editor camera (drag orbits, right-drag pans, wheel dollies); the film's camera keeps following the score |
+| F | frame the selected part |
+| Move (M) | drag the selected part over the ground (Shift: up and down); its position is written on release |
+| Ctrl/Cmd+Z | undo the last edit, whoever made it (the studio, an agent, a migration) |
 
 Every change is a source edit, and the running page takes it IN PLACE: a
 clip's timing, a keyframe, a drum cell, a note, a part's pose or material —
@@ -87,6 +93,29 @@ reload. Anything the page cannot take in place (markup, a style, a new part,
 the score's length) reloads, and the film comes back at the same frame, paused
 or playing, looped, with the same selection. Gate:
 `tests/studio/film_studio_e2e.sh`.
+
+## Fields know their type (PLAN-156)
+
+A part's inspector is drawn from `GET /__spacetime/reflect.json` (see
+[reflect and rewrite](../reflect-and-rewrite.md)): every param its macro's `%form`
+declares, with its type, default, `///` doc and the words written. The type
+picks the widget, a `@template` from `stdlib/widgets` (`&w-number`, `&w-range`,
+`&w-color`, `&w-toggle`, `&w-choice`, `&w-text`, `&w-vec3`):
+
+- a **keyword set** (`light_kind`) is a row of its words, each with its doc;
+- a **typed number** (`unit`, `meters`, `degrees`) is a slider over its row's
+  `%range`, with its `%step` and `%unit`;
+- a **fact** (`model_clip`) is a choice of what the file holds: the robot's 14
+  clips, read from `robot.glb`;
+- a **shorthand** (`pos`) puts its longhands on one row;
+- drag a number's label to scrub it (Shift: fine, Ctrl: coarse).
+
+A param left at its default is greyed; writing it puts it after the last
+written param. A param a score animates is marked ◆: an edit to it keys the
+stop at the playhead (or adds one between stops), never the rest value the
+score overrides. Every widget writes through the one writer
+(`POST /__spacetime/rewrite`), keeping the author's spelling: a quoted word
+stays quoted, a bare one stays bare, `pos: 0 3 -7` stays a shorthand.
 
 ## Instant edits: hot binds
 

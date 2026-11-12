@@ -17,8 +17,12 @@
 ///
 /// No JavaScript here: behaviour lives in ./primitives/film-kit.st.
 @import "./primitives/film-kit.st";
+// the field widgets the inspector renders (PLAN-156), shared with the admin
+@import "../widgets/index.st";
 
 @data fetch $stuScore : "/__spacetime/studio/score.json?entry=__SPACETIME_STUDIO_ENTRY__";
+// the program as every tool reads it: a part's typed, documented params (PLAN-156)
+@data fetch $stuReflect : "/__spacetime/reflect.json?entry=__SPACETIME_STUDIO_ENTRY__";
 @data inline $stuFilmSel string : "";
 @data inline $stuFilmTime string : "00:00:00";
 @data inline $stuFilmPlaying bool : false;
@@ -29,6 +33,14 @@
 @data inline $stuFilmPickOn bool : false;
 @data inline $stuFilmNoteCell string : "";
 @data inline $stuFilmSoundNow string : "";
+// the view window (PLAN-156 P7): how far the timeline is zoomed in, and what it shows
+@data inline $stuFilmZoom number : 1;
+@data inline $stuFilmView string : "";
+// the keyframes a box drag holds, space-separated stop keys (PLAN-156 P6)
+@data inline $stuFilmMulti string : "";
+// the camera the 3D is seen through, and the move tool (PLAN-156 P8)
+@data inline $stuFilmCam string : "Film camera";
+@data inline $stuFilmMoveOn bool : false;
 
 @type StuFilmPanel { Timeline | Code }
 @data derive $stuFilmPanel StuFilmPanel : @match {
@@ -36,10 +48,11 @@
   _                             => Timeline;
 }
 
-@data derive $stuFilmRows array : ST.stuFilmRows($stuScore);
-@data derive $stuFilmKeys array : ST.stuFilmKeys($stuScore);
-@data derive $stuFilmTicks array : ST.stuFilmTicks($stuScore);
+@data derive $stuFilmRows array : ST.stuFilmRows($stuScore, $stuFilmSel);
+@data derive $stuFilmKeys array : ST.stuFilmKeys($stuScore, $stuFilmSel, $stuFilmMulti);
+@data derive $stuFilmTicks array : ST.stuFilmTicks($stuScore, $stuFilmZoom);
 @data derive $stuFilmFields array : ST.stuFilmFields($stuFilmSel, $stuScore);
+@data derive $stuPartFields array : ST.stuPartFields($stuFilmSel, $stuScore, $stuReflect);
 @data derive $stuFilmGrid array : ST.stuFilmGrid($stuFilmSel, $stuScore);
 @data derive $stuFilmParts array : ST.stuFilmParts($stuScore, $stuFilmSel);
 @data derive $stuFilmPiano array : ST.stuFilmPiano($stuFilmSel, $stuScore, $stuFilmNoteCell);
@@ -57,6 +70,10 @@
 .stu-film__title { text <- $stuFilmTitle; }
 .stu-film__time { text <- $stuFilmTime; }
 .stu-film__loop { text <- $stuFilmLoop; }
+.stu-film__view { .is-hidden: $stuFilmZoom <= 1; text <- $stuFilmView; }
+.stu-film__fit { @on &.click { $stuNoop <- ST.stuFilmFit(); } }
+.stu-film__cam { text <- $stuFilmCam; @on &.click { $stuNoop <- ST.stuFilmCamToggle(); } }
+.stu-film__move { .is-on: $stuFilmMoveOn; @on &.click { $stuNoop <- ST.stuFilmMoveToggle(); } }
 .stu-film__play {
   .is-playing: $stuFilmPlaying;
   @on &.click { $stuNoop <- ST.stuFilmToggle(); }
@@ -89,17 +106,17 @@
 }
 .stu-film__labels {
   @each($stuFilmRows as $r) {
-    <button type="button" class="stu-lab" data-film="row" data-key="`$r.key`" data-kind="`$r.kind`" style="--stu-depth: `$r.depth`">`$r.label`</button>
+    <button type="button" class="stu-lab" data-film="row" data-key="`$r.key`" data-kind="`$r.kind`" data-selected="`$r.selected`" style="--stu-depth: `$r.depth`">`$r.label`</button>
   }
 }
 .stu-film__bars {
   @each($stuFilmRows as $r) {
-    <div class="stu-bar-clip" data-film="clip" data-key="`$r.key`" data-kind="`$r.kind`" style="--stu-y: `$r.y`; left: `$r.left`%; width: `$r.width`%"><span class="stu-bar-clip__text">`$r.text`</span><canvas class="stu-wave" data-entry="`$r.entry`"></canvas><span class="stu-bar-clip__edge" data-film="edge" data-key="`$r.key`"></span></div>
+    <div class="stu-bar-clip" data-film="clip" data-key="`$r.key`" data-kind="`$r.kind`" data-selected="`$r.selected`" style="--stu-y: `$r.y`; left: `$r.left`%; width: `$r.width`%"><span class="stu-bar-clip__text">`$r.text`</span><canvas class="stu-wave" data-entry="`$r.entry`"></canvas><span class="stu-bar-clip__edge" data-film="edge" data-key="`$r.key`"></span></div>
   }
 }
 .stu-film__keys {
   @each($stuFilmKeys as $k) {
-    <span class="stu-key" data-film="key" data-key="`$k.key`" data-held="`$k.held`" data-fixed="`$k.fixed`" title="`$k.value`" style="--stu-y: `$k.y`; left: `$k.left`%"></span>
+    <span class="stu-key" data-film="key" data-key="`$k.key`" data-held="`$k.held`" data-fixed="`$k.fixed`" data-selected="`$k.selected`" title="`$k.value`" style="--stu-y: `$k.y`; left: `$k.left`%"></span>
   }
 }
 .stu-film__code {
@@ -109,14 +126,18 @@
 }
 .stu-code { @on &.change { $stuNoop <- ST.stuFilmSave($); } }
 
-.stu-sec--film { .is-hidden: $stuFilmSel == ""; }
-.stu-film-sel__label { text <- $stuFilmSelLabel; }
 .stu-film-fields {
   @each($stuFilmFields as $f) {
     <label class="stu-field" data-kind="film"><span class="stu-field__key">`$f.label`</span><input class="stu-film-input" type="text" value="`$f.value`" data-mode="`$f.mode`" data-label="`$f.label`" data-file="`$f.file`" data-start="`$f.start`" data-end="`$f.end`" data-expect="`$f.expect`" data-at="`$f.at`" data-before="`$f.before`" spellcheck="false" /><span class="stu-field__hint">`$f.hint`</span></label>
   }
 }
 .stu-film-input { @on &.change { $stuNoop <- ST.stuFilmCommit($); } }
+// a part's params: one widget per type, picked by the field (PLAN-156)
+.stu-part-fields {
+  @each($stuPartFields as $f) { &$f.tpl($f); }
+}
+.stu-part-fields .w-input { @on &.change { $stuNoop <- ST.stuWidgetCommit($); } }
+.stu-part-fields .w-choice { @on &.click { $stuNoop <- ST.stuWidgetCommit($); } }
 .stu-grid {
   @each($stuFilmGrid as $c) {
     <button type="button" class="stu-cell" data-kind="`$c.kind`" data-on="`$c.on`" data-text="`$c.text`" data-step="`$c.step`" data-rc="`$c.rc`" data-melodic="`$c.melodic`" data-file="`$c.file`" data-start="`$c.start`" data-end="`$c.end`" title="`$c.text`" style="grid-row: `$c.row`; grid-column: `$c.col`">`$c.text`</button>
@@ -159,16 +180,26 @@ html.stu-film-on .st-dev-dock { bottom: calc(var(--stu-film-h) + 12px) !importan
 }
 .stu-film__bar { display: flex; align-items: center; gap: 6px; height: 34px; padding: 0 10px; border-bottom: 1px solid var(--stu-film-line); flex: none; }
 .stu-film__title { margin: 0 10px 0 0; font-weight: 600; color: var(--stu-film-soft); white-space: nowrap; }
-.stu-film__go, .stu-film__play, .stu-film__tab {
+.stu-film__go, .stu-film__play, .stu-film__tab, .stu-film__fit, .stu-film__cam, .stu-film__move {
   height: 24px; min-width: 26px; padding: 0 8px; border: 0; border-radius: 5px;
   background: #26262c; color: var(--stu-film-ink); font: inherit; cursor: pointer;
 }
-.stu-film__go:hover, .stu-film__tab:hover { background: #303038; }
+.stu-film__go:hover, .stu-film__tab:hover, .stu-film__fit:hover { background: #303038; }
 .stu-film__play { min-width: 44px; background: #0d99ff; color: #fff; font-weight: 600; }
 .stu-film__play::after { content: "Play"; }
 .stu-film__play.is-playing::after { content: "Pause"; }
 .stu-film__time { font: 600 13px/1 ui-monospace, "SF Mono", Menlo, monospace; letter-spacing: 0.04em; padding: 0 8px; min-width: 9em; }
 .stu-film__loop { color: #ffcf5a; font: 11px ui-monospace, Menlo, monospace; }
+.stu-film__view { color: var(--stu-film-soft); font: 11px ui-monospace, Menlo, monospace; }
+.stu-film__move.is-on { background: #0d99ff; color: #fff; }
+/* the 3D tools' hit layer: over the stage's canvas (above the film's own
+   titles), under the studio's panels */
+.stu-3d-hit { display: none; position: fixed; z-index: 2147482000; touch-action: none; }
+html.stu-3d-tools .stu-3d-hit { display: block; }
+html.stu-moving .stu-3d-hit { cursor: move; }
+.stu-film__view.is-hidden { display: none; }
+.stu-film__marquee { position: absolute; display: none; border: 1px solid #0d99ff; background: rgba(13, 153, 255, 0.12); pointer-events: none; z-index: 4; }
+.stu-film__marquee.is-on { display: block; }
 .stu-film__spacer { flex: 1; }
 .stu-film[data-st-state="Timeline"] .stu-film__tab[data-panel="Timeline"],
 .stu-film[data-st-state="Code"] .stu-film__tab[data-panel="Code"] { background: #3a3a44; }
@@ -185,12 +216,20 @@ html.stu-film-on .st-dev-dock { bottom: calc(var(--stu-film-h) + 12px) !importan
 .stu-lab[data-kind="channel"] { color: var(--stu-film-soft); }
 .stu-lab:hover { background: #222228; }
 
-.stu-film__lanes { position: relative; min-height: 100%; }
+/* the lanes stop short of the panel edge, so the film's last second (its last
+   tick, a clip that ends there, the playhead parked at the end) stays in view */
+.stu-film__lanes { position: relative; min-height: 100%; margin: 0 16px 0 6px; overflow-x: clip; }
+/* the view window: the track is the film widened by --stu-zoom and shifted by
+   --stu-from (fractions of the film), so zoom and pan move no data */
+.stu-film__ruler, .stu-film__bars, .stu-film__keys {
+  width: calc(var(--stu-zoom, 1) * 100%);
+  transform: translateX(calc(var(--stu-from, 0) * -100%));
+}
 .stu-film__ruler { position: sticky; top: 0; height: 22px; background: #1d1d22; border-bottom: 1px solid var(--stu-film-line); cursor: ew-resize; z-index: 2; }
 .stu-film__ticks { position: absolute; inset: 0; pointer-events: none; }
 .stu-tick { position: absolute; top: 0; bottom: 0; border-left: 1px solid #34343c; padding-left: 3px; color: var(--stu-film-soft); font-size: 10px; line-height: 22px; }
 .stu-tick[data-major="false"] { top: 14px; }
-.stu-film__bars, .stu-film__keys { position: absolute; left: 0; right: 0; top: 22px; bottom: 0; }
+.stu-film__bars, .stu-film__keys { position: absolute; left: 0; top: 22px; bottom: 0; }
 .stu-film__keys { pointer-events: none; }
 
 .stu-bar-clip {
@@ -214,9 +253,12 @@ html.stu-film-on .st-dev-dock { bottom: calc(var(--stu-film-h) + 12px) !importan
 }
 .stu-key[data-held="true"] { background: #ff8a5a; border-radius: 0; }
 .stu-key[data-fixed="true"] { background: #b8b8c4; }
+.stu-key[data-selected="true"] { background: #fff; box-shadow: 0 0 0 2px #0d99ff; z-index: 1; }
+.stu-bar-clip[data-selected="true"] { box-shadow: inset 0 0 0 1px #0d99ff; }
+.stu-lab[data-selected="true"] { background: #1f2a3a; color: #fff; }
 
 .stu-film__playhead {
-  position: absolute; top: 0; bottom: 0; left: calc(var(--stu-t, 0) * 100%); width: 0;
+  position: absolute; top: 0; bottom: 0; left: calc((var(--stu-t, 0) - var(--stu-from, 0)) * var(--stu-zoom, 1) * 100%); width: 0;
   border-left: 1px solid #ff4d4d; pointer-events: none; z-index: 3;
 }
 .stu-film__playhead::before { content: ""; position: absolute; top: 0; left: -6px; border: 6px solid transparent; border-top-color: #ff4d4d; }
@@ -227,9 +269,6 @@ html.stu-film-on .st-dev-dock { bottom: calc(var(--stu-film-h) + 12px) !importan
   font: 12px/1.55 ui-monospace, "SF Mono", Menlo, monospace; tab-size: 2; outline: none;
 }
 
-.stu-sec--film { display: block; }
-.stu-sec--film.is-hidden { display: none; }
-.stu-film-sel__label { margin: 0 0 8px; font-weight: 600; }
 .stu-field__hint { display: block; color: var(--stu-soft); font-size: 10px; margin-top: 1px; }
 .stu-film-input { width: 100%; box-sizing: border-box; border: 1px solid var(--stu-line); border-radius: 4px; padding: 4px 6px; font: 11px ui-monospace, Menlo, monospace; }
 .stu-film-input:focus { outline: 1px solid var(--stu-blue); }

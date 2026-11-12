@@ -134,6 +134,7 @@
         renderer.setSize(w, h, false);
         camera.aspect = w / h;
         camera.updateProjectionMatrix();
+        if (viewCam && viewCam.isPerspectiveCamera) { viewCam.aspect = w / h; viewCam.updateProjectionMatrix(); }
       }
       // notify any size listeners (e.g. post-processing composer)
       for (const cb of sizeListeners) cb(w, h, sizeState.dpr);
@@ -152,8 +153,14 @@
       };
     };
 
+    // The camera the stage is SEEN through: the film's, unless a tool lends
+    // its own (the studio's editor camera, PLAN-156) while the film's camera
+    // keeps following the score.
+    let viewCam = null;
+    const looking = () => viewCam || camera;
+    const renderPasses = [];
     // Default render = straight scene draw. Post-processing overrides via setRender.
-    let renderFn = () => { if (renderer) renderer.render(scene, camera); };
+    let renderFn = () => { if (renderer) renderer.render(scene, looking()); };
     const setRender = (fn) => { renderFn = fn; };
 
     const sizeFn = () => ({ ...sizeState });
@@ -516,7 +523,9 @@
         make: (pt) => {
           const A = THREE.addons, sz = sizeFn();
           const composer = new A.EffectComposer(renderer);
-          composer.addPass(new A.RenderPass(scene, camera));
+          const rp = new A.RenderPass(scene, looking());
+          renderPasses.push(rp);
+          composer.addPass(rp);
           // the glow at half resolution: it is soft anyway, and a software GL (Chromium's SwiftShader) pays per pixel.
           // three.js ADDS what passes a threshold (before exposure); raea's Bevy bloom blends without one. The
           // strength and threshold are measured against raea on demos/film-disco (an emissive floor, point lights)
@@ -615,6 +624,14 @@
       // the scene's parts (a dev tool picks and outlines them, PLAN-155) and a
       // draw on the next settled frame
       parts: () => parts,
+      // see the stage through another camera (null: the film's), and the one
+      // it is seen through now (PLAN-156)
+      view: (c) => {
+        viewCam = c || null;
+        for (const rp of renderPasses) rp.camera = looking();
+        requestSettle();
+      },
+      looking,
       draw: () => requestSettle(),
       onResize: (cb) => { sizeListeners.push(cb); },
       size: sizeFn,

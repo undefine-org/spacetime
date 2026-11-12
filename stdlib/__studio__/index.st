@@ -40,7 +40,7 @@
 @data inline $stuNoop string : "";
 
 @type StuTab { Layers | Lists | Components | Pages | Scene }
-@type StuSelection { Nothing | Element | Row }
+@type StuSelection { Nothing | Element | Row | Film }
 @type StuTool { Select | Interact }
 
 @data derive $stuTool StuTool : @match {
@@ -56,7 +56,10 @@
   _                             => Layers;
 }
 
+// A film selection (a clip, a keyframe, a part) and a page selection exclude
+// each other: the kits clear one when the other is set.
 @data derive $stuSelection StuSelection : @match {
+  ($stuFilmSel != "")      => Film;
   ($stuSel && $stuSel.row) => Row;
   ($stuSel)                => Element;
   _                        => Nothing;
@@ -74,7 +77,7 @@
 
 @data derive $stuTitle string : (($stuOutline && $stuOutline.title) || "This page");
 @data derive $stuFiles string : (($stuOutline && $stuOutline.files) ? $stuOutline.files.join("  ") : "");
-@data derive $stuSelLabel string : ($stuSel ? $stuSel.label : "Nothing selected");
+@data derive $stuSelLabel string : ($stuSel ? $stuSel.label : ($stuFilmSel != "" ? $stuFilmSelLabel : "Nothing selected"));
 @data derive $stuSelCrumbs string : ($stuSel ? $stuSel.crumbs : "");
 @data derive $stuSelText string : ($stuSel ? $stuSel.text : "");
 @data derive $stuRowTitle string : (($stuSel && $stuSel.row) ? ("$" + $stuSel.row.binding + "  item " + ($stuSel.row.index + 1) + " of " + $stuSel.row.count) : "");
@@ -141,6 +144,7 @@
   @state(when: $stuSelection is Nothing) { --stu-sel: 0; }
   @state(when: $stuSelection is Element) { --stu-sel: 1; }
   @state(when: $stuSelection is Row)     { --stu-sel: 2; }
+  @state(when: $stuSelection is Film)    { --stu-sel: 3; }
 }
 .stu-inspector__label { text <- $stuSelLabel; }
 .stu-inspector__crumbs { text <- $stuSelCrumbs; }
@@ -202,10 +206,10 @@
       <p class="stu-inspector__crumbs"></p>
     </header>
 
-    <section class="stu-sec stu-sec--film is-hidden">
+    <section class="stu-sec stu-sec--film">
       <h3 class="stu-sec__h">Film</h3>
-      <p class="stu-film-sel__label"></p>
       <div class="stu-film-fields"></div>
+      <div class="stu-part-fields"></div>
       <p class="stu-film-now is-hidden"></p>
       <div class="stu-grid"></div>
       <div class="stu-piano"></div>
@@ -244,6 +248,7 @@
     </section>
   </aside>
 
+  <div class="stu-3d-hit stu-ui" aria-hidden="true"></div>
   <section class="stu-film stu-ui" aria-label="Film">
     <header class="stu-film__bar">
       <p class="stu-film__title"></p>
@@ -254,7 +259,11 @@
       <button type="button" class="stu-film__go" data-go="end" title="To the end (End)">&gt;|</button>
       <span class="stu-film__time">00:00:00</span>
       <span class="stu-film__loop"></span>
+      <span class="stu-film__view"></span>
       <span class="stu-film__spacer"></span>
+      <button type="button" class="stu-film__fit" title="Fit the film (\); Ctrl+wheel zooms, Shift+wheel pans">Fit</button>
+      <button type="button" class="stu-film__cam" title="See the 3D through a free camera (C); F frames the selection">Film camera</button>
+      <button type="button" class="stu-film__move" title="Move the selected part: drag it over the ground, Shift for up and down (M)">Move</button>
       <button type="button" class="stu-film__pick" title="Select in the 3D: point at a part, click to open it (P)">Select</button>
       <button type="button" class="stu-film__tab" data-panel="Timeline">Timeline</button>
       <button type="button" class="stu-film__tab" data-panel="Code">Code</button>
@@ -266,6 +275,7 @@
         <div class="stu-film__bars"></div>
         <div class="stu-film__keys"></div>
         <div class="stu-film__playhead"></div>
+        <div class="stu-film__marquee"></div>
       </div>
     </div>
     <div class="stu-film__body stu-film__body--code">
@@ -431,7 +441,8 @@ html.stu-on body { margin-left: var(--stu-left) !important; margin-right: var(--
 .stu-inspector[data-st-state="Element"] .stu-sec--design,
 .stu-inspector[data-st-state="Element"] .stu-sec--rules,
 .stu-inspector[data-st-state="Row"] .stu-sec--design,
-.stu-inspector[data-st-state="Row"] .stu-sec--rules { display: block; }
+.stu-inspector[data-st-state="Row"] .stu-sec--rules,
+.stu-inspector[data-st-state="Film"] .stu-sec--film { display: block; }
 .stu-sec__h { margin: 0 0 8px; font-size: 11px; font-weight: 600; }
 .stu-empty { margin: 0; color: var(--stu-soft); line-height: 1.6; }
 .stu-text { margin: 0; color: var(--stu-ink); max-height: 7em; overflow: hidden; }

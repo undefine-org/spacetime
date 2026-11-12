@@ -31,6 +31,12 @@
         var score = function () { return L().stuScore || null; };
         var main = function (s) { return s && s.scores && s.scores[0] || null; };
         var total = function (s) { var m = main(s); return (m && m.total_ms) || 1; };
+        /// The film selection. Setting one clears the page selection: the
+        /// inspector shows one thing at a time.
+        F.select = function (key) {
+          put('stuFilmSel', key || '');
+          if (key && ST.stu && ST.stu.forget) { ST.stu.forget(); }
+        };
         var FPS = 30;
 
         // ---- 1. view model ----------------------------------------------------------
@@ -57,8 +63,19 @@
         var addr = function (w) { return w ? { start: w.start, end: w.end, expect: w.text } : null; };
         var fileOf = function (s, i) { return (s && s.files && s.files[i]) || ''; };
 
+        /// Is a row (or a key) the selection, or the row a selected keyframe sits on?
+        var picked = function (key, sel) {
+          if (!sel) { return false; }
+          if (key === sel) { return true; }
+          var p = sel.split(':');
+          return p[0] === 'stop' && key === 'chan:' + p[1] + ':' + p[2];
+        };
+
         /// The timeline: a row per clip, its channels under it, then the sounds.
-        ST.stuFilmRows = function (s) {
+        /// A channel's bar carries no text: its keyframes are drawn on it (their
+        /// values show on hover and in the inspector), and a chain of words under
+        /// the diamonds read as noise.
+        ST.stuFilmRows = function (s, sel) {
           var rows = [], m = main(s);
           if (!m) { return rows; }
           var T = total(s);
@@ -67,7 +84,7 @@
             if (e.kind !== 'clip') { return; }
             var at = e.at_ms || 0, len = e.for_ms != null ? e.for_ms : T - at;
             rows.push({
-              key: 'clip:' + i, kind: 'clip', label: '&' + e.subject, depth: 0, y: y++,
+              key: 'clip:' + i, kind: 'clip', label: '&' + e.subject, depth: 0, y: y++, selected: picked('clip:' + i, sel),
               left: at / T * 100, width: len / T * 100, text: (e.at ? e.at.text : '0s') + ' for ' + (e.for ? e.for.text : '...'),
               entry: i
             });
@@ -75,7 +92,7 @@
             (body ? body.channels : []).forEach(function (c, j) {
               rows.push({
                 key: 'chan:' + i + ':' + j, kind: 'channel', label: (c.scope ? c.scope + ' ' : '') + c.prop, depth: 1, y: y++,
-                left: at / T * 100, width: len / T * 100, text: c.value.text, entry: i
+                left: at / T * 100, width: len / T * 100, text: '', entry: i, selected: picked('chan:' + i + ':' + j, sel)
               });
             });
           });
@@ -85,7 +102,7 @@
             var form = s.forms && e.form && s.forms[e.form.text];
             var len = e.for_ms != null ? e.for_ms : Math.min(T - at, 2000);
             rows.push({
-              key: 'sound:' + i, kind: form && form.kind === 'pattern' ? 'pattern' : 'sound',
+              key: 'sound:' + i, kind: form && form.kind === 'pattern' ? 'pattern' : 'sound', selected: picked('sound:' + i, sel),
               label: (e.name ? e.name.text + ' ' : '') + (e.form ? e.form.text : '@sound'), depth: 0, y: y++,
               left: at / T * 100, width: Math.max(0.6, len / T * 100), text: e.notes ? e.notes.text : '', entry: i
             });
@@ -94,7 +111,8 @@
         };
 
         /// Keyframe diamonds, placed in score time on their channel's row.
-        ST.stuFilmKeys = function (s) {
+        ST.stuFilmKeys = function (s, sel, many) {
+          var held = String(many || '').split(' ');
           var keys = [], m = main(s);
           if (!m) { return keys; }
           var T = total(s), y = 0;
@@ -108,7 +126,7 @@
               c.stops.forEach(function (st, k) {
                 keys.push({
                   key: 'stop:' + i + ':' + j + ':' + k, y: y, left: (at + pos[k] * len) / T * 100,
-                  value: st.value, held: !!(st.easing && st.easing.indexOf('steps') >= 0), fixed: k === 0 || k === c.stops.length - 1
+                  value: st.value, selected: sel === 'stop:' + i + ':' + j + ':' + k || held.indexOf('stop:' + i + ':' + j + ':' + k) >= 0, held: !!(st.easing && st.easing.indexOf('steps') >= 0), fixed: k === 0 || k === c.stops.length - 1
                 });
               });
               y++;
@@ -118,10 +136,18 @@
         };
 
         /// Ruler ticks: whole seconds, labelled every few.
-        ST.stuFilmTicks = function (s) {
-          var T = total(s), ticks = [], step = T > 60000 ? 10 : T > 20000 ? 2 : 1;
-          for (var sec = 0; sec * 1000 <= T; sec += 1) {
-            ticks.push({ left: sec * 1000 / T * 100, label: sec % step === 0 ? sec + 's' : '', major: sec % step === 0 });
+        /// Ruler ticks for what the timeline shows (`zoom` = film / view): a
+        /// tick about every 40px, a label every few; finer as you zoom in.
+        ST.stuFilmTicks = function (s, zoom) {
+          var T = total(s), ticks = [], z = Math.max(1, +zoom || 1);
+          var visible = T / z;
+          var steps = [50, 100, 250, 500, 1000, 2000, 5000, 10000, 30000, 60000];
+          var tick = steps.find(function (st) { return visible / st <= 30; }) || 60000;
+          var label = steps.find(function (st) { return st >= tick * 2 && visible / st <= 12; }) || tick * 5;
+          for (var ms = 0; ms <= T + 1; ms += tick) {
+            var major = Math.abs(ms / label - Math.round(ms / label)) < 1e-6;
+            var text = ms % 1000 === 0 ? (ms / 1000) + 's' : (ms / 1000).toFixed(ms % 100 === 0 ? 1 : 2) + 's';
+            ticks.push({ left: ms / T * 100, label: major ? text : '', major: major });
           }
           return ticks;
         };
@@ -160,19 +186,140 @@
             word((f.channel.scope ? f.channel.scope + ' ' : '') + f.channel.prop, f.channel.value, 'every stop: a -> b at p%');
           } else if (f.kind === 'stop') {
             word('stop ' + (f.index + 1), f.stop.span, 'value [at p%] [--easing]');
-          } else if (f.kind === 'part') {
-            // a new param goes after the one written last in the source
-            var last = null;
-            f.part.params.forEach(function (p) { if (p.written && (!last || p.written.end > last.end)) { last = p.written; } });
-            f.part.params.forEach(function (p) {
-              if (p.written) {
-                word(p.name, p.written);
-              } else if (last) {
-                out.push({ label: p.name, value: String(p.value), hint: 'default', mode: 'insert', file: fileOf(s, last.file), start: 0, end: 0, expect: '', at: last.end, before: last.text });
-              }
+          }
+          // a part's params are widgets, typed by their form: ST.stuPartFields
+          return out;
+        };
+
+        /// A CSS colour as `#rrggbb`, for a colour input (the canvas normalises it).
+        var hexOf = function (c) {
+          try {
+            var x = document.createElement('canvas').getContext('2d');
+            x.fillStyle = '#000000';
+            x.fillStyle = String(c).replace(/^"|"$/g, '');
+            return /^#[0-9a-f]{6}$/i.test(x.fillStyle) ? x.fillStyle : '#000000';
+          } catch (e) { return '#000000'; }
+        };
+        var WIDGETS = { number: 1, range: 1, color: 1, toggle: 1, choice: 1, text: 1 };
+
+        /// The edit that makes a driven param read `v` at the playhead
+        /// (`drive` = "entry:channel"): the stop that sits there is rewritten;
+        /// between stops, a new stop goes in after the one before.
+        F.stopEdit = function (drive, v) {
+          var s = score(), mn = main(s), t = F.transport();
+          var p = String(drive).split(':'), e = mn && mn.entries[+p[0]];
+          var body = e && s.clips && s.clips[e.subject], c = body && body.channels[+p[1]];
+          if (!c || !t) { return null; }
+          var T = total(s), at = e.at_ms || 0, len = e.for_ms != null ? e.for_ms : T - at;
+          var pct = Math.round(Math.max(0, Math.min(1, (t.position - at) / len)) * 1000) / 10;
+          var pos = positions(c.stops), k = -1, before = 0;
+          pos.forEach(function (q, i) { if (Math.abs(q * 100 - pct) < 0.5) { k = i; } if (q * 100 < pct) { before = i; } });
+          var st, text;
+          if (k >= 0) {
+            st = c.stops[k];
+            var tail = st.span.text.slice(String(st.value).length);
+            text = v + tail;
+          } else {
+            st = c.stops[before];
+            text = st.span.text + ' -> ' + v + ' at ' + pct + '%';
+          }
+          return { file: fileOf(s, st.span.file), start: st.span.start, end: st.span.end, expect: st.span.text, text: text };
+        };
+
+        /// A part's params as widget fields (PLAN-156), from reflect.json: the
+        /// type its form declares picks the widget (its scalar row's `%widget`,
+        /// `choice` when it has choices: a keyword set's words, a model file's
+        /// clips), its `///` doc is the label's tooltip, the row gives the range,
+        /// step and unit. The score's part is found in reflect where it starts.
+        ST.stuPartFields = function (key, s, r) {
+          var f = find(s, key);
+          if (!f || f.kind !== 'part' || !r || !r.matches) { return []; }
+          var path = fileOf(s, f.part.span.file);
+          var fi = (r.files || []).findIndex(function (x) { return x.path === path; });
+          var m = r.matches.find(function (x) { return x.file === fi && x.start === f.part.span.start; });
+          if (!m) { return []; }
+          // a param still to write goes after the one written last
+          var last = null;
+          m.params.forEach(function (p) { if (p.written && !p.positional && (!last || p.written.end > last.end)) { last = p.written; } });
+          // the channels a score animates this part's params with: `&lamp2 { intensity: … }`
+          var driven = {}, mn = main(s), name = f.part.name ? '&' + f.part.name : null;
+          if (name && mn) {
+            mn.entries.forEach(function (e, i) {
+              var body = e.kind === 'clip' && s.clips && s.clips[e.subject];
+              (body ? body.channels : []).forEach(function (c, j) {
+                if (c.scope === name && !driven[c.prop]) { driven[c.prop] = i + ':' + j; }
+              });
             });
           }
-          return out;
+          var fields = m.params.filter(function (p) { return !p.positional; }).map(function (p) {
+            var sc = p.scalar || {}, range = sc.range || [null, null];
+            var words = p.written ? p.written.text : (p.default == null ? '' : String(p.default));
+            var bare = words.replace(/^"(.*)"$/, '$1');
+            var choices = Array.isArray(p.choices) && p.choices.length ? p.choices : null;
+            var widget = choices ? 'choice' : (sc.widget || { color: 'color', bool: 'toggle', number: 'number' }[p.type] || 'text');
+            if (widget === 'number' && range[0] != null && range[1] != null) { widget = 'range'; }
+            if (!WIDGETS[widget] || (widget === 'choice' && !choices)) { widget = 'text'; }
+            return {
+              tpl: 'w-' + widget, label: p.name, doc: p.doc || '', written: !!p.written,
+              value: widget === 'text' || widget === 'choice' ? bare : words,
+              unit: sc.unit || '', min: range[0] == null ? '' : range[0], max: range[1] == null ? '' : range[1],
+              step: sc.step || (p.type === 'number' ? 0.1 : ''), hex: hexOf(words), on: bare === 'true',
+              // the author's spelling stays: quoted stays quoted, a bare word stays bare
+              quote: p.written ? /^"/.test(p.written.text) : /^(string|model_clip|expr)$/.test(p.type),
+              choices: (choices || []).map(function (c) { return { word: c.word, doc: c.doc || '', on: c.word === bare }; }),
+              file: path,
+              start: p.written ? p.written.start : (last ? last.start : 0),
+              end: p.written ? p.written.end : (last ? last.end : 0),
+              expect: p.written ? p.written.text : (last ? last.text : ''),
+              at: last ? 'after' : '', before: last ? last.text : '',
+              drive: driven[p.name] || ''
+            };
+          });
+          // a shorthand's longhands share one row (`pos`: X Y Z)
+          (m.shorthands || []).forEach(function (sh) {
+            var parts = sh[1].map(function (l) { return fields.find(function (x) { return x.label === l; }); });
+            if (parts.some(function (x) { return !x; })) { return; }
+            var at = fields.indexOf(parts[0]);
+            fields = fields.filter(function (x) { return parts.indexOf(x) < 0; });
+            fields.splice(at, 0, {
+              tpl: 'w-vec3', label: sh[0], doc: parts[0].doc, written: parts.some(function (x) { return x.written; }),
+              parts: parts.map(function (x) {
+                return Object.assign({}, x, { axis: x.label.slice(sh[0].length) || x.label });
+              })
+            });
+          });
+          return fields;
+        };
+
+        /// Any widget's change, as one guarded edit through the one writer
+        /// (`/__spacetime/rewrite`): a written param's words are replaced; a
+        /// param left at its default is written after the last written one.
+        ST.stuWidgetCommit = function (el) {
+          var field = el.closest && el.closest('.w-field');
+          if (!field) { return ''; }
+          // a template writes a true flag as a present attribute and a false one
+          // not at all; an @each inside a template writes "true"/"false"
+          var flag = function (x) { return x !== undefined && x !== 'false'; };
+          var d = field.dataset, v, written = flag(d.written), quote = flag(d.quote);
+          if (el.classList.contains('w-choice')) { v = el.dataset.word; }
+          else if (el.type === 'checkbox') { v = el.checked ? 'true' : 'false'; }
+          else { v = el.value; }
+          if (quote) { v = '"' + String(v).replace(/^"|"$/g, '').replace(/"/g, '\\"') + '"'; }
+          var edit;
+          if (d.drive) {
+            // a param a score drives: the value is the stop at the playhead
+            edit = F.stopEdit(d.drive, v);
+            if (!edit) { return ''; }
+          } else if (written) {
+            if (v === d.expect) { return ''; }
+            edit = { file: d.file, start: +d.start, end: +d.end, expect: d.expect, text: v };
+          } else if (d.at === 'after') {
+            edit = { file: d.file, start: +d.start, end: +d.end, expect: d.expect, text: d.expect + ', ' + d.label + ': ' + v };
+          } else {
+            return '';
+          }
+          ST.stu.send('/__spacetime/rewrite', { entry: L().stuEntry, edits: [edit] }, 'Saved to ');
+          return '';
         };
 
         /// A pattern's step grid: a row per instrument, a cell per step.
@@ -269,7 +416,8 @@
         };
 
         // ---- the Select tool: point at the 3D, pick a part --------------------------------
-        var inStudioUi = function (node) { return !!(node && node.closest && node.closest('.stu-ui, .st-dev-dock, .stu-overlay')); };
+        // the 3D tools' hit layer is the stage, not the studio's UI
+        var inStudioUi = function (node) { return !!(node && node.closest && !node.closest('.stu-3d-hit') && node.closest('.stu-ui, .st-dev-dock, .stu-overlay')); };
         F.pickAt = function (ev) {
           var st = F.stage();
           if (!st || !st.THREE || !st.camera || !st.renderer) { return null; }
@@ -277,7 +425,7 @@
           if (ev.clientX < r.left || ev.clientX > r.right || ev.clientY < r.top || ev.clientY > r.bottom) { return null; }
           var ndc = new st.THREE.Vector2((ev.clientX - r.left) / r.width * 2 - 1, -((ev.clientY - r.top) / r.height) * 2 + 1);
           F.ray = F.ray || new st.THREE.Raycaster();
-          F.ray.setFromCamera(ndc, st.camera);
+          F.ray.setFromCamera(ndc, st.looking ? st.looking() : st.camera);
           var parts = st.parts().filter(function (pt) { return pt.bind && pt.obj; });
           var hits = F.ray.intersectObjects(st.scene.children, true);
           for (var h = 0; h < hits.length; h++) {
@@ -301,7 +449,7 @@
           var pt = F.pickAt(ev), i = F.partIndexOf(score(), pt);
           if (i < 0) { return; }
           put('stuTabName', 'Scene');
-          put('stuFilmSel', 'part:' + i);
+          F.select('part:' + i);
         };
         ST.stuFilmPickTool = function () {
           F.pickOn = !F.pickOn;
@@ -490,17 +638,69 @@
         };
         var snap = function (ms, free) { return free ? ms : Math.round(ms / 100) * 100; };
         var lane = function () { return document.querySelector('.stu-film__lanes'); };
+        // ---- the view window (PLAN-156 P7) ----------------------------------------------
+        // What the timeline shows: from `from` ms, `span` ms of film. Zoom and pan
+        // change only this. The view model stays in percent of the film; the
+        // track is widened (--stu-zoom) and shifted (--stu-from) under the lanes.
+        F.view = { from: 0, span: 0 };
+        var viewSpan = function () { var T = total(score()); return F.view.span > 0 ? Math.min(F.view.span, T) : T; };
+        var viewFrom = function () { var T = total(score()); return Math.max(0, Math.min(T - viewSpan(), F.view.from)); };
+        F.setView = function (from, span) {
+          var T = total(score());
+          span = Math.max(Math.min(T, 200), Math.min(T, span));
+          from = Math.max(0, Math.min(T - span, from));
+          F.view = { from: from, span: span };
+          var root = document.querySelector('.stu-film');
+          if (root) {
+            root.style.setProperty('--stu-zoom', String(T / span));
+            root.style.setProperty('--stu-from', String(from / T));
+          }
+          put('stuFilmZoom', Math.round(T / span * 100) / 100);
+          put('stuFilmView', (from / 1000).toFixed(2) + 's - ' + ((from + span) / 1000).toFixed(2) + 's');
+        };
+        /// Zoom by `factor`, keeping the moment under `clientX` where it is.
+        F.zoomAt = function (clientX, factor) {
+          var r = lane().getBoundingClientRect();
+          var x = Math.max(0, Math.min(1, (clientX - r.left) / r.width));
+          var sp = viewSpan(), at = viewFrom() + x * sp, ns = sp / factor;
+          F.setView(at - x * ns, ns);
+        };
+        F.fit = function () { F.setView(0, total(score())); };
+        F.wheel = function (ev) {
+          if (!ev.target.closest || !ev.target.closest('.stu-film__lanes')) { return; }
+          var r = lane().getBoundingClientRect();
+          if (ev.ctrlKey || ev.metaKey) {
+            ev.preventDefault();
+            F.zoomAt(ev.clientX, ev.deltaY < 0 ? 1.25 : 0.8);
+          } else if (ev.shiftKey || Math.abs(ev.deltaX) > Math.abs(ev.deltaY)) {
+            ev.preventDefault();
+            var d = ev.deltaX || ev.deltaY;
+            F.setView(viewFrom() + d / r.width * viewSpan(), viewSpan());
+          }
+        };
+
         var msAt = function (clientX) {
           var r = lane().getBoundingClientRect();
-          return Math.max(0, Math.min(1, (clientX - r.left) / r.width)) * total(score());
+          return viewFrom() + Math.max(0, Math.min(1, (clientX - r.left) / r.width)) * viewSpan();
         };
         var spanOp = function (w, value) {
           return { op: 'span', file: fileOf(score(), w.file), start: w.start, end: w.end, expect: w.text, value: value };
         };
 
+        /// The keyframes a box drag holds (PLAN-156 P6): a set of stop keys.
+        var multi = function () { return String(L().stuFilmMulti || '').split(' ').filter(Boolean); };
+        var marquee = function () { return document.querySelector('.stu-film__marquee'); };
+
         F.down = function (ev) {
           if (ev.button !== 0) { return; }
           var el = ev.target.closest && ev.target.closest('[data-film]');
+          var lanes = ev.target.closest && ev.target.closest('.stu-film__lanes');
+          // a drag from empty lane (or a channel's bar) draws a box around keyframes
+          if (lanes && (!el || (el.dataset.film === 'clip' && el.dataset.kind === 'channel'))) {
+            F.drag = { kind: 'marquee', x0: ev.clientX, y0: ev.clientY, add: ev.shiftKey, row: el && el.dataset.key, moved: false };
+            ev.preventDefault();
+            return;
+          }
           if (!el || !el.closest('.stu-film')) { return; }
           var kind = el.dataset.film, s = score();
           if (kind === 'ruler') {
@@ -510,10 +710,10 @@
             F.seek(msAt(ev.clientX));
           } else if (kind === 'clip' || kind === 'edge' || kind === 'key') {
             var key = el.dataset.key;
-            put('stuFilmSel', key);
+            F.select(key);
             F.drag = { kind: kind, key: key, el: el, x0: ev.clientX, moved: false };
           } else if (kind === 'row') {
-            put('stuFilmSel', el.dataset.key);
+            F.select(el.dataset.key);
           } else {
             return;
           }
@@ -525,17 +725,52 @@
           if (!d) { return; }
           if (d.kind === 'scrub') { F.seek(msAt(ev.clientX)); return; }
           var dx = ev.clientX - d.x0;
-          if (Math.abs(dx) > 2) { d.moved = true; }
-          d.el.style.setProperty('--stu-dx', dx + 'px');
+          if (Math.abs(dx) > 2 || (d.kind === 'marquee' && Math.abs(ev.clientY - d.y0) > 2)) { d.moved = true; }
+          if (d.kind === 'marquee') {
+            var box = marquee(), r = lane().getBoundingClientRect();
+            if (box && d.moved) {
+              box.style.left = (Math.min(d.x0, ev.clientX) - r.left) + 'px';
+              box.style.top = (Math.min(d.y0, ev.clientY) - r.top) + 'px';
+              box.style.width = Math.abs(dx) + 'px';
+              box.style.height = Math.abs(ev.clientY - d.y0) + 'px';
+              box.classList.add('is-on');
+            }
+            return;
+          }
+          // a selected keyframe moves the whole selection
+          var many = d.kind === 'key' && multi().indexOf(d.key) >= 0 ? multi() : [];
+          if (many.length) {
+            document.querySelectorAll('.stu-film__keys .stu-key').forEach(function (k) {
+              if (many.indexOf(k.dataset.key) >= 0) { k.style.setProperty('--stu-dx', dx + 'px'); }
+            });
+          } else {
+            d.el.style.setProperty('--stu-dx', dx + 'px');
+          }
         };
         F.up = function (ev) {
           var d = F.drag;
           F.drag = null;
           if (!d) { return; }
           if (d.kind === 'scrub') { var t = F.transport(); if (t && d.was) { t.play(); } return; }
+          if (d.kind === 'marquee') {
+            var box = marquee();
+            if (box) { box.classList.remove('is-on'); }
+            if (!d.moved) { put('stuFilmMulti', ''); if (d.row) { F.select(d.row); } return; }
+            var x1 = Math.min(d.x0, ev.clientX), x2 = Math.max(d.x0, ev.clientX);
+            var y1 = Math.min(d.y0, ev.clientY), y2 = Math.max(d.y0, ev.clientY);
+            var got = d.add ? multi() : [];
+            document.querySelectorAll('.stu-film__keys .stu-key').forEach(function (k) {
+              var b = k.getBoundingClientRect(), cx = b.left + b.width / 2, cy = b.top + b.height / 2;
+              if (cx >= x1 && cx <= x2 && cy >= y1 && cy <= y2 && got.indexOf(k.dataset.key) < 0) { got.push(k.dataset.key); }
+            });
+            put('stuFilmMulti', got.join(' '));
+            if (got.length) { F.select(got[got.length - 1]); }
+            return;
+          }
+          document.querySelectorAll('.stu-film__keys .stu-key').forEach(function (k) { k.style.removeProperty('--stu-dx'); });
           d.el.style.removeProperty('--stu-dx');
           if (!d.moved) { return; }
-          var s = score(), T = total(s), dms = (ev.clientX - d.x0) / lane().getBoundingClientRect().width * T;
+          var s = score(), T = total(s), dms = (ev.clientX - d.x0) / lane().getBoundingClientRect().width * viewSpan();
           var f = find(s, d.key);
           if (!f) { return; }
           var free = ev.shiftKey;
@@ -544,11 +779,19 @@
           } else if (d.kind === 'edge' && f.entry.for) {
             ST.stu.apply(spanOp(f.entry.for, fmtTime(snap(Math.max(100, (f.entry.for_ms || 0) + dms), free), f.entry.for.text)));
           } else if (d.kind === 'key' && f.kind === 'stop') {
-            var e = f.entry, len = e.for_ms != null ? e.for_ms : T - (e.at_ms || 0);
-            var pos = positions(f.channel.stops)[f.index] + dms / len;
-            var pct = Math.round(Math.max(0, Math.min(1, pos)) * 1000) / 10;
-            var st = f.stop;
-            ST.stu.apply(spanOp(st.span, st.value + ' at ' + pct + '%' + (st.easing ? ' ' + st.easing : '')));
+            // one keyframe, or every one the box holds: one transaction
+            var keys = multi().indexOf(d.key) >= 0 ? multi() : [d.key];
+            var edits = keys.map(function (k) {
+              var g = find(s, k);
+              if (!g || g.kind !== 'stop') { return null; }
+              var e = g.entry, len = e.for_ms != null ? e.for_ms : T - (e.at_ms || 0);
+              var pos = positions(g.channel.stops)[g.index] + dms / len;
+              var pct = Math.round(Math.max(0, Math.min(1, pos)) * 1000) / 10;
+              var st = g.stop;
+              return { file: fileOf(s, st.span.file), start: st.span.start, end: st.span.end, expect: st.span.text,
+                       text: st.value + ' at ' + pct + '%' + (st.easing ? ' ' + st.easing : '') };
+            }).filter(Boolean);
+            ST.stu.send('/__spacetime/rewrite', { entry: L().stuEntry, edits: edits }, 'Saved to ');
           }
         };
 
@@ -568,15 +811,171 @@
           else if (k === 'End') { F.seek(t.duration); }
           else if (k === 'i' || k === 'I') { F.loopIn = t.position; F.setLoop(); }
           else if (k === 'o' || k === 'O') { F.loopOut = t.position; F.setLoop(); }
-          else if (k === 'Escape' && (F.loopIn != null || F.loopOut != null)) { F.loopIn = F.loopOut = null; F.setLoop(); }
           else if (k === 'p' || k === 'P') { ST.stuFilmPickTool(); }
+          else if (k === 'c' || k === 'C') { F.editorCam(!F.ed); }
+          else if (k === 'f' || k === 'F') { F.frame(); }
+          else if (k === 'm' || k === 'M') { F.moveTool(!F.moveOn); }
+          // the view: \ fits the film, = and - zoom about the playhead
+          else if (k === '\\') { F.fit(); }
+          else if (k === '=' || k === '+' || k === '-') {
+            var r = lane().getBoundingClientRect();
+            F.zoomAt(r.left + (t.position - viewFrom()) / viewSpan() * r.width, k === '-' ? 0.8 : 1.25);
+          }
+          // Escape leaves the most transient thing first: the tool, the loop, the selection
           else if (k === 'Escape' && F.pickOn) { ST.stuFilmPickTool(); }
+          else if (k === 'Escape' && (F.loopIn != null || F.loopOut != null)) { F.loopIn = F.loopOut = null; F.setLoop(); }
+          else if (k === 'Escape' && multi().length) { put('stuFilmMulti', ''); }
+          else if (k === 'Escape' && L().stuFilmSel) { F.select(''); }
           else { hit = false; }
           if (hit) { ev.preventDefault(); ev.stopPropagation(); }
         };
 
         // Actions the panels call through `$stuNoop <- ST.stuFilmX($)`.
         ST.stuFilmToggle = function () { F.toggle(); return ''; };
+        ST.stuFilmFit = function () { F.fit(); return ''; };
+
+        // ---- the editor camera and the move tool (PLAN-156 P8) ---------------------------
+        // The stage is seen through a free camera (orbit: drag; pan: right-drag;
+        // dolly: wheel) while the film's camera keeps following the score. C
+        // toggles it, F frames the selected part. With M, dragging the selected
+        // part moves it over the ground (Shift: up and down); on release its
+        // position is written, as words (or as the stop at the playhead when the
+        // score drives it).
+        F.editorCam = function (on) {
+          var st = F.stage();
+          if (!st || !st.THREE || !st.renderer || !st.view) { return; }
+          if (on && !F.ed) {
+            var cam = st.camera.clone();
+            // the film's own layers (its titles) sit over the canvas: the camera
+            // listens on the studio's hit layer, laid over the canvas while a 3D
+            // tool is on
+            var ctl = new st.THREE.addons.OrbitControls(cam, document.querySelector('.stu-3d-hit') || st.renderer.domElement);
+            ctl.enablePan = true; ctl.enableZoom = true; ctl.enableDamping = false;
+            var dir = new st.THREE.Vector3();
+            st.camera.getWorldDirection(dir);
+            ctl.target.copy(st.camera.position).addScaledVector(dir, 8);
+            ctl.update();
+            ctl.addEventListener('change', function () { st.draw(); });
+            F.ed = { cam: cam, ctl: ctl };
+            st.view(cam);
+          } else if (!on && F.ed) {
+            F.ed.ctl.dispose();
+            F.ed = null;
+            st.view(null);
+          }
+          put('stuFilmCam', F.ed ? 'Editor camera' : 'Film camera');
+          F.syncHit();
+        };
+        /// Lay the hit layer over the stage's canvas while a 3D tool is on.
+        F.syncHit = function () {
+          var on = !!(F.ed || F.moveOn), hit = document.querySelector('.stu-3d-hit'), st = F.stage();
+          document.documentElement.classList.toggle('stu-3d-tools', on);
+          if (!on || !hit || !st || !st.renderer) { return; }
+          var r = st.renderer.domElement.getBoundingClientRect();
+          hit.style.left = r.left + 'px'; hit.style.top = r.top + 'px';
+          hit.style.width = r.width + 'px'; hit.style.height = r.height + 'px';
+        };
+        ST.stuFilmCamToggle = function () { F.editorCam(!F.ed); return ''; };
+        /// Bring the selected part into the editor camera's view.
+        F.frame = function () {
+          var st = F.stage(), sel = L().stuFilmSel || '';
+          if (!st || sel.indexOf('part:') !== 0) { return; }
+          var pt = F.stagePart(score(), +sel.split(':')[1]);
+          if (!pt || !pt.obj) { return; }
+          if (!F.ed) { F.editorCam(true); }
+          var T3 = st.THREE, box = new T3.Box3().setFromObject(pt.obj);
+          var c = box.getCenter(new T3.Vector3()), size = Math.max(0.5, box.getSize(new T3.Vector3()).length());
+          var dir = new T3.Vector3().subVectors(F.ed.cam.position, F.ed.ctl.target).normalize();
+          F.ed.ctl.target.copy(c);
+          F.ed.cam.position.copy(c).addScaledVector(dir, size * 1.8);
+          F.ed.ctl.update();
+          st.draw();
+        };
+
+        /// Does a 3D tool of the film own this pointer event (a click on the stage)?
+        F.ownsPointer = function (ev) {
+          var t = ev.target && ev.target.closest && (ev.target.closest('.stu-3d-hit') || ev.target.closest('canvas'));
+          return !!((F.ed || F.moveOn) && t && (t._stThree || t.classList.contains('stu-3d-hit')));
+        };
+        F.moveTool = function (on) {
+          F.moveOn = !!on;
+          put('stuFilmMoveOn', F.moveOn);
+          document.documentElement.classList.toggle('stu-moving', F.moveOn);
+          F.syncHit();
+        };
+        ST.stuFilmMoveToggle = function () { F.moveTool(!F.moveOn); return ''; };
+        var selectedPart = function () {
+          var sel = L().stuFilmSel || '';
+          return sel.indexOf('part:') === 0 ? F.stagePart(score(), +sel.split(':')[1]) : null;
+        };
+        F.moveDown = function (ev) {
+          if (!F.moveOn || ev.button !== 0 || inStudioUi(ev.target)) { return; }
+          var st = F.stage(), pt = selectedPart(), hit = F.pickAt(ev);
+          if (!st || !pt || hit !== pt) { return; }
+          var T3 = st.THREE, cam = st.looking();
+          // the plane the part moves in: the ground through it, or (Shift) the
+          // upright plane facing the camera
+          var normal = ev.shiftKey ? cam.getWorldDirection(new T3.Vector3()).setY(0).normalize().negate() : new T3.Vector3(0, 1, 0);
+          var plane = new T3.Plane().setFromNormalAndCoplanarPoint(normal, pt.obj.position);
+          var at = F.ray.ray.intersectPlane(plane, new T3.Vector3());
+          if (!at) { return; }
+          F.moving = { pt: pt, plane: plane, at: at, from: pt.obj.position.clone(), up: ev.shiftKey };
+          if (F.ed) { F.ed.ctl.enabled = false; }
+          ev.preventDefault();
+          ev.stopImmediatePropagation();
+        };
+        F.moveMove = function (ev) {
+          var m = F.moving;
+          if (!m) { return; }
+          var st = F.stage();
+          F.pickAt(ev); // aims F.ray through the pointer
+          var now = F.ray.ray.intersectPlane(m.plane, new st.THREE.Vector3());
+          if (!now) { return; }
+          var d = now.sub(m.at);
+          if (m.up) { d.set(0, d.y, 0); } else { d.y = 0; }
+          m.pt.obj.position.copy(m.from).add(d);
+          m.delta = d;
+          st.draw();
+          ev.preventDefault();
+          ev.stopImmediatePropagation();
+        };
+        F.moveUp = function (ev) {
+          var m = F.moving;
+          if (!m) { return; }
+          F.moving = null;
+          if (F.ed) { F.ed.ctl.enabled = true; }
+          ev.preventDefault();
+          ev.stopImmediatePropagation();
+          if (!m.delta || m.delta.length() < 1e-4) { return; }
+          var round = function (v) { return Math.round(v * 1000) / 1000; };
+          var axes = { posX: m.delta.x, posY: m.delta.y, posZ: m.delta.z };
+          var fields = ST.stuPartFields(L().stuFilmSel, score(), L().stuReflect);
+          var flat = [];
+          fields.forEach(function (f) { if (f.parts) { flat = flat.concat(f.parts); } else { flat.push(f); } });
+          var edits = [], inserts = [], last = null;
+          Object.keys(axes).forEach(function (axis) {
+            var d = axes[axis], f = flat.find(function (x) { return x.label === axis; });
+            if (!f || Math.abs(d) < 1e-4) { return; }
+            var v = String(round(Number(f.value) + d));
+            if (f.drive) {
+              var e = F.stopEdit(f.drive, String(round(m.from[axis.slice(-1).toLowerCase()] + d)));
+              if (e) { edits.push(e); }
+            } else if (f.written) {
+              edits.push({ file: f.file, start: f.start, end: f.end, expect: f.expect, text: v });
+            } else if (f.at === 'after') {
+              inserts.push(axis + ': ' + v);
+              last = f;
+            }
+          });
+          if (inserts.length && last) {
+            // the params still to write go after the last written one, in one edit
+            // (folded into that param's own edit when it moves too)
+            var mine = edits.find(function (e) { return e.start === last.start && e.end === last.end; });
+            if (mine) { mine.text += ', ' + inserts.join(', '); }
+            else { edits.push({ file: last.file, start: last.start, end: last.end, expect: last.expect, text: last.expect + ', ' + inserts.join(', ') }); }
+          }
+          if (edits.length) { ST.stu.send('/__spacetime/rewrite', { entry: L().stuEntry, edits: edits }, 'Saved to '); }
+        };
         ST.stuFilmGo = function (el) {
           var t = F.transport(), a = el.dataset.go;
           if (a === 'start') { F.seek(0); } else if (a === 'end') { F.seek(t ? t.duration : 0); }
@@ -608,7 +1007,7 @@
           ST.stu.apply({ op: 'source', file: d.path, base: d.hash, text: area.value });
           return '';
         };
-        ST.stuFilmPick = function (el) { put('stuFilmSel', el.dataset.key); return ''; };
+        ST.stuFilmPick = function (el) { F.select(el.dataset.key); return ''; };
 
         // ---- 4. sound: waveforms from the synthesizer itself ----------------------------
 
@@ -658,15 +1057,30 @@
           try { saved = JSON.parse(sessionStorage.getItem('stu.film') || 'null'); sessionStorage.removeItem('stu.film'); } catch (e) {}
           if (!saved || Date.now() - saved.at > 60000) { return; }
           var tries = 0;
+          F.restoring = true;
           var go = function () {
             // the film's timeline and the studio's own state (its score) are both up
             var t = F.transport();
             if ((!t || !L().stuScore) && tries++ < 200) { setTimeout(go, 50); return; }
+            F.restoring = false;
             if (!t) { return; }
             if (!saved.playing) { t.pause(); }
             t.seek(saved.t);
             F.loopIn = saved.loopIn; F.loopOut = saved.loopOut; F.setLoop();
-            if (saved.sel) { put('stuFilmSel', saved.sel); }
+            if (saved.sel) { F.select(saved.sel); }
+          };
+          go();
+        };
+
+        /// Opening the studio on a film that has played to its end shows its
+        /// first frame, not its last: a restore (after an edit's reload) wins.
+        F.rewind = function () {
+          var tries = 0;
+          var go = function () {
+            var t = F.transport();
+            if (!t && tries++ < 100) { setTimeout(go, 50); return; }
+            if (!t || F.restoring) { return; }
+            if (!t.playing && t.position >= t.duration - 1) { t.seek(0); }
           };
           go();
         };
@@ -688,16 +1102,21 @@
           dispatchEvent(new Event('resize'));
           var m = on ? 'addEventListener' : 'removeEventListener';
           document[m]('pointerdown', F.down, true);
+          document[m]('wheel', F.wheel, { capture: true, passive: false });
           document[m]('pointermove', F.move, true);
           document[m]('pointerup', F.up, true);
           document[m]('keydown', F.key, true);
           // the Select tool runs before the page's own studio canvas (window capture)
           window[m]('pointermove', F.pickMove, true);
+          window[m]('pointerdown', F.moveDown, true);
+          window[m]('pointermove', F.moveMove, true);
+          window[m]('pointerup', F.moveUp, true);
           window[m]('click', F.pickClick, true);
           document[m]('pointerover', F.listOver, true);
           document[m]('pointerout', F.listOut, true);
           if (!on && F.pickOn) { ST.stuFilmPickTool(); }
           if (on) {
+            F.rewind();
             F.raf = requestAnimationFrame(tick);
             setTimeout(F.paintWaves, 60);
           } else {
@@ -706,7 +1125,7 @@
         };
         // every way the page goes (a deferred reload included) passes here
         addEventListener('pagehide', function () { if (F.on) { F.remember(); } });
-        addEventListener('resize', function () { if (F.on) { F.paintWaves(); } });
+        addEventListener('resize', function () { if (F.on) { F.paintWaves(); F.syncHit(); } });
         F.restore();
       })();
     }

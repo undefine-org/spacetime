@@ -125,9 +125,24 @@
           });
         };
 
+        /// The selected element, from the selection itself: the cached element
+        /// while it is in the page, else the path it was described by (a hot
+        /// patch or a re-render replaces nodes without a new selection).
+        var elOf = function (sel) {
+          if (!sel) { return null; }
+          if (S.el && S.el.isConnected) { return S.el; }
+          try { return (S.el = document.querySelector(sel.path)); } catch (e) { return null; }
+        };
+        /// Forget the page selection without touching the film's (the film calls it).
+        S.forget = function () {
+          S.el = null; S.selRow = null;
+          put('stuSel', null); put('stuSelKey', '');
+          S.paint();
+        };
+
         ST.stuRules = function (sel, o) {
           var out = [];
-          var el = S.el;
+          var el = elOf(sel);
           if (!sel || !el || !o || !o.rules) { return out; }
           o.rules.forEach(function (r) {
             var hit = false;
@@ -147,7 +162,7 @@
         var px = function (v) { var n = parseFloat(v); return isNaN(n) ? v : (Math.round(n * 10) / 10) + ''; };
 
         ST.stuBox = function (sel) {
-          var el = S.el;
+          var el = elOf(sel);
           if (!sel || !el || !el.isConnected) { return []; }
           var cs = getComputedStyle(el);
           var r = el.getBoundingClientRect();
@@ -275,6 +290,8 @@
 
         S.select = function (el) {
           S.el = el || null;
+          // a page selection clears the film's: the inspector shows one thing
+          if (el) { put('stuFilmSel', ''); }
           S.selRow = el ? S.rowOf(el) : null;
           put('stuSel', el ? describe(el) : null);
           put('stuSelKey', el ? S.keyFor(el) : '');
@@ -302,16 +319,22 @@
 
         S.queue = Promise.resolve();
         S.apply = function (op) {
-          var body = Object.assign({ entry: entry() }, op);
+          return S.send('/__spacetime/studio/apply', Object.assign({ entry: entry() }, op), 'Saved to ');
+        };
+        /// Undo the last edit (any tool's: the dev server keeps one journal).
+        S.undo = function () { return S.send('/__spacetime/rewrite/undo', {}, 'Undone in '); };
+
+        /// Send a write to the dev server, then take it in place or reload.
+        S.send = function (url, body, done) {
           put('stuError', '');
           put('stuStatus', 'Saving...');
           S.inflight++;
           S.queue = S.queue.then(S.hotBaseline).then(function () {
-            return fetch('/__spacetime/studio/apply', {
+            return fetch(url, {
               method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
             }).then(function (r) { return r.json(); }).then(function (res) {
               if (res.ok) {
-                put('stuStatus', res.changed && res.changed.length ? 'Saved to ' + res.changed.join(', ') : 'No change');
+                put('stuStatus', res.changed && res.changed.length ? done + res.changed.join(', ') : 'Nothing to change');
                 if (res.changed && res.changed.length) {
                   S.remember();
                   // An edit the running page can take IN PLACE (PLAN-155: only
@@ -326,7 +349,7 @@
                     if (live) {
                       S.hotDone = Date.now();
                       S.pendingReload = false;
-                      put('stuStatus', 'Saved to ' + res.changed.join(', ') + ' - live');
+                      put('stuStatus', done + res.changed.join(', ') + ' - live');
                     } else {
                       setTimeout(function () {
                         if (S.inflight || S.editing) { S.pendingReload = true; } else { location.reload(); }
@@ -383,7 +406,7 @@
         };
         /// Re-read the outline and the film's shape into the panels.
         S.refresh = function () {
-          [['stuOutline', '/__spacetime/studio/outline.json?entry='], ['stuScore', '/__spacetime/studio/score.json?entry=']].forEach(function (src) {
+          [['stuOutline', '/__spacetime/studio/outline.json?entry='], ['stuScore', '/__spacetime/studio/score.json?entry='], ['stuReflect', '/__spacetime/reflect.json?entry=']].forEach(function (src) {
             fetch(src[1] + encodeURIComponent(entry())).then(function (r) { return r.json(); }).then(function (v) { put(src[0], v); }).catch(function () {});
           });
         };
@@ -659,6 +682,8 @@
           up: function () { if (S.drag) { S.endDrag(); } },
           click: function (ev) {
             if (inUi(ev.target) || (passThrough(ev) && !S.editing)) { return; }
+            // the film's 3D tools (its editor camera, its move tool) own the stage's canvas
+            if (ST.stuFilm && ST.stuFilm.ownsPointer && ST.stuFilm.ownsPointer(ev)) { return; }
             if (S.editing && S.editing.el.contains(ev.target)) {
               if (ev.target.closest('a')) { ev.preventDefault(); }
               return;
@@ -681,9 +706,17 @@
               return;
             }
             if (inUi(ev.target) || /INPUT|TEXTAREA|SELECT/.test(ev.target.tagName)) { return; }
+            // Ctrl/Cmd+Z: the last edit comes back out of the source (a field
+            // being typed in keeps its own undo: the guard above)
+            if ((ev.metaKey || ev.ctrlKey) && !ev.shiftKey && (ev.key === 'z' || ev.key === 'Z')) {
+              ev.preventDefault();
+              S.undo();
+              return;
+            }
             if (!ev.metaKey && !ev.ctrlKey && !ev.altKey) {
               if (ev.key === 'v' || ev.key === 'V') { put('stuToolName', 'Select'); }
-              if (ev.key === 'i' || ev.key === 'I') { put('stuToolName', 'Interact'); }
+              // with the film open, I marks the loop's in point (the film's keys run first)
+              if ((ev.key === 'i' || ev.key === 'I') && !document.documentElement.classList.contains('stu-film-on')) { put('stuToolName', 'Interact'); }
             }
             if (ev.key === 'Escape') { S.select(S.el && S.el.parentElement !== document.body ? S.el.parentElement : null); }
             if (ev.key === 'Enter' && S.el) { ev.preventDefault(); S.beginEdit(S.el); }

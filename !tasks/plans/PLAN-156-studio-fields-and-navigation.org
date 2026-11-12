@@ -41,14 +41,110 @@ window, the commit routing, multi-select) and the open decisions live in
 - Evidence: 249 params declared twice, 11 disagree; 1,319 JSDoc-style tag lines; light.st's own
   =@example= (=@light ambient(...)=) builds a =directional= light with no warning.
 
+* Found on the way (compiling every stdlib example)
+Real bugs the compiled examples exposed; not fixed in this plan. Each one's example stays in the
+=examples::tests= known-broken list, with its reason, until it is fixed.
+- =@cleanup= (stdlib/testing/test.st), =@fn= and =@compute= (stdlib/macros/type-data.st): a ={ $x:expr }= body capture
+  keeps the opening ={= and drops the closing one (=push(() => { { … });=, E0952).
+- =@test-behavior= (test.st): every transition syntax compiles the enclosing =@test= to nothing, without a diagnostic.
+- =@given-data= (test.st): =@given $x = …= always loses to the selector form of =@given= (E0946).
+- =@for-range=, =@repeat=, =@conditional= (stdlib/macros/each.st): no =%binds=/=%emit= (E0956; =@conditional= is
+  BUG-362).
+- =@fade-in-stagger= (stdlib/macros/fade-in.st): its =$_childSelector:selector= body capture never receives tokens.
+- =@template-inline= (stdlib/macros/template.st): =&name(…) { … }= at file level is E0925 (body scope not built).
+- stdlib/macros/websocket.st names capture types that are never declared (=message_handlers=, =statements=,
+  =channel_messages=, =type_fields=, =object=).
+- =@localStorage= (stdlib/macros/bindings.st): =$cart string[]: localStorage("k", [])= compiles to the string
+  ="localStorage"=; the macro never applies.
+- A comma inside an array literal in a declaration fails to parse (=.p { $items number[]: [1, 2]; }=).
+- =@light { … }= (responsive light-mode) is taken by the 3D =@light= (E0804); pre-existing: the last commit fails
+  =integration::responsive_nested_directives::light_with_nested_loop_emits_guarded_js= too.
+- =@each(…, key: …)= with =:entering=/=:exiting= is E0946 (either alone works).
+- =@on-mutation= compiles to a "missing required element" error at runtime.
+- =@enable_signal_tracking= uses =__ctx.cleanup= before it exists; =@enable_state_tracking= patches a function nothing
+  defines.
+
 * Work
-** TODO P0 bugs from the review
-** TODO P1 reflect and rewrite
-** TODO P2 the migration engine learns the stdlib
-** TODO P3 waves 1-3: docs, examples, params once
-** TODO P4 types: choices, scalar rows, vectors, facts, stops
-** TODO P5 widgets and one inspector
-** TODO P6 one selection, one commit, edit many
-** TODO P7 timeline navigation
-** TODO P8 3D navigation
+** DONE P0 bugs from the review
+- The inspector follows a film selection: =StuSelection= gains =Film=; the header shows the film label and the
+  empty state hides. A page selection and a film selection clear each other (=F.select=, =S.forget=).
+- The selected keyframe, clip and row are marked (=data-selected=; =@each= booleans render as ="true"/"false"=).
+- Opening the studio on a film parked at its end shows its first frame (=F.rewind=; a restore wins).
+- Not a duration mismatch (the review's guess): the lanes ran flush to the panel edge, hiding the last second.
+  They now stop 16px short.
+- A channel's bar no longer prints its stop chain under its keyframes (values on hover and in the inspector).
+- Escape leaves the tool, then the loop, then the selection; with the film open, I marks the loop's in point and
+  no longer also switches the page studio to Interact.
+- =stuRules= / =stuBox= find the element from the selection's path when the cached one has left the page.
+- Validator: a param filled from its form's default is not judged (=@resize(min: 10px)= failed E0967 on its
+  default =max: none=); =max= is declared optional. Test: =tests/body_property_e2e_test.rs=.
+- e2e: =tests/studio/film_studio_e2e.sh= 30/30 (8 new checks).
+** DONE P1 reflect and rewrite
+- =src/reflect=: one projection of a page (=GET /__spacetime/reflect.json=, MCP =st_reflect=): every form match
+  with its macro, =///= doc, declared params (type, default, doc, scalar row, choices; written words + span or
+  =null=), resolved =%registers= entries, nested children. No macro name in Rust. The page's imported
+  declarations (=stdlib/3d=) take part in matching.
+- =src/rewrite=: the one writer (=POST /__spacetime/rewrite=, =/undo=, MCP =st_rewrite=/=st_undo=): guarded
+  edits, no overlap, refuses a file that would stop parsing, atomic writes, an undo journal. The studio's gesture
+  ops and =spacetime migrate= write through it; Ctrl/Cmd+Z in the studio undoes any writer's last commit.
+- Spans: a scalar capture's span is its words (=@light &sun (…)='s =$named= used to cover the whole call).
+- Docs: =docs/language/reflect-and-rewrite.md=.
+** DONE P2 the migration engine learns the stdlib
+- =%migration … { %scope meta  %transform <name> }=: meta waves rewrite declarations with built-in transforms
+  (=src/migrate/meta.rs=: =docs-onto-declarations=, =examples-to-clauses=, =forward-binds=), through
+  =rewrite::apply=; a file a wave would break is left as it was and reported; idempotent.
+- =spacetime migrate <dir> --meta= (the stdlib); project =%macro=s take the waves with =spacetime migrate=.
+- Three capsules, wave 2026-11-10. Docs: =docs/language/migrations.md= (Meta waves).
+** DONE P3 waves 1-3: docs, examples, params once
+- Language: =///= above a =%form= param / primitive param / =%exports= entry / keyword documents it
+  (=FormParam.doc=); =%example "title" { … }= (=MacroDefAst.examples=), compiled by =spacetime check --examples=
+  (=src/examples.rs=: an example must compile and still use its macro); =...= in =%binds= forwards every named form
+  param (desugared at parse time).
+- Applied to the stdlib: 197 files; =@param= 692 → 1 (a migration's own text), =@yields= 307 → 0, =@example= 320 →
+  30 (module headers and primitives no single macro binds), 291 =%example= clauses, 39 =...= spreads.
+- 210 of 291 examples held on the first compile; the rest were rotten docs (retired syntax, fragments, prose read
+  as code), rewritten; 12 stay failing because their MACRO is broken (« Found on the way »), pinned by a ratchet
+  in =examples::tests=.
+** DOING P4 types: choices, scalar rows, vectors, facts, stops
+- A written value must be of its param's type (an unknown word used to vanish: =@resize(direction: sideways)=).
+- Keyword sets: a =%capture_type= that is a choice of words is the inline union's twin (bare or quoted, one
+  value), with a =///= per word. =light_kind=, =object_shape=, =object_material=, =stage_tone=, =scroll_drive=.
+- Scalar rows type params: =$x:unit= matches as the row's =%capture= (=number=); rows gain =%range %step %unit=;
+  new rows =unit intensity meters degrees=. 3D params typed with them.
+- Facts: =%facts src gltf-clips= on the =model_clip= row; E0971 refuses a clip the model file lacks (with the
+  file's clips and a « did you mean »); reflect offers the file's clips as choices (=src/facts.rs=).
+- =%registers part(…)= on =@light=, =@object=, =@gltf=; =timeline= on =@score=; =motion= (with its driver) on
+  =@on= bodies.
+- Shorthands: =%shorthand pos { posX posY posZ }= — =pos: 0 3 -7= is the longhands in the IR, CSS order rules,
+  each longhand's span is its own word. On =@object= (pos, rotate, scale, spin), =@light= (pos, target), =@gltf=,
+  =@stage= (cam). Not done: a shorthand in a score channel (=pos: 0 0 0 -> 0 0 6=).
+- Not done: stops as a =%capture_type= (L7) and lossless spans for =@data= and markup (L8): both rewrite the
+  compiler's core keyframe and markup paths; until then =src/studio/score.rs= and the outline readers stay.
+- Fixed on the way: the validator judged defaults the author never wrote (=@resize(min: 10px)= → E0967).
+** DONE P5 widgets (the studio's part inspector)
+- =stdlib/widgets= (=@import "stdlib/widgets"=): =@template &w-number &w-range &w-color &w-toggle &w-choice &w-text
+  &w-vec3=, and the =@scrub= behavior (drag a label). A field rides its address; one handler writes it through
+  =/__spacetime/rewrite=, keeping the author's spelling.
+- The film inspector draws a part's params from reflect: widget from the scalar row (=%widget=) or =choice=; a
+  keyword set's words with their docs; a typed number's range/step/unit; a model's clips from its file; a
+  shorthand's longhands on one row; defaults greyed; the =///= doc as the label's tooltip.
+- Not done: the admin drawer still renders its own =&fld-*= (Q3 said yes; left for a follow-up), and the page
+  inspector's fields (=@data= rows, CSS rules) still use their own inputs.
+** DONE P6 driven fields, edit many
+- A param a score channel animates is marked ◆; an edit keys the stop at the playhead (or adds one between
+  stops), never the rest value (=F.stopEdit=).
+- A box drag on empty lane selects keyframes (Shift adds); dragging one moves all, in one transaction.
+- Not done: multi-selected PARTS with mixed values (the dossier's =many= cell) — parts are still selected one at
+  a time.
+** DONE P7 timeline navigation
+- A view window: Ctrl+wheel zooms about the cursor, Shift+wheel pans, === / =-= zoom about the playhead, =\= and
+  Fit show the film. The view model stays in percent of the film; the track is widened and shifted by two CSS
+  variables. Ruler ticks follow the zoom (50 ms to 60 s). Not done: the overview strip, snapping to beats.
+** DONE P8 3D navigation
+- The stage can be seen through a tool's camera (=ctx.view(cam)=, =ctx.looking()=; bloom's render pass follows).
+- Film camera ↔ editor camera (C): OrbitControls on a free camera, the film's camera keeps following the score;
+  F frames the selection; a hit layer over the canvas (the film's titles cover it).
+- Move (M): drag the selected part over the ground (Shift: vertical); on release its position words are written,
+  or the stops at the playhead when the score drives them; unwritten axes go after the last written param.
+- Not three's TransformControls gizmo: it isn't in the vendored bundle, and rebundling three is a churn diff.
 ** TODO P9 delete src/studio, split the kits
