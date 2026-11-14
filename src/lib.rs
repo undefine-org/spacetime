@@ -75,6 +75,7 @@ pub mod build_runtime;
 #[cfg(feature = "cdp")]
 pub mod cdp;
 pub mod render;
+mod assets;
 pub mod cli;
 pub mod color;
 /// Structured comments (PLAN-123): THE `//@` scanner, the record model, and

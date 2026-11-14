@@ -9,8 +9,8 @@
 /// pattern reused for a media entity).
 ///
 /// Under the browser's `.time` transport the audio plays in real time and seeks
-/// on scrub; under a virtual clock (render) it stays muted geometry — the mux is
-/// a render-side follow-up. Either way the score, not the audio, owns the clock.
+/// on scrub; under a virtual clock (render) it stays silent — the renderer
+/// mixes the same recorded clip into its soundtrack. The score owns the clock.
 
 %primitive score-audio(
   /// the score's scope owner (the transport signal resolves here)
@@ -54,13 +54,24 @@
     if (typeof ST === 'undefined' || !ST.watchScoped) { %yield true -> $ready; return; }
 
     // The score's progress (0..1) maps to a wall-clock time in the audio's own
-    // seconds: audioTime = (progress * total - at) / 1000. Seek to it whenever
-    // the score advances; play while the audio's window is live.
-    let lastSeek = -1;
+    // seconds: audioTime = (progress * total - at) / 1000. Progress alone
+    // cannot distinguish a scrub from playback; use the playing signal too.
+    const virtual = () => ST._clock && ST._clock.virtual;
+    let held = false, audioSec = -1;
+    const syncPlayback = () => {
+      if (held || virtual() || audioSec < 0 || audioSec >= (audio.duration || Infinity)) {
+        audio.pause();
+        return;
+      }
+      if (audio.paused) {
+        const pr = audio.play();
+        if (pr && pr.catch) pr.catch(() => {});
+      }
+    };
     ST.watchScoped(root, %progress, (p) => {
       const prog = typeof p === 'number' ? p : 0;
       const scoreMs = prog * totalMs;
-      const audioSec = (scoreMs - atMs) / 1000;
+      audioSec = (scoreMs - atMs) / 1000;
       // Record the intended playhead for tests/tools: currentTime clamps to the
       // real clip duration, but this is the transport-derived seek target.
       audio._stSeekTarget = audioSec;
@@ -69,19 +80,18 @@
       if ('rate' in channels) audio.playbackRate = Math.max(0.0625, num(channels.rate, 1));
       if (audioSec < 0) {
         // Before this audio's start: keep it paused at 0.
-        if (!audio.paused) audio.pause();
+        audio.pause();
         return;
       }
       // Seek to follow the transport (only when it drifts, to avoid stutter).
       if (Math.abs(audio.currentTime - audioSec) > 0.15 && isFinite(audioSec)) {
         try { audio.currentTime = audioSec; } catch (_e) {}
       }
-      // Play while live and the page is actually advancing (a scrub sets
-      // progress without playing; a real transport advances continuously).
-      if (audio.paused && audioSec < (audio.duration || Infinity)) {
-        const pr = audio.play();
-        if (pr && pr.catch) pr.catch(() => {}); // autoplay policy: ignore rejection
-      }
+      syncPlayback();
+    });
+    ST.watchScoped(root, %progress + '__playing', (on) => {
+      held = on === false;
+      syncPlayback();
     });
 
     %yield true -> $ready;

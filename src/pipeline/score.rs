@@ -1647,7 +1647,7 @@ fn audio_entries(entries: Option<&CapturedValue>) -> Vec<AudioEntry> {
                     let src = audio.get("src").and_then(|v| text_of(v.clone())).unwrap_or_default();
                     let name = audio
                         .get("name")
-                        .and_then(|v| text_of(v.clone()))
+                        .and_then(element_name)
                         .map(|n| n.trim_start_matches('&').to_string())
                         .unwrap_or_default();
                     // The `at` measure is a nested record; find its ms value.
@@ -1818,7 +1818,7 @@ fn synth_program(
     Some(serde_json::json!({ "total": total, "sounds": sounds, "forms": forms }))
 }
 
-/// Every `@score`'s synth program on the page (PLAN-152) — what `render`
+/// Every `@score`'s recorded clips and synth program — what `render`
 /// writes into the film's soundtrack, read from the SAME merged tree the
 /// compiler emits from (as [`declared_score_totals`] reads lengths).
 pub fn declared_soundtracks(matches: &[crate::syntax::FormMatch], registry: &MetaRegistry) -> Vec<serde_json::Value> {
@@ -1826,8 +1826,13 @@ pub fn declared_soundtracks(matches: &[crate::syntax::FormMatch], registry: &Met
     for m in matches {
         if m.matched_macro.as_deref() == Some("score-block") {
             let total = driver_duration(&m.captures).unwrap_or(0.0);
-            if let Some(p) = synth_program(m.captures.get("entries"), matches, registry, total) {
-                out.push(p);
+            let entries = m.captures.get("entries");
+            let audio = audio_entries(entries);
+            let synth = synth_program(entries, matches, registry, total);
+            if synth.is_some() || !audio.is_empty() {
+                let mut program = synth.unwrap_or_else(|| serde_json::json!({ "total": total, "sounds": [], "forms": {} }));
+                program["audio"] = audio.iter().map(|a| serde_json::json!({ "src": a.src, "name": a.name, "at": a.at_ms })).collect();
+                out.push(program);
             }
         }
     }

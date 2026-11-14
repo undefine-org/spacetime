@@ -1,14 +1,14 @@
-/// Reference tokens. The launch film's palette and Arial-compatible typography
+/// Reference tokens. The launch film's palette and public X VF brand typography
 /// are intentional; change these once to reskin every scene and component.
-@font("Launch Sans") { src: url("assets/fonts/Arimo.ttf") format("truetype"); font-weight: 400 700; font-display: block; }
+@font("Launch Sans") { src: url("assets/fonts/XVF.woff2") format("woff2"); font-weight: 100 900; font-display: block; }
 @font("Launch Serif") { src: url("assets/fonts/Tinos.ttf") format("truetype"); font-weight: 400; font-display: block; }
 :root {
-  --film-paper: #ffffff;
+  --film-paper: #fdfdfd;
   --film-ink: #101111;
-  --film-blue: #168bfa;
-  --film-mint: #00c8a1;
+  --film-blue: #0f83fd;
+  --film-mint: #00bba5;
   --film-orange: #ff7900;
-  --film-red: #f00043;
+  --film-red: #fd243b;
   --film-purple: #773de8;
   --film-cloud: #e9f4fc;
   --film-peach: #fcf1e8;

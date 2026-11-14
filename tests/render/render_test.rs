@@ -117,10 +117,18 @@ fn frame_pixels(path: &Path, index: u32) -> Vec<u8> {
 }
 
 fn frame_md5(path: &Path, index: u32) -> String {
-    let mut h = Command::new("md5sum").stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).spawn().unwrap();
+    let mut h = Command::new("md5sum")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
     std::io::Write::write_all(h.stdin.as_mut().unwrap(), &frame_pixels(path, index)).unwrap();
     let out = h.wait_with_output().unwrap();
-    String::from_utf8_lossy(&out.stdout).split_whitespace().next().unwrap().to_string()
+    String::from_utf8_lossy(&out.stdout)
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .to_string()
 }
 
 /// MOTION: do frames `a` and `b` differ beyond pixel noise? (Any difference in
@@ -350,7 +358,11 @@ fn scratch_dir(tag: &str) -> PathBuf {
 /// PNG dimensions from the IHDR chunk (bytes 16..24: width, height BE u32).
 fn png_dims(path: &Path) -> (u32, u32) {
     let d = std::fs::read(path).expect("read png");
-    assert!(d.len() > 24 && &d[1..4] == b"PNG", "not a PNG: {}", path.display());
+    assert!(
+        d.len() > 24 && &d[1..4] == b"PNG",
+        "not a PNG: {}",
+        path.display()
+    );
     let w = u32::from_be_bytes([d[16], d[17], d[18], d[19]]);
     let h = u32::from_be_bytes([d[20], d[21], d[22], d[23]]);
     (w, h)
@@ -398,7 +410,11 @@ fn w11_dpr_scales_the_captured_pixels() {
     let paths = render_stills(&fixture("film.st"), &opts)
         .unwrap_or_else(|e| panic!("dpr stills render failed: {e}"));
     let (w, h) = png_dims(&paths[0]);
-    assert_eq!((w, h), (640, 360), "dpr 2 must render at 2x the pixels, got {w}x{h}");
+    assert_eq!(
+        (w, h),
+        (640, 360),
+        "dpr 2 must render at 2x the pixels, got {w}x{h}"
+    );
     std::fs::remove_dir_all(&dir).ok();
 }
 
@@ -422,4 +438,147 @@ fn w11_from_to_window_trims_the_render() {
         "a [1s,2s] window at 10fps is 10 frames — a full-score render would be 20"
     );
     std::fs::remove_dir_all(out.parent().unwrap()).ok();
+}
+
+// PLAN-158: recorded clips share the score and the native export soundtrack.
+fn recorded_samples(path: &Path, from: f64, to: f64) -> Vec<i16> {
+    let result = Command::new("ffmpeg")
+        .args(["-v", "error", "-i"])
+        .arg(path)
+        .args([
+            "-ss",
+            &from.to_string(),
+            "-to",
+            &to.to_string(),
+            "-ac",
+            "1",
+            "-ar",
+            "48000",
+            "-f",
+            "s16le",
+            "-",
+        ])
+        .output()
+        .expect("ffmpeg decodes exported audio");
+    assert!(
+        result.status.success(),
+        "export must contain audio: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    result
+        .stdout
+        .chunks_exact(2)
+        .map(|b| i16::from_le_bytes([b[0], b[1]]))
+        .collect()
+}
+
+fn recorded_level(samples: &[i16]) -> f64 {
+    assert!(
+        !samples.is_empty(),
+        "audio samples must exist, not an empty success"
+    );
+    samples.iter().map(|&s| (s as f64).abs()).sum::<f64>() / samples.len() as f64
+}
+
+#[test]
+fn file_audio_exports_at_its_offset_alongside_synthesized_notes() {
+    let (out, _) = render("file_audio.st", 10, "file_audio_mix");
+    assert!(
+        recorded_level(&recorded_samples(&out, 0.15, 0.25)) > 300.0,
+        "synthesized notes remain audible"
+    );
+    assert!(
+        recorded_level(&recorded_samples(&out, 0.6, 0.9)) < 5.0,
+        "silence before the recording's at=1s"
+    );
+    assert!(
+        recorded_level(&recorded_samples(&out, 1.1, 1.4)) > 500.0,
+        "the recorded file must reach the rendered movie"
+    );
+    let source_level = recorded_level(&recorded_samples(
+        &fixture("audio/two tones.flac"),
+        0.1,
+        0.4,
+    ));
+    assert!(
+        recorded_level(&recorded_samples(&out, 1.1, 1.4)) < source_level * 1.2,
+        "a score exposed in both the flat AST and scope tree must not double its audio"
+    );
+    assert!(
+        recorded_level(&recorded_samples(&out, 2.3, 2.8)) < 5.0,
+        "a short file pads the rest of the score with silence"
+    );
+    let (_, duration) = ffprobe_frames(&out);
+    assert!(
+        (duration - 3.0).abs() < 0.05,
+        "short audio must not truncate the film: {duration}"
+    );
+    std::fs::remove_file(out).unwrap();
+}
+
+#[test]
+fn file_audio_export_window_starts_at_the_correct_source_sample() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("window.mp4");
+    render_page(
+        &fixture("file_audio.st"),
+        &RenderOptions {
+            out: out.clone(),
+            fps: 10,
+            width: 320,
+            height: 180,
+            from_ms: Some(1500),
+            to_ms: Some(2500),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let samples = recorded_samples(&out, 0.05, 0.35);
+    assert!(
+        recorded_level(&samples) > 500.0,
+        "window starts halfway into the recorded clip"
+    );
+    let crossings = samples.windows(2).filter(|s| s[0] <= 0 && s[1] > 0).count();
+    let frequency = crossings as f64 / (samples.len() as f64 / 48000.0);
+    assert!(
+        (frequency - 880.0).abs() < 15.0,
+        "a trimmed render must begin with the second 880 Hz tone, not the first 440 Hz tone: {frequency}"
+    );
+    assert!(
+        recorded_level(&recorded_samples(&out, 0.65, 0.95)) < 5.0,
+        "silence after the file ends survives trimming"
+    );
+    let (frames, duration) = ffprobe_frames(&out);
+    assert_eq!(frames, 10);
+    assert!(
+        (duration - 1.0).abs() < 0.05,
+        "trimmed output must be one second: {duration}"
+    );
+}
+
+#[test]
+fn file_audio_missing_source_is_an_explicit_export_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let entry = dir.path().join("index.st");
+    std::fs::write(&entry, r#"
+<div class="film"><div class="picture">Picture</div></div>
+.film { @score &.time(1s) { &picture at 0s for 1s; @audio(src: "missing recording.flac") as &recording at 0s; } }
+.picture { @on &.clip { opacity: 0 -> 1; } }
+"#).unwrap();
+    let result = render_page(
+        &entry,
+        &RenderOptions {
+            out: dir.path().join("missing.mp4"),
+            fps: 10,
+            width: 320,
+            height: 180,
+            ..Default::default()
+        },
+    );
+    let error =
+        result.expect_err("a missing recording cannot silently produce a successful silent movie");
+    assert!(
+        error.contains("missing recording.flac"),
+        "error identifies the missing source: {error}"
+    );
 }

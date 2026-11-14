@@ -3203,6 +3203,9 @@ async fn run_serve(
                 .await;
             }
             while let Ok(change) = file_rx.recv().await {
+                // Imports are part of a page's program. The watched leaf can
+                // change without touching any cached route's entry file.
+                watch_dev_cache.invalidate();
                 // Compile BEFORE the reload is announced: the status file and
                 // the warm cache exist whether or not a browser is connected,
                 // and the reload lands on fresh output rather than triggering

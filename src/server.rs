@@ -109,6 +109,13 @@ impl DevCompileCache {
             entries: std::sync::Mutex::new(HashMap::new()),
         }
     }
+
+    /// A watched module can affect every route while each entry's bytes stay
+    /// unchanged. Drop the outer output cache before warming/broadcasting;
+    /// the compiler's resolved-AST cache still handles unchanged programs.
+    pub fn invalidate(&self) {
+        self.entries.lock().unwrap().clear();
+    }
 }
 
 /// Middleware that lets a shell on ANOTHER loopback port consume the dev
@@ -1390,150 +1397,8 @@ async fn catch_all_handler(
                         (StatusCode::NOT_FOUND, format!("File not found: {}", path)).into_response()
                     }
                 }
-            } else if path.ends_with(".css") {
+            } else if let Some(mime) = crate::assets::content_type(Path::new(&path)) {
                 let file_path = site_dir.join(&path);
-                match std::fs::read_to_string(&file_path) {
-                    Ok(content) => (
-                        StatusCode::OK,
-                        [(header::CONTENT_TYPE, "text/css")],
-                        content,
-                    )
-                        .into_response(),
-                    Err(_) => (StatusCode::NOT_FOUND, "Not found").into_response(),
-                }
-            } else if path.ends_with(".js") {
-                let file_path = site_dir.join(&path);
-                match std::fs::read_to_string(&file_path) {
-                    Ok(content) => (
-                        StatusCode::OK,
-                        [(header::CONTENT_TYPE, "application/javascript")],
-                        content,
-                    )
-                        .into_response(),
-                    Err(_) => (StatusCode::NOT_FOUND, "Not found").into_response(),
-                }
-            } else if path.ends_with(".jpg") || path.ends_with(".jpeg") {
-                let file_path = site_dir.join(&path);
-                match std::fs::read(&file_path) {
-                    Ok(content) => (
-                        StatusCode::OK,
-                        [(header::CONTENT_TYPE, "image/jpeg")],
-                        content,
-                    )
-                        .into_response(),
-                    Err(_) => (StatusCode::NOT_FOUND, "Not found").into_response(),
-                }
-            } else if path.ends_with(".png") {
-                let file_path = site_dir.join(&path);
-                match std::fs::read(&file_path) {
-                    Ok(content) => (
-                        StatusCode::OK,
-                        [(header::CONTENT_TYPE, "image/png")],
-                        content,
-                    )
-                        .into_response(),
-                    Err(_) => (StatusCode::NOT_FOUND, "Not found").into_response(),
-                }
-            } else if path.ends_with(".webp") {
-                let file_path = site_dir.join(&path);
-                match std::fs::read(&file_path) {
-                    Ok(content) => (
-                        StatusCode::OK,
-                        [(header::CONTENT_TYPE, "image/webp")],
-                        content,
-                    )
-                        .into_response(),
-                    Err(_) => (StatusCode::NOT_FOUND, "Not found").into_response(),
-                }
-            } else if path.ends_with(".svg") {
-                let file_path = site_dir.join(&path);
-                match std::fs::read_to_string(&file_path) {
-                    Ok(content) => (
-                        StatusCode::OK,
-                        [(header::CONTENT_TYPE, "image/svg+xml")],
-                        content,
-                    )
-                        .into_response(),
-                    Err(_) => (StatusCode::NOT_FOUND, "Not found").into_response(),
-                }
-            } else if path.ends_with(".mp4") {
-                let file_path = site_dir.join(&path);
-                match std::fs::read(&file_path) {
-                    Ok(content) => (
-                        StatusCode::OK,
-                        [(header::CONTENT_TYPE, "video/mp4")],
-                        content,
-                    )
-                        .into_response(),
-                    Err(_) => (StatusCode::NOT_FOUND, "Not found").into_response(),
-                }
-            } else if path.ends_with(".webm") {
-                let file_path = site_dir.join(&path);
-                match std::fs::read(&file_path) {
-                    Ok(content) => (
-                        StatusCode::OK,
-                        [(header::CONTENT_TYPE, "video/webm")],
-                        content,
-                    )
-                        .into_response(),
-                    Err(_) => (StatusCode::NOT_FOUND, "Not found").into_response(),
-                }
-            } else if path.ends_with(".json") {
-                let file_path = site_dir.join(&path);
-                match std::fs::read_to_string(&file_path) {
-                    Ok(content) => (
-                        StatusCode::OK,
-                        [(header::CONTENT_TYPE, "application/json")],
-                        content,
-                    )
-                        .into_response(),
-                    Err(_) => (StatusCode::NOT_FOUND, "Not found").into_response(),
-                }
-            } else if path.ends_with(".glb")
-                || path.ends_with(".gltf")
-                || path.ends_with(".bin")
-                || path.ends_with(".ktx2")
-                || path.ends_with(".hdr")
-                || path.ends_with(".exr")
-                || path.ends_with(".draco")
-            {
-                // 3D model + asset binaries (stdlib/3d @gltf rail). glTF (`.gltf`)
-                // is JSON but references sibling `.bin`/textures by relative URL, so
-                // the whole set must be servable as raw bytes.
-                let file_path = site_dir.join(&path);
-                let mime = if path.ends_with(".gltf") {
-                    "model/gltf+json"
-                } else if path.ends_with(".glb") {
-                    "model/gltf-binary"
-                } else {
-                    "application/octet-stream"
-                };
-                match std::fs::read(&file_path) {
-                    Ok(content) => {
-                        (StatusCode::OK, [(header::CONTENT_TYPE, mime)], content).into_response()
-                    }
-                    Err(_) => (StatusCode::NOT_FOUND, "Not found").into_response(),
-                }
-            } else if path.ends_with(".otf") || path.ends_with(".ttf") {
-                let file_path = site_dir.join(&path);
-                let mime = if path.ends_with(".otf") {
-                    "font/otf"
-                } else {
-                    "font/ttf"
-                };
-                match std::fs::read(&file_path) {
-                    Ok(content) => {
-                        (StatusCode::OK, [(header::CONTENT_TYPE, mime)], content).into_response()
-                    }
-                    Err(_) => (StatusCode::NOT_FOUND, "Not found").into_response(),
-                }
-            } else if path.ends_with(".woff") || path.ends_with(".woff2") {
-                let file_path = site_dir.join(&path);
-                let mime = if path.ends_with(".woff2") {
-                    "font/woff2"
-                } else {
-                    "font/woff"
-                };
                 match std::fs::read(&file_path) {
                     Ok(content) => {
                         (StatusCode::OK, [(header::CONTENT_TYPE, mime)], content).into_response()
@@ -11325,5 +11190,61 @@ mod comments_doc_accuracy_tests {
                 "the doc must name the `{anchor}` anchor kind"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod recorded_asset_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn recorded_media_and_existing_assets_share_the_static_route() {
+        let site = tempfile::tempdir().unwrap();
+        let state = AppState {
+            mode: AppMode::Dev {
+                site_dir: site.path().to_path_buf(),
+                trace: false,
+                debug: false,
+            },
+            static_dir: None,
+            debugger_config: None,
+            cache_stdlib: true,
+            compile_cache: Arc::new(CompileCache::new()),
+            dev_compile_cache: Arc::new(DevCompileCache::new()),
+        };
+        for (file, mime) in [
+            ("two tones.m4a", "audio/mp4"),
+            ("voice.flac", "audio/flac"),
+            ("voice.wav", "audio/wav"),
+            ("voice.mp3", "audio/mpeg"),
+            ("voice.ogg", "audio/ogg"),
+            ("film.mp4", "video/mp4"),
+            ("font.woff2", "font/woff2"),
+            ("photo.webp", "image/webp"),
+        ] {
+            std::fs::write(site.path().join(file), b"original asset bytes").unwrap();
+            let response = catch_all_handler(
+                axum::extract::State(state.clone()),
+                axum::extract::Path(file.to_owned()),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK, "{file}");
+            assert_eq!(response.headers()[header::CONTENT_TYPE], mime, "{file}");
+            let bytes = axum::body::to_bytes(response.into_body(), 1024)
+                .await
+                .unwrap();
+            assert_eq!(bytes.as_ref(), b"original asset bytes", "{file}");
+        }
+        std::fs::write(
+            site.path().join("private.st"),
+            "source is not a static asset",
+        )
+        .unwrap();
+        let response = catch_all_handler(
+            axum::extract::State(state),
+            axum::extract::Path("private.st".to_owned()),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 }

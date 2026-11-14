@@ -181,7 +181,7 @@ fn prepare(entry: &Path, opts: &RenderOptions) -> Result<(Stage, Window, u64), S
     let stage = Stage::new(&document, &workspace_root)?;
     // PLAN-152: the film's `@sound`, synthesized for the rendered window, as the
     // composition's `<audio>` (raea mixes a page's audio into the mp4)
-    if super::soundtrack_in(&stage.dir, &soundtracks, window.from_ms, window.to_ms)?.is_some() {
+    if super::soundtrack_in(&stage.dir, &workspace_root, &soundtracks, window.from_ms, window.to_ms)?.is_some() {
         let page = stage.page();
         let doc = std::fs::read_to_string(&page).map_err(|e| format!("failed to read the staged page: {e}"))?;
         let at = doc.rfind("</body>").ok_or("the staged page has no </body>")?;

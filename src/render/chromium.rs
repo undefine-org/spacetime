@@ -73,10 +73,9 @@ pub fn render_page(entry: &Path, opts: &RenderOptions) -> Result<RenderReport, S
     // dpr scales the capture viewport; the mux still targets width×height×dpr.
     let out_w = (opts.width as f64 * opts.dpr).round() as u32;
     let out_h = (opts.height as f64 * opts.dpr).round() as u32;
-    // PLAN-152: the film's `@sound`, synthesized for exactly the rendered window
-    let sound_dir = std::env::temp_dir().join(format!("spacetime-sound-{}", std::process::id()));
-    std::fs::create_dir_all(&sound_dir).map_err(|e| format!("failed to create {}: {e}", sound_dir.display()))?;
-    let soundtrack = super::soundtrack_in(&sound_dir, &soundtracks, start_ms, end_ms.max(start_ms + 1))?;
+    // A render owns its staging directory, including failed/missing sources.
+    let sound_dir = tempfile::tempdir().map_err(|e| format!("failed to stage the soundtrack: {e}"))?;
+    let soundtrack = super::soundtrack_in(sound_dir.path(), workspace_root, &soundtracks, start_ms, end_ms.max(start_ms + 1))?;
     let mut ffmpeg = spawn_ffmpeg(&opts.out, opts.fps, out_w, out_h, soundtrack.as_deref())?;
     let write_result = capture_into(
         &served.url,
@@ -100,7 +99,6 @@ pub fn render_page(entry: &Path, opts: &RenderOptions) -> Result<RenderReport, S
         .child
         .wait()
         .map_err(|e| format!("ffmpeg wait failed: {e}"))?;
-    let _ = std::fs::remove_dir_all(&sound_dir);
     if !status.success() {
         return Err(format!("ffmpeg exited with {status}"));
     }

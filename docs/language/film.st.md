@@ -527,7 +527,7 @@ The manual mux; `&h1 at 2.08s` arithmetic (a mark plus a positioned stop says
 
 ### — status —
 
-**Shipped (PLAN-150 W7), browser-play half.** `@audio(src:) as &name at <t>;` is
+**Shipped (PLAN-150 W7 / PLAN-158), browser playback and native export.** `@audio(src:) as &name at <t>;` is
 a SCORE ENTRY (`stdlib/macros/score.st` grammar; `src/pipeline/score.rs::audio_entries`
 emits a `score-audio` bind). The `score-audio` primitive
 (`stdlib/primitives/score-audio.st`) creates a hidden `<audio>` on the score's
@@ -539,9 +539,22 @@ the score. This did NOT need the `.playback` driver (BUG-306/310/311 are the
 inverse — video DRIVES score); a `.time` score plays audio directly. Working doc:
 `film/w7-audio.st.md`; behaviour gate: `tests/score/audio.test.st` (the audio
 element exists with the right src and its transport-derived seek target advances
-with the clock, seen RED with the seek frozen). Remaining in W7's arc: the
-`render` MUX (ffmpeg audio track at the `at` offset with the gain curve), `pan`,
-and a two-backend conformance test.
+with the clock, seen RED with the seek frozen). A paused seek stays silent;
+play and pause follow the score's existing playing signal. Virtual rendering
+never plays through the browser's audio device.
+
+`spacetime render` includes recorded files at their `at` offsets, mixed with
+`@sound` notes by the shared soundtrack path used by Chromium and raea. Local
+sources resolve relative to the project. A `--from` / `--to` window trims the
+source to the corresponding sample, and short files pad with silence rather
+than truncating the picture. Missing recordings fail the export explicitly.
+Gates: `tests/render/render_test.rs::file_audio_*` inspect decoded movie audio;
+`tests/score/audio-transport.test.st` checks paused seeking and play/pause on CDP.
+
+Recorded export currently preserves source gain and speed. The gain-curve
+export described above, `rate`/`pan` export automation, browser `pan`, and a
+two-backend conformance test remain in W7's arc; they are not implied by a
+successful recorded-file mux.
 
 
 **Shipped (PLAN-152), sound as notes.** `@sound(--form [, notes: "C3 Eb3"]) [as &name]

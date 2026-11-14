@@ -616,8 +616,11 @@ impl<'a> Compiler<'a> {
             stamp(m);
         }
         for scope in ast.scopes.iter_mut() {
+            let scope_source = scope.source_file.as_ref().unwrap_or(&main_path);
             for m in scope.matches.iter_mut() {
-                stamp(m);
+                if m.source_file.is_none() {
+                    m.source_file = Some(scope_source.clone());
+                }
             }
         }
 

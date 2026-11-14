@@ -321,33 +321,14 @@ fn percent_decode(s: &str) -> String {
 
 #[cfg(feature = "cdp")]
 fn content_type(p: &Path) -> &'static str {
-    match p.extension().and_then(|e| e.to_str()).unwrap_or("") {
-        "html" => "text/html; charset=utf-8",
-        "js" | "mjs" => "text/javascript",
-        "css" => "text/css",
-        "json" => "application/json",
-        "glb" => "model/gltf-binary",
-        "gltf" => "model/gltf+json",
-        "png" => "image/png",
-        "jpg" | "jpeg" => "image/jpeg",
-        "webp" => "image/webp",
-        "svg" => "image/svg+xml",
-        "wav" => "audio/wav",
-        "mp3" => "audio/mpeg",
-        "ogg" => "audio/ogg",
-        "woff2" => "font/woff2",
-        "woff" => "font/woff",
-        "hdr" => "application/octet-stream",
-        "mp4" => "video/mp4",
-        _ => "application/octet-stream",
-    }
+    crate::assets::content_type(p).unwrap_or("application/octet-stream")
 }
 
-/// PLAN-152: the soundtrack of `[from_ms, to_ms)` of a film into `dir` as
-/// `soundtrack.wav` — its path, or None when the film has no `@sound`.
-pub(crate) fn soundtrack_in(dir: &Path, programs: &[serde_json::Value], from_ms: u64, to_ms: u64) -> Result<Option<PathBuf>, String> {
+/// The recorded and synthesized soundtrack of `[from_ms, to_ms)`, shared by
+/// both renderers. Source URLs resolve against the same project as the page.
+pub(crate) fn soundtrack_in(dir: &Path, site_dir: &Path, programs: &[serde_json::Value], from_ms: u64, to_ms: u64) -> Result<Option<PathBuf>, String> {
     let out = dir.join("soundtrack.wav");
-    Ok(soundtrack::write_soundtrack(programs, from_ms, to_ms, &out)?.then_some(out))
+    Ok(soundtrack::write_soundtrack(programs, site_dir, from_ms, to_ms, &out)?.then_some(out))
 }
 
 /// The `file://` base of a site directory (what a `file://`-staged page
@@ -396,8 +377,32 @@ pub(crate) fn collect_scope_matches(
     out: &mut Vec<crate::syntax::FormMatch>,
 ) {
     for scope in scopes {
-        out.extend(scope.matches.clone());
-        collect_nested_matches(&scope.nested_scopes, out);
+        collect_matches_once(&scope.matches, scope.source_file.as_deref(), out);
+        collect_nested_matches(&scope.nested_scopes, scope.source_file.as_deref(), out);
+    }
+}
+
+/// The parser also exposes scoped matches in the flattened match set. Preserve
+/// the containing file's provenance and collect each source occurrence once;
+/// otherwise one score is rendered twice (and its audio is twice as loud).
+fn collect_matches_once(
+    matches: &[crate::syntax::FormMatch],
+    source_file: Option<&str>,
+    out: &mut Vec<crate::syntax::FormMatch>,
+) {
+    for m in matches {
+        let mut m = m.clone();
+        if m.source_file.is_none() {
+            m.source_file = source_file.map(str::to_owned);
+        }
+        if !out.iter().any(|existing| {
+            existing.source_file == m.source_file
+                && existing.span == m.span
+                && existing.matched_macro == m.matched_macro
+                && existing.selector == m.selector
+        }) {
+            out.push(m);
+        }
     }
 }
 
@@ -405,11 +410,12 @@ pub(crate) fn collect_scope_matches(
 /// in selectors at any depth; imported modules bring their own nesting).
 fn collect_nested_matches(
     scopes: &[crate::parser::ast::NestedScope],
+    source_file: Option<&str>,
     out: &mut Vec<crate::syntax::FormMatch>,
 ) {
     for scope in scopes {
-        out.extend(scope.matches.clone());
-        collect_nested_matches(&scope.nested_scopes, out);
+        collect_matches_once(&scope.matches, source_file, out);
+        collect_nested_matches(&scope.nested_scopes, source_file, out);
     }
 }
 

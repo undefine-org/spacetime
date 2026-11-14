@@ -1,6 +1,6 @@
 # W7 — audio is on the score
 
-*Working doc for PLAN-150 W7. Builds and runs today (browser-play half). The
+*Working doc for PLAN-150 W7 / PLAN-158. Browser playback and native export. The
 "audio is on the score" of `../film.st.md` §8.*
 
 ```st hidden
@@ -48,13 +48,25 @@ reused for a media entity), so `@on` addresses it exactly like any element:
 `score-audio` bind (`stdlib/primitives/score-audio.st`). The primitive creates a
 hidden `<audio>` element and watches the score's own progress signal: as the
 score advances, the audio SEEKS to `progress · total − at` and plays while its
-window is live. Under the browser's `.time` transport it plays in real time and
-seeks on scrub; the score, not the audio, owns the clock.
+window is live and the transport is playing. Paused scrubbing positions the
+recording without playing it. Under a virtual clock it stays silent; the score,
+not the audio, owns the clock.
+
+## Native export
+
+`spacetime render` mixes recordings and synthesized `@sound` notes through the
+same soundtrack module for Chromium and raea. Files resolve from the project
+root, start at their `at` offsets, and trim to the selected `--from` / `--to`
+window in sample time. Silence pads the remainder of a short clip; missing
+sources fail explicitly. No separate mux command is needed.
+
+Export currently preserves recorded source gain and speed. The browser
+play/pause gate is `tests/score/audio-transport.test.st` (`--cdp`); the native
+`file_audio_*` gates in `tests/render/render_test.rs` decode the actual movie
+to check offsets, source-sample trimming, synth mixing and duration.
 
 ## Not yet (later in W7's arc)
 
-- The `render` MUX: under `spacetime render`, muxing the track at its `at` offset
-  with its gain curve applied by ffmpeg (today the audio is browser-play only;
-  the render still needs the mux step).
+- Recorded gain/rate/pan automation during export; browser `pan`.
 - `mark &hit at 2.2s;` as an audio-relative position, and `pan`.
 - A conformance test asserting the two backends agree on every mark to a frame.

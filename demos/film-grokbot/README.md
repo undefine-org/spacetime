@@ -2,14 +2,15 @@
 
 A reconstruction of the [79-second 1.0 launch film](https://x.ai/news/grok-bot-1-0),
 1920×1080 at 30 fps. The original copy and sequence are retained so frames can
-be compared. All UI, character anatomy, typography, camera movement, charts,
-selection boxes and transitions are authored in Spacetime. Photographic artwork
-comes from the reference; see [asset provenance](assets/PROVENANCE.org).
+be compared. UI layout, character anatomy, typography, camera movement, charts,
+selection boxes and transitions are authored in Spacetime. Photographic artwork,
+the public X VF brand font, and the soundtrack come from the reference;
+see [asset provenance](assets/PROVENANCE.org).
 
 ```sh
 spacetime serve demos/film-grokbot/             # Edit → Film, scrub or change code
 spacetime render demos/film-grokbot/ --fps 30 --out scratch/grokbot/film.mp4
-spacetime render demos/film-grokbot/ --stills 6,16,26,37,44,56,68,77 --out scratch/grokbot/stills/
+spacetime render demos/film-grokbot/ --stills 6,16,26,37,44,56,68,77 --out scratch/grokbot/stills/frame.png
 ```
 
 The entry composes scenes; it contains no choreography. `score.st` is the edit
@@ -24,6 +25,10 @@ and local choreography. `design/` is the reusable language:
 | Motion | arrival, focus, pan, pop, pointer, clip visibility | `design/motion.st` |
 | Composition | one scene and its local camera | `scenes/*.st` |
 | Time | cut order, starts, durations | `score.st` |
+
+During `serve`, edits to imported design and scene modules invalidate cached
+page output before the live reload. The entry file does not need to be touched
+to pick up a shared token, anatomy or motion edit.
 
 Use the same forms in another composition:
 
@@ -58,9 +63,17 @@ The executable catalog (`language.st.md`), served at `/language`, also includes 
 typed color signal that reskins a voice panel through ordinary `@on` events
 and reactive CSS.
 
-The page is silent. No reference soundtrack is copied into the reusable design
-library. The original footage, extraction sheets and render outputs remain in
-ignored `scratch/grokbot/`; no standalone application JavaScript is required.
+The reference soundtrack is an ordinary `@audio` entry on the same `film`
+transport. Play, pause, scrub and native export share that score. It remains
+a demo asset; the reusable design library has no soundtrack dependency.
+Recorded export currently preserves source gain and speed. The original
+footage, extraction sheets and render outputs remain in ignored
+`scratch/grokbot/`; no standalone application JavaScript is required.
+
+Voice proportions use one typed form parameter, `<--voice scale="1.2">`.
+The `--voice-activity` timeline channel grows speaking bars while a diameter
+floor preserves round quiet dots. Character front/rear faces turn inside the
+outer focus wrapper, so focus blur does not flatten the face's 3D context.
 
 Validation uses the actual Chromium backend. The language motion gates were
 first run without their motion declarations: **0 passed, 2 failed, 0 skipped**.
@@ -70,8 +83,13 @@ seek, rather than emitted strings.
 
 Visual fidelity is a reconstruction, not a certified pixel identity. The cut
 and UI beats follow the master, with native-resolution photographic atlases;
-font metrics, character poses, poster crops and some camera curves differ.
-The reference soundtrack is not included. The comparison script renders exact
+some character poses, poster crops and camera curves still differ.
+Photographic plates retain some embedded labels and campaign text; those
+pixels are not editable typography.
+Those plates opt into `captioned="true"` to avoid a second caption layer.
+For clean artwork, the poster form defaults to editable `brand` and `line`
+parameters rendered as native typography.
+The comparison script renders exact
 timestamps from both sources so remaining differences stay visible.
 
 
@@ -82,8 +100,11 @@ spacetime serve demos/film-grokbot/ -p 4549
 spacetime test tests/score/grokbot-film.drive.st --cdp
 spacetime test tests/score/grokbot-catalog.drive.st --cdp
 spacetime test tests/score/grokbot-language.test.st --cdp
+spacetime test tests/score/audio-transport.test.st --cdp
 ```
 
 Each drive file has one URL: the current CDP runner navigates once per compiled
 file. The film gate checks scene windows, photographic movement and aspect,
 chart motion and reverse seeking. The catalog gate clicks the real skin controls.
+`tests/studio/imported_design_e2e.sh` verifies that changing only a nested
+design module updates real browser text and layout on two served routes.

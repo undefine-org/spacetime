@@ -4,7 +4,7 @@
   <--scene name="launch-message"><div class="launch-message__thread"><--message name="Launch Bot" kind="purple" time="10:06 AM" app="APP"><p>The new headphones campaign is live! 🚀</p></--message></div></--scene>
 }
 @form markup --campaign {
-  <--scene name="campaign"><div class="campaign__mosaic"><--poster src="assets/square.webp" alt="The launched Pendel Arc campaign's warm portrait of a man in black headphones" format="square" /><--poster src="assets/portrait.webp" alt="The launched campaign's silver headphone portrait" /><--poster src="assets/wide.webp" alt="The launched campaign's blue-toned headphone portrait" format="wide" /><--poster src="assets/portrait.webp" alt="Another scale of the silver headphone campaign portrait" /></div><img class="campaign__hero" src="assets/campaign-orange.webp" alt="The Pendel Arc campaign portrait, black headphones against a vivid orange background" /><div class="campaign__reaction"><--reaction>🚀 22</--reaction> <--reaction>♧ 19</--reaction> <span class="campaign__heart"><--bot kind="red" label="Grok Bot heart reaction" /> 47</span> <--reaction>💯 19</--reaction> <--reaction>🛒 20</--reaction><div class="campaign__tooltip"><--bot kind="red" label="Grok Bot heart reaction" /><p>You, Launch Bot, Research Bot,<br />Copy Bot, Deck Bot and 44 others<br /><span>reacted with :grok-bot-heart:</span></p></div></div></--scene>
+  <--scene name="campaign"><div class="campaign__mosaic"><--poster captioned="true" src="assets/square.webp" alt="The launched Pendel Arc campaign's warm portrait of a man in black headphones" format="square" /><--poster captioned="true" src="assets/portrait.webp" alt="The launched campaign's silver headphone portrait" /><--poster captioned="true" src="assets/wide.webp" alt="The launched campaign's blue-toned headphone portrait" format="wide" /><--poster captioned="true" src="assets/portrait.webp" alt="Another scale of the silver headphone campaign portrait" /></div><img class="campaign__hero" src="assets/campaign-orange.webp" alt="The Pendel Arc campaign portrait, black headphones against a vivid orange background" /><div class="campaign__reaction"><--reaction>🚀 22</--reaction> <--reaction>♧ 19</--reaction> <span class="campaign__heart"><--bot kind="red" label="Grok Bot heart reaction" /> 47</span> <--reaction>💯 19</--reaction> <--reaction>🛒 20</--reaction><div class="campaign__tooltip"><--bot kind="red" label="Grok Bot heart reaction" /><p>You, Launch Bot, Research Bot,<br />Copy Bot, Deck Bot and 44 others<br /><span>reacted with :grok-bot-heart:</span></p></div></div></--scene>
 }
 @form markup --heart {
   <--scene name="heart" tone="pink"><div class="center"><div class="heart__character"><--bot kind="red" label="Red Grok Bot heart" /></div></div></--scene>
@@ -34,17 +34,17 @@
 .campaign__tooltip > .bot { width: 130px; height: 130px; }
 .campaign__tooltip p { font-size: 43px; line-height: 1.2; }
 .campaign__tooltip p span { color: #666; }
-.heart__character .bot { width: 430px; height: 430px; }
-.heart__character { transform-style: preserve-3d; }
+.heart__character .bot { width: 650px; height: 650px; }
+.heart__character { transform-style: preserve-3d; rotate: -22deg; }
 .goodbye .caption { white-space: nowrap; font-size: 88px; }
 .goodbye__new, .goodbye__teammates { display: inline-block; overflow: hidden; vertical-align: bottom; white-space: pre; }
 .cast__row { position: absolute; top: 450px; left: 530px; display: flex; gap: 35px; align-items: center; }
 .cast__row .bot { width: 140px; height: 140px; }
-.wordmark__lockup { display: flex; align-items: center; gap: 32px; font-size: 111px; letter-spacing: -4px; }
-.wordmark__lockup .bot { width: 115px; height: 115px; }
+.wordmark__lockup { display: flex; align-items: center; gap: 32px; font-size: 123px; letter-spacing: -2px; }
+.wordmark__lockup .bot { width: 125px; height: 125px; }
 .launch-message { @on &.clip { --film-window; .launch-message__thread { --film-arrive; } } }
 .campaign { @on &.clip { --film-window; .campaign__mosaic { translate-y: 200px -> -130px; scale: 1.2 -> 1; easing: --ease-out-cubic; } .campaign__reaction { opacity: 0 -> 0 at 50% -> 1 at 57% -> 1; translate-y: 90px -> 90px at 50% -> 0px at 57% -> 0px; } .campaign__tooltip { opacity: 0 -> 0 at 68% -> 1 at 73% -> 1; scale: 0.8 -> 0.8 at 68% -> 1 at 73% -> 1; } } }
-.heart { @on &.clip { --film-window; .heart__character { rotate-y: -75deg -> 0deg at 35% -> 35deg at 70% -> 10deg; scale: 0.65 -> 1 at 35% -> 1; blur: 8px -> 0px at 35% -> 0px; easing: --ease-out-cubic; } } }
+.heart { @on &.clip { --film-window; .heart__character .bot { rotate-y: 0deg -> 0deg at 15% -> 180deg at 60% -> 250deg; easing: --ease-out-cubic; } .heart__character { scale: 1 -> 1 at 70% -> 0.9; blur: 0px -> 0px at 70% -> 3px; easing: --ease-out-cubic; } } }
 .goodbye { @on &.clip { --film-window; .caption { opacity: 0 -> 1 at 10% -> 1; } .goodbye__new { width: 0px -> 0px at 25% -> 360px at 40% -> 360px; } .goodbye__teammates { width: 0px -> 0px at 50% -> 440px at 65% -> 440px; } } }
 .cast { @on &.clip { --film-window; .cast__row { scale: 0.85 -> 1 at 15% -> 1 at 70% -> 0.2; blur: 8px -> 0px at 15% -> 0px at 70% -> 8px; easing: --ease-out-cubic; } } }
 .wordmark { @on &.clip { --film-window; .wordmark__lockup .bot { scale: 2 -> 1 at 30% -> 1; translate-x: 260px -> 0px at 40% -> 0px; rotate: -35deg -> 0deg at 40% -> 0deg; easing: --ease-in-out-cubic; } .wordmark__lockup > span { opacity: 0 -> 0 at 32% -> 1 at 45% -> 1; blur: 6px -> 6px at 32% -> 0px at 45% -> 0px; translate-x: -30px -> 0px at 45% -> 0px; } } }

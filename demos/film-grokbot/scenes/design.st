@@ -7,7 +7,7 @@
   <--scene name="design-canvas"><div class="design-canvas__dots"></div><div class="design-canvas__text"><h2 class="editorial design-canvas__old">Sound, reimagined.</h2><h2 class="editorial design-canvas__new">A lighter fit for longer days</h2><div class="design-canvas__selection"><i></i><i></i><i></i><i></i></div><div class="design-canvas__pointer"><--pointer kind="mint" /></div></div><div class="design-canvas__tools"><--toolstrip /></div><img class="design-canvas__product" src="assets/headphones.webp" alt="Silver Pendel Arc headphones, with the headband framing the new campaign headline" /></--scene>
 }
 @form markup --design-posters {
-  <--scene name="design-posters"><div class="design-canvas__dots"></div><div class="design-posters__row"><div class="design-posters__item"><small>Ad · 1080×1080</small><--poster src="assets/square.webp" alt="A man wearing black Pendel Arc headphones in warm studio light" format="square" /></div><div class="design-posters__item"><small>Ad · 1080×1350</small><--poster src="assets/portrait.webp" alt="A woman wearing silver Pendel Arc headphones in a close profile portrait" /></div><div class="design-posters__item"><small>Ad · 1920×1080</small><--poster src="assets/wide.webp" alt="A man wearing black Pendel Arc headphones against a blue background" format="wide" /></div></div><div class="design-posters__pointer"><--pointer kind="mint" /></div></--scene>
+  <--scene name="design-posters"><div class="design-canvas__dots"></div><div class="design-posters__row"><div class="design-posters__item"><small>Ad · 1080×1080</small><--poster captioned="true" src="assets/square.webp" alt="A man wearing black Pendel Arc headphones in warm studio light" format="square" /></div><div class="design-posters__item"><small>Ad · 1080×1350</small><--poster captioned="true" src="assets/portrait.webp" alt="A woman wearing silver Pendel Arc headphones in a close profile portrait" /></div><div class="design-posters__item"><small>Ad · 1920×1080</small><--poster captioned="true" src="assets/wide.webp" alt="A man wearing black Pendel Arc headphones against a blue background" format="wide" /></div></div></--scene>
 }
 .design-inspector__panel { position: absolute; left: 0; top: -20px; width: 1920px; background: white; }
 .design-inspector__top { height: 340px; display: flex; align-items: center; gap: 75px; padding: 50px 80px; }
@@ -26,26 +26,27 @@
 .design-inspector__layer { font-size: 90px; padding: 50px 100px; }
 .design-inspector__layer--active { background: #d3faf1; }
 .design-inspector__cursor { position: absolute; left: 970px; top: 620px; scale: 1.5; }
-.design-canvas__dots { position: absolute; inset: 0; background-image: radial-gradient(#d9dadc 2px, transparent 2px); background-size: 75px 75px; opacity: 0.75; }
-.design-canvas__text { position: absolute; left: 0; top: 445px; width: 1920px; text-align: center; }
-.design-canvas__text h2 { margin: 0; font-size: 115px; line-height: 1.15; font-weight: 400; white-space: nowrap; }
+.design-canvas__dots { position: absolute; inset: 0; background-image: radial-gradient(#d6d7d8 2.8px, transparent 2.8px); background-size: 93px 93px; background-position: 22.5px 14px; }
+.design-canvas__text { position: absolute; left: 0; top: 455px; width: 1920px; text-align: center; }
+.design-canvas__text h2 { margin: 0; font-size: 134px; line-height: 1.15; font-weight: 400; white-space: nowrap; }
 .design-canvas__new { position: absolute; top: 0; left: 0; width: 100%; clip-path: inset(0 100% 0 0); }
-.design-canvas__selection { position: absolute; left: 430px; top: -8px; width: 1070px; height: 150px; border: 3px solid var(--film-mint); }
+.design-canvas__selection { position: absolute; left: 440px; top: 8px; width: 1040px; height: 146px; border: 4px solid var(--film-mint); }
 .design-canvas__selection i { position: absolute; width: 15px; height: 15px; background: white; border: 3px solid var(--film-mint); }
 .design-canvas__selection i:nth-child(1) { left: -9px; top: -9px; }
 .design-canvas__selection i:nth-child(2) { right: -9px; top: -9px; }
 .design-canvas__selection i:nth-child(3) { left: -9px; bottom: -9px; }
 .design-canvas__selection i:nth-child(4) { right: -9px; bottom: -9px; }
-.design-canvas__pointer { position: absolute; left: 1250px; top: -140px; }
-.design-canvas__tools { position: absolute; bottom: 80px; left: 705px; }
+.design-canvas__pointer { position: absolute; left: 700px; top: -140px; }
+.design-canvas__tools { position: absolute; bottom: 80px; left: 705px; scale: 1.2; transform-origin: bottom center; }
 .design-canvas__product { position: absolute; width: 1920px; height: 1080px; inset: 0; opacity: 0; object-fit: cover; }
-.design-posters__row { position: absolute; left: 160px; top: 230px; display: flex; align-items: flex-end; gap: 70px; }
+.design-posters__row { position: absolute; left: 196px; top: 185px; display: flex; align-items: flex-end; gap: 70px; }
 .design-posters__item { flex: 0 0 auto; }
 .design-posters__item > small { display: block; font-size: 28px; color: #7d8081; margin: 0 0 18px 8px; }
-.design-posters__pointer { position: absolute; left: 1100px; top: 500px; }
 .design-inspector { @on &.clip { --film-window; .design-inspector__panel { translate-y: 0px -> -1230px; easing: --ease-in-out-cubic; } .design-inspector__cursor { --film-pointer; } } }
-.design-canvas { @on &.clip { --film-window; .design-canvas__selection { opacity: 1 -> 1 at 35% -> 0 at 41% -> 0; } .design-canvas__old { opacity: 1 -> 1 at 36% -> 0 at 40% -> 0; } .design-canvas__new { clip-path: inset(0 100% 0 0) -> inset(0 100% 0 0) at 40% -> inset(0 0% 0 0) at 72% -> inset(0 0% 0 0); } .design-canvas__pointer { --film-pointer; opacity: 1 -> 1 at 35% -> 0 at 40% -> 0; } .design-canvas__product { opacity: 0 -> 0 at 85% -> 1 at 92% -> 1; scale: 1.5 -> 1.5 at 85% -> 1 at 100%; easing: --ease-out-cubic; } } }
-.design-posters { @on &.clip { --film-window; .design-posters__row { translate-x: 650px -> -190px at 65% -> -350px; scale: 1.1 -> 1 at 65% -> 1; blur: 8px -> 0px at 50% -> 0px; easing: --ease-out-cubic; } .design-posters__pointer { --film-pointer; } } }
+.design-canvas { @on &.clip { --film-window; .design-canvas__selection { width: 1040px -> 1040px at 40% -> 1410px at 56% -> 1410px; translate-x: 0px -> 0px at 40% -> -185px at 56% -> -185px; } .design-canvas__old { opacity: 1 -> 1 at 36% -> 0 at 40% -> 0; } .design-canvas__new { clip-path: inset(0 100% 0 0) -> inset(0 100% 0 0) at 40% -> inset(0 0% 0 0) at 56% -> inset(0 0% 0 0); } .design-canvas__pointer { --film-pointer; opacity: 1 -> 1 at 35% -> 0 at 40% -> 0; } .design-canvas__product { opacity: 0 -> 0 at 85% -> 1 at 92% -> 1; scale: 1.5 -> 1.5 at 85% -> 1 at 100%; easing: --ease-out-cubic; } } }
+.design-posters { @on &.clip { --film-window; .design-posters__row { translate-x: 650px -> -190px at 65% -> -350px; scale: 1.1 -> 1 at 15% -> 1; blur: 8px -> 0px at 50% -> 0px; easing: --ease-out-cubic; } } }
 
 .design-inspector__avatars > i { overflow: hidden; }
 .design-inspector__avatars > i > img { width: 100%; height: 100%; object-fit: cover; }
+
+.design-posters .poster--wide img { width: 475px; height: 525px; object-fit: fill; }

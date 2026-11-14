@@ -17,7 +17,7 @@
 .opening__notification-head { display: flex; justify-content: space-between; line-height: 1.4; }
 .opening__notification time { opacity: 0.55; }
 .opening__notification p { margin: 0; line-height: 1.25; }
-.introduction__line { display: flex; align-items: center; white-space: pre; font-size: 92px; letter-spacing: -1.7px; }
+.introduction__line { display: flex; align-items: center; white-space: pre; font-size: 92px; letter-spacing: -0.95px; }
 .introduction__beta { font-size: 57px; letter-spacing: -1px; padding: 12px 30px; margin-left: 45px; border-radius: 80px; background: #f6f6f5; }
 .introduction__version { position: absolute; left: 855px; font-size: 64px; line-height: 1; color: white; background: black; border-radius: 45px; padding: 12px 30px; letter-spacing: -1px; opacity: 0; }
 .introduction__cast { position: absolute; left: 1140px; top: 355px; width: 440px; height: 450px; }
@@ -36,6 +36,6 @@
 .opening { @on &.clip { --film-window; .opening__character { translate-y: 170px -> -230px at 38% -> -230px; rotate: 8deg -> -16deg at 38% -> -16deg; } .opening__world { opacity: 1 -> 1 at 35% -> 0 at 49% -> 0; blur: 0px -> 0px at 35% -> 30px at 49% -> 30px; } .opening__notification { opacity: 0 -> 0 at 37% -> 1 at 49% -> 1; translate-y: 150px -> 150px at 37% -> 0px at 65% -> 0px; blur: 10px -> 10px at 37% -> 0px at 49% -> 0px; } } }
 .introduction { @on &.clip { --film-window; .introduction__line { scale: 0.94 -> 1 at 18% -> 1; easing: --ease-out-cubic; } .introduction__product { opacity: 0 -> 0 at 16% -> 1 at 30% -> 1; } .introduction__beta { opacity: 0 -> 0 at 28% -> 1 at 40% -> 1 at 40% -> 0 at 48% -> 0; } .introduction__version { opacity: 0 -> 0 at 42% -> 1 at 52% -> 1; scale: 0.1 -> 0.1 at 42% -> 1 at 52% -> 1; } .introduction__cast { opacity: 0 -> 0 at 40% -> 1 at 52% -> 1; scale: 0.1 -> 0.1 at 40% -> 1 at 52% -> 1; rotate: -22deg -> -22deg at 40% -> 0deg at 52% -> 0deg; } } }
 
-.introduction__line { translate: 6px 0px; }
+.introduction__line { translate: 14px 0px; }
 .introduction__line > span:first-child, .introduction__product { position: relative; top: -7px; }
 .opening { @on &.clip { .opening__notification .bot { scale: 3.5 -> 3.5 at 45% -> 1 at 70% -> 1; } .opening__notification .bot__eyes { opacity: 0 -> 0 at 45% -> 1 at 70% -> 1; } } }

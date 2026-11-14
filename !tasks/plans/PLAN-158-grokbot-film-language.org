@@ -65,3 +65,135 @@ No new syntax, no alternate CSS parser, no stdlib fallback.
   under scratch/grokbot/comparison; draft does not claim pixel identity.
 - Soundtrack, exact character posing and finer camera/font/poster alignment
   remain fidelity limitations. Blur is an authored envelope, not velocity blur.
+
+
+* Continuation: native file audio and measured visual fidelity (2026-11-14)
+** DONE P5 Existing @audio reaches both native renderers
+Problem: declared_soundtracks filters for synth-only programs, so file audio
+is silently omitted from an otherwise successful export. score-audio also
+attempts play after a paused seek rather than following the transport state.
+
+Design (existing grammar/rails, no new parser or author JavaScript):
+- Reuse audio_entries from the parsed score, alongside synth_program, in one
+  render program. Keep src/name/at as data; no source re-parsing or JS scraping.
+- The shared soundtrack module decodes file inputs through FFmpeg (already
+  required by Chromium rendering), offsets/trims them in sample time, pads
+  silence to the selected window, and mixes them with the existing synth WAV.
+- Chromium and raea receive the same WAV through soundtrack_in. No demo mux
+  script; render remains the film's one build command.
+- Keep source resolution relative to the project, as live serving does.
+- Browser play/pause/seek follows the existing progress + __playing signals.
+- This pass uses recorded file clips at their original speed/gain; do not
+  silently claim new automation support for gain/rate/pan. Existing W7 docs
+  describe their unfinished automation/export parity separately.
+
+Tests before implementation:
+1. Actual Chromium render has a file-audio stream, silent before at=1 s,
+   audible in the window; a --from/--to render begins at the correct source
+   sample and retains its requested duration. Missing files fail explicitly.
+2. File sources and synthesized notes mix through the same path.
+3. Pipeline metadata retains the parsed source, name and offset.
+4. CDP browser gate: a paused seek cannot play audio; play resumes and pause
+   holds it, including a backward seek before the clip starts.
+
+** DONE P6 Add reference soundtrack through native @audio and refine images
+Use the reference's track as a local study asset with provenance, then compare
+exact timestamps. Fix large composition differences before small font metrics.
+** DOING P7 Render and verify final audiovisual output, commit with docs/gates
+
+** DONE P8 Imported design modules refresh in the live editor
+Observed while editing this film: the served HTML still contains Arimo and
+the old bot anatomy after changes to imported tokens/components. Fresh native
+renders contain the edits. DevCompileCache keys only the entry's bytes/mtime;
+the watcher recompiles the entry by calling that same stale cache.
+
+Design: invalidate the existing dev output cache on each already-watched source
+change, before warming it and broadcasting reload. This covers every route
+that imports a changed module, using the existing watch/compile rails rather
+than adding a second import dependency graph. The inner compiler cache still
+hashes the resolved AST, so unchanged output can reuse that existing cache.
+
+Gate first: start a real dev server for an entry importing a nested design
+module; edit only that module, then assert the browser's text and element
+width update. Preserve a failing run against the unfixed server. Use a scratch
+site and the existing Studio shell/browser harness, never mutate this demo
+as test setup.
+
+*** Additional RED findings from the new metadata gates
+- Full library run: 3334 passed, 2 new metadata gates failed, 1 ignored.
+  The single-score gate now saw one program, but its audio name was empty.
+  audio_entries used text_of on an ELEMENT capture; it now uses the existing
+  element_name helper (same identity rail, no parser added).
+- Two identical scores in different imported files produced THREE programs.
+  Compiler::from_file stamped imported scope matches with the MAIN file path.
+  Correct the stamp using the scope's source_file; preserve the shared
+  collector's file/span/macro/selector identity so distinct modules remain
+  distinct and the flat/scope view of one occurrence is collected once.
+- These are compiler/runtime fixes with colocated metadata, movie-sample and
+  browser channel-proxy gates; no reconstruction-specific backend path.
+
+*** Voice anatomy refinement
+The quiet waveform currently scales its entire box vertically, flattening dots
+into dashes. Keep a scalar --voice-activity channel, floor each bar's height at
+its dot diameter, and grow only taller speaking bars. This reuses custom-property
+animation and CSS, with no new primitive or author JavaScript. A CDP gate must
+first fail on quiet geometry, then assert loud growth and exact reverse seek.
+Voice size is one typed form parameter; bar, controls, padding and waveform
+spacing scale together. Scene timing remains in scene choreography.
+
+** DONE P9 Recorded media uses the same asset-serving rail in serve and render
+RED: actual film browser audio reports MEDIA_ELEMENT_ERROR; GET and HEAD of
+/assets/launch-soundtrack.m4a return 404 while its font returns 200. Native
+render reads that same file successfully. The dev server has twelve separate
+file-type branches and no recorded-audio types; render has its own MIME match.
+
+Design: one small shared extension/MIME data table; both existing serving
+paths use it. Replace the dev server's duplicated static branches and the
+renderer-only MIME match. Preserve the special HTML compilation route and
+source privacy; add M4A/FLAC/WAV/MP3/OGG as ordinary asset entries. No grammar,
+new parser, application script or parallel asset subsystem.
+
+Gate: HTTP router returns the recorded bytes and correct MIME, including a
+space in the filename; actual film CDP waits for metadata, decodes the real
+soundtrack, and seeks it while paused. The 404 is already RED in that browser.
+
+*** Continuation verification (local, actual outputs)
+- @audio transport CDP: 1 passed, 0 failed, 0 skipped; named bed proxy exists,
+  paused seeking stays silent, and play/pause follows the shared transport.
+- Waveform CDP: RED 0/1/0 -> GREEN 1/0/0. Quiet geometry, speaking growth and
+  exact reverse seek use the real shared forms.
+- Imported-design browser: RED Before 120 after editing the transitive import;
+  GREEN 2/0 across two routes. The first stressed rerun saw loading/timeouts;
+  isolated rerun passes without changing the cache fix.
+- Isolated Studio browser regression: 50 passed, 0 failed. The concurrent run
+  under severe disk pressure was discarded; do not count its partial result.
+- Catalog controls CDP: 1/0/0 after the voice anatomy changes.
+- Native final movie: 1920x1080, H.264 + AAC, both 79.100 s from time zero,
+  2373 picture frames at 30 fps. Final AV contact sheet inspected.
+- Actual imported film's native audio window vs master: correlation
+  0.9997523642; level ratio 0.9984000978. One aligned track, not doubled.
+- Native mixed file/synth fixture: mean absolute samples at .15-.25 s =8851.54;
+  .6-.9 =0; 1.1-1.4 =1842.22; 2.3-2.8 =0. The 3 s movie retains duration.
+- Native --from 1.5 --to 2.5: 10 frames / exactly 1 s; source tone 880 Hz,
+  amplitude 1843.75; final .65-.95 s silent. Missing source fails with filename.
+- Full library before asset consolidation: 3336 passed, 0 failed, 1 ignored;
+  CLI 5/0. Updated shared-asset suite is running separately.
+- Nix render integration attempts hit Chromium navigation timeouts, then the
+  Nix daemon disconnected during the overloaded run. The three contracts were
+  executed through the same native CLI locally and decoded as above. Keep this
+  infrastructure failure explicit rather than calling the builder run green.
+
+*** Shared asset and final browser gates
+- New shared-asset HTTP unit passes (M4A/FLAC/WAV/MP3/OGG, video, image,
+  font, original bytes and a filename containing a space; .st remains outside
+  the static route). Final library: 3337/0/1 ignored; CLI 5/0.
+- Actual soundtrack route: HEAD /assets/launch-soundtrack.m4a -> 200 audio/mp4,
+  content-length 3153207. Actual film CDP: 1 passed, 0 failed, 0 skipped,
+  including decoded 79.1 s audio, paused seeking, scene windows, photo motion,
+  chart movement and reverse seeking.
+- Poster reference plates now opt into captioned=true; the reusable form's
+  normal brand/line remain typed editable parameters. Portrait extraction now
+  includes the full poster rather than a cropped photo body. The blue plate's
+  embedded editor cursor is documented, and the duplicate authored cursor is
+  removed from this reference scene. Final poster still at 49 s inspected.
+- Final poster pass is being re-exported through the same native command.

@@ -2,6 +2,7 @@
 /// choreography is local to each scene; this file owns only ordering/time.
 .film__canvas {
   @score &.time(79.1s) as &film {
+    @audio(src: "assets/launch-soundtrack.m4a") as &soundtrack at 0s;
     &opening at 0s for 3.9s;
     &introduction at 3.9s for 3.6s;
     &voice-invitation at 7.5s for 5.2s;

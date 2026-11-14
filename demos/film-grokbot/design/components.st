@@ -4,7 +4,7 @@
   <section class="scene scene--`$tone` `$name`"><div class="scene__camera">`&content`</div></section>
 }
 @form markup --bot($kind string = "blue", $label string = "Research Bot") {
-  <span class="bot bot--`$kind`" role="img" aria-label="`$label`"><span class="bot__body"></span><span class="bot__eyes"><i></i><i></i></span></span>
+  <span class="bot bot--`$kind`" role="img" aria-label="`$label`"><span class="bot__body"></span><span class="bot__eyes"><i></i><i></i></span><span class="bot__back"></span></span>
 }
 @form markup --icon($name string, $label string = "Control") {
   <span class="icon"><img src="assets/icons/`$name`.svg" alt="`$label`" /></span>
@@ -12,8 +12,8 @@
 @form markup --wave {
   <span class="wave" aria-label="Voice activity"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></span>
 }
-@form markup --voice(&content, $kind string = "blue") {
-  <div class="voice voice--`$kind`"><div class="voice__bar"><--bot kind="`$kind`" /><--wave /><span class="voice__spacer"></span><--icon name="settings" label="Voice settings" /><--icon name="message-circle" label="Open conversation" /><--icon name="mic" label="Microphone" /><span class="voice__end"><--icon name="x" label="End call" /></span></div><div class="voice__conversation">`&content`</div></div>
+@form markup --voice(&content, $kind string = "blue", $scale number = 1) {
+  <div class="voice voice--`$kind`" style="--voice-scale: `$scale`;"><div class="voice__bar"><--bot kind="`$kind`" /><--wave /><span class="voice__spacer"></span><--icon name="settings" label="Voice settings" /><--icon name="message-circle" label="Open conversation" /><--icon name="mic" label="Microphone" /><span class="voice__end"><--icon name="x" label="End call" /></span></div><div class="voice__conversation">`&content`</div></div>
 }
 @form markup --bubble(&content, $side string = "in") {
   <div class="bubble-row bubble-row--`$side`"><div class="bubble bubble--`$side`">`&content`</div></div>
@@ -40,6 +40,6 @@
 @form markup --participant(&content, $name string) {
   <div class="participant">`&content`<span class="participant__name">`$name`</span></div>
 }
-@form markup --poster($src string, $alt string, $format string = "portrait") {
-  <article class="poster poster--`$format`"><img src="`$src`" alt="`$alt`" /><span class="poster__brand">Pendel Arc</span><span class="poster__line">A lighter fit for longer days.</span></article>
+@form markup --poster($src string, $alt string, $format string = "portrait", $brand string = "Pendel Arc", $line string = "A lighter fit for longer days.", $captioned bool = false) {
+  <article class="poster poster--`$format`" data-captioned="`$captioned`"><img src="`$src`" alt="`$alt`" /><span class="poster__brand">`$brand`</span><span class="poster__line">`$line`</span></article>
 }
