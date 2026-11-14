@@ -128,3 +128,16 @@ After an edit the studio compares the fingerprint (unchanged: only hot
 arguments moved) and hands the page the new arguments (`ST.hotApply`); a key
 set that differs or a call that refuses means a reload. Gates:
 `tests/studio_hot_binds_test.rs`.
+
+## A film built from an editable design language
+
+`demos/film-grokbot/` reconstructs a 79.1-second launch film using nested markup
+forms. `index.st` composes scenes, `score.st` owns their timing, and `design/`
+separates tokens, component anatomy, surfaces and motion. Open its **Edit → Film**
+mode to inspect the same score as the renderer; the source remains the project.
+
+Each scene has a camera element inside it. Visibility animates the scene,
+framing animates the camera, and a component's own move animates its element.
+That separation keeps two concerns from replacing the same transform. Shared
+arrival and focus forms include their blur envelopes; changing the form changes
+all consumers. See the demo's README for its reference assets and fidelity limits.
