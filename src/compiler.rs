@@ -1960,7 +1960,9 @@ fn compile_pipeline(ast: &StFile, options: CompileOptions) -> CompiledSpacetime 
     // re-runs authoritatively (clearing the parse-time file-local E0947 a
     // cross-file form would otherwise carry), then style splices EXPAND into
     // scope CSS.
-    let needs_forms = !overlay.form_matches.is_empty() || crate::parser::ast_has_form_refs(ast);
+    let needs_forms = !overlay.form_matches.is_empty()
+        || crate::parser::ast_has_form_refs(ast)
+        || crate::parser::ast_has_form_elements(ast);
     let ast: &StFile = if has_registry_data(ast)
         || has_dispatch_data(ast)
         || has_doc_src(ast)
@@ -1978,6 +1980,11 @@ fn compile_pipeline(ast: &StFile, options: CompileOptions) -> CompiledSpacetime 
         inject_dispatch_data(&mut cloned, &registry);
         inject_forms_data(&mut cloned, &overlay.form_matches);
         inject_doc_content(&mut cloned, options.site_dir.as_deref());
+        // PLAN-157: markup forms written as elements (`<--accent>…</--accent>`),
+        // after @doc content is inlined so literate prose expands too.
+        if needs_forms {
+            crate::parser::expand_markup_form_elements(&mut cloned);
+        }
         // FUP-149 (PLAN-119 W3): fill each bodyless `@data subscribe` with a
         // `seed` capture so its `%binds` `local-state-impl(initial: $seed)`
         // has a value to thread. Typed → the type's ZERO VALUE (structural,

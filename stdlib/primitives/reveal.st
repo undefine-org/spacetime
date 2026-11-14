@@ -347,6 +347,19 @@
     // SECOND split directly (no ResizeObserver exists at the logic rung) and prove
     // idempotence — the unit count and textContent must not multiply (gh-24).
     el._revealSplit = splitText;
+    // The AUTHORED-CONTENT contract: a primitive that rebuilds its host's
+    // children says what the author wrote, so a tool that edits the page (the
+    // studio) edits those nodes, not one span per word. `nodes` are the author's
+    // own children; `skip` is generated text that is not a projection of them
+    // (the screen-reader copy); `project()` rebuilds from `nodes`, shown at rest.
+    el.__stAuthored = {
+      nodes: originalNodes,
+      skip: [srSpan],
+      project: () => {
+        srSpan.textContent = originalNodes.map(n => n.textContent).join('');
+        splitText();
+      }
+    };
     // Calculate stagger order indices
     const getStaggerOrder = (count) => {
       const indices = Array.from({ length: count }, (_, i) => i);

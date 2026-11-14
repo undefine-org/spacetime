@@ -8,7 +8,8 @@
 //! - **markup**: every element literal, with its static text runs;
 //! - **templates**: every `@template &name(params)` with its `///` doc;
 //! - **rules**: every selector scope with its declarations and form splices,
-//!   from the real parser's spans.
+//!   from the real parser's spans;
+//! - **marks**: the inline marks the formatting bar offers ([`super::marks`]).
 //!
 //! Nothing here is cached: an outline is rebuilt from disk for every request,
 //! so the spans it hands out describe the bytes that are there now.
@@ -219,6 +220,7 @@ impl Site {
             "markup": markup,
             "templates": templates,
             "rules": rules,
+            "marks": super::marks::marks(self).iter().map(|m| m.to_json()).collect::<Vec<_>>(),
         })
     }
 }

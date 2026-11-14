@@ -721,6 +721,25 @@ fn org_inline(text: &str) -> String {
     emphasis(&s)
 }
 
+/// The inline marks prose can write, as its renderer reads them: the
+/// delimiter and the element it renders as. Org is read by [`emphasis`] below;
+/// Markdown is rendered by the vendored snarkdown (`stdlib/md`), whose
+/// emphasis table this mirrors. An editor writing a mark INTO prose reads
+/// these backwards ([`prose_mark`]), so writing and reading cannot disagree.
+pub const ORG_MARKS: &[(char, &str)] = &[('*', "strong"), ('/', "em"), ('=', "code"), ('~', "code"), ('+', "s")];
+pub const MD_MARKS: &[(&str, &str)] = &[("**", "strong"), ("*", "em"), ("`", "code"), ("~~", "s")];
+
+/// How prose writes `<tag>` around a text, when its language has a delimiter
+/// for that element: `(open, close)`.
+pub fn prose_mark(org: bool, tag: &str) -> Option<(String, String)> {
+    let d = if org {
+        ORG_MARKS.iter().find(|m| m.1 == tag).map(|m| m.0.to_string())
+    } else {
+        MD_MARKS.iter().find(|m| m.1 == tag).map(|m| m.0.to_string())
+    };
+    d.map(|d| (d.clone(), d))
+}
+
 fn emphasis(text: &str) -> String {
     let chars: Vec<char> = text.chars().collect();
     let mut out = String::with_capacity(text.len());
@@ -728,7 +747,8 @@ fn emphasis(text: &str) -> String {
     while i < chars.len() {
         let c = chars[i];
         let boundary_before = i == 0 || !chars[i - 1].is_alphanumeric();
-        if boundary_before && matches!(c, '=' | '~' | '*' | '/' | '+') {
+        let tag = ORG_MARKS.iter().find(|m| m.0 == c).map(|m| m.1);
+        if let (true, Some(tag)) = (boundary_before, tag) {
             // Find the closing marker: non-space before it, boundary after it.
             let mut j = i + 1;
             let mut close = None;
@@ -747,10 +767,10 @@ fn emphasis(text: &str) -> String {
             }
             if let Some(j) = close {
                 let inner: String = chars[i + 1..j].iter().collect();
-                let wrapped = match c {
-                    '=' | '~' => format!("`{inner}`"),
-                    '*' => format!("**{inner}**"),
-                    '/' => format!("_{inner}_"),
+                let wrapped = match tag {
+                    "code" => format!("`{inner}`"),
+                    "strong" => format!("**{inner}**"),
+                    "em" => format!("_{inner}_"),
                     _ => format!("~~{inner}~~"),
                 };
                 out.push_str(&wrapped);

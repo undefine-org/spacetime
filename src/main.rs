@@ -2230,12 +2230,16 @@ fn check_file(
             // while building perfectly. A diagnostic tool that disagrees with
             // the compiler is worse than no diagnostic tool.
             let mut ast = ast;
-            if !overlay_form_matches.is_empty() || spacetime::parser::ast_has_form_refs(&ast) {
+            if !overlay_form_matches.is_empty()
+                || spacetime::parser::ast_has_form_refs(&ast)
+                || spacetime::parser::ast_has_form_elements(&ast)
+            {
                 // Same seam as `Compiler::compile`: the project's `_prelude.st`
                 // forms join the assembled page BEFORE refs are judged.
                 ast.matches.extend(overlay_form_matches.iter().cloned());
                 spacetime::parser::validate_form_refs(&mut ast);
                 spacetime::parser::expand_style_form_splices(&mut ast);
+                spacetime::parser::expand_markup_form_elements(&mut ast);
             }
             let ast = ast;
 

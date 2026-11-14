@@ -6794,7 +6794,7 @@ async fn dev_editable_schema_handler(
 
 /// Extract `@cms(TypeName) { role: field; ... }` display-hint overrides from the
 /// site AST, keyed by target type name. Roles: title/subtitle/thumbnail/chips.
-/// Interim file-scope form (see stdlib/__admin__/cms-hint.st); the nested
+/// Interim file-scope form (see stdlib/macros/cms.st); the nested
 /// `@type.cms` form is tracked by FUP-macro-namespaces.
 fn collect_cms_hints(
     matches: &[crate::syntax::FormMatch],

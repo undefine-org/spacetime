@@ -10,6 +10,9 @@
 //!   the edit is applied only when exactly ONE remains.
 //! - **field / move / duplicate / delete** — a list by binding and a row by index.
 //! - **decl** — a style declaration by span, guarded by its current text.
+//! - **mark / unmark** — "wrap these characters of this text in a mark", or
+//!   "take this marked text out of its mark": the text is placed like a text
+//!   edit, then the mark is written in the language of that place ([`marks`]).
 //!
 //! Nothing here reads or writes the disk. [`apply`] returns the full new text
 //! of each changed file; the caller writes them.
@@ -20,6 +23,7 @@ use serde::Deserialize;
 
 use super::literal::{self, Lit};
 use super::markup;
+use super::marks::{self, Lang, Mark};
 use super::outline::{List, Site, comment_spans};
 use super::{Span, normalize};
 
@@ -75,6 +79,26 @@ pub enum Op {
         at: usize,
         before: String,
         text: String,
+    },
+    /// Wrap `start..end` (UTF-16 offsets, as the browser counts) of the text
+    /// that reads `old` in the mark `mark`, its params filled from `attrs`.
+    Mark {
+        old: String,
+        start: usize,
+        end: usize,
+        mark: String,
+        #[serde(default)]
+        attrs: BTreeMap<String, String>,
+        #[serde(default)]
+        hint: Hint,
+    },
+    /// Take the text `text`, written in the mark `mark`, out of it. `hint`
+    /// describes the element the mark sits in.
+    Unmark {
+        text: String,
+        mark: String,
+        #[serde(default)]
+        hint: Hint,
     },
     /// Replace a whole file (the code pane), guarded by the hash of the text
     /// the edit was made on ([`source_hash`]).
@@ -151,6 +175,8 @@ pub fn apply(site: &Site, op: &Op) -> Result<Changes, String> {
             }
             Ok(splice(site, fi, Span::new(*at, *at), text))
         }
+        Op::Mark { old, start, end, mark, attrs, hint } => wrap(site, old, *start, *end, mark, attrs, hint),
+        Op::Unmark { text, mark, hint } => unwrap(site, text, mark, hint),
         Op::Source { file, base, text } => {
             let fi = file_index(site, file)?;
             if source_hash(&site.files[fi].text) != *base {
@@ -172,29 +198,34 @@ fn file_index(site: &Site, file: &str) -> Result<usize, String> {
 // ---- text ------------------------------------------------------------------
 
 fn text(site: &Site, old: &str, new: &str, hint: &Hint) -> Result<Changes, String> {
+    if normalize(new) == normalize(old) && !normalize(old).is_empty() {
+        return Ok(Changes::new());
+    }
+    let chosen = locate(site, old, hint)?;
+    replace_place(site, &chosen, new)
+}
+
+/// The one place in the source that produces the text `old`.
+fn locate(site: &Site, old: &str, hint: &Hint) -> Result<Place, String> {
     let want = normalize(old);
     if want.is_empty() {
         return Err("nothing to edit: the old text is empty".to_string());
     }
-    if normalize(new) == want {
-        return Ok(Changes::new());
-    }
     let mut places = data_places(site, &want);
     places.extend(markup_places(site, &want));
 
-    let chosen = match places.len() {
-        1 => places.remove(0),
-        0 => raw_place(site, old.trim())?,
+    match places.len() {
+        1 => Ok(places.remove(0)),
+        0 => raw_place(site, old.trim()),
         _ => {
             let narrowed: Vec<Place> = places.iter().filter(|p| fits(p, hint)).cloned().collect();
             match narrowed.len() {
-                1 => narrowed.into_iter().next().unwrap(),
-                0 => return Err(format!("\"{}\" appears in {} places and none matches where it was shown", short(&want), places.len())),
-                n => return Err(format!("\"{}\" appears in {n} places; edit it from the list or the source", short(&want))),
+                1 => Ok(narrowed.into_iter().next().unwrap()),
+                0 => Err(format!("\"{}\" appears in {} places and none matches where it was shown", short(&want), places.len())),
+                n => Err(format!("\"{}\" appears in {n} places; edit it from the list or the source", short(&want))),
             }
         }
-    };
-    replace_place(site, &chosen, new)
+    }
 }
 
 fn data_places(site: &Site, want: &str) -> Vec<Place> {
@@ -240,16 +271,22 @@ fn collect_strings<'a>(lit: &'a Lit, f: &mut dyn FnMut(Span, &str, Option<&'a st
 
 fn markup_places(site: &Site, want: &str) -> Vec<Place> {
     let mut out = Vec::new();
+    // A form element (`<--accent>`) shows on the page as its projection's root.
+    let forms: Vec<Mark> = if site.files.iter().any(|f| f.text.contains("<--")) { marks::marks(site) } else { Vec::new() };
     for fi in 0..site.files.len() {
         let els = site.elements(fi);
         for el in &els {
+            let (tag, classes) = match forms.iter().find(|m| m.name == el.tag) {
+                Some(m) => (m.tag.clone(), m.classes.clone()),
+                None => (el.tag.clone(), el.classes.clone()),
+            };
             for run in el.runs.iter().filter(|r| r.is_static) {
                 if normalize(&run.text) == want {
                     out.push(Place::Markup {
                         file: fi,
                         span: run.span,
-                        tag: el.tag.clone(),
-                        classes: el.classes.clone(),
+                        tag: tag.clone(),
+                        classes: classes.clone(),
                         element_text: el.static_text(&els),
                     });
                 }
@@ -314,6 +351,150 @@ fn replace_place(site: &Site, place: &Place, new: &str) -> Result<Changes, Strin
         Place::Raw { file, span } => (*file, *span, new.trim().to_string()),
     };
     Ok(splice(site, file, span, &replacement))
+}
+
+// ---- marks -------------------------------------------------------------------
+
+fn find_mark(site: &Site, name: &str) -> Result<Mark, String> {
+    marks::marks(site).into_iter().find(|m| m.name == name).ok_or_else(|| format!("no mark named {name}"))
+}
+
+/// The byte offset in `s` of the UTF-16 offset `at`.
+fn byte_at(s: &str, at: usize) -> usize {
+    let mut units = 0;
+    for (i, c) in s.char_indices() {
+        if units >= at {
+            return i;
+        }
+        units += c.len_utf16();
+    }
+    s.len()
+}
+
+fn wrap(site: &Site, old: &str, start: usize, end: usize, name: &str, attrs: &BTreeMap<String, String>, hint: &Hint) -> Result<Changes, String> {
+    let mark = find_mark(site, name)?;
+    // The selection, without the spaces a double-click takes along.
+    let (mut s, mut e) = (byte_at(old, start.min(end)), byte_at(old, start.max(end)));
+    let picked = &old[s..e];
+    s += picked.len() - picked.trim_start().len();
+    e -= picked.len() - picked.trim_end().len();
+    if s >= e {
+        return Err("select some text first".to_string());
+    }
+    let (file, from, to, lang) = match locate(site, old, hint)? {
+        Place::Data { binding, .. } => {
+            return Err(format!("this text is a plain string in ${binding}; marks go on markup and prose"));
+        }
+        Place::Markup { file, span, .. } => {
+            let src = markup::collapse(markup::raw_units(&site.files[file].text[span.start..span.end]));
+            let shown = markup::collapse(old.char_indices().map(|(i, c)| (c, i, i + c.len_utf8())).collect());
+            if src.len() != shown.len() {
+                return Err("the text on the page no longer matches its source; reload".to_string());
+            }
+            let i = shown.iter().take_while(|u| u.1 < s).count();
+            let j = shown.iter().take_while(|u| u.1 < e).count();
+            (file, span.start + src[i].1, span.start + src[j - 1].2, Lang::Markup)
+        }
+        Place::Raw { file, span } => {
+            let lead = old.len() - old.trim_start().len();
+            let from = span.start + s.saturating_sub(lead);
+            let to = (span.start + e.saturating_sub(lead)).min(span.end);
+            let text = &site.files[file].text;
+            (file, from, to, marks::lang_at(&site.files[file].path, text, from))
+        }
+    };
+    let (open, close) = mark.wrap(lang, attrs)?;
+    let text = &site.files[file].text;
+    let replacement = format!("{open}{}{close}", &text[from..to]);
+    Ok(splice(site, file, Span::new(from, to), &replacement))
+}
+
+fn unwrap(site: &Site, shown: &str, name: &str, hint: &Hint) -> Result<Changes, String> {
+    let mark = find_mark(site, name)?;
+    let want = normalize(shown);
+    if want.is_empty() {
+        return Err("nothing to unmark".to_string());
+    }
+    // (file, whole span, inner span)
+    let mut found: Vec<(usize, Span, Span)> = Vec::new();
+    let mut fitting: Vec<(usize, Span, Span)> = Vec::new();
+    for fi in 0..site.files.len() {
+        let els = site.elements(fi);
+        for el in &els {
+            // written by name (`<--accent>`), or as its projection
+            let named = el.tag == mark.name;
+            if !named && (el.tag != mark.tag || !mark.classes.iter().all(|c| el.classes.contains(c))) {
+                continue;
+            }
+            if el.static_text(&els).as_deref() != Some(want.as_str()) || el.span == el.open {
+                continue;
+            }
+            let text = &site.files[fi].text;
+            let close = text[..el.span.end].rfind("</").filter(|c| *c >= el.open.end).unwrap_or(el.open.end);
+            let hit = (fi, el.span, Span::new(el.open.end, close));
+            let parent = el.parent.map(|p| &els[p]);
+            let fits = parent.is_some_and(|p| {
+                hint.tag.as_ref().is_none_or(|t| *t == p.tag)
+                    && (hint.classes.is_empty() || hint.classes.iter().any(|c| p.classes.contains(c)))
+                    && hint.element_text.as_ref().is_none_or(|t| p.static_text(&els).is_none_or(|e| normalize(&e) == normalize(t)))
+            });
+            if fits {
+                fitting.push(hit);
+            }
+            found.push(hit);
+        }
+    }
+    found.extend(prose_marks(site, &mark, shown.trim()));
+    let chosen = match (found.len(), fitting.len()) {
+        (1, _) => found[0],
+        (_, 1) => fitting[0],
+        (0, _) => return Err(format!("\"{}\" is not written as {} in the source", short(&want), mark.label)),
+        (n, _) => return Err(format!("\"{}\" is written as {} in {n} places; unmark it in the source", short(&want), mark.label)),
+    };
+    let (file, whole, inner) = chosen;
+    let inner_text = site.files[file].text[inner.start..inner.end].to_string();
+    Ok(splice(site, file, whole, &inner_text))
+}
+
+/// `text` written in `mark`'s prose syntax in the prose of literate files.
+fn prose_marks(site: &Site, mark: &Mark, text: &str) -> Vec<(usize, Span, Span)> {
+    let mut out = Vec::new();
+    if text.is_empty() {
+        return out;
+    }
+    for (fi, file) in site.files.iter().enumerate() {
+        let src = &file.text;
+        let mut from = 0;
+        while let Some(pos) = src[from..].find(text) {
+            let a = from + pos;
+            let b = a + text.len();
+            from = b;
+            let lang = marks::lang_at(&file.path, src, a);
+            if lang == Lang::Markup {
+                continue;
+            }
+            let inner = Span::new(a, b);
+            if mark.tag == "a" {
+                // [text](href) / [[href][text]]
+                let (head, tail_open, tail_close) = if lang == Lang::Markdown { ("[", "](", ")") } else { ("][", "]]", "") };
+                if !src[..a].ends_with(head) || !src[b..].starts_with(tail_open) {
+                    continue;
+                }
+                let start = if lang == Lang::Markdown { a - 1 } else { match src[..a].rfind("[[") { Some(s) => s, None => continue } };
+                let end = if lang == Lang::Markdown {
+                    match src[b + 2..].find(tail_close) { Some(e) => b + 2 + e + 1, None => continue }
+                } else {
+                    b + 2
+                };
+                out.push((fi, Span::new(start, end), inner));
+            } else if let Ok((open, close)) = mark.wrap(lang, &BTreeMap::new()) {
+                if src[..a].ends_with(&open) && src[b..].starts_with(&close) {
+                    out.push((fi, Span::new(a - open.len(), b + close.len()), inner));
+                }
+            }
+        }
+    }
+    out
 }
 
 // ---- lists -----------------------------------------------------------------
@@ -553,5 +734,89 @@ mod tests {
         assert!(run(value_only).unwrap().contains(".hero__title { color: teal; }"));
         let stale = Op::Decl { file: "index.st".into(), start, end, expect: "color: green;".into(), value: "blue".into() };
         assert!(run(stale).is_err());
+    }
+
+    fn mark_op(old: &str, sel: &str, mark: &str, attrs: &[(&str, &str)]) -> Op {
+        let start = old.find(sel).unwrap();
+        Op::Mark {
+            old: old.into(),
+            start: old[..start].encode_utf16().count(),
+            end: old[..start + sel.len()].encode_utf16().count(),
+            mark: mark.into(),
+            attrs: attrs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+            hint: Hint::default(),
+        }
+    }
+
+    #[test]
+    fn marks_wrap_the_selected_characters_of_markup() {
+        // a double-click takes the trailing space along; the mark does not
+        let out = run(mark_op("I write ", "write ", "--bold", &[])).unwrap();
+        assert!(out.contains("<h1 class=\"hero__title\">I <strong>write</strong> <em>stories</em>.</h1>"), "{out}");
+        let out = run(mark_op("I write ", "I", "--link", &[("href", "/who")])).unwrap();
+        assert!(out.contains("><a href=\"/who\">I</a> write <em>"), "{out}");
+        assert!(run(mark_op("I write ", "I", "--link", &[])).unwrap_err().contains("href"));
+        let err = run(mark_op("AI isn't ", "AI", "--bold", &[])).unwrap_err();
+        assert!(err.contains("$tenets"), "{err}");
+    }
+
+    #[test]
+    fn marks_map_through_entities_and_reflowed_whitespace() {
+        let page = "<p class=\"x\">Fish &amp; chips,\n    twice</p>\n";
+        let site = Site::from_files(&[("index.st", page)]);
+        let old = "Fish & chips,\n    twice";
+        let start = old.find("chips").unwrap();
+        let op = Op::Mark { old: old.into(), start, end: old.len(), mark: "--italic".into(), attrs: BTreeMap::new(), hint: Hint::default() };
+        let out = apply(&site, &op).unwrap()["index.st"].clone();
+        assert_eq!(out, "<p class=\"x\">Fish &amp; <em>chips,\n    twice</em></p>\n");
+    }
+
+    #[test]
+    fn marks_in_prose_use_the_prose_syntax() {
+        let md = "```st\n<p>code</p>\n```\nWe are still in the design phase.\n";
+        let site = Site::from_files(&[("post.st.md", md)]);
+        let old = "We are still in the design phase.";
+        let s = old.find("design").unwrap();
+        let op = Op::Mark { old: old.into(), start: s, end: s + 6, mark: "--bold".into(), attrs: BTreeMap::new(), hint: Hint::default() };
+        let out = apply(&site, &op).unwrap()["post.st.md"].clone();
+        assert!(out.contains("in the **design** phase."), "{out}");
+        let site = Site::from_files(&[("post.st.md", out.as_str())]);
+        let op = Op::Unmark { text: "design".into(), mark: "--bold".into(), hint: Hint::default() };
+        assert_eq!(apply(&site, &op).unwrap()["post.st.md"], md);
+
+        let org = "Read the [[https://x.y][notes]] and /this/.\n";
+        let site = Site::from_files(&[("p.st.org", org)]);
+        let op = Op::Unmark { text: "notes".into(), mark: "--link".into(), hint: Hint::default() };
+        assert_eq!(apply(&site, &op).unwrap()["p.st.org"], "Read the notes and /this/.\n");
+        let op = Op::Unmark { text: "this".into(), mark: "--italic".into(), hint: Hint::default() };
+        assert_eq!(apply(&site, &op).unwrap()["p.st.org"], "Read the [[https://x.y][notes]] and this.\n");
+    }
+
+    #[test]
+    fn unmark_takes_markup_text_out_of_its_element() {
+        let out = run(Op::Unmark { text: "stories".into(), mark: "--italic".into(), hint: Hint::default() }).unwrap();
+        assert!(out.contains("<h1 class=\"hero__title\">I write stories.</h1>"), "{out}");
+        let err = run(Op::Unmark { text: "Hello".into(), mark: "--bold".into(), hint: Hint::default() }).unwrap_err();
+        assert!(err.contains("not written as Bold"), "{err}");
+    }
+
+    #[test]
+    fn a_page_form_is_written_and_unwritten_by_name() {
+        let page = "@form markup --accent(&sel) { <mark class=\"accent\">`&sel`</mark> }\n<h1 class=\"t\">I write software.</h1>\n";
+        let site = Site::from_files(&[("index.st", page)]);
+        let old = "I write software.";
+        let s = old.find("software").unwrap();
+        let op = Op::Mark { old: old.into(), start: s, end: s + 8, mark: "--accent".into(), attrs: BTreeMap::new(), hint: Hint::default() };
+        let out = apply(&site, &op).unwrap()["index.st"].clone();
+        assert!(out.contains("<h1 class=\"t\">I write <--accent>software</--accent>.</h1>"), "{out}");
+
+        // text inside it is edited in place; the page shows it as <mark class="accent">
+        let site = Site::from_files(&[("index.st", out.as_str())]);
+        let hint = Hint { tag: Some("mark".into()), classes: vec!["accent".into()], ..Hint::default() };
+        let edited = apply(&site, &Op::Text { old: "software".into(), new: "stories".into(), hint }).unwrap()["index.st"].clone();
+        assert!(edited.contains("<--accent>stories</--accent>"), "{edited}");
+
+        let op = Op::Unmark { text: "software".into(), mark: "--accent".into(), hint: Hint::default() };
+        assert_eq!(apply(&site, &op).unwrap()["index.st"], page);
     }
 }

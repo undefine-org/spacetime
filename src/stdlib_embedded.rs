@@ -336,6 +336,12 @@ pub mod macros {
             path: "form.st",
             content: include_str!("../stdlib/macros/form.st"),
         },
+        // `@cms` display hints (types and forms). It lived in `__admin__`, which
+        // the filesystem registry never scans, so it only registered here.
+        EmbeddedFile {
+            path: "cms.st",
+            content: include_str!("../stdlib/macros/cms.st"),
+        },
         EmbeddedFile {
             path: "drivers.st",
             content: include_str!("../stdlib/macros/drivers.st"),
@@ -490,18 +496,6 @@ pub mod testing {
     ];
 }
 
-pub mod admin {
-    use super::EmbeddedFile;
-
-    /// Spacetime CMS admin module. Currently only the `@cms` display-hint macro,
-    /// which must be available when compiling user `.st` so authors can annotate
-    /// their `@type`s for the local content admin. Produces no runtime output.
-    pub const FILES: &[EmbeddedFile] = &[EmbeddedFile {
-        path: "cms-hint.st",
-        content: include_str!("../stdlib/__admin__/cms-hint.st"),
-    }];
-}
-
 /// PLAN-077 W1: the `enum` module's capture types. The filesystem registry scan
 /// covers the whole `stdlib/enum/` dir (STDLIB_DIRS); embedded mode lists files
 /// explicitly. Only meta-def-carrying files are embedded (MODULE.st/index.st
@@ -620,7 +614,6 @@ pub fn all_embedded_files() -> Vec<(&'static str, &'static [EmbeddedFile])> {
         ("syntax", syntax::FILES),
         ("primitives", primitives::FILES),
         ("macros", macros::FILES),
-        ("admin", admin::FILES),
         ("__mcp__", mcp::FILES),
         ("testing", testing::FILES),
         ("enum", enum_module::FILES),

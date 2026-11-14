@@ -8,7 +8,9 @@
 //! those through the data instead.
 //!
 //! A `<` opens a tag only when followed by a letter, `/letter` or `!--`, which
-//! rules out `<-` bindings and `a < b` comparisons. Comment regions and `@data`
+//! rules out `<-` bindings and `a < b` comparisons — or by `--letter`: a markup
+//! form written as an element (`<--accent>…</--accent>`, PLAN-157), whose tag is
+//! the form's name. Comment regions and `@data`
 //! literal regions are excluded by the caller (a string value may itself contain
 //! `<em>`, which is data, not markup).
 
@@ -87,8 +89,9 @@ pub fn elements(src: &str, excluded: &[Span]) -> Vec<Element> {
             i = src[i..].find("-->").map(|e| i + e + 3).unwrap_or(b.len());
             continue;
         }
-        let closing = next == b'/' && b.get(i + 2).is_some_and(|c| c.is_ascii_alphabetic());
-        if !(next.is_ascii_alphabetic() || closing) {
+        let form_at = |at: usize| src[at..].starts_with("--") && b.get(at + 2).is_some_and(|c| c.is_ascii_alphabetic());
+        let closing = next == b'/' && (b.get(i + 2).is_some_and(|c| c.is_ascii_alphabetic()) || form_at(i + 2));
+        if !(next.is_ascii_alphabetic() || closing || form_at(i + 1)) {
             if text_start.is_none() && !stack.is_empty() {
                 text_start = Some(i);
             }
@@ -194,6 +197,46 @@ pub fn decode_entities(raw: &str) -> String {
         .replace("&amp;", "&")
 }
 
+/// The characters a raw run shows, each with the source bytes it is written
+/// as (`&amp;` is one character, so is the escaped hole backtick).
+pub fn raw_units(raw: &str) -> Vec<(char, usize, usize)> {
+    const ENTITIES: &[(&str, char)] =
+        &[("&nbsp;", '\u{a0}'), ("&lt;", '<'), ("&gt;", '>'), ("&quot;", '"'), ("&#39;", '\''), ("&#96;", '`'), ("&amp;", '&'), ("\\`", '`')];
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < raw.len() {
+        let rest = &raw[i..];
+        if let Some((e, c)) = ENTITIES.iter().find(|(e, _)| rest.starts_with(e)) {
+            out.push((*c, i, i + e.len()));
+            i += e.len();
+            continue;
+        }
+        let c = rest.chars().next().unwrap();
+        out.push((c, i, i + c.len_utf8()));
+        i += c.len_utf8();
+    }
+    out
+}
+
+/// Units with every whitespace run collapsed to its first character and the
+/// ends trimmed: the form [`normalize`] compares, keeping each unit's bytes.
+pub fn collapse(units: Vec<(char, usize, usize)>) -> Vec<(char, usize, usize)> {
+    let mut out: Vec<(char, usize, usize)> = Vec::new();
+    for u in units {
+        if u.0.is_whitespace() {
+            if out.last().is_some_and(|l| !l.0.is_whitespace()) {
+                out.push((' ', u.1, u.2));
+            }
+        } else {
+            out.push(u);
+        }
+    }
+    while out.last().is_some_and(|l| l.0.is_whitespace()) {
+        out.pop();
+    }
+    out
+}
+
 /// Encode plain text for a markup text run: `<` and the hole backtick are the
 /// only characters `.st` markup cannot carry literally.
 pub fn encode_text(text: &str) -> String {
@@ -246,6 +289,16 @@ mod tests {
         assert!(!els[2].runs[0].is_static);
         assert_eq!(els[2].static_text(&els), None);
         assert_eq!(&src[els[0].span.start..els[0].span.end], "<h1 class=\"hero__title big\">I write <em>stories</em>.</h1>");
+    }
+
+    #[test]
+    fn form_elements_are_elements_named_by_their_form() {
+        let src = "<p>I write <--accent>soft</--accent> ware, x<--3 <- y.</p>";
+        let els = elements(src, &[]);
+        assert_eq!(els.iter().map(|e| e.tag.as_str()).collect::<Vec<_>>(), vec!["p", "--accent"]);
+        assert_eq!(els[1].parent, Some(0));
+        assert_eq!(els[1].runs[0].text, "soft");
+        assert_eq!(els[0].static_text(&els).as_deref(), Some("I write soft ware, x<--3 <- y."));
     }
 
     #[test]

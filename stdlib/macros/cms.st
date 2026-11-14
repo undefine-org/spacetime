@@ -34,6 +34,12 @@
 ///   Until those land, @cms(TypeName) is the interim, fully-parsing surface.
 ///   It is a real metasystem macro (no Rust special-casing of placement).
 ///
+/// A FORM is a target too: `@cms(--accent) { icon: "✦"; shortcut: "mod+e"; }`.
+/// An editor infers how to present a form (label from its name, doc from its
+/// `///`, each param's control from its scalar row); @cms only overrides that,
+/// exactly as it overrides a type's display roles (PLAN-157). `$type:ident`
+/// already accepts the dashed name.
+///
 /// CONVENTION FALLBACK: @cms is OPTIONAL. With no @cms at all, the admin infers
 /// display roles from field names/types (name|title→title, headline|subtitle→
 /// subtitle, image|photo|url→thumbnail, categories|tags→chips). @cms only

@@ -1,0 +1,129 @@
+#+TITLE: Rich editing with forms — marks are forms, editing is types and @cms (builds on PLAN-154, fits PLAN-156)
+#+STATE: DOING
+#+CUSTOM_ID: PLAN-157-rich-editing-with-forms
+#+EFFORT: 4d
+#+PRIORITY: #A
+#+LAYER: tooling
+
+* Initial Message
+
+How do we fix the span-per-word thing and still edit properly, and how can we
+rich-edit, with transformations tied to icons on a Notion-like bar on top of the
+text? Look at the editable CMS demo. Then, in conversation (2026-11-09):
+
+- « shouldn't editable-mark be a form or a template? »
+- « why mark and block and not style/motion/easing? » — explained; then
+- « doesn't that introduce a difference between the forms used in the text vs.
+  the forms used to rich-edit? annotations on @forms? templates with an arity? »
+- « look at the way the @cms tag does it — like rich types, slightly different.
+  '@offer' is complete bullshit, it introduces a new semantic. »
+- « yeah that matches. reshape and then give me an overview. »
+
+* Decisions
+
+** D1 · No mark construct. A mark is a form whose SIGNATURE wraps text.
+=@form markup --accent(&sel) { <mark class="accent">`&sel`</mark> }= is a mark
+because of its shape, read like a type: exactly one content slot, every other
+param a typed scalar, one root of HTML phrasing content holding the slot once.
+No kind word (=mark= would be about the tool, not the thing), no annotation to
+BE a mark. Arity also explains blocks without a kind:
+
+| slots | root | what an editor can do |
+|---|---|---|
+| 1 | phrasing (strong, em, a, mark, span…) | wrap a selection — the bar |
+| 1 | flow (p, h2, blockquote, div…) | turn a block into it — « Turn into » |
+| ≥2, or =&items[]= | flow | insert it, then edit each region |
+
+** D2 · Presentation is inferred, then =@cms= overrides — as for types
+The CMS already works this way: a scalar row says what a type MEANS
+(=%widget=), =widget_for= infers declaration > value > name, and =@cms(Type)=
+only overrides display roles (no runtime, optional). For forms:
+label from the name, doc from =///=, icon from the initial, each param's
+control from its scalar row (=url= → media, =color= → colour); then
+
+#+begin_src st
+@cms(--accent) { icon: "✦"; shortcut: "mod+e"; }
+#+end_src
+
+The same macro and meaning, keyed by a form. (No =@offer=: no new semantic.)
+
+** D3 · The standard marks are ordinary forms in the stdlib
+=stdlib/editable/marks.st=: =--bold= =--italic= =--strike= =--code= =--link($href url)=,
+each with its =@cms=. A page's own form wins by name. Nothing about bold lives
+in Rust.
+
+** D4 · Prose writes a mark in its own syntax, from ONE table
+A mark whose projection is a bare element prose can write is written that way
+(=**x**=, =/x/=, =[x](href)=, =[[href][x]]=); otherwise Markdown takes the markup
+and Org refuses. The table is the renderer's: =literate::ORG_MARKS= is what the
+Org reader reads (=emphasis()= uses it), =MD_MARKS= mirrors the vendored
+snarkdown. Writers read it backwards, so writing and reading cannot disagree
+(the studio once wrote Org underline as =_x_=, which the reader leaves literal).
+
+** D5 · Edit what the AUTHOR wrote (the authored-content contract)
+A primitive that rebuilds its host's children hands them back:
+=host.__stAuthored = { nodes, skip, project }=. =@reveal= does. The canvas
+selects the host, edits the author's nodes, the primitive rebuilds from them.
+
+** D6 · The text NAMES the form: =<--accent>software</--accent>= (decided: B)
+Today the editor writes the form's EXPANSION (=<mark class="accent">…</mark>=),
+and recognises it back by tag and classes: change =--accent= later and old
+phrases don't follow. Forms keep their name in source everywhere else
+(=--role-shout;=). The fix is an inline call in text, per host language:
+
+| host | reference | the language's own |
+|---|---|---|
+| =.st= markup | =`--accent { software }`= (one hole, a body-slot call) | =<strong>= … |
+| Markdown prose | =:accent[software]= (CommonMark generic directive) | =**x**= … |
+| Org prose | ={{{accent(software)}}}= (Org's own macro) | =*x*= … |
+
+Decided (2026-11-09): *B*, the form as an element, in markup and in Markdown
+prose alike (=<--link href="/who">Me</--link>=). It nests like HTML, params are
+attributes, and the sigil after =<= says what it is: =<--x>= a form, and later
+=<&x>= a template (identity, behaviour), which is the inline template call
+markup lacks (BUG-130's territory). Org prose waits. The rejected options:
+a hole with a body (=`--accent { x }`=: nesting needs balanced backticks), the
+form named on a real element (=<mark --accent>=: the tag written twice), and
+prose-only syntaxes (=[x]{--accent}=, =:accent[x]=, ={{{accent(x)}}}=).
+
+* How it fits PLAN-156 (reflect, rewrite, widgets)
+PLAN-156 deletes =src/studio/= for two dev-server facilities: *reflect* (one typed
+projection with spans, docs, registry entries) and *rewrite* (one guarded
+writer, re-parse, undo). Everything here lands on them:
+- « which forms wrap text » is a query over reflect's =form= registry entries
+  (params with types, the body's root with its span), not =src/studio/marks.rs=;
+  the phrasing/flow content model becomes a stdlib table.
+- =mark= / =unmark= are rewrite transactions (address, expected text, words).
+- A param's control is PLAN-156's widget for its scalar row (=&w-text=,
+  =&w-color=, =&w-asset=), the same in the bar, the inspector and the admin.
+- =@cms= display hints are what reflect returns next to a declaration's docs.
+
+* Work
+
+** DONE Authored-content contract; @reveal opts in (52489359)
+** DONE Format bar, mark/unmark ops, shortcuts, href field (daed87fe, 52489359, 725fc833)
+** DONE Reshape (this plan): =icon:= line on =@editable-mark= reverted; standard
+marks are stdlib forms; marks read from forms + =@cms=; prose spellings from the
+renderer's table; param controls from the scalar table.
+** DONE =@cms= moved to =stdlib/macros/cms.st= — it lived in =__admin__/=, which the
+registry never scans, so =@cms(Brand)= failed =check= (« unknown primitive: cms »)
+on main, and =demos/cms-testbed= with it.
+** TODO The live editor reads the same forms
+=@editable(…)= / =@richtext= surfaces take their vocabulary from the forms in
+scope; the runtime schema carries the root's classes (today =projectInlines=
+renders tag + attrs only, so =<mark class="accent">= loses its class).
+** TODO Migration wave: =@editable-mark &x(…) { … }= → =@form markup --x(…) { … }=
+(and =@editable-block=), with PLAN-156's =%scope stdlib= migration engine.
+** TODO Blocks: « Turn into » from 1-slot flow forms (retag; Markdown/Org line
+prefixes from the renderer's table)
+** TODO Paste-lift: pasted HTML recognised as the page's marks
+** TODO A mark across other marks (the selection must sit in one text node today)
+** DONE D6 · form elements in the compiler (5d65689b): expanded at the form seam
+everywhere markup lives (top-level, =@each= bodies, template bodies, =@doc=
+prose, =_prelude.st= forms); E0947 / E0959 / E0960 on misuse; documented in
+=data-and-rendering.md= and SIP-001c's kind table.
+** DONE D6 · the studio writes page forms by name, edits inside them, unmarks
+them by name; standard marks stay their element (=<strong>=, =**x**=)
+** TODO =<&template>= as an element (identity, behaviour; BUG-130)
+** TODO Org prose: a form element syntax for Org
+** TODO Move marks.rs onto reflect + rewrite (with PLAN-156 P1 / P9)

@@ -21,6 +21,16 @@
 ///    to edit text in place, drag a row's handle to reorder its list. Links do
 ///    not navigate while editing. A reload never interrupts typing: the dev
 ///    live-reload fires a cancellable `st:reload` first, and the canvas defers it.
+/// 5. FORMAT BAR: while text is being edited, a selection shows the page's
+///    marks (src/studio/marks.rs: the language's own inline elements, and its
+///    forms that wrap text); a mark wraps the selection in the source, or
+///    takes an already marked text out of it.
+///
+/// The canvas edits what the AUTHOR wrote. A primitive that rebuilds its
+/// host's children (a reveal's one span per word) hands the author's nodes
+/// back as `host.__stAuthored = { nodes, skip, project }`: the canvas selects
+/// the host, edits those nodes in place of the generated ones, and has the
+/// primitive rebuild from them after.
 %primitive studio-kit() {
   %emit prelude-js {
     window.ST = window.ST || {};
@@ -38,6 +48,20 @@
         };
         var inUi = function (node) {
           return !!(node && node.closest && node.closest('.st-dev-dock, .stu-ui, .stu-overlay'));
+        };
+        /// The element as the author wrote it: inside a host whose children a
+        /// primitive generated, the host.
+        var authored = function (el) {
+          for (var n = el; n && n.nodeType === 1 && n !== document.body; n = n.parentElement) {
+            if (n.__stAuthored) { return n; }
+          }
+          return el;
+        };
+        /// The text an element shows, without generated copies (a reveal's
+        /// screen-reader twin).
+        var shownText = function (el) {
+          var a = el && el.__stAuthored;
+          return a ? a.nodes.map(function (n) { return n.textContent; }).join('') : (el ? el.textContent : '');
         };
 
         // ---- 1. view model ------------------------------------------------------
@@ -256,7 +280,7 @@
           for (var n = el; n && n !== document.body && crumbs.length < 4; n = n.parentElement) { crumbs.unshift(labelOf(n)); }
           var d = {
             key: '', tag: el.tagName.toLowerCase(), label: labelOf(el),
-            text: clip(el.textContent, 160), crumbs: crumbs.join(' / '), path: pathOf(el),
+            text: clip(shownText(el), 160), crumbs: crumbs.join(' / '), path: pathOf(el),
             row: null
           };
           if (row) {
@@ -273,7 +297,7 @@
           if (row) { return 'r:' + row.binding + ':' + row.index; }
           var o = outline();
           if (!o || !o.markup) { return ''; }
-          var tag = el.tagName.toLowerCase(), cls = [].slice.call(el.classList), text = norm(el.textContent);
+          var tag = el.tagName.toLowerCase(), cls = [].slice.call(el.classList), text = norm(shownText(el));
           var fallback = '';
           for (var i = 0; i < o.markup.length; i++) {
             var f = o.markup[i];
@@ -514,7 +538,9 @@
           S.boxes = {
             hover: mk('stu-hover'),
             select: mk('stu-select', '<span class="stu-select__label"></span><button type="button" class="stu-handle" title="Drag to reorder" aria-label="Drag to reorder this item">::</button>'),
-            drop: mk('stu-drop')
+            drop: mk('stu-drop'),
+            // what the format bar's field will mark, while focus is in the field
+            ask: mk('stu-asking')
           };
           return S.boxes;
         };
@@ -553,12 +579,61 @@
           return out;
         };
 
+        /// The selection as character offsets in the text `el` shows (`skip`
+        /// nodes not counted), and back: so a double-clicked word stays
+        /// selected when the generated spans give way to the author's nodes.
+        var allText = function (el, skip) {
+          var out = [], w = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+          for (var n = w.nextNode(); n; n = w.nextNode()) {
+            if (!(skip || []).some(function (k) { return k.contains(n); })) { out.push(n); }
+          }
+          return out;
+        };
+        var offsetsIn = function (el, skip) {
+          var s = getSelection();
+          if (!s.rangeCount || !el.contains(s.anchorNode)) { return null; }
+          var r = s.getRangeAt(0), at = 0, start = -1, end = -1;
+          allText(el, skip).forEach(function (n) {
+            if (n === r.startContainer) { start = at + r.startOffset; }
+            if (n === r.endContainer) { end = at + r.endOffset; }
+            at += n.data.length;
+          });
+          return start < 0 || end < 0 ? null : { start: start, end: end };
+        };
+        var selectOffsets = function (el, at) {
+          // A boundary belongs to the node it starts (so a word just after
+          // `<em>` is inside the em), and to the node it ends.
+          var r = document.createRange(), pos = 0, started = false;
+          allText(el).forEach(function (n) {
+            var len = n.data.length;
+            if (!started && at.start < pos + len) { r.setStart(n, at.start - pos); started = true; }
+            if (started && at.end <= pos + len && r.collapsed) { r.setEnd(n, at.end - pos); }
+            pos += len;
+          });
+          if (started) { var s = getSelection(); s.removeAllRanges(); s.addRange(r); }
+          return started;
+        };
+
         S.beginEdit = function (el) {
           if (S.editing) { S.endEdit(true); }
+          if (!el || el === document.documentElement || el === document.body) { return; }
+          // Generated children give way to the author's own while editing.
+          var a = el.__stAuthored, generated = null, at = null;
+          if (a) {
+            at = offsetsIn(el, a.skip);
+            generated = [].slice.call(el.childNodes);
+            el.replaceChildren.apply(el, a.nodes);
+          }
           var nodes = textNodes(el);
-          if (!nodes.length) { put('stuError', 'No text to edit here.'); return; }
+          if (!nodes.length) {
+            if (generated) { el.replaceChildren.apply(el, generated); }
+            put('stuError', 'No text to edit here.');
+            return;
+          }
           S.editing = {
             el: el,
+            authored: a || null,
+            generated: generated,
             before: nodes.map(function (n) {
               var p = n.parentElement;
               return { node: n, text: n.data, tag: p.tagName.toLowerCase(), classes: [].slice.call(p.classList), elementText: norm(p.textContent), row: S.rowOf(p) };
@@ -573,6 +648,7 @@
           var keep = getSelection();
           var native = keep.rangeCount && !keep.isCollapsed && el.contains(keep.anchorNode);
           el.focus();
+          if (at && at.end > at.start) { native = selectOffsets(el, at); }
           if (!native) {
             var r = document.createRange();
             r.selectNodeContents(el);
@@ -589,8 +665,18 @@
           S.editing = null;
           ed.el.removeAttribute('contenteditable');
           ed.el.classList.remove('stu-is-editing');
+          S.fmtHide();
           var now = textNodes(ed.el);
           var same = now.length === ed.before.length && now.every(function (n, i) { return n === ed.before[i].node; });
+          var changed = ed.before.some(function (b) { return b.node.data !== b.text; });
+          if (ed.authored) {
+            // The primitive's own projection again: as it was when nothing
+            // changed, rebuilt from the edited nodes when something did.
+            if (save && same && changed) { ed.authored.project(); } else {
+              ed.before.forEach(function (b) { b.node.data = b.text; });
+              ed.el.replaceChildren.apply(ed.el, ed.generated);
+            }
+          }
           if (!save || !same) {
             ed.before.forEach(function (b) { b.node.data = b.text; });
             if (save && !same) { put('stuError', 'Only text can change here; the structure was restored.'); }
@@ -668,16 +754,189 @@
           S.apply({ op: 'move', binding: a.binding, from: +a.at, to: +b.at });
         };
 
+        // ---- 5. format bar ---------------------------------------------------------------
+
+        var isMac = /Mac|iPhone|iPad/.test(navigator.platform || '');
+        var keyLabel = function (sc) {
+          return String(sc || '').split('+').map(function (k) {
+            if (k === 'mod') { return isMac ? 'Cmd' : 'Ctrl'; }
+            return k.length === 1 ? k.toUpperCase() : k.charAt(0).toUpperCase() + k.slice(1);
+          }).join('+');
+        };
+        var marks = function () { var o = outline(); return (o && o.marks) || []; };
+        var markNamed = function (name) { return marks().filter(function (m) { return m.name === name; })[0] || null; };
+
+        /// The bar's buttons: the page's marks (the language's own inline
+        /// elements, then its forms that wrap text), lit when the selection
+        /// already sits in one. Label, icon and shortcut are the server's
+        /// inference, overridden by `@cms(--form)`.
+        ST.stuMarks = function (o, active) {
+          var on = String(active || '').split(',');
+          return ((o && o.marks) || []).map(function (m) {
+            return {
+              name: m.name, icon: m.icon, tag: m.tag,
+              title: m.label + (m.shortcut ? ' (' + keyLabel(m.shortcut) + ')' : '') + (m.doc ? ' - ' + m.doc : ''),
+              active: on.indexOf(m.name) >= 0 ? 'true' : 'false'
+            };
+          });
+        };
+
+        /// The element of `mark` the node sits in, inside the edited element.
+        var markedAncestor = function (node, mark, root) {
+          for (var n = node.nodeType === 1 ? node : node.parentElement; n; n = n.parentElement) {
+            if (n.tagName.toLowerCase() === mark.tag && mark.classes.every(function (c) { return n.classList.contains(c); })) { return n; }
+            if (n === root) { return null; }
+          }
+          return null;
+        };
+
+        /// What the bar acts on: the selection, in ONE text node of the text
+        /// being edited (a mark spanning other marks is a source edit).
+        S.fmtCapture = function () {
+          var ed = S.editing, s = getSelection();
+          if (!ed || !s.rangeCount) { return null; }
+          var r = s.getRangeAt(0);
+          if (!ed.el.contains(r.commonAncestorContainer)) { return null; }
+          var node = r.startContainer;
+          var p = node.nodeType === 3 ? node.parentElement : node;
+          var hint = { tag: p.tagName.toLowerCase(), classes: [].slice.call(p.classList), element_text: norm(p.textContent) };
+          var row = S.rowOf(p);
+          if (row) { hint = { binding: row.binding, index: row.index }; }
+          return {
+            node: node, collapsed: r.collapsed, single: node === r.endContainer && node.nodeType === 3,
+            old: node.nodeType === 3 ? node.data : '', start: r.startOffset, end: r.endOffset,
+            rect: r.getBoundingClientRect(), hint: hint,
+            active: marks().filter(function (m) { return markedAncestor(node, m, ed.el); }).map(function (m) { return m.name; })
+          };
+        };
+
+        S.fmtHide = function () {
+          S.fmt = null;
+          S.ask = null;
+          if (S.boxes) { S.boxes.ask.style.display = 'none'; }
+          put('stuFmtMode', 'Hidden');
+        };
+
+        S.fmtShow = function () {
+          if (!S.editing || S.ask) { return; }
+          var c = S.fmtCapture();
+          if (!c || (c.collapsed && !c.active.length)) { if (L().stuFmtMode !== 'Hidden') { put('stuFmtMode', 'Hidden'); } S.fmt = null; return; }
+          S.fmt = c;
+          put('stuFmtActive', c.active.join(','));
+          put('stuFmtMode', 'Marks');
+          S.fmtPlace(c.rect);
+        };
+
+        S.fmtPlace = function (rect) {
+          var bar = document.querySelector('.stu-format');
+          if (!bar) { return; }
+          requestAnimationFrame(function () {
+            var w = bar.offsetWidth || 200, h = bar.offsetHeight || 34;
+            var x = Math.max(8, Math.min(innerWidth - w - 8, rect.left + rect.width / 2 - w / 2));
+            var y = rect.top - h - 10;
+            if (y < 8) { y = rect.bottom + 10; }
+            bar.style.transform = 'translate(' + Math.round(x) + 'px,' + Math.round(y) + 'px)';
+          });
+        };
+
+        /// Wrap the captured selection in `mark` (its params from `attrs`), or
+        /// take the marked text out of it. Text typed so far is saved first.
+        var runMark = function (c, mark, attrs) {
+          var ed = S.editing;
+          var marked = c.active.indexOf(mark.name) >= 0 ? markedAncestor(c.node, mark, ed ? ed.el : null) : null;
+          var unmarkOp = null;
+          if (marked) {
+            var p = marked.parentElement;
+            unmarkOp = { op: 'unmark', text: marked.textContent, mark: mark.name,
+              hint: { tag: p.tagName.toLowerCase(), classes: [].slice.call(p.classList), element_text: norm(p.textContent) } };
+          } else if (c.collapsed || !c.single) {
+            put('stuError', c.collapsed ? 'Select some text first.' : 'Select within one run of text: this one crosses another mark.');
+            return;
+          }
+          S.endEdit(true);
+          S.apply(unmarkOp || { op: 'mark', old: c.old, start: c.start, end: c.end, mark: mark.name, attrs: attrs || {}, hint: c.hint });
+        };
+
+        ST.stuMark = function (button) {
+          var mark = markNamed(button.dataset.mark), c = S.fmt;
+          if (!mark || !c) { return ''; }
+          if (mark.params.length && c.active.indexOf(mark.name) < 0) {
+            // A mark with params asks for them first (a link's href).
+            S.ask = { c: c, mark: mark };
+            var box = overlay().ask;
+            box.style.display = 'block';
+            box.style.transform = 'translate(' + c.rect.left + 'px,' + c.rect.top + 'px)';
+            box.style.width = c.rect.width + 'px';
+            box.style.height = c.rect.height + 'px';
+            // The field is the scalar's own control (`%widget`), as in the admin.
+            var p = mark.params[0];
+            var label = p.name + (p.type ? ' (' + p.type + ')' : '') + ', Enter to apply, Esc to go back';
+            put('stuFmtMode', 'Ask');
+            setTimeout(function () {
+              var i = document.querySelector('.stu-format__input');
+              if (!i) { return; }
+              i.type = p.widget === 'color' ? 'color' : p.widget === 'media' ? 'url' : p.widget === 'number' ? 'number' : 'text';
+              i.value = '';
+              i.placeholder = label;
+              i.focus();
+            }, 0);
+            return '';
+          }
+          runMark(c, mark);
+          return '';
+        };
+
+        ST.stuAsk = function (input) {
+          var a = S.ask;
+          if (!a || !input.value.trim()) { return ''; }
+          var attrs = {};
+          attrs[a.mark.params[0].name] = input.value.trim();
+          S.ask = null;
+          runMark(a.c, a.mark, attrs);
+          return '';
+        };
+
+        /// Esc in the bar's field: back to the text, selection and all.
+        S.askCancel = function () {
+          var a = S.ask;
+          S.ask = null;
+          if (S.boxes) { S.boxes.ask.style.display = 'none'; }
+          if (!a || !S.editing) { S.fmtHide(); return; }
+          S.editing.el.focus();
+          var r = document.createRange();
+          r.setStart(a.c.node, a.c.start);
+          r.setEnd(a.c.node, a.c.end);
+          var s = getSelection(); s.removeAllRanges(); s.addRange(r);
+          S.fmtShow();
+        };
+
+        /// `mod+b`-style shortcuts while editing.
+        var shortcutMark = function (ev) {
+          if (!(ev.metaKey || ev.ctrlKey)) { return null; }
+          return marks().filter(function (m) {
+            if (!m.shortcut) { return false; }
+            var parts = m.shortcut.toLowerCase().split('+');
+            var key = parts[parts.length - 1];
+            return parts.indexOf('mod') >= 0 && (parts.indexOf('shift') >= 0) === ev.shiftKey && (parts.indexOf('alt') >= 0) === ev.altKey && ev.key.toLowerCase() === key;
+          })[0] || null;
+        };
+
+        document.addEventListener('selectionchange', function () {
+          if (S.editing && !S.ask) { S.fmtShow(); }
+        });
+
         /// Interact tool, or Alt held: the page behaves like the site.
         var passThrough = function (ev) { return L().stuToolName === 'Interact' || ev.altKey; };
 
         var handlers = {
           move: function (ev) {
             if (S.drag) { S.moveDrag(ev); return; }
-            S.hovered = inUi(ev.target) || passThrough(ev) ? null : ev.target;
+            S.hovered = inUi(ev.target) || passThrough(ev) ? null : authored(ev.target);
           },
           down: function (ev) {
             if (ev.target.closest && ev.target.closest('.stu-handle')) { S.beginDrag(ev); }
+            // The bar's buttons must not take the selection they act on.
+            if (ev.target.closest && ev.target.closest('.stu-format') && !ev.target.closest('input')) { ev.preventDefault(); }
           },
           up: function () { if (S.drag) { S.endDrag(); } },
           click: function (ev) {
@@ -691,16 +950,27 @@
             ev.preventDefault();
             ev.stopPropagation();
             if (S.editing) { S.endEdit(true); }
-            S.select(ev.target);
+            S.select(authored(ev.target));
           },
           dblclick: function (ev) {
             if (inUi(ev.target) || passThrough(ev)) { return; }
             ev.preventDefault();
-            S.select(ev.target);
-            S.beginEdit(ev.target);
+            S.select(authored(ev.target));
+            S.beginEdit(authored(ev.target));
           },
           key: function (ev) {
+            if (S.ask && ev.target.closest && ev.target.closest('.stu-format')) {
+              if (ev.key === 'Escape') { ev.preventDefault(); S.askCancel(); }
+              return;
+            }
             if (S.editing) {
+              var sm = shortcutMark(ev);
+              if (sm) {
+                ev.preventDefault();
+                S.fmt = S.fmtCapture();
+                if (S.fmt) { ST.stuMark({ dataset: { mark: sm.name } }); }
+                return;
+              }
               if (ev.key === 'Escape') { ev.preventDefault(); S.endEdit(false); }
               else if (ev.key === 'Enter' && !ev.shiftKey) { ev.preventDefault(); S.endEdit(true); }
               return;
@@ -727,6 +997,8 @@
             }
           },
           focusout: function (ev) {
+            var to = ev.relatedTarget;
+            if (to && to.closest && to.closest('.stu-format')) { return; }
             if (S.editing && ev.target === S.editing.el) { S.endEdit(true); }
           },
           dragstart: function (ev) {
