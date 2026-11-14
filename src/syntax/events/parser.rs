@@ -19,6 +19,7 @@ pub struct Parser<'i> {
     pos: usize,
     pub(crate) events: Vec<Event>,
     fuel: Cell<u32>,
+    furthest_lookahead: Cell<usize>,
     strategy: ErrorStrategy,
     failed: bool,
 }
@@ -31,6 +32,7 @@ impl<'i> Parser<'i> {
             pos: 0,
             events: Vec::new(),
             fuel: Cell::new(256),
+            furthest_lookahead: Cell::new(0),
             strategy,
             failed: false,
         }
@@ -70,25 +72,35 @@ impl<'i> Parser<'i> {
     /// Trivia (WHITESPACE, COMMENT) is skipped for lookahead purposes but
     /// stays in the input for lossless CST construction.
     pub fn nth(&self, n: usize) -> SyntaxKind {
-        let fuel = self.fuel.get();
-        assert!(fuel > 0, "parser fuel exhausted (infinite loop bug)");
-        self.fuel.set(fuel - 1);
-
         let mut pos = self.pos;
         let mut non_trivia_seen = 0;
-        loop {
+        let kind = loop {
             let kind = self.input.kind(pos);
             if kind == SyntaxKind::EOF {
-                return SyntaxKind::EOF;
+                break SyntaxKind::EOF;
             }
             if !kind.is_trivia() {
                 if non_trivia_seen == n {
-                    return kind;
+                    break kind;
                 }
                 non_trivia_seen += 1;
             }
             pos += 1;
+        };
+
+        // A speculative scan makes progress by advancing its lookahead cursor,
+        // even while it leaves the consumed position alone. Long CSS functions
+        // may need arbitrarily many such reads. Replenish only when reaching a
+        // real token beyond the previous high-water mark: repeated probes and
+        // increasing probes past EOF must still trip the infinite-loop guard.
+        if kind != SyntaxKind::EOF && n > self.furthest_lookahead.get() {
+            self.furthest_lookahead.set(n);
+            self.fuel.set(256);
         }
+        let fuel = self.fuel.get();
+        assert!(fuel > 0, "parser fuel exhausted (infinite loop bug)");
+        self.fuel.set(fuel - 1);
+        kind
     }
 
     /// Whether a newline precedes the current (next non-trivia) token.
@@ -321,6 +333,7 @@ impl<'i> Parser<'i> {
         });
         self.pos += 1;
         self.fuel.set(256);
+        self.furthest_lookahead.set(0);
     }
 }
 
@@ -328,6 +341,57 @@ impl<'i> Parser<'i> {
 mod tests {
     use super::*;
     use crate::syntax::cst::lexer::Token;
+
+    #[test]
+    fn long_css_function_lookahead_makes_progress() {
+        let points = std::iter::repeat_n("20% 7%", 160)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let source = format!(".shape {{ clip-path: polygon({points}); }} .after {{ color: red; }}");
+        let tokens = crate::syntax::cst::lexer::Lexer::new(&source).tokenize();
+        let input = Input::from_tokens(&tokens);
+        let mut parser = Parser::new(&input, ErrorStrategy::Verbose);
+        super::super::grammar::root(&mut parser, &source);
+        assert!(
+            parser.at_end(),
+            "the rule after a long function must be reached"
+        );
+        let events = parser.finish();
+        assert!(!events.iter().any(|e| matches!(e, Event::Error(_))));
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(
+                    e,
+                    Event::Start {
+                        kind: SyntaxKind::SCOPE_BLOCK,
+                        ..
+                    }
+                ))
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "parser fuel exhausted")]
+    fn repeated_lookahead_without_progress_still_exhausts_fuel() {
+        let (input, _) = make_input(&[(SyntaxKind::IDENT, "shape"), (SyntaxKind::EOF, "")]);
+        let parser = Parser::new(&input, ErrorStrategy::Verbose);
+        for _ in 0..300 {
+            parser.nth(0);
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "parser fuel exhausted")]
+    fn increasing_lookahead_past_eof_is_not_progress() {
+        let (input, _) = make_input(&[(SyntaxKind::IDENT, "shape"), (SyntaxKind::EOF, "")]);
+        let parser = Parser::new(&input, ErrorStrategy::Verbose);
+        for n in 1..300 {
+            parser.nth(n);
+        }
+    }
 
     fn make_input(tokens: &[(SyntaxKind, &str)]) -> (Input, Vec<Token>) {
         let mut offset = 0usize;
