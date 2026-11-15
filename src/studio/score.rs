@@ -20,6 +20,22 @@ use serde_json::{Map, Value, json};
 use super::outline::Site;
 use crate::syntax::{CapturedValue, FormMatch};
 
+#[cfg(test)]
+#[test]
+fn recorded_audio_retains_source_identity_and_editable_words() {
+    let source = ".film { @score &.time(8s) as &film { @audio(src: \"voice.m4a\") as &voice at 2s; &title at 0s for 8s; } }";
+    let value = score(&Site::from_files(&[("score.st", source)]));
+    let entry = &value["scores"][0]["entries"][0];
+    assert_eq!(entry["kind"], "audio");
+    assert_eq!(entry["name"]["text"], "&voice");
+    assert_eq!(entry["src"]["text"], "\"voice.m4a\"");
+    assert_eq!(entry["at_ms"], 2000.0);
+    for word in ["src", "name", "at"] {
+        let w = &entry[word];
+        assert_eq!(&source[w["start"].as_u64().unwrap() as usize..w["end"].as_u64().unwrap() as usize], w["text"].as_str().unwrap());
+    }
+}
+
 /// The film's shape, for `GET /__spacetime/studio/score.json`.
 pub fn score(site: &Site) -> Value {
     let mut out = Shape::default();
@@ -166,6 +182,16 @@ impl Shape {
                         e.insert(key.into(), f.at(s));
                         if key == "at" || key == "for" {
                             e.insert(format!("{key}_ms"), crate::pipeline::score::time_ms(&f.text[s.0..s.1]).into());
+                        }
+                    }
+                }
+            } else if has(m, &format!("{p}.audio")) {
+                e.insert("kind".into(), "audio".into());
+                for key in ["src", "name", "at"] {
+                    if let Some(s) = span(m, &format!("{p}.audio.{key}")) {
+                        e.insert(key.into(), f.at(s));
+                        if key == "at" {
+                            e.insert("at_ms".into(), crate::pipeline::score::time_ms(&f.text[s.0..s.1]).into());
                         }
                     }
                 }

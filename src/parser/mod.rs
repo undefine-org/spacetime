@@ -3123,7 +3123,7 @@ pub fn expand_markup_form_elements(ast: &mut StFile) {
     let mut diags: Vec<crate::diagnostics::Diagnostic> = Vec::new();
     let mut fix = |text: &mut String, span: SourceSpan, diags: &mut Vec<crate::diagnostics::Diagnostic>| {
         let mut errors = Vec::new();
-        if let Some(out) = form_elements::expand(text, &forms, &mut errors) {
+        if let Some(out) = form_elements::expand_identified(text, &forms, &mut errors) {
             *text = out;
         }
         for e in errors {

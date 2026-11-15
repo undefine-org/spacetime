@@ -65,7 +65,13 @@ pub fn mentions_form_element(text: &str) -> bool {
 
 /// Expand every form element in `text`. `None` when there was none.
 pub fn expand(text: &str, forms: &HashMap<String, ElementForm>, errors: &mut Vec<FormElementError>) -> Option<String> {
-    expand_inner(text, forms, errors, &mut Vec::new())
+    expand_inner(text, forms, errors, &mut Vec::new(), false)
+}
+
+/// Retain each composed form's identity on its projected roots. These inert
+/// attributes let tools select the real element without guessing its anatomy.
+pub fn expand_identified(text: &str, forms: &HashMap<String, ElementForm>, errors: &mut Vec<FormElementError>) -> Option<String> {
+    expand_inner(text, forms, errors, &mut Vec::new(), true)
 }
 
 fn is_name_char(c: char) -> bool {
@@ -189,6 +195,7 @@ fn expand_inner(
     forms: &HashMap<String, ElementForm>,
     errors: &mut Vec<FormElementError>,
     stack: &mut Vec<String>,
+    identify: bool,
 ) -> Option<String> {
     if !mentions_form_element(text) {
         return None;
@@ -222,7 +229,7 @@ fn expand_inner(
         };
         out.push_str(&text[i..p]);
         i = end;
-        match element(name, attrs_raw, inner, forms, errors, stack) {
+        match element(name, attrs_raw, inner, forms, errors, stack, identify) {
             Some(expanded) => {
                 out.push_str(&expanded);
                 changed = true;
@@ -242,6 +249,7 @@ fn element(
     forms: &HashMap<String, ElementForm>,
     errors: &mut Vec<FormElementError>,
     stack: &mut Vec<String>,
+    identify: bool,
 ) -> Option<String> {
     let use_err = |message: String| FormElementError::Use { name: name.to_string(), message };
     let Some(form) = forms.get(name) else {
@@ -308,10 +316,18 @@ fn element(
     }
     // A projection may use other form elements; the content is already expanded.
     stack.push(name.to_string());
-    let projected = expand_inner(&projected, forms, errors, stack).unwrap_or(projected);
+    let projected = expand_inner(&projected, forms, errors, stack, identify).unwrap_or(projected);
     stack.pop();
-    let content = expand_inner(inner, forms, errors, stack).unwrap_or_else(|| inner.to_string());
-    Some(projected.replace(SLOT, &content))
+    let content = expand_inner(inner, forms, errors, stack, identify).unwrap_or_else(|| inner.to_string());
+    let mut projected = projected.replace(SLOT, &content);
+    if identify {
+        let roots = crate::html::source::elements(&projected, &[]);
+        for root in roots.iter().filter(|e| e.parent.is_none()).rev() {
+            let at = root.open.start + 1 + root.tag.len();
+            projected.insert_str(at, &format!(" data-st-form-{}=\"\"", name.trim_start_matches("--")));
+        }
+    }
+    Some(projected)
 }
 
 #[cfg(test)]
@@ -409,5 +425,14 @@ mod tests {
     #[test]
     fn plain_text_and_comments_are_untouched() {
         assert_eq!(expand("a <- b, x<--3, <!-- c -->", &forms(), &mut Vec::new()), None);
+    }
+    #[test]
+    fn composed_forms_keep_identity_without_wrappers_or_changed_content() {
+        let mut errors = Vec::new();
+        let out = expand_identified("<--quote>hello</--quote>", &forms(), &mut errors).unwrap();
+        assert!(out.contains("<q data-st-form-quote=\"\""), "{out}");
+        assert!(out.contains("<mark data-st-form-accent=\"\""), "{out}");
+        assert!(out.contains(">hello</mark></q>"), "{out}");
+        assert!(errors.is_empty());
     }
 }

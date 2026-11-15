@@ -20,6 +20,7 @@ pub mod ssg_filters;
 pub mod ssg_unroll;
 mod template;
 pub mod treesink;
+pub mod source;
 mod validation;
 
 pub use model::{

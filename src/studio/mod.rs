@@ -35,21 +35,5 @@ pub mod ops;
 pub mod outline;
 pub mod score;
 
-/// A byte range in one source file.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
-pub struct Span {
-    pub start: usize,
-    pub end: usize,
-}
-
-impl Span {
-    pub fn new(start: usize, end: usize) -> Self {
-        Span { start, end }
-    }
-}
-
-/// Collapse every whitespace run to one space and trim: the comparison form for
-/// text, since the browser reflows source whitespace.
-pub fn normalize(text: &str) -> String {
-    text.split_whitespace().collect::<Vec<_>>().join(" ")
-}
+// The compiler and authoring tools share the same lossless HTML reader.
+pub use crate::html::source::{Span, normalize};

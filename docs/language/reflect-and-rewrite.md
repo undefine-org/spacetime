@@ -49,6 +49,24 @@ parsed against the stdlib registry, the project overlay and the page's own
 Nothing in `src/reflect` knows a macro by name. What a construct *is* gets
 declared next to it in the stdlib.
 
+### Typed definitions
+
+The response also includes `definitions[]`: registered declarations that own
+a parsed parameter list, including markup/style/motion forms and templates.
+Each definition keeps its native name, kind, documentation, source address,
+signature and structured parameters. A parameter identifies a value or content
+slot, its type/default/optionality, scalar widget metadata and keyword choices.
+
+A default's `written` address points to the default's exact words in the
+declaration, including quotes and units. Catalogs can edit it through the same
+guarded writer as a call's parameter. These addresses come from the parser's
+nested capture spans; tools do not parse the display signature to recover them.
+An absent default has no address: use source editing to introduce one.
+
+Markup-form expansion retains inert `data-st-form-*` identities on projected
+roots. Composed forms preserve each identity without adding wrapper elements,
+so selection can follow the authored form to its rendered anatomy.
+
 ## Rewrite: the one writer
 
 ```

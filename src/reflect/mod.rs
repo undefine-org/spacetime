@@ -153,7 +153,8 @@ pub fn reflect_with(
         }
         out_files.push(file);
     }
-    json!({ "files": out_files, "matches": matches })
+    let definitions: Vec<Value> = matches.iter().filter_map(|m| m.get("definition").filter(|d| !d.is_null()).cloned()).collect();
+    json!({ "files": out_files, "matches": matches, "definitions": definitions })
 }
 
 struct Walker<'a, 'o> {
@@ -212,8 +213,42 @@ impl Walker<'_, '_> {
             "shorthands": def.map(|d| d.shorthands.clone()).unwrap_or_default(),
             "spans": self.spans(m),
             "children": children,
+            "definition": self.definition(m, def),
         });
         id
+    }
+
+    /// A declaration already carries a parsed param_list. Expose it directly,
+    /// rather than making catalog consumers parse a formatted signature again.
+    fn definition(&self, m: &FormMatch, def: Option<&MacroDefAst>) -> Value {
+        let Some(reg) = def.and_then(|d| d.registers.as_ref()) else { return Value::Null };
+        let Some(CapturedValue::ParamList(params)) = m.captures.get("params") else { return Value::Null };
+        let Some(name) = m.captures.get("name").and_then(|v| value_json(v).as_str().map(str::to_owned)) else { return Value::Null };
+        let name_start = m.capture_spans.get("name").map(|s| s.start as usize).unwrap_or(0);
+        let prefix = if name_start > 0 && self.slice(name_start - 1, name_start) == "&" { "&" } else { "" };
+        let kind = m.captures.get("kind").map(value_json).unwrap_or_else(|| json!(reg.name));
+        let params: Vec<Value> = params.iter().enumerate().map(|(i, p)| {
+            let ty = p.type_ref.as_deref().unwrap_or("string");
+            let scalar = self.scalar(ty);
+            let choices = self.registry.get_capture_type(ty)
+                .and_then(|d| crate::syntax::events::keyword_set(&d.pattern))
+                .map(|words| words.iter().map(|w| json!({"word": w})).collect::<Vec<_>>());
+            json!({ "name": p.name, "kind": if p.kind == crate::syntax::TemplateParamKind::Element { "slot" } else { "value" },
+                "type": ty, "default": p.default, "optional": p.optional || p.default.is_some(),
+                "collection": p.collection, "scalar": scalar, "choices": choices,
+                "written": m.capture_spans.get(&format!("params.{i}.default")).map(|s| self.address(s.start as usize, s.end as usize)) })
+        }).collect();
+        json!({ "id": self.id(m), "name": format!("{prefix}{name}"), "kind": kind, "entity": reg.name,
+            "doc": m.doc, "params": params, "source": self.address(m.span.start as usize, m.span.end as usize),
+            "body": m.capture_spans.get("body").map(|s| self.address(s.start as usize, s.end as usize)),
+            "signature": m.capture_spans.get("params").map(|s| self.slice(s.start as usize, s.end as usize)) })
+    }
+
+    fn scalar(&self, ty: &str) -> Value {
+        self.registry.get_scalar_type(ty).map(|s| json!({
+            "widget": s.widget, "range": [s.range.0, s.range.1], "step": s.step,
+            "unit": s.unit, "docs": s.docs,
+        })).unwrap_or(Value::Null)
     }
 
     /// The params the macro's `%form` declares, each with what the author
@@ -222,15 +257,6 @@ impl Walker<'_, '_> {
         let Some(form) = &def.form else { return Vec::new() };
         let mut out = Vec::new();
         // a param's type, when it is a row of the scalar table, says how to edit it
-        let scalar = |ty: &str| -> Value {
-            match self.registry.scalar_types().find(|s| s.id == ty) {
-                Some(s) => json!({
-                    "widget": s.widget, "range": [s.range.0, s.range.1], "step": s.step,
-                    "unit": s.unit, "docs": s.docs,
-                }),
-                None => Value::Null,
-            }
-        };
         // the words a param may take: an inline union, or a named keyword set
         // (each word with its `///` doc)
         let choices = |ct: &crate::parser::meta_ast::CaptureType| -> Value {
@@ -252,7 +278,7 @@ impl Walker<'_, '_> {
         let mut push = |name: &str, var: &str, ct: &crate::parser::meta_ast::CaptureType, optional: bool, default: Option<&ParamDefault>, positional: bool, doc: Option<&String>| {
             let ty = crate::metasystem::signature::capture_type_name(ct);
             let written = m.capture_spans.get(var).map(|s| self.address(s.start as usize, s.end as usize));
-            let scalar = scalar(&ty);
+            let scalar = self.scalar(&ty);
             let mut choices = choices(ct);
             // a value that names something in a file: the file's names
             if let Some((sibling, reader)) = self.registry.scalar_types().find(|s| s.id == ty).and_then(|s| s.facts.clone())

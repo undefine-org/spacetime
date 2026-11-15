@@ -1,5 +1,35 @@
 use super::*;
 
+#[test]
+fn declarations_expose_typed_parameters_slots_and_native_source() {
+    let src = r##"
+/// A reusable message.
+@form markup --message(&content, $fill color = "#eaf0f5") {
+  <article>`&content`</article>
+}
+@template &card($title string = "Hello", &actions?) { <div>`$title``&actions`</div> }
+"##;
+    let v = reflect_text(&[("components.st", src)]);
+    let defs = v["definitions"].as_array().expect("typed definition inventory");
+    let message = defs.iter().find(|d| d["name"] == "--message").unwrap();
+    assert_eq!(message["kind"], "markup");
+    assert_eq!(message["params"][0]["kind"], "slot");
+    assert_eq!(message["params"][1]["type"], "color");
+    assert_eq!(message["params"][1]["default"], "\"#eaf0f5\"");
+    assert_eq!(message["params"][1]["scalar"]["widget"], "color");
+    let default = &message["params"][1]["written"];
+    assert_eq!(default["text"], "\"#eaf0f5\"");
+    assert_eq!(&src[default["start"].as_u64().unwrap() as usize..default["end"].as_u64().unwrap() as usize], "\"#eaf0f5\"");
+    assert!(message["doc"].as_str().unwrap().contains("reusable message"));
+    let span = &message["source"];
+    assert_eq!(span["file"], 0);
+    assert!(src[span["start"].as_u64().unwrap() as usize..span["end"].as_u64().unwrap() as usize].contains("@form markup --message"));
+    let card = defs.iter().find(|d| d["name"] == "&card").unwrap();
+    assert_eq!(card["kind"], "template");
+    assert_eq!(card["params"][0]["type"], "string");
+    assert_eq!(card["params"][1]["optional"], true);
+}
+
 fn reflect_text(files: &[(&str, &str)]) -> Value {
     let files: Vec<File<'_>> = files.iter().map(|(p, t)| File { path: p, text: t }).collect();
     reflect(&files, &crate::compiler::cached_stdlib_registry().0)
