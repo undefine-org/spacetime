@@ -22,7 +22,7 @@
     <header class="au-property__head"><span class="au-property__name">`$p.label`</span><code class="au-property__type">`$p.type`</code></header>
     <p class="au-property__doc">`$p.doc`</p>
     <div class="au-property__control"></div>
-    <div class="au-property__values"><span>Authored <code>`$p.authored`</code></span><span>Now <code>`$p.evaluated`</code></span></div>
+    <div class="au-property__values"><span>Authored <code class="au-property__authored">`$p.authored`</code></span><span>Now <code class="au-property__evaluated">`$p.evaluated`</code></span></div>
     <div class="au-property__origin"></div>
     <div class="au-property__scopes"></div>
     <p class="au-property__diagnostic" role="status">`$p.diagnostic`</p>

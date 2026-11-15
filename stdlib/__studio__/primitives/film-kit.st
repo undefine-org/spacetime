@@ -232,13 +232,15 @@
         /// `choice` when it has choices: a keyword set's words, a model file's
         /// clips), its `///` doc is the label's tooltip, the row gives the range,
         /// step and unit. The score's part is found in reflect where it starts.
-        ST.stuPartFields = function (key, s, r) {
+        ST.stuPartFields = function (key, s, r, scope) {
           var f = find(s, key);
           if (!f || f.kind !== 'part' || !r || !r.matches) { return []; }
           var path = fileOf(s, f.part.span.file);
           var fi = (r.files || []).findIndex(function (x) { return x.path === path; });
           var m = r.matches.find(function (x) { return x.file === fi && x.start === f.part.span.start; });
           if (!m) { return []; }
+          var live = F.stagePart(s, +key.split(':')[1]);
+          var evaluated = Object.assign({}, live && live.proxy && live.proxy._stTransforms, live && live.channels);
           // a param still to write goes after the one written last
           var last = null;
           m.params.forEach(function (p) { if (p.written && !p.positional && (!last || p.written.end > last.end)) { last = p.written; } });
@@ -254,7 +256,7 @@
           }
           var fields = m.params.filter(function (p) { return !p.positional; }).map(function (p) {
             var words = p.written ? p.written.text : (p.default == null ? '' : String(p.default));
-            return Object.assign(ST.authoring.field(p), {
+            var field = Object.assign(ST.authoring.field(p), {
               hex: hexOf(words),
               quote: p.written ? /^"/.test(p.written.text) : /^(string|model_clip|expr)$/.test(p.type),
               file: path,
@@ -262,8 +264,15 @@
               end: p.written ? p.written.end : (last ? last.end : 0),
               expect: p.written ? p.written.text : (last ? last.text : ''),
               at: last ? 'after' : '', before: last ? last.text : '',
-              drive: driven[p.name] || ''
+              drive: scope === 'base' ? '' : driven[p.name] || '', animated: !!driven[p.name]
             });
+            field.evaluated = evaluated[p.name] == null ? field.value : String(evaluated[p.name]).replace(/^(["'])(.*)\1$/, '$2');
+            if (field.animated && scope !== 'base') {
+              field.value = field.evaluated;
+              field.hex = hexOf(field.value);
+              field.choices = field.choices.map(function (c) { return Object.assign({}, c, { on: c.word === field.value }); });
+            }
+            return field;
           });
           // a shorthand's longhands share one row (`pos`: X Y Z)
           (m.shorthands || []).forEach(function (sh) {
@@ -279,6 +288,51 @@
             });
           });
           return fields;
+        };
+
+        /// The same property-editor used in the catalog, in a compact Studio
+        /// presentation. The runtime supplies values; the source owns targets.
+        ST.stuPartProperties = function (fields, scope) {
+          return (fields || []).map(function (f) {
+            var parts = f.parts || [f], animated = parts.some(function (p) { return p.animated; });
+            return {
+              key: f.label, label: f.label, type: f.type || 'vector', doc: f.doc || '', controls: [f],
+              authored: parts.map(function (p) { return p.authored; }).join(' '),
+              evaluated: parts.map(function (p) { return p.evaluated; }).join(' '),
+              origin: parts[0].file || '', state: animated ? 'animated' : f.written ? 'authored' : 'default', diagnostic: '',
+              scopes: animated ? [
+                { key: 'base', label: 'Base value', selected: scope === 'base', doc: 'Edit the declaration; the score keeps controlling the current frame' },
+                { key: 'keyframe', label: 'At playhead', selected: scope !== 'base', doc: 'Edit or add a stop at the current playhead' }
+              ] : []
+            };
+          });
+        };
+
+        F.paintPartValues = function () {
+          var key = L().stuFilmSel || '';
+          if (key.indexOf('part:') !== 0) { return; }
+          var pt = F.stagePart(score(), +key.split(':')[1]);
+          if (!pt) { return; }
+          var values = Object.assign({}, pt.proxy && pt.proxy._stTransforms, pt.channels);
+          document.querySelectorAll('.stu-part-fields .au-property[data-state="animated"]').forEach(function (property) {
+            var shown = [];
+            property.querySelectorAll('.w-field[data-label]').forEach(function (field) {
+              var value = values[field.dataset.label];
+              if (value == null) { var input = field.querySelector('input'); shown.push(input ? input.value : ''); return; }
+              value = String(value).replace(/^(["'])(.*)\1$/, '$2');
+              shown.push(value);
+              // Frame readback never replaces a focused or actively scrubbed
+              // draft, and never dispatches an input/change back to the writer.
+              if (!field.dataset.drive || field.contains(document.activeElement) || field.dataset.scrubbing) { return; }
+              field.querySelectorAll('input').forEach(function (input) {
+                if (input.type === 'checkbox') { input.checked = value === 'true'; }
+                else { var next = input.type === 'color' ? hexOf(value) : value; if (input.value !== next) { input.value = next; } }
+              });
+              field.querySelectorAll('.w-choice').forEach(function (button) { var next = String(button.dataset.word === value); if (button.dataset.on !== next) { button.dataset.on = next; } });
+            });
+            var readout = property.querySelector('.au-property__evaluated');
+            if (readout && readout.textContent !== shown.join(' ')) { readout.textContent = shown.join(' '); }
+          });
         };
 
         /// Any widget's change, as one guarded edit through the one writer
@@ -622,6 +676,7 @@
           }
           if (followOutlines() && !t.playing) { var st = F.stage(); if (st) { st.draw(); } }
           F.showSound(t);
+          F.paintPartValues();
           // the picked note cell is marked in the grid
           var rc = L().stuFilmNoteCell || '';
           if (rc !== F.lastRc) {

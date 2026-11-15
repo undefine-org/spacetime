@@ -281,5 +281,23 @@ NEWX=$(grep -o '@object &globe1 ([^)]*' "$SRC" | grep -o 'posX: [-0-9.]*' | sed 
 [ -n "$NEWX" ] && [ "$NEWX" != "-2.6" ] && ok "dragging a part with Move writes its position (globe1 posX -2.6 -> $NEWX)" || bad "move: $(grep -o '@object &globe1 ([^)]*' "$SRC")"
 agent-browser press m >/dev/null; agent-browser press c >/dev/null
 
+# 19. one shared property editor, two explicit source destinations (PLAN-159)
+js "ST.stuFilm.transport().pause(); ST.stuFilm.seek(8000); 1" >/dev/null
+part '&robot'
+js "document.querySelector('.stu-part-fields .au-property[data-property=clip] [data-scope=base]').click(); 1" >/dev/null
+sleep 0.3
+js "[...document.querySelectorAll('.stu-part-fields .w-field[data-label=clip] .w-choice')].find(b=>b.dataset.word==='Dance').click(); 1" >/dev/null
+for _ in $(seq 1 60); do grep -q '@gltf &robot ([^)]*clip: "Dance"' "$SRC" && break; sleep 0.2; done
+grep -q '@gltf &robot ([^)]*clip: "Dance"' "$SRC" && ok "Base value edits the authored model declaration" || bad "base scope did not edit the declaration"
+grep -q -- '"Dance" at' "$SRC" && bad "base scope accidentally keyed the score" || ok "Base value does not add an animation stop"
+ready >/dev/null
+part '&robot'
+js "ST.stuFilm.transport().pause(); ST.stuFilm.seek(8000); document.querySelector('.stu-part-fields .au-property[data-property=clip] [data-scope=keyframe]').click(); 1" >/dev/null
+sleep 0.3
+js "[...document.querySelectorAll('.stu-part-fields .w-field[data-label=clip] .w-choice')].find(b=>b.dataset.word==='Jump').click(); 1" >/dev/null
+for _ in $(seq 1 60); do grep -q -- '-> "Jump" at 33.3%' "$SRC" && break; sleep 0.2; done
+grep -q -- '-> "Jump" at 33.3%' "$SRC" && ok "At playhead writes a stop at the current frame" || bad "keyframe scope did not key the current frame"
+grep -q '@gltf &robot ([^)]*clip: "Dance"' "$SRC" && ok "At playhead preserves the authored base value" || bad "keyframe scope changed the base value"
+
 echo "$pass passed, $fail failed"
 [ "$fail" -eq 0 ]

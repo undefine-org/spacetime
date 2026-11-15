@@ -19,11 +19,13 @@
 @import "./primitives/film-kit.st";
 // the field widgets the inspector renders (PLAN-156), shared with the admin
 @import "../widgets/index.st";
+@import "../authoring/index.st";
 
 @data fetch $stuScore : "/__spacetime/studio/score.json?entry=__SPACETIME_STUDIO_ENTRY__";
 // the program as every tool reads it: a part's typed, documented params (PLAN-156)
 @data fetch $stuReflect : "/__spacetime/reflect.json?entry=__SPACETIME_STUDIO_ENTRY__";
 @data inline $stuFilmSel string : "";
+@data inline $stuEditScope string : "keyframe";
 @data inline $stuFilmTime string : "00:00:00";
 @data inline $stuFilmPlaying bool : false;
 @data inline $stuFilmLoop string : "";
@@ -53,7 +55,8 @@
 @data derive $stuFilmKeys array : ST.stuFilmKeys($stuScore, $stuFilmSel, $stuFilmMulti);
 @data derive $stuFilmTicks array : ST.stuFilmTicks($stuScore, $stuFilmZoom);
 @data derive $stuFilmFields array : ST.stuFilmFields($stuFilmSel, $stuScore);
-@data derive $stuPartFields array : ST.stuPartFields($stuFilmSel, $stuScore, $stuReflect);
+@data derive $stuPartFields array : ST.stuPartFields($stuFilmSel, $stuScore, $stuReflect, $stuEditScope);
+@data derive $stuPartProperties array : ST.stuPartProperties($stuPartFields, $stuEditScope);
 @data derive $stuFilmGrid array : ST.stuFilmGrid($stuFilmSel, $stuScore);
 @data derive $stuFilmParts array : ST.stuFilmParts($stuScore, $stuFilmSel);
 @data derive $stuFilmPiano array : ST.stuFilmPiano($stuFilmSel, $stuScore, $stuFilmNoteCell);
@@ -142,10 +145,17 @@
 .stu-film-input { @on &.change { $stuNoop <- ST.stuFilmCommit($); } }
 // a part's params: one widget per type, picked by the field (PLAN-156)
 .stu-part-fields {
-  @each($stuPartFields as $f) { &$f.tpl($f); }
+  @each($stuPartProperties as $p) { &property-editor($p); }
 }
+.stu-part-fields .au-scope { @on &.click { $stuEditScope <- $.dataset.scope; } }
 .stu-part-fields .w-input { @on &.change { $stuNoop <- ST.stuWidgetCommit($); } }
 .stu-part-fields .w-choice { @on &.click { $stuNoop <- ST.stuWidgetCommit($); } }
+.stu-part-fields .au-property { padding: 6px 0; border: 0; border-bottom: 1px solid var(--stu-line); border-radius: 0; }
+.stu-part-fields .au-property__head, .stu-part-fields .au-property__doc, .stu-part-fields .au-property__origin { display: none; }
+.stu-part-fields .au-property__values, .stu-part-fields .au-property__scopes { display: none; }
+.stu-part-fields .au-property[data-state="animated"] .au-property__values { display: flex; font-size: 9px; gap: 10px; margin: 8px 0; }
+.stu-part-fields .au-property[data-state="animated"] .au-property__scopes { display: block; }
+.stu-part-fields .au-scopes { margin: 0 0 5px; }
 .stu-grid {
   @each($stuFilmGrid as $c) {
     <button type="button" class="stu-cell" data-kind="`$c.kind`" data-on="`$c.on`" data-text="`$c.text`" data-step="`$c.step`" data-rc="`$c.rc`" data-melodic="`$c.melodic`" data-file="`$c.file`" data-start="`$c.start`" data-end="`$c.end`" title="`$c.text`" style="grid-row: `$c.row`; grid-column: `$c.col`">`$c.text`</button>

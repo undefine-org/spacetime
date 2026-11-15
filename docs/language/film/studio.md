@@ -120,6 +120,13 @@ score overrides. Every widget writes through the one writer
 (`POST /__spacetime/rewrite`), keeping the author's spelling: a quoted word
 stays quoted, a bare one stays bare, `pos: 0 3 -7` stays a shorthand.
 
+Animated scene properties use the shared property editor. **Authored** shows
+the declaration's base value; **Now** reads the existing stage channels at the
+current frame. **At playhead** edits/adds a stop, while **Base value** explicitly
+targets the declaration. Seeking updates the readout without replacing a
+focused input or an active numeric scrub. The inspector reads the engine's
+evaluated values; it does not implement another interpolation engine.
+
 ## Instant edits: hot binds
 
 A primitive that declares a `bind` param receives a stable key from the

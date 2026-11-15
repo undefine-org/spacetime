@@ -21,6 +21,7 @@
       if (ev.button !== 0) { return; }
       const step = parseFloat(input.step) || 0.1;
       drag = { x: ev.clientX, v: parseFloat(input.value) || 0, step, moved: false, places: Math.max(decimals(step), decimals(input.value)) };
+      field.dataset.scrubbing = 'true';
       label.setPointerCapture(ev.pointerId);
       ev.preventDefault();
     });
@@ -41,6 +42,7 @@
       if (!drag) { return; }
       const moved = drag.moved;
       drag = null;
+      delete field.dataset.scrubbing;
       if (moved) { input.dispatchEvent(new Event('change', { bubbles: true })); } else { input.focus(); input.select(); }
     };
     label.addEventListener('pointerup', end);
