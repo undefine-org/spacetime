@@ -1,0 +1,405 @@
+#+TITLE: Studio from a shared authoring library and living language catalog
+#+STATE: DOING
+#+CUSTOM_ID: PLAN-159-studio-authoring-catalog
+#+DATE: 2026-11-15
+
+* Request
+Design the component architecture before developing the next Studio. Include
+templates, forms, macros and the catalog; map the editing review's concrete
+improvements onto reusable components that use Spacetime itself. The catalog
+should be the way we develop and prove these components before assembling the
+Studio. This document proposes that architecture; it does not implement the
+new editor, library, metadata or behavior described below.
+
+Implementation authorized by the user on 2026-11-15: improve/fix Spacetime as
+needed, commit coherent slices as work proceeds, and deliver the catalog-led
+Studio improvements. Preserve unrelated work and existing source truth.
+
+* Implementation log
+** DOING Shared authoring components and executable catalog
+** TODO Typed declaration reflection and Studio component/source navigation
+** TODO Bounded preview, form-instance selection and recorded audio projection
+** TODO Browser verification, regression checks and final presentation
+
+Related: [[file:../../@research/studio-editing-review.org][Studio review]],
+PLAN-135 (brand catalog), PLAN-156 (reflect/rewrite/widgets), PLAN-157 (forms
+and rich editing), PLAN-158 (Grokbot design language).
+
+* Architectural position
+Studio becomes a composition of source-aware authoring components. Each
+component has a small responsibility and works outside Studio. What a selected
+thing is comes from the language, its types, its registered role, and compiler
+provenance. The shell arranges tools and carries selection/context; it does
+not independently decide what a bubble, light, model or motion form means.
+
+The reusable library has two kinds of consumers:
+- Catalog: develop, document and exercise the authoring components themselves.
+- Studio: use those same components to inspect/edit a project's language.
+The catalog browser also browses the project's forms, templates and macros.
+These are different datasets and contexts, not different catalog engines.
+
+* Existing foundations (checked in source, not assumed from old plans)
+| Foundation | Existing location | Boundary today |
+|------------+-------------------+----------------|
+| Declaration rows for registry entities | stdlib/macros/data-kind.st: @data declarations | Catalog params/body are presentation strings, not the full editing contract |
+| Reusable form rows | @data forms; demos/brand-catalog | Useful catalog/browser; not a generic instance/usage editor |
+| Macro signatures and dispatch | @data dispatch; demos/spacetime-docs/reference.st | Describes language; no universal specialized workspace |
+| Typed calls, spans, docs, defaults, choices, facts | src/reflect; reflect.json | Macro calls are reflected; authored form/template signatures and expansion origins need fuller exposure |
+| Shared source writer and undo | src/rewrite | Retain, do not introduce a writer per component |
+| Scalar widget/range/unit metadata | stdlib/scalars/types.st | Existing widgets differ in support and contract |
+| Generic fields and control helpers | stdlib/fields | Several consumer-specific addresses currently ride on controls |
+| Studio's typed inspector widgets | stdlib/widgets | Overlaps fields; adds range/choice/vector/scrub needs |
+| Presentation hints | @cms(Type) / @cms(--form) | Presentation only; must not define runtime/editor correctness |
+| Executable examples | %example; .st.md; existing test runner | Contextual previews must use normal compilation, not JS source evaluation |
+
+The declaration bridge already exists. Adding a Studio-only @component,
+@offer, %editor or new plugin subsystem would duplicate it. Domain definitions
+must remain useful outside the tool.
+
+* Layers and ownership
+** L0: language and source (existing truth)
+Own declarations, captures/types, defaults, imports, scope/content constraints,
+runtime semantics and source bytes. A form/template/macro keeps its native
+spelling when edited. Editing a call must not silently replace it with its
+expanded HTML or keyframes.
+
+** L1: compiler/reflection projections (extend existing truth access)
+Expose references to definitions, uses, typed params, content slots, expansions,
+source ownership and registered roles. Join existing parsed structures; never
+parse catalog strings back into syntax. Browser probes attach computed values
+to compiler origins and preview context. Projections are derived and rebuilt,
+not a second mutable document stored by Studio.
+
+Definitions and instances are separate: one --bubble definition can have many
+call sites; a template call inside @each can produce many runtime instances.
+Definition reference, call-site reference, expansion path, repeat key and
+source revision must stay distinguishable. Existing file-index/byte-span IDs
+are addresses within a revision, not permanent cross-edit identity. If repeat
+identity is ambiguous, refuse the write or edit the collection definition
+explicitly rather than guessing an individual instance from DOM position.
+
+** L2: typed field controls (consolidate existing libraries)
+One supported field contract for text, number, range, length, duration, color,
+bool, choices, vectors and source-backed references. Consolidate the useful
+parts of fields and widgets into fields; migrate consumers incrementally and
+remove superseded code. Do not build a third set of inputs.
+
+Controls receive display/type constraints and report value/gesture changes.
+They do not choose source file, write HTTP requests, parse an animation chain,
+or decide whether an edit means a base value or a keyframe. An address/target
+may travel as opaque context, but a color picker must not understand every
+Studio/admin/workbench address convention.
+
+** L3: authoring components (proposed stdlib/authoring)
+Compose controls with ownership, scope, time and structural meaning. The same
+property editor is used in an inspector, catalog, rich-text parameter popover,
+asset detail view and multi-selection. Components use reactive signals,
+templates, style/motion forms and shared behavior macros.
+
+Each vertical slice owns its public templates, supporting forms/macros,
+necessary primitives, examples and meaningful behavior gates. Implementation
+JS stays behind %primitive; views contain no custom JS. Generic browser/host
+facilities stay small; domain variations are registry/stdlib data.
+
+** L4: workspaces (Studio, catalog, admin/workbench consumers)
+Own panel arrangement, routing, focus, selection and preview context. Studio
+composes reusable tools. It owns neither a parallel type system nor separate
+mutation code. Admin/workbench can migrate to shared pieces without importing
+the Studio chrome or a film timeline.
+
+* Which Spacetime construct does what?
+| Construct | Responsibility here | Example |
+|-----------+---------------------+---------|
+| @template | Reusable UI/instance composition, local interaction state | &property-editor, &definition-card, &outline-tree |
+| @form markup | Reusable anatomy and content slots | --panel, --property-heading, a project's --bubble |
+| @form style | Shared surface, spacing and typography treatments | --editor-surface, --selected-row, --field-error |
+| @form motion / easing | Shared temporal treatment | --panel-reveal, --selection-focus, a project's --arrive |
+| @form score / instrument / pattern | Reusable temporal/audio material | Catalog previews, user compositions, sound inspection |
+| %macro + %form | Define/compose behavior with declared grammar and typed params | A shared field-edit or selection behavior, using existing APIs where possible |
+| %capture_type / %scalar_type | Meaning, choices and constraints | unit, meters, duration, model_clip |
+| %registers | Language-level role tools can query | part, timeline, motion, form, template |
+| @data declarations / forms / dispatch | Catalog input | Visible project/library definitions and macro signatures |
+| ///, %example, .st.md | Documentation and executable examples | Same example rendered, inspected and tested |
+| @cms | Optional display preferences | Label/icon/shortcut; never permission to violate a content/type constraint |
+| %primitive | Browser/host boundary only | Picking, drag capture, preview host, guarded rewrite request |
+
+Templates/forms/macros retain their distinct jobs. A catalog entry unifies
+discovery, not their execution models. Public project code should not require
+% syntax merely to appear in Studio.
+
+* Proposed component catalog and API shapes
+Names below are proposed public component names, not implemented syntax.
+Arguments are view records/references, not a new author-level DSL.
+
+| Family | Components | Responsibility |
+|--------+------------+----------------|
+| Properties | &property-editor($property, $context), &property-group($group, $context) | Render the supported type, value states and diagnostics; delegate scope and edits |
+| Ownership | &origin-trail($origin), &scope-picker($targets), &usage-list($definition) | Explain where the value comes from, legal destinations and affected uses |
+| Animation | &keyframe-control($channel, $context), &curve-editor($channel, $context) | Base/evaluated value, key navigation and temporal edits |
+| Selection | &selection-path($selection), &outline-tree($nodes, $selection) | Navigate actual instances and retain source/definition identity |
+| Structure | &slot-editor($slot, $context), &collection-editor($collection, $context) | Insert/move/reorder only legal children; add the first item from the schema |
+| Catalog | &catalog-browser($entries), &definition-card($definition), &definition-detail($definition, $context) | Search/group/filter; show interface, examples, source, uses and checks |
+| Preview | &preview-frame($example, $context), &preview-controls($context) | Bounded authored viewport, local time/state/camera and reset |
+| Timeline | &timeline($composition, $context), &clip-track($clip, $context), &audio-track($audio, $context) | Nested local/global time, clip placement, channels and recorded/synth lanes |
+| Assets | &asset-browser($assets), &asset-detail($asset, $context) | Compose catalog + preview + properties + usages; replacement/provenance |
+| Source | &source-editor($source, $selection), &change-review($transaction), &history-list($history) | Owning files, guarded edits, impact, diagnostics and undo/history |
+
+Use composition before adding a new component: asset detail is largely a
+catalog detail with a media preview, not its own unrelated inspector.
+
+* Small shared contracts (conceptual records, not new grammar)
+** Definition
+reference, native kind, name, docs, structured parameters, content slots,
+registered role, constraints, source origin, examples, dependencies/usages.
+Keep declaration/catalog display text alongside structured data. The former
+is for reading, the latter for controls and mutation planning.
+
+** Property
+reference, type, default, authored value, evaluated value, units/constraints,
+origin/override chain, diagnostics, legal edit targets, optional channel ref.
+Do not overload a single value with authored/evaluated/mixed/invalid meaning.
+
+** Selection
+Definition ref + call-site ref + runtime instance/expansion path + optional
+property/slot/channel. The same selection is interpreted by outline, canvas,
+inspector, timeline and source. Selecting a definition need not select its
+first rendered instance. Selecting an instance must not lose the definition.
+
+** Preview context
+Viewport, time/transport, selected interaction state, editor camera and local
+parameter overrides. It is transient rehearsal state, not authored project
+state. The catalog can vary parameters without changing the library default.
+Promoting a rehearsal value to source is an explicit edit through the writer.
+
+** Edit intent and transaction
+A component reports target ref + operation/value + gesture boundary. Shared
+edit planning resolves that target to current source spans and spelling, then
+uses rewrite with revision/expected-byte guards. Preview scrubbing is transient;
+commit on release creates one undoable gesture. Invalid/stale edits retain the
+input and explain why nothing was written. Existing rewrite remains the disk
+boundary; structural planners must use parsed captures and supported grammar.
+
+* How Studio specializes automatically
+The first rule is: infer from semantic facts already declared, then allow
+presentation preferences. No component-name-specific Studio branch.
+
+| Language fact | Automatic authoring consequence | Additional implementation needed |
+|---------------+---------------------------------+----------------------------------|
+| color scalar param | Color control and source binding | Consistent shared field projection |
+| Scalar range/step/unit | Numeric scrub/slider with correct units | Consolidated control contract |
+| Keyword grammar or %facts | Documented choices from grammar/file | Reuse current reflection/fact readers |
+| Markup form with content slot | Content/slot editor; insert candidates | Structured signatures, content model, origins |
+| One phrasing-content slot | Offer text wrapping | Generalize existing signature inference |
+| style form applied to an instance | Surface/token ownership and shared-definition navigation | Expansion/cascade provenance |
+| motion form applied in a clip | Reusable-motion parameters, channels and local time | Preserve call/expansion relation in projection |
+| timeline registry entry | Timeline/transport tools | Nested composition projection and time mapping |
+| part registry entry | Scene selection/properties | Reuse picking and typed inspector; expose instance refs |
+| Source-backed asset/facts | Asset preview and file-specific choices | Typed asset/origin/usage projection |
+| Macro %form + %example | Signature, controls and compiled examples | Expose existing example/signature structures consistently |
+
+A new typed param should gain a control with no Studio patch. A new macro
+composing known roles should gain the applicable tools. A genuinely new
+interaction (e.g. a novel spatial manipulator) still needs an implementation;
+grammar alone cannot invent its behavior. Register/reuse that behavior once,
+then let all compatible definitions use it. Unknown constructs still expose
+docs and source, with unsupported editing actions explained rather than hidden.
+
+Specialization composes available views rather than assigning each entity a
+single inspector class. A model may expose properties, content facts, timeline
+channels, source and examples together. A property may be both token-derived
+and animated. Preserve those relationships; do not flatten them into a closed
+Rust enum of property kinds or one custom panel per macro name.
+
+Types do not automatically express every relational constraint. For example,
+a light's penumbra being useful only for spot lights needs a real domain
+constraint if the editor is to hide/disable it correctly. Reuse constraints
+the language already declares; mark missing ones as language work rather than
+inventing a second @cms validation language. Presentation hints alone cannot
+establish runtime semantics.
+
+Do not infer animation ownership merely from a matching property name or
+assume an arbitrary property accepts an instance override. Offer only edit
+targets the source language can represent. Current single-slot markup forms
+and template element slots remain different; do not silently invent multi-slot
+markup-form syntax. Rich block regions can use existing editable-block forms
+where applicable; generalizing them is a separate language decision.
+
+* Editing depth: use, define, extend
+The same catalog supports progressive depth with a persistent source trail:
+- Use a declaration: insert a native call in a legal scope/slot and tune its
+  instance params. Studio stays in the project's vocabulary.
+- Define a form: edit its parameters and body, preview examples and list all
+  usages affected by a change. Motion/style/markup remain separate definitions.
+- Define a template: inspect parameters, element slots, local state, exports,
+  repeated instances and its composition of other definitions. Preserve the
+  distinction between local instance state and authored defaults.
+- Extend the language: inspect a macro's %form grammar, capture types, binds,
+  registered role and %example clauses. Reuse the current dispatch probe to
+  explain which signature matched. Source editing and compilation are the
+  initial implementation path; a visual grammar editor is not a prerequisite
+  and is not promised by the generic property editor.
+
+Definition edits must show dependent uses and their diagnostics. A preview
+validates in the actual project registry/import context; a macro example that
+compiles in isolation does not prove all existing uses survived a signature
+change. Such changes need the relevant consumer checks before publication.
+
+* Example: what the user authors
+The checked scratch probe combines these existing surfaces:
+#+begin_src st
+@form style --bubble-surface {
+  background: var(--bubble-fill);
+  border-radius: 32px;
+  padding: 20px 28px;
+}
+@form markup --bubble(&content, $fill color = "#eaf0f5") {
+  <div class="bubble" style="--bubble-fill: `$fill`">`&content`</div>
+}
+@form motion --arrive($distance length = 80px, $softness length = 12px) {
+  translate-y: $distance -> 0px;
+  blur: $softness -> 0px;
+  opacity: 0 -> 1;
+  easing: --ease-out-cubic;
+}
+.bubble { --bubble-surface; }
+#+end_src
+
+In the proposed Studio, selecting a bubble exposes content, a typed fill
+control, its shared surface, its call site, and any applied motion. Selecting
+--arrive exposes distance/softness controls, real channels and all usages.
+The blur is still an authored envelope; velocity-derived motion blur remains
+a separate runtime capability, not something this metadata pretends exists.
+
+Macro authors already express stronger domain semantics in %form, types,
+%shorthand, %facts, %registers and %example (see 3d/macros/light.st/gltf.st).
+Studio consumes these facts. Authors should not repeat the same bounds,
+choices, slots and labels in an independent inspector schema.
+
+* What the catalog looks like
+#+begin_example
+Catalog
+  Language: Forms / Templates / Directives
+  Authoring library: Properties / Structure / Time / Assets / Source
+
+  Property editor
+  [Preview] [Interface] [Examples] [Source] [Uses] [Checks]
+
+  Fixture: Message bubble      State: Inherited
+  Fill       [color control]   Evaluated: #eaf0f5
+  Origin     --bubble default -> this instance
+  Edit       [Instance] [Definition] [Token] [Keyframe]
+              only destinations valid for this property are enabled
+
+  Try: default / overridden / animated / mixed / invalid / stale
+  Inspect: template + supporting forms/macros + target transaction
+#+end_example
+
+Each component's catalog entry has executable scenarios and real consumers.
+For property-editor, fixtures include a bubble fill, a light intensity, a
+motion distance, a data field and a keyframe. These are uses of the same
+component, not separate editors. For slot-editor, fixtures include empty,
+populated, rejected child and repeated-template contexts.
+
+Reuse @data declarations/forms/dispatch for inventory. Macro examples come
+from existing %example clauses. Authoring components/templates/forms can use
+literate .st.md scenarios importing the real definitions. A live preview must
+compile these examples normally, including their imports/assets and host
+requirements. Do not evaluate arbitrary catalog source as browser JavaScript
+or assume every declaration can render without a surrounding stage/score.
+
+Preview hosts isolate CSS/state/time so a component's global styles do not
+alter catalog chrome; use the existing compiler/render/test paths. The host
+also fixes the Studio clipping problem: authored viewport and tool viewport
+are distinct, with fit/zoom belonging to the host rather than body overrides.
+
+* Match every review problem to a reusable piece
+| Review problem | Component(s) | Shared language/runtime requirement |
+|----------------+--------------+------------------------------------|
+| Film hidden by inspector | preview-frame | Explicit bounded viewport and authored-frame fit |
+| Empty Components | catalog-browser + definition-detail | Join form/template/declaration inventory |
+| Form invocation cannot select expanded scene | outline-tree + selection-path | Call/instance/expansion provenance |
+| Code only index.st | source-editor + origin-trail | Owning-file references across imports |
+| Recorded audio missing | audio-track | One soundtrack projection, source identities and clock |
+| Base value displayed, edit creates key | property-editor + keyframe-control + scope-picker | Evaluated/authored separation and explicit target |
+| Computed styles read-only/opaque | property-editor + origin-trail | CSS/form/token/animation ownership, legal overrides |
+| Empty list cannot add | collection-editor + slot-editor | Schema/defaults and parsed insertion anchors |
+| Flat 132-row timeline | timeline + clip-track | Nested compositions, collapse, selection-linked detail |
+| Reusable motion hides channels | definition-detail + timeline | Form-use/expanded-channel relationship |
+| Duplicate controls | shared fields + property-editor | One descriptor/gesture contract; delete duplicates |
+| No state preview | preview-controls | Existing state/event semantics, transient rehearsal |
+| No asset workflow | asset-browser/detail | Provenance, typed facts, dependency/usage edges |
+| Unclear undo impact | history-list + change-review | Shared journal with named actor/gesture/targets |
+
+* Proposed module shape (targets, not created in this design pass)
+#+begin_example
+stdlib/fields/                 consolidated generic controls
+stdlib/authoring/
+  MODULE.st
+  index.st
+  properties/                 property, origin, scope, shared edit planning
+  structure/                  selection path, outline, slots, collections
+  catalog/                    browser, definition detail, usages/examples
+  preview/                    bounded host, state/time/camera controls
+  timeline/                   compositions, clips, channels, audio lanes
+  source/                     owning files, transactions, history
+  assets/                     composition of catalog/preview/properties
+  ... each slice owns forms, macros, necessary primitives and tests
+stdlib/__studio__/            workspace composition and routing
+demos/authoring-catalog/      executable .st.md scenarios and rationale
+#+end_example
+
+Do not pre-create empty abstractions/folders. Start with one vertical slice
+and split only where a concrete responsibility or dependency requires it.
+Use imports to keep optional engines out of consumers that do not invoke them.
+Styles are shared forms and prefixed component classes until scoped template
+CSS exists; do not claim that capability has already landed.
+
+* Catalog-first sequence and architecture gates
+1. Inventory and contracts: retain existing fields/widgets consumers; define
+   the minimal shared field/property/selection records against concrete uses.
+2. First slice: one property-editor + origin-trail + scope-picker in a catalog
+   with bubble fill, light intensity and motion distance. Prove type/ownership
+   variation without separate controllers for each fixture.
+3. Connect source: explicit instance/definition/keyframe targets, guarded edits,
+   preview/commit gesture boundaries and shared undo. One gesture, one write.
+4. Add declaration/instance navigation and the bounded preview host. Open a
+   nested form's owning source and return without losing time or selection.
+5. Add structure and time slices, including the recorded audio projection.
+6. Assemble Studio from the proven components; migrate old paths and remove
+   duplicate field widgets and bespoke projection cases as their replacements
+   reach parity. Other consumers can adopt slices independently.
+
+Language/runtime gaps get a separate concrete design and RED-to-GREEN gate
+before Studio work depends on them. For new metasystem machinery apply AGENTS:
+small existing-registry extension, variants as data, delete a special-case,
+same test machinery. If it cannot pass that bar, record a follow-up instead
+of creating a general extension system preemptively.
+
+Proposed gates, not claimed as run:
+- Compiler contracts: structured signature/slots/origins retain source spans,
+  imports, native spelling and revision checks; no parsing of display strings.
+- Real CDP: the same field component changes the intended property in three
+  different domains; instance edit affects one, definition edit affects uses.
+- Real CDP: animated inspector follows evaluated values; base vs keyframe
+  destinations create different expected source edits; undo restores each.
+- Real CDP: nested form selection opens the correct module, including repeated
+  instances; ambiguous provenance refuses a write without changing files.
+- Real CDP: seek/state/viewport changes do not leak into other catalog fixtures;
+  preview is fully fitted/selectable at different workspace sizes.
+- Real audio/render: recorded waveform/trim/seek and exported samples agree
+  with shared transport; do not expose unsupported automation as working UI.
+
+* Design-pass verification
+Inspected current implementations and the older plans together, distinguishing
+existing primitives from planned capabilities. No production Studio/library
+implementation is included. scratch/studio-architecture/catalog-shape.st
+contains existing-language declarations and catalog input/templating syntax;
+its compiler-check result is recorded below. A compile check proves that
+syntax only, not the proposed automatic specialization or browser behavior.
+
+- =scratch/grokbot-final-engine/bin/spacetime check
+  scratch/studio-architecture/catalog-shape.st=: exit 0, one file passed,
+  0 errors. Two W0201 warnings: templates/directives inventory declared but
+  not rendered by this minimal form-card probe. Typed markup/style/motion
+  declarations, native form use, template card and @data inventory all parse.
+- No production tests rerun: this pass changes a design document only.
