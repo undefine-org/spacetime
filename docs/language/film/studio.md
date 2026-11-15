@@ -75,6 +75,9 @@ never guessed.
 | Inspector → Film | the selection's words, editable |
 | Explorer → Scene | the stage's parts and every param |
 | Code | the file, saved whole when you leave it |
+| Code → file tabs | every imported project module, not just the entry |
+| Components → Inspect | shared form/template defaults through the reusable property editor |
+| Components → Open source | the definition's owning module |
 | Select (P) | point into the 3D: hover outlines a part, click opens it in the Scene |
 | Scene list | hovering a part outlines it in the 3D |
 | a sound / pattern | the inspector shows where the playhead is in it; the step grid lights the step playing |
@@ -141,3 +144,20 @@ framing animates the camera, and a component's own move animates its element.
 That separation keeps two concerns from replacing the same transform. Shared
 arrival and focus forms include their blur envelopes; changing the form changes
 all consumers. See the demo's README for its reference assets and fidelity limits.
+
+## Shared authoring components
+
+The Components view reads typed definitions from reflection, including markup,
+style and motion forms and templates. Its cards and shared-default inspector
+come from `stdlib/authoring`, the same library exercised by
+`demos/authoring-catalog`. A default edit uses its parser-owned span and Studio's
+existing guarded live-edit/undo handshake. Quotes and units remain intact.
+
+Projected markup roots retain their form identities, so a Layers invocation can
+select its actual scene. The preview fits between the panels even when the page
+sets body width/height to 100%. Code exposes all project imports; selecting a
+definition opens the module that owns it. Code is also available on pages
+without a score through Components → Open source.
+
+Recorded `@audio` entries have a named timeline lane and editable source/start
+words. Synth and recorded playback continue to use the film's single transport.

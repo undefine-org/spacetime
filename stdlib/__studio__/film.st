@@ -28,6 +28,7 @@
 @data inline $stuFilmPlaying bool : false;
 @data inline $stuFilmLoop string : "";
 @data stored $stuFilmPanelName string : "Timeline";
+@data inline $stuSourcePath string : "";
 // the Select tool (pick a part in the 3D), the melodic cell the keyboard edits
 // ("row:col"), and where the playhead is in the selected sound
 @data inline $stuFilmPickOn bool : false;
@@ -56,14 +57,15 @@
 @data derive $stuFilmGrid array : ST.stuFilmGrid($stuFilmSel, $stuScore);
 @data derive $stuFilmParts array : ST.stuFilmParts($stuScore, $stuFilmSel);
 @data derive $stuFilmPiano array : ST.stuFilmPiano($stuFilmSel, $stuScore, $stuFilmNoteCell);
-@data derive $stuFilmSrcs array : ST.stuFilmSources($stuScore);
+@data derive $stuFilmSrcs array : ST.stuFilmSources($stuScore, $stuSourcePath);
+@data derive $stuSourceFiles array : ST.stuSourceFiles($stuScore, $stuSourcePath);
 @data derive $stuFilmSelLabel string : ST.stuFilmLabel($stuFilmSel, $stuScore);
 @data derive $stuFilmTitle string : (($stuScore && $stuScore.scores && $stuScore.scores[0]) ? ("&" + ($stuScore.scores[0].name || "score") + "  " + ($stuScore.scores[0].total ? $stuScore.scores[0].total.text : "")) : "");
 
 // ---- bindings ------------------------------------------------------------------------
 
 .stu-film {
-  @film-panel(on: $stuOpen, shape: $stuScore);
+  @film-panel(on: $stuOpen, shape: $stuScore, panel: $stuFilmPanelName);
   @state(when: $stuFilmPanel is Timeline) { --stu-film-panel: 0; }
   @state(when: $stuFilmPanel is Code)     { --stu-film-panel: 1; }
 }
@@ -124,6 +126,12 @@
     <textarea class="stu-code" spellcheck="false" data-path="`$src.path`" data-hash="`$src.hash`">`$src.text`</textarea>
   }
 }
+.stu-film__files {
+  @each($stuSourceFiles as $src) {
+    <button type="button" class="stu-source-file" data-path="`$src.path`" data-selected="`$src.selected`">`$src.path`</button>
+  }
+}
+.stu-source-file { @on &.click { $stuSourcePath <- $.dataset.path; } }
 .stu-code { @on &.change { $stuNoop <- ST.stuFilmSave($); } }
 
 .stu-film-fields {
@@ -160,6 +168,7 @@ html.stu-film-on { --stu-film-h: 248px; }
 html.stu-film-on .stu-film { display: flex; }
 html.stu-film-on body {
   position: fixed !important; top: 0; left: var(--stu-left); right: var(--stu-right); bottom: var(--stu-film-h);
+  width: auto !important; height: auto !important;
   margin: 0 !important; transform: translateZ(0); overflow: hidden;
 }
 html.stu-film-on .st-dev-dock { bottom: calc(var(--stu-film-h) + 12px) !important; }
@@ -264,6 +273,10 @@ html.stu-moving .stu-3d-hit { cursor: move; }
 .stu-film__playhead::before { content: ""; position: absolute; top: 0; left: -6px; border: 6px solid transparent; border-top-color: #ff4d4d; }
 
 .stu-film__code { flex: 1; display: flex; }
+.stu-film__body--code { flex-direction: column; }
+.stu-film__files { display: flex; gap: 4px; overflow-x: auto; flex: none; padding: 5px 8px; border-bottom: 1px solid var(--stu-film-line); }
+.stu-source-file { white-space: nowrap; border: 0; border-radius: 4px; padding: 4px 8px; background: transparent; color: #a9a9b4; font: 10px ui-monospace, monospace; cursor: pointer; }
+.stu-source-file[data-selected="true"] { background: #303139; color: #fff; }
 .stu-code {
   flex: 1; margin: 0; border: 0; resize: none; padding: 10px 14px; background: #121215; color: #e8e8ec;
   font: 12px/1.55 ui-monospace, "SF Mono", Menlo, monospace; tab-size: 2; outline: none;

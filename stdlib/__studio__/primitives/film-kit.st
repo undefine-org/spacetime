@@ -34,6 +34,7 @@
         /// The film selection. Setting one clears the page selection: the
         /// inspector shows one thing at a time.
         F.select = function (key) {
+          if (key) { put('stuDefinition', ''); }
           put('stuFilmSel', key || '');
           if (key && ST.stu && ST.stu.forget) { ST.stu.forget(); }
         };
@@ -97,13 +98,13 @@
             });
           });
           m.entries.forEach(function (e, i) {
-            if (e.kind !== 'sound') { return; }
+            if (e.kind !== 'sound' && e.kind !== 'audio') { return; }
             var at = e.at_ms || 0;
             var form = s.forms && e.form && s.forms[e.form.text];
-            var len = e.for_ms != null ? e.for_ms : Math.min(T - at, 2000);
+            var len = e.for_ms != null ? e.for_ms : e.kind === 'audio' ? T - at : Math.min(T - at, 2000);
             rows.push({
-              key: 'sound:' + i, kind: form && form.kind === 'pattern' ? 'pattern' : 'sound', selected: picked('sound:' + i, sel),
-              label: (e.name ? e.name.text + ' ' : '') + (e.form ? e.form.text : '@sound'), depth: 0, y: y++,
+              key: 'sound:' + i, kind: e.kind === 'audio' ? 'audio' : form && form.kind === 'pattern' ? 'pattern' : 'sound', selected: picked('sound:' + i, sel),
+              label: (e.name ? e.name.text + ' ' : '') + (e.src ? '@audio' : e.form ? e.form.text : '@sound'), depth: 0, y: y++,
               left: at / T * 100, width: Math.max(0.6, len / T * 100), text: e.notes ? e.notes.text : '', entry: i
             });
           });
@@ -178,6 +179,7 @@
             word('at', f.entry.at, 'when it starts');
             word('for', f.entry.for, 'how long');
           } else if (f.kind === 'sound') {
+            word('src', f.entry.src, 'recorded audio source');
             word('sound', f.entry.form, 'an instrument or a pattern');
             word('notes', f.entry.notes, 'a chord');
             word('at', f.entry.at);
@@ -200,7 +202,6 @@
             return /^#[0-9a-f]{6}$/i.test(x.fillStyle) ? x.fillStyle : '#000000';
           } catch (e) { return '#000000'; }
         };
-        var WIDGETS = { number: 1, range: 1, color: 1, toggle: 1, choice: 1, text: 1 };
 
         /// The edit that makes a driven param read `v` at the playhead
         /// (`drive` = "entry:channel"): the stop that sits there is rewritten;
@@ -252,28 +253,17 @@
             });
           }
           var fields = m.params.filter(function (p) { return !p.positional; }).map(function (p) {
-            var sc = p.scalar || {}, range = sc.range || [null, null];
             var words = p.written ? p.written.text : (p.default == null ? '' : String(p.default));
-            var bare = words.replace(/^"(.*)"$/, '$1');
-            var choices = Array.isArray(p.choices) && p.choices.length ? p.choices : null;
-            var widget = choices ? 'choice' : (sc.widget || { color: 'color', bool: 'toggle', number: 'number' }[p.type] || 'text');
-            if (widget === 'number' && range[0] != null && range[1] != null) { widget = 'range'; }
-            if (!WIDGETS[widget] || (widget === 'choice' && !choices)) { widget = 'text'; }
-            return {
-              tpl: 'w-' + widget, label: p.name, doc: p.doc || '', written: !!p.written,
-              value: widget === 'text' || widget === 'choice' ? bare : words,
-              unit: sc.unit || '', min: range[0] == null ? '' : range[0], max: range[1] == null ? '' : range[1],
-              step: sc.step || (p.type === 'number' ? 0.1 : ''), hex: hexOf(words), on: bare === 'true',
-              // the author's spelling stays: quoted stays quoted, a bare word stays bare
+            return Object.assign(ST.authoring.field(p), {
+              hex: hexOf(words),
               quote: p.written ? /^"/.test(p.written.text) : /^(string|model_clip|expr)$/.test(p.type),
-              choices: (choices || []).map(function (c) { return { word: c.word, doc: c.doc || '', on: c.word === bare }; }),
               file: path,
               start: p.written ? p.written.start : (last ? last.start : 0),
               end: p.written ? p.written.end : (last ? last.end : 0),
               expect: p.written ? p.written.text : (last ? last.text : ''),
               at: last ? 'after' : '', before: last ? last.text : '',
               drive: driven[p.name] || ''
-            };
+            });
           });
           // a shorthand's longhands share one row (`pos`: X Y Z)
           (m.shorthands || []).forEach(function (sh) {
@@ -568,7 +558,19 @@
 
         /// The film's own file, for the code pane (one item: an `@each` source).
         ST.stuFilmSources = function (s) {
-          return ((s && s.sources) || []).filter(function (x) { return x.path === s.entry; });
+          var all = ((s && s.sources) || []);
+          var path = L().stuSourcePath || (s && s.entry);
+          return all.filter(function (x) { return x.path === path; });
+        };
+        ST.stuSourceFiles = function (s, path) {
+          return ((s && s.sources) || []).map(function (x) {
+            return { path: x.path, selected: x.path === (path || s.entry) };
+          });
+        };
+        ST.stuOpenSource = function (path) {
+          put('stuSourcePath', path);
+          put('stuFilmPanelName', 'Code');
+          return '';
         };
 
         ST.stuFilmLabel = function (key, s) {
@@ -1134,21 +1136,23 @@
 
 /// Binds the timeline to the studio: on while the studio is open and the page
 /// has a score; waveforms repaint when the score's shape arrives.
-%primitive film-panel(&el, on: string = "", shape: string = "") %uses film-kit {
+%primitive film-panel(&el, on: string = "", shape: string = "", panel: string = "") %uses film-kit {
   %emit js {
     (() => {
       const host = %&el;
-      const on = %on, shape = %shape;
+      const on = %on, shape = %shape, panel = %panel;
       const sync = () => {
         const open = !!ST.resolve(host, on.split('.')[0]);
         const s = ST.resolve(host, shape.split('.')[0]);
-        ST.stuFilm.setOn(open && !!(s && s.scores && s.scores.length));
+        const source = panel && ST.resolve(host, panel.split('.')[0]) === 'Code';
+        ST.stuFilm.setOn(open && (!!(s && s.scores && s.scores.length) || source));
         if (open) { setTimeout(ST.stuFilm.paintWaves, 30); }
       };
       const stops = [];
       if (ST.watchScoped) {
         stops.push(ST.watchScoped(host, on.split('.')[0], sync));
         stops.push(ST.watchScoped(host, shape.split('.')[0], sync));
+        if (panel) stops.push(ST.watchScoped(host, panel.split('.')[0], sync));
       }
       sync();
       %cleanup {
@@ -1160,6 +1164,6 @@
 }
 
 %macro film-panel {
-  %form { @film-panel(on: $on:binding, shape: $shape:binding) }
-  %binds { film-panel(&self, on: $on, shape: $shape) }
+  %form { @film-panel(on: $on:binding, shape: $shape:binding, panel: $panel:binding) }
+  %binds { film-panel(&self, on: $on, shape: $shape, panel: $panel) }
 }

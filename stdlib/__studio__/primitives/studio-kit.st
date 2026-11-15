@@ -223,6 +223,8 @@
         // ---- 2. selection ---------------------------------------------------------
 
         var labelOf = function (el) {
+          var origin = el.getAttributeNames && el.getAttributeNames().find(function (a) { return a.indexOf('data-st-form-') === 0; });
+          if (origin) { return '--' + origin.slice('data-st-form-'.length); }
           var cls = el.classList && el.classList[0];
           return el.tagName.toLowerCase() + (cls ? '.' + cls : '');
         };
@@ -303,6 +305,7 @@
             var f = o.markup[i];
             for (var j = 0; j < f.nodes.length; j++) {
               var n = f.nodes[j];
+              if (n.tag.indexOf('--') === 0 && el.hasAttribute('data-st-form-' + n.tag.slice(2))) { return 'n:' + f.file + ':' + n.index; }
               if (n.tag !== tag || n.classes.join(' ') !== cls.join(' ')) { continue; }
               var key = 'n:' + f.file + ':' + n.index;
               if (n.static && norm(n.text) === text) { return key; }
@@ -313,6 +316,7 @@
         };
 
         S.select = function (el) {
+          if (el) { put('stuDefinition', ''); }
           S.el = el || null;
           // a page selection clears the film's: the inspector shows one thing
           if (el) { put('stuFilmSel', ''); }
@@ -320,6 +324,12 @@
           put('stuSel', el ? describe(el) : null);
           put('stuSelKey', el ? S.keyFor(el) : '');
           S.paint();
+        };
+        ST.stuSelectDefinition = function (name) {
+          S.forget();
+          if (ST.stuFilm) { ST.stuFilm.select(''); }
+          put('stuDefinition', name || '');
+          return '';
         };
 
         /// Mark the selected explorer row and bring it into view (Figma's
@@ -503,8 +513,11 @@
             var file = o.markup.filter(function (f) { return f.file === d.file; })[0];
             var n = file && file.nodes.filter(function (x) { return String(x.index) === d.at; })[0];
             if (n) {
-              var sel = n.tag + (n.classes.length ? '.' + n.classes.map(CSS.escape).join('.') : '');
+              var sel = n.tag.indexOf('--') === 0 ? '[data-st-form-' + CSS.escape(n.tag.slice(2)) + ']' : n.tag + (n.classes.length ? '.' + n.classes.map(CSS.escape).join('.') : '');
               var all = document.querySelectorAll(sel);
+              if (n.tag.indexOf('--') === 0) {
+                target = Array.from(all).find(function (el) { return !inUi(el) && el.getBoundingClientRect().width > 0 && parseFloat(getComputedStyle(el).opacity) > 0; }) || null;
+              }
               for (var j = 0; j < all.length && !target; j++) {
                 if (!inUi(all[j]) && (!n.static || norm(all[j].textContent) === norm(n.text))) { target = all[j]; }
               }

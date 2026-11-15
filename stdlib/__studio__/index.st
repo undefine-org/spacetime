@@ -20,6 +20,7 @@
 /// JavaScript: behaviour lives in ./primitives/studio-kit.st.
 @import "./primitives/studio-kit.st";
 @import "./film.st";
+@import "../authoring/index.st";
 
 // ---- state ---------------------------------------------------------------------
 
@@ -30,6 +31,7 @@
 @data stored $stuOpen bool : false;
 @data stored $stuTabName string : "Layers";
 @data inline $stuQuery string : "";
+@data stored $stuDefinition string : "";
 // The tool: Select edits the page; Interact lets it behave like the site, to
 // reach a state (a tab, a filter, a hover) before selecting in it.
 @data stored $stuToolName string : "Select";
@@ -47,7 +49,7 @@
 @data inline $stuFmtActive string : "";
 
 @type StuTab { Layers | Lists | Components | Pages | Scene }
-@type StuSelection { Nothing | Element | Row | Film }
+@type StuSelection { Nothing | Element | Row | Film | Definition }
 @type StuTool { Select | Interact }
 @type StuFormat { Hidden | Marks | Ask }
 
@@ -73,6 +75,7 @@
 // A film selection (a clip, a keyframe, a part) and a page selection exclude
 // each other: the kits clear one when the other is set.
 @data derive $stuSelection StuSelection : @match {
+  ($stuDefinition != "") => Definition;
   ($stuFilmSel != "")      => Film;
   ($stuSel && $stuSel.row) => Row;
   ($stuSel)                => Element;
@@ -83,7 +86,8 @@
 
 @data derive $stuLayers array : ST.stuLayers($stuOutline, $stuQuery);
 @data derive $stuLists array : ST.stuLists($stuOutline, $stuQuery);
-@data derive $stuComponents array : ST.stuComponents($stuOutline, $stuQuery);
+@data derive $stuComponents array : ST.authoring.definitions($stuReflect, $stuQuery);
+@data derive $stuDefinitionProperties array : ST.authoring.definitionProperties($stuReflect, $stuDefinition);
 @data derive $stuPages array : ST.stuPages($stuOutline);
 @data derive $stuFields array : ST.stuFields($stuSel);
 @data derive $stuRules array : ST.stuRules($stuSel, $stuOutline);
@@ -92,7 +96,7 @@
 
 @data derive $stuTitle string : (($stuOutline && $stuOutline.title) || "This page");
 @data derive $stuFiles string : (($stuOutline && $stuOutline.files) ? $stuOutline.files.join("  ") : "");
-@data derive $stuSelLabel string : ($stuSel ? $stuSel.label : ($stuFilmSel != "" ? $stuFilmSelLabel : "Nothing selected"));
+@data derive $stuSelLabel string : ($stuDefinition || ($stuSel ? $stuSel.label : ($stuFilmSel != "" ? $stuFilmSelLabel : "Nothing selected")));
 @data derive $stuSelCrumbs string : ($stuSel ? $stuSel.crumbs : "");
 @data derive $stuSelText string : ($stuSel ? $stuSel.text : "");
 @data derive $stuRowTitle string : (($stuSel && $stuSel.row) ? ("$" + $stuSel.row.binding + "  item " + ($stuSel.row.index + 1) + " of " + $stuSel.row.count) : "");
@@ -142,11 +146,15 @@
     <button type="button" class="stu-node" draggable="`$n.drag`" data-key="`$n.key`" data-kind="`$n.kind`" data-binding="`$n.binding`" data-at="`$n.index`" style="--stu-depth: `$n.depth`"><span class="stu-node__mark"></span><span class="stu-node__label">`$n.label`</span><span class="stu-node__text">`$n.text`</span></button>
   }
 }
-.stu-tree--components {
-  @each($stuComponents as $c) {
-    <article class="stu-comp" data-group="`$c.group`"><header class="stu-comp__head"><code class="stu-comp__name">`$c.name`</code><code class="stu-comp__params">`$c.params`</code></header><p class="stu-comp__doc">`$c.doc`</p><footer class="stu-comp__foot"><span>`$c.group`</span><span>`$c.file`</span></footer></article>
-  }
+@template &studio-definition($c) {
+  <article class="stu-comp"><div class="stu-comp__definition"></div><div class="stu-comp__actions"><button type="button" class="stu-comp__inspect" data-name="`$c.name`">Inspect</button><button type="button" class="stu-comp__source" data-path="`$c.path`">Open source</button></div></article>
+  .stu-comp__definition { &definition-card($c); }
 }
+.stu-tree--components { @each($stuComponents as $c) { &studio-definition($c); } }
+.stu-comp__source { @on &.click { $stuNoop <- ST.stuOpenSource($.dataset.path); } }
+.stu-comp__inspect { @on &.click { $stuNoop <- ST.stuSelectDefinition($.dataset.name); } }
+.stu-definition-properties { @each($stuDefinitionProperties as $p) { &property-editor($p); } }
+.stu-sec--definition { @authoring-edit(entry: "__SPACETIME_STUDIO_ENTRY__"); }
 .stu-tree--pages {
   @each($stuPages as $p) {
     <a class="stu-page" href="`$p.route`" data-current="`$p.current`"><span class="stu-page__route">`$p.route`</span><span class="stu-page__file">`$p.file`</span></a>
@@ -156,6 +164,7 @@
 .stu-node { @on &.click { $stuNoop <- ST.stuReveal($); } }
 
 .stu-inspector {
+  @state(when: $stuSelection is Definition) { --stu-sel: 4; }
   @state(when: $stuSelection is Nothing) { --stu-sel: 0; }
   @state(when: $stuSelection is Element) { --stu-sel: 1; }
   @state(when: $stuSelection is Row)     { --stu-sel: 2; }
@@ -234,6 +243,12 @@
       <p class="stu-inspector__crumbs"></p>
     </header>
 
+    <section class="stu-sec stu-sec--definition">
+      <h3 class="stu-sec__h">Shared definition</h3>
+      <p class="stu-empty">Changes to defaults apply to every use that inherits them.</p>
+      <div class="stu-definition-properties"></div>
+      <p class="stu-empty" data-authoring-status></p>
+    </section>
     <section class="stu-sec stu-sec--film">
       <h3 class="stu-sec__h">Film</h3>
       <div class="stu-film-fields"></div>
@@ -307,6 +322,7 @@
       </div>
     </div>
     <div class="stu-film__body stu-film__body--code">
+      <nav class="stu-film__files" aria-label="Source files"></nav>
       <div class="stu-film__code"></div>
     </div>
   </section>
@@ -475,7 +491,12 @@ html.stu-on body { margin-left: var(--stu-left) !important; margin-right: var(--
 .stu-inspector[data-st-state="Element"] .stu-sec--rules,
 .stu-inspector[data-st-state="Row"] .stu-sec--design,
 .stu-inspector[data-st-state="Row"] .stu-sec--rules,
-.stu-inspector[data-st-state="Film"] .stu-sec--film { display: block; }
+.stu-inspector[data-st-state="Film"] .stu-sec--film,
+.stu-inspector[data-st-state="Definition"] .stu-sec--definition { display: block; }
+.stu-comp__actions { display: flex; gap: 6px; margin-top: 8px; }
+.stu-comp__actions button { border: 1px solid var(--stu-line); border-radius: 4px; padding: 4px 8px; background: #fff; font: inherit; cursor: pointer; }
+.stu-definition-properties { display: grid; gap: 10px; }
+.stu-definition-properties .au-property { padding: 10px; }
 .stu-sec__h { margin: 0 0 8px; font-size: 11px; font-weight: 600; }
 .stu-empty { margin: 0; color: var(--stu-soft); line-height: 1.6; }
 .stu-text { margin: 0; color: var(--stu-ink); max-height: 7em; overflow: hidden; }
