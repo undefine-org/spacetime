@@ -3,6 +3,8 @@
 #
 #   nix build -f nix/spacetime.nix -L                       # release, cdp + defaults
 #   nix build -f nix/spacetime.nix --arg features '[ ]'     # without cdp
+#   nix build -f nix/spacetime.nix --argstr buildProfile dev -o scratch/dev
+#                                                        # fast iteration, no release LTO
 #   ./result/bin/spacetime serve demos/film-robot-day/      # run from the repo root
 #
 # Dependencies are their own derivation (crane's buildDepsOnly), so after the
@@ -19,6 +21,7 @@
 { pkgs ? import (builtins.getFlake "nixpkgs") { }
 , crane ? builtins.getFlake "github:ipetkov/crane"
 , features ? [ "cdp" ]
+, buildProfile ? "release" # "dev" for a fast editor/compiler iteration
 , testArgs ? "--lib"   # nix build -f nix/spacetime.nix tests --argstr testArgs "--test studio_hot_binds_test"
 }:
 let
@@ -42,6 +45,19 @@ let
   # or every source edit rebuilds every dependency
   patches = builtins.path { path = root + "/.patches"; name = "spacetime-patches"; };
 
+  # mkDummySrc replaces Rust bodies, but preserves non-Rust files. Feeding it
+  # the whole application therefore makes a one-line stdlib/UI edit rebuild
+  # V8 and every dependency. Dependency compilation needs the manifest/target
+  # layout, not the application's embedded assets (the dummy crate has none).
+  dependencySrc = lib.cleanSourceWith {
+    inherit src;
+    filter = path: type:
+      type == "directory"
+      || lib.hasSuffix ".rs" path
+      || builtins.elem (baseNameOf path) [ "Cargo.toml" "Cargo.lock" ]
+      || lib.hasSuffix "/.cargo/config.toml" path;
+  };
+
   v8 = pkgs.fetchurl {
     url = "https://github.com/denoland/rusty_v8/releases/download/v137.3.0/librusty_v8_release_x86_64-unknown-linux-gnu.a.gz";
     sha256 = "0rv5nl4gcbvdpk3mdwbqvw180nfx2wk173q1cqrvv2h1agg1ys52";
@@ -61,10 +77,13 @@ let
   depsFor = profile: craneLib.buildDepsOnly (common // {
     CARGO_PROFILE = profile;
     cargoCheckCommand = "true";
+    # Unit/integration runs enable dev-dependencies. Cache them too, instead
+    # of recompiling rusty_v8/proptest for every application test derivation.
+    cargoExtraArgs = common.cargoExtraArgs + lib.optionalString (profile == "dev") " --tests";
     # Cargo.toml patches serde/serde_core from .patches/ (path crates): the
     # deps build stubs every path crate, so it gets the REAL patched sources
     dummySrc = craneLib.mkDummySrc {
-      inherit src;
+      src = dependencySrc;
       extraDummyScript = ''
         rm -rf $out/.patches
         cp -r ${patches} $out/.patches
@@ -72,10 +91,11 @@ let
       '';
     };
   });
-  deps = depsFor "release";
+  deps = depsFor buildProfile;
   spacetime = craneLib.buildPackage (common // {
     # deps only, built once and cached (only spacetime recompiles after)
     cargoArtifacts = deps;
+    CARGO_PROFILE = buildProfile;
     passthru = {
       # nix build -f nix/spacetime.nix tests      (cargo test --lib, on the builder)
       # the dev profile: the suite has debug-only helpers (cfg(debug_assertions))
