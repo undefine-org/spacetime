@@ -38,6 +38,8 @@ let
     filter = path: type:
       let rel = lib.removePrefix (toString root + "/") (toString path);
       in !(lib.any (s: rel == s || lib.hasPrefix (s + "/") rel) skip)
+         && !(lib.any (part: builtins.elem part [ ".git" "dist" "target" "node_modules" ]) (lib.splitString "/" rel))
+         && baseNameOf path != "build-status.json"
          && !(lib.hasSuffix ".snap.new" rel);
   };
 

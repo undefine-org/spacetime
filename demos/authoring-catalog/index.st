@@ -2,7 +2,7 @@
 @import "stdlib/film";
 @import "./fixtures.st";
 
-@font("Catalog Serif") { src: url("assets/fonts/Tinos.ttf") format("truetype"); font-weight: 400; font-display: block; }
+@font("Catalog Serif") { src: url("/assets/fonts/Tinos.ttf") format("truetype"); font-weight: 400; font-display: block; }
 @data declarations $toolDeclarations from template;
 @data dispatch $macroDeclarations;
 @data derive $toolCards array : ST.authoring.declarationCards($toolDeclarations, "template");
@@ -128,4 +128,4 @@ button, input { font: inherit; }
 .catalog-tools > p:not(.catalog-kicker) { color: var(--au-soft); font-size: 12px; line-height: 1.8; max-width: 540px; }
 .catalog-tool-cards, .catalog-macro-cards { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; margin-top: 22px; }
 @media (max-width: 960px) { .catalog-shell { grid-template-columns: 190px 1fr; } .catalog-side { padding: 25px 18px; } .catalog-main { padding: 0 25px 30px; } .catalog-workbench__body { grid-template-columns: 1fr; } .catalog-preview { min-height: 300px; } }
-@media (max-width: 620px) { .catalog-shell { display: block; } .catalog-side { border-right: 0; border-bottom: 1px solid var(--au-line); } .catalog-side__section { margin-top: 20px; } .catalog-side__note { display: none; } .catalog-intro h1 { font-size: 48px; } .catalog-principles { grid-template-columns: 1fr; gap: 20px; } }
+@media (max-width: 620px) { .catalog-shell { display: block; } .catalog-side { border-right: 0; border-bottom: 1px solid var(--au-line); } .catalog-side__section { margin-top: 20px; } .catalog-side__note { display: none; } .catalog-intro h1 { font-size: 48px; } .catalog-principles { grid-template-columns: 1fr; gap: 20px; } .catalog-tool-cards, .catalog-macro-cards { grid-template-columns: 1fr; } }

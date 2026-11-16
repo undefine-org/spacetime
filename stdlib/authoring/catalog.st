@@ -8,10 +8,10 @@
     <footer class="au-definition__source">`$d.path`</footer>
   </article>
 }
-.au-definition { --authoring-surface; padding: 18px; }
-.au-definition__head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
-.au-definition__name { --authoring-code; font-size: 13px; font-weight: 600; }
+.au-definition { --authoring-surface; min-width: 0; padding: 18px; }
+.au-definition__head { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: 12px; }
+.au-definition__name { --authoring-code; font-size: 13px; font-weight: 600; overflow-wrap: anywhere; }
 .au-definition__kind { --authoring-code; color: var(--au-soft, #73796c); }
 .au-definition__doc { font-size: 12px; line-height: 1.6; color: var(--au-soft, #73796c); }
 .au-definition__signature { --authoring-code; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.6; }
-.au-definition__source { --authoring-code; color: var(--au-soft, #73796c); padding-top: 10px; border-top: 1px solid var(--au-line, #dedfd8); }
+.au-definition__source { --authoring-code; color: var(--au-soft, #73796c); padding-top: 10px; border-top: 1px solid var(--au-line, #dedfd8); overflow-wrap: anywhere; }
