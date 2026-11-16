@@ -20,6 +20,10 @@ typed controls, legal scopes and diagnostics. `&origin-trail($p)` and
 `&scope-picker($p)` can also be composed independently. A host decides the edit
 destination; controls do not choose source files or invent overrides.
 
+Compose child templates with body-root references such as
+`&origin-trail($p);` after the parent's root markup. Each child owns its markup
+and behavior; CSS arranges the resulting children.
+
 `ST.authoring.field(param, overrides)` projects reflected scalar metadata and
 choices into the shared compact field contract. `ST.authoring.property` adds
 the authoring view. `definitionProperties` targets parser-owned default spans;

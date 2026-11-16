@@ -4210,6 +4210,7 @@ fn parse_template_ref(line: &str) -> Option<crate::syntax::form_match::TemplateR
             arg_names,
             // String-parser context (no source offsets); the span-bearing harvest
             // is scope_refs/harvest_dynamic_refs. Zero span = unknown (G2 skips it).
+            node: None,
             span: Default::default(),
         })
     } else {
@@ -4222,6 +4223,7 @@ fn parse_template_ref(line: &str) -> Option<crate::syntax::form_match::TemplateR
             args,
             is_collection: false,
             arg_names,
+            node: None,
             span: Default::default(),
         })
     }

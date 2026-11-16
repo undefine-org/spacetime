@@ -784,6 +784,7 @@
               if (typeof window !== 'undefined') window.__stTemplateDepth--;
             }
             if (refEl && element) {
+              if (ref.node && ST.stampTemplateInstance) ST.stampTemplateInstance(refEl, ref.node);
               element.appendChild(refEl);
               // Named refs: store reference via ST.set for cross-instance access
               if (ref.ref_name) {

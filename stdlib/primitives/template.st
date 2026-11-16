@@ -38,6 +38,11 @@
   /// Optional keyframes for scoped template animations
   animations: keyframes? = null
 ) {
+  %emit prelude-js {
+    ST.stampTemplateInstance = function (element, node) {
+      if (element && node) element.setAttribute('data-st-node', node);
+    };
+  }
   %emit js {
     (() => {
     // Strip & prefix from template name if present (macro captures it with prefix)
@@ -196,9 +201,7 @@
 
   %if $node {
     %emit js {
-      if (element) {
-        element.setAttribute('data-st-node', %node);
-      }
+      ST.stampTemplateInstance(element, %node);
     }
   }
 

@@ -1067,7 +1067,7 @@ fn cst_to_stfile_with_registry(
                         //               `@on click { … }`; the wrapped `.sel { @on … }`
                         //               form already gets a real selector above).
                         // Scoped to these two ONLY: template invocations `&name()` keep
-                        // their reify-refs path + recursion-depth guard — a root selector
+                        // their factory-refs path + recursion-depth guard — a root selector
                         // would reroute them to the unguarded invoke primitive.
                         if let Some(root) = template_root_sel.get(&scope_ast.selector) {
                             fm.selector = Some(root.clone());
@@ -1080,9 +1080,15 @@ fn cst_to_stfile_with_registry(
                     // scope (where the cutover sources the factory `states`) and do NOT add
                     // it to the flat `file.matches` that drives page-level emit. Behavioral
                     // constructs (@on/@each/@editable/class-toggle) DO stay flat — their
-                    // page selector-init mounts per-instance via the observer.
+                    // page selector-init mounts per-instance via the observer. Child
+                    // template calls likewise belong ONLY to the factory's `refs`:
+                    // flattening them also invokes a second, unbound child on the page.
                     let is_state = fm.macro_name == "local-state";
-                    if !is_state {
+                    let is_factory_ref = matches!(
+                        fm.macro_name.as_str(),
+                        "template-invoke-bare" | "template-invoke-named"
+                    );
+                    if !is_state && !is_factory_ref {
                         file.matches.push(fm.clone());
                     }
                     if !assign_match_to_nested_scopes(&fm, &mut scope_ast.nested_scopes) {
@@ -2159,6 +2165,7 @@ fn invoke_refs_from_matches(
                         args,
                         is_collection,
                         arg_names,
+                        node: None,
                         span: m.span,
                     },
                 ));
@@ -2196,6 +2203,7 @@ fn invoke_refs_from_matches(
                                         args,
                                         is_collection: true,
                                         arg_names,
+                                        node: None,
                                         span: m.span,
                                     },
                                 ));
@@ -2286,6 +2294,7 @@ fn harvest_dynamic_refs(
                         args,
                         is_collection: false,
                         arg_names,
+                        node: None,
                         span: SourceSpan::new(start + i, start + j + close + 1),
                     },
                 ));
@@ -2332,6 +2341,7 @@ fn harvest_dynamic_refs(
                             args,
                             is_collection: true,
                             arg_names,
+                            node: None,
                             span: SourceSpan::new(start + i, start + t + close + 1),
                         },
                     ));

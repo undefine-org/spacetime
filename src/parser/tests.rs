@@ -3205,3 +3205,25 @@ fn bind_spread_forwards_every_form_param() {
         .collect();
     assert_eq!(args, ["&self", "name=$named", "power=Number(2.0)", "kind=$kind", "tint=$tint"]);
 }
+
+#[test]
+fn template_child_invocations_belong_to_the_factory_only() {
+    let ast = parse(r#"
+@template &child($label string) { <span class="child">`$label`</span> }
+@template &parent($label string) {
+  <section class="parent"></section>
+  &child($label);
+  &named &child($label);
+}
+.host { &parent("hello"); }
+"#).expect("nested templates parse");
+    let parent = ast.scopes.iter().find(|s| s.selector == "@template:parent").unwrap();
+    assert_eq!(parent.refs.len(), 2);
+    assert!(parent.refs.iter().all(|r| r.template_name == "child" && r.args == ["$label"]));
+    assert_eq!(parent.refs[1].ref_name.as_deref(), Some("named"));
+    let invocations: Vec<_> = ast.matches.iter().filter(|m| {
+        matches!(m.macro_name.as_str(), "template-invoke-bare" | "template-invoke-named")
+    }).collect();
+    assert_eq!(invocations.len(), 1, "children must not also mount at page scope");
+    assert_eq!(invocations[0].selector.as_deref(), Some(".host"));
+}

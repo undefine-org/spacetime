@@ -1474,8 +1474,20 @@ pub fn compile_verbose(
     // here and shared by E0402 ref validation and the expand body arm — both read the
     // template payload (refs/html) from the `@template:<name>` Construct scope, not the
     // retired ComponentBody capture.
-    let scopes_by_name: std::collections::HashMap<String, &crate::parser::ScopeBlock> = context
-        .scopes
+    // Factory-owned children need the same dev identity as direct invocations.
+    // Reuse the ambiguity-checked map above; never mutate the authored AST.
+    let mut factory_scopes = std::borrow::Cow::Borrowed(context.scopes.as_slice());
+    if !unique.is_empty() {
+        for scope in factory_scopes.to_mut() {
+            for reference in &mut scope.refs {
+                let span = (reference.span.start, reference.span.end);
+                if !ambiguous.contains(&span) && let Some(node_id) = unique.get(&span) {
+                    reference.node = Some((*node_id).to_string());
+                }
+            }
+        }
+    }
+    let scopes_by_name: std::collections::HashMap<String, &crate::parser::ScopeBlock> = factory_scopes
         .iter()
         .filter_map(|s| {
             s.selector
@@ -4585,6 +4597,7 @@ mod tests {
                 args: vec![],
                 is_collection: true,
                 arg_names: vec![],
+                node: None,
                 span: Default::default(),
             }],
             ..Default::default()
@@ -4610,6 +4623,7 @@ mod tests {
                 args: vec![],
                 is_collection: true,
                 arg_names: vec![],
+                node: None,
                 span: Default::default(),
             }],
         );
@@ -4648,6 +4662,7 @@ mod tests {
                     args: vec![],
                     is_collection: false,
                     arg_names: vec![],
+                    node: None,
                     span: Default::default(),
                 },
                 crate::syntax::TemplateRef {
@@ -4656,6 +4671,7 @@ mod tests {
                     args: vec![],
                     is_collection: false,
                     arg_names: vec![],
+                    node: None,
                     span: Default::default(),
                 },
             ],

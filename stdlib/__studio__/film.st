@@ -151,10 +151,10 @@
 .stu-part-fields .w-input { @on &.change { $stuNoop <- ST.stuWidgetCommit($); } }
 .stu-part-fields .w-choice { @on &.click { $stuNoop <- ST.stuWidgetCommit($); } }
 .stu-part-fields .au-property { padding: 6px 0; border: 0; border-bottom: 1px solid var(--stu-line); border-radius: 0; }
-.stu-part-fields .au-property__head, .stu-part-fields .au-property__doc, .stu-part-fields .au-property__origin { display: none; }
-.stu-part-fields .au-property__values, .stu-part-fields .au-property__scopes { display: none; }
+.stu-part-fields .au-property__head, .stu-part-fields .au-property__doc, .stu-part-fields .au-origin { display: none; }
+.stu-part-fields .au-property__values, .stu-part-fields .au-scopes { display: none; }
 .stu-part-fields .au-property[data-state="animated"] .au-property__values { display: flex; font-size: 9px; gap: 10px; margin: 8px 0; }
-.stu-part-fields .au-property[data-state="animated"] .au-property__scopes { display: block; }
+.stu-part-fields .au-property[data-state="animated"] .au-scopes { display: flex; }
 .stu-part-fields .au-scopes { margin: 0 0 5px; }
 .stu-grid {
   @each($stuFilmGrid as $c) {

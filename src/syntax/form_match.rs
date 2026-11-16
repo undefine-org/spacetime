@@ -225,6 +225,10 @@ pub struct TemplateRef {
     /// the serialized bundle, so existing `refs:` snapshots are unaffected.
     #[serde(default, skip_serializing_if = "all_arg_names_none")]
     pub arg_names: Vec<Option<String>>,
+    /// Dev-only invocation identity, projected from the existing source-span map.
+    /// Production factory payloads omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node: Option<String>,
     /// Byte span of the invocation in source (FUP-093/G2): the EditAst write
     /// address for editing THIS invocation's args. `#[serde(skip)]` keeps it out
     /// of the serialized bundle (it is an internal addressing aid, not contract
@@ -2026,6 +2030,7 @@ mod tests {
             args: vec!["\"A\"".to_string()],
             is_collection: false,
             arg_names: vec![None],
+            node: None,
             span: Default::default(),
         };
         let json = serde_json::to_string(&positional).unwrap();
@@ -2040,6 +2045,7 @@ mod tests {
             args: vec!["\"A\"".to_string()],
             is_collection: false,
             arg_names: vec![Some("title".to_string())],
+            node: None,
             span: Default::default(),
         };
         let json = serde_json::to_string(&named).unwrap();
@@ -2104,6 +2110,7 @@ mod tests {
                 args: vec!["\"x\"".to_string()],
                 is_collection: false,
                 arg_names: vec![],
+                node: None,
                 span: Default::default(),
             }],
             ..Default::default()

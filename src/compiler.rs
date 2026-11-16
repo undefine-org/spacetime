@@ -6795,7 +6795,7 @@ mod snapshot_tests {
         // false-positives on every page. What must never appear in a production
         // build is the emission itself.
         assert!(
-            !build.js.contains("setAttribute('data-st-node'"),
+            !build.js.contains("ST.stampTemplateInstance(element,"),
             "production output stamps inspector node ids: {}",
             build.js
         );

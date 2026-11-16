@@ -23,13 +23,11 @@
     <p class="au-property__doc">`$p.doc`</p>
     <div class="au-property__control"></div>
     <div class="au-property__values"><span>Authored <code class="au-property__authored">`$p.authored`</code></span><span>Now <code class="au-property__evaluated">`$p.evaluated`</code></span></div>
-    <div class="au-property__origin"></div>
-    <div class="au-property__scopes"></div>
     <p class="au-property__diagnostic" role="status">`$p.diagnostic`</p>
   </section>
   .au-property__control { @each($p.controls as $f) { &$f.tpl($f); } }
-  .au-property__origin { &origin-trail($p); }
-  .au-property__scopes { &scope-picker($p); }
+  &origin-trail($p);
+  &scope-picker($p);
 }
 
 @form style --authoring-surface { background: var(--au-panel, #fff); border: 1px solid var(--au-line, #dedfd8); border-radius: 12px; }

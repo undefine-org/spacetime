@@ -14,6 +14,8 @@ set -u
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 BIN=${SPACETIME_BIN:-${CARGO_TARGET_DIR:-$ROOT/target}/debug/spacetime}
 PORT=${PORT:-4519}
+FILM_BROWSER_SESSION="spacetime-film-${PORT}-$$"
+agent-browser() { command agent-browser --session "$FILM_BROWSER_SESSION" "$@"; }
 WORK=$(mktemp -d)
 FILM="$WORK/film"
 cp -r "$ROOT/demos/film-robot-day" "$FILM"
@@ -25,7 +27,10 @@ trap 'kill $SERVER 2>/dev/null; agent-browser close >/dev/null 2>&1; rm -rf "$WO
 
 pass=0; fail=0
 ok() { echo "  ok    $1"; pass=$((pass + 1)); }
-bad() { echo "  FAIL  $1"; fail=$((fail + 1)); }
+bad() {
+  echo "  FAIL  $1"; fail=$((fail + 1))
+  agent-browser eval '({url:location.href,ready:document.readyState,age:Math.round(performance.now()),signals:!!window.SpacetimeLocal})' 2>/dev/null
+}
 js() { agent-browser eval "$1" 2>/dev/null | sed 's/^"//; s/"$//'; }
 ready() {  # the film's transport and the studio's score are up on a settled page
   for _ in $(seq 1 120); do

@@ -147,8 +147,8 @@
   }
 }
 @template &studio-definition($c) {
-  <article class="stu-comp"><div class="stu-comp__definition"></div><div class="stu-comp__actions"><button type="button" class="stu-comp__inspect" data-name="`$c.name`">Inspect</button><button type="button" class="stu-comp__source" data-path="`$c.path`">Open source</button></div></article>
-  .stu-comp__definition { &definition-card($c); }
+  <article class="stu-comp"><div class="stu-comp__actions"><button type="button" class="stu-comp__inspect" data-name="`$c.name`">Inspect</button><button type="button" class="stu-comp__source" data-path="`$c.path`">Open source</button></div></article>
+  &definition-card($c);
 }
 .stu-tree--components { @each($stuComponents as $c) { &studio-definition($c); } }
 .stu-comp__source { @on &.click { $stuNoop <- ST.stuOpenSource($.dataset.path); } }
@@ -471,7 +471,7 @@ html.stu-on body { margin-left: var(--stu-left) !important; margin-right: var(--
 .stu-node__label { flex: none; max-width: 60%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .stu-node__text { flex: 1; min-width: 0; color: var(--stu-soft); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
-.stu-comp { margin: 8px; padding: 10px; border: 1px solid var(--stu-line); border-radius: 6px; }
+.stu-comp { display: flex; flex-direction: column; margin: 8px; padding: 10px; border: 1px solid var(--stu-line); border-radius: 6px; }
 .stu-comp__head { display: flex; flex-wrap: wrap; gap: 4px; }
 .stu-comp__name { font-weight: 600; color: var(--stu-violet); }
 .stu-comp__params { color: var(--stu-soft); }
@@ -493,7 +493,7 @@ html.stu-on body { margin-left: var(--stu-left) !important; margin-right: var(--
 .stu-inspector[data-st-state="Row"] .stu-sec--rules,
 .stu-inspector[data-st-state="Film"] .stu-sec--film,
 .stu-inspector[data-st-state="Definition"] .stu-sec--definition { display: block; }
-.stu-comp__actions { display: flex; gap: 6px; margin-top: 8px; }
+.stu-comp__actions { display: flex; order: 1; gap: 6px; margin-top: 8px; }
 .stu-comp__actions button { border: 1px solid var(--stu-line); border-radius: 4px; padding: 4px 8px; background: #fff; font: inherit; cursor: pointer; }
 .stu-definition-properties { display: grid; gap: 10px; }
 .stu-definition-properties .au-property { padding: 10px; }

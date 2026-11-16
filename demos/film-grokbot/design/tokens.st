@@ -1,7 +1,7 @@
 /// Reference tokens. The launch film's palette and public X VF brand typography
 /// are intentional; change these once to reskin every scene and component.
-@font("Launch Sans") { src: url("assets/fonts/XVF.woff2") format("woff2"); font-weight: 100 900; font-display: block; }
-@font("Launch Serif") { src: url("assets/fonts/Tinos.ttf") format("truetype"); font-weight: 400; font-display: block; }
+@font("Launch Sans") { src: url("/assets/fonts/XVF.woff2") format("woff2"); font-weight: 100 900; font-display: block; }
+@font("Launch Serif") { src: url("/assets/fonts/Tinos.ttf") format("truetype"); font-weight: 400; font-display: block; }
 :root {
   --film-paper: #fdfdfd;
   --film-ink: #101111;
