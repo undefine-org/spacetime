@@ -2738,6 +2738,29 @@ fn test_w0712_not_fired_for_selector_scoped_each() {
 }
 
 #[test]
+fn test_each_child_ref_is_marked_from_each() {
+    // A child invoked by a selector-scoped @each inside a template body is kept
+    // in the template's refs (BUG-130, for structure views) but marked
+    // `from_each`, so the factory does not ALSO render it at the template root
+    // (it appended an unbound ghost child to every parent instance).
+    let input = "@template &lst() {\n  <ul class=\"l\"></ul>\n  .l { @each($items as $x) { &item($x); } }\n}\n";
+    let result = parse(input).unwrap();
+    let refs: Vec<_> = result
+        .scopes
+        .iter()
+        .flat_map(|s| s.refs.iter())
+        .filter(|r| r.template_name == "item")
+        .collect();
+    assert!(!refs.is_empty(), "the @each child stays visible in refs");
+    assert!(refs.iter().all(|r| r.from_each), "every @each child is from_each: {refs:?}");
+    let direct = parse("@template &lst() {\n  <ul class=\"l\"></ul>\n  &item(\"a\");\n}\n").unwrap();
+    assert!(
+        direct.scopes.iter().flat_map(|s| s.refs.iter()).any(|r| r.template_name == "item" && !r.from_each),
+        "a body-root child is still rendered by the factory"
+    );
+}
+
+#[test]
 fn test_e0929_colon_in_template_param_list_errors() {
     // B1 fail-loud: a `:` in a @template param list previously truncated the list
     // SILENTLY at the first param. It must now surface E0929 instead of losing data.

@@ -107,3 +107,50 @@ fn hot_arguments_are_the_values_the_body_is_given() {
     let name = ground["args"]["name"].as_str().unwrap();
     assert!(name.starts_with('"') && name.ends_with('"'), "name must be a JS string literal, got {name}");
 }
+
+fn hot_page(source: &str) -> (Vec<Value>, String) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let file = dir.path().join("index.st");
+    std::fs::write(&file, source).unwrap();
+    let mut binds = Compiler::from_file(&file, dir.path())
+        .expect("parse")
+        .with_site_dir(Some(dir.path().to_path_buf()))
+        .hot_only()
+        .compile()
+        .hot_binds;
+    let at = binds.iter().position(|b| b.get("fingerprint").is_some()).expect("a fingerprint row");
+    let fp = binds.remove(at)["fingerprint"].as_str().unwrap().to_string();
+    (binds, fp)
+}
+
+#[test]
+fn editing_inline_data_is_hot() {
+    // A content edit (a Studio field, an agent's rewrite of a row) changes only
+    // the list's value: the page takes it in place instead of reloading.
+    let page = |headline: &str| {
+        format!(
+            "@data inline $pieces : [{{ \"id\": \"KN-001\", \"headline\": \"{headline}\" }}];\n<ul class=\"l\"></ul>\n.l {{ @each($pieces as $p) {{ <li>`$p.headline`</li> }} }}\n"
+        )
+    };
+    let (before, fp0) = hot_page(&page("Tout le savoir du cabinet"));
+    let (after, fp1) = hot_page(&page("Les méthodes du cabinet"));
+    assert_eq!(fp0, fp1, "a data edit changes nothing but hot arguments");
+    let row = before.iter().find(|b| b["primitive"] == "local-state-impl").expect("inline data is hot-keyed");
+    let moved = after.iter().find(|b| b["key"] == row["key"]).expect("same key after the edit");
+    assert!(moved["args"]["initial"].as_str().unwrap().contains("Les méthodes"));
+    let (_, fp2) = hot_page(&page("Tout le savoir du cabinet").replace("<li>", "<li class=\"x\">"));
+    assert_ne!(fp0, fp2, "a row's markup is not hot: it still reloads");
+}
+
+#[test]
+fn a_longer_value_does_not_move_a_template_below_it() {
+    // Byte offsets after an edit shift; the fingerprint must not see them.
+    let page = |h: &str| {
+        format!(
+            "@data inline $pieces : [{{ \"h\": \"{h}\" }}];\n@template &c($p) {{ <li>`$p.h`</li> }}\n<ul class=\"l\"></ul>\n.l {{ @each($pieces as $p) {{ &c($p); }} }}\n"
+        )
+    };
+    let (_, a) = hot_page(&page("x"));
+    let (_, b) = hot_page(&page("a much longer headline"));
+    assert_eq!(a, b, "only the data moved");
+}

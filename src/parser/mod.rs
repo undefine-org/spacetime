@@ -2166,6 +2166,7 @@ fn invoke_refs_from_matches(
                         is_collection,
                         arg_names,
                         node: None,
+                        from_each: false,
                         span: m.span,
                     },
                 ));
@@ -2204,6 +2205,7 @@ fn invoke_refs_from_matches(
                                         is_collection: true,
                                         arg_names,
                                         node: None,
+                                        from_each: true,
                                         span: m.span,
                                     },
                                 ));
@@ -2295,6 +2297,7 @@ fn harvest_dynamic_refs(
                         is_collection: false,
                         arg_names,
                         node: None,
+                        from_each: false,
                         span: SourceSpan::new(start + i, start + j + close + 1),
                     },
                 ));
@@ -2342,6 +2345,7 @@ fn harvest_dynamic_refs(
                             is_collection: true,
                             arg_names,
                             node: None,
+                            from_each: false,
                             span: SourceSpan::new(start + i, start + t + close + 1),
                         },
                     ));

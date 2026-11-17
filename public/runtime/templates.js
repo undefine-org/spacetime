@@ -748,6 +748,9 @@
       if (element && bodyRefs.length > 0 && !__stAtDepthCap && typeof ST !== 'undefined') {
         bodyRefs.forEach(ref => {
           if (!ref || !ref.template_name) return;
+          // A child of one of this body's @each blocks: the @each renders it per
+          // row. Rendering it here too appended an unbound ghost to the root.
+          if (ref.from_each) return;
           // DYNAMIC DISPATCH (FEAT-073): a `$`-prefixed template_name (`&$w()` /
           // `&$node.widget()`) names the template by a RUNTIME value. Resolve it against
           // this instance's `data` (dotted path supported) before the registry lookup.

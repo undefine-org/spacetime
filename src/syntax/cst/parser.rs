@@ -1119,6 +1119,13 @@ impl Parser {
                         | SyntaxKind::NUMBER_WITH_UNIT
                         | SyntaxKind::L_BRACKET
                         | SyntaxKind::R_BRACKET
+                        // An element that is itself an expression opens a
+                        // literal too: no attribute selector starts with
+                        // `(`, `$` or `-` (twin of the events grammar).
+                        | SyntaxKind::L_PAREN
+                        | SyntaxKind::DOLLAR
+                        | SyntaxKind::VARIABLE_REF
+                        | SyntaxKind::MINUS
                 ) =>
             {
                 // Inline array literal value: consume the whole BALANCED bracket region

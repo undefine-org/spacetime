@@ -1225,6 +1225,34 @@ fn test_validate_typed_reads_flags_bad_field() {
 }
 
 #[test]
+fn test_validate_typed_reads_allows_array_and_string_host_members() {
+    // `$forms.length` on a typed `FormEnvelope[]` is the array's length, not a
+    // field of FormEnvelope; `.errors.email.length` is the string's. A method
+    // ends the typed walk. A misspelled field is still refused.
+    let mut analysis = CompileAnalysis::new();
+    let registry = form_envelope_registry();
+    analysis.analyze_data_sources(
+        &[make_data_form_match("forms", "FormEnvelope[]", None)],
+        &registry,
+    );
+    let scopes = vec![
+        scope_with_read(".count", "$forms.length"),
+        scope_with_read(".first", "$forms.filter(f => f.valid).length"),
+        scope_with_read(".email", "$forms.errors.email.length"),
+        scope_with_read(".lower", "$forms.errors.email.toLowerCase"),
+        scope_with_read(".bad", "$forms.errors.emial"),
+    ];
+    analysis.validate_typed_reads(&registry, &scopes);
+    let errs: Vec<_> = analysis
+        .diagnostics
+        .iter()
+        .filter(|d| d.code == DiagnosticCode::E0401)
+        .collect();
+    assert_eq!(errs.len(), 1, "only the misspelled field errors (got {:?})", errs);
+    assert!(errs[0].message.contains("emial"));
+}
+
+#[test]
 fn test_validate_typed_reads_untyped_base_is_silent() {
     // Regression: an UNTYPED data source (`type_name == "any"`, pre-FUP-144
     // default) must NOT be field-checked — the pass is purely additive.

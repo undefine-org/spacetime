@@ -229,6 +229,12 @@ pub struct TemplateRef {
     /// Production factory payloads omit it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub node: Option<String>,
+    /// A child invoked inside one of this template's `@each` blocks (BUG-130
+    /// harvests it so structure views see it). The `@each` renders it once per
+    /// row; the factory must NOT also render it at the template's root, which
+    /// appended an unbound ghost instance to every parent. Omitted when false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub from_each: bool,
     /// Byte span of the invocation in source (FUP-093/G2): the EditAst write
     /// address for editing THIS invocation's args. `#[serde(skip)]` keeps it out
     /// of the serialized bundle (it is an internal addressing aid, not contract
@@ -1252,21 +1258,23 @@ pub fn signal_read(scope: SignalScope, name: &str) -> String {
 /// compile-time transpile: no runtime `eval`/`Function`.
 pub fn transpile_signal_expr_with(expr: &str, scope: SignalScope) -> String {
     let bytes = expr.as_bytes();
-    let mut out = String::with_capacity(expr.len() + 16);
+    // Bytes out, decoded once: pushing `u8 as char` turned every byte of a
+    // non-ASCII string literal into a Latin-1 char (`"prévus"` -> `"prÃ©vus"`).
+    let mut out: Vec<u8> = Vec::with_capacity(expr.len() + 16);
     let mut i = 0;
     while i < bytes.len() {
         let c = bytes[i] as char;
         // Skip string literals verbatim so `$` inside strings is untouched.
         if c == '"' || c == '\'' || c == '`' {
             let quote = c;
-            out.push(c);
+            out.push(bytes[i]);
             i += 1;
             while i < bytes.len() {
                 let ch = bytes[i] as char;
-                out.push(ch);
+                out.push(bytes[i]);
                 i += 1;
                 if ch == '\\' && i < bytes.len() {
-                    out.push(bytes[i] as char);
+                    out.push(bytes[i]);
                     i += 1;
                     continue;
                 }
@@ -1291,7 +1299,7 @@ pub fn transpile_signal_expr_with(expr: &str, scope: SignalScope) -> String {
             }
             if j > start {
                 let name = &expr[start..j];
-                out.push_str(&format!("ST.ref({:?})", name));
+                out.extend_from_slice(format!("ST.ref({:?})", name).as_bytes());
                 i = j;
                 continue;
             }
@@ -1310,15 +1318,15 @@ pub fn transpile_signal_expr_with(expr: &str, scope: SignalScope) -> String {
             }
             if j > start {
                 let name = &expr[start..j];
-                out.push_str(&signal_read(scope, name));
+                out.extend_from_slice(signal_read(scope, name).as_bytes());
                 i = j;
                 continue;
             }
         }
-        out.push(c);
+        out.push(bytes[i]);
         i += 1;
     }
-    out
+    String::from_utf8(out).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned())
 }
 
 /// Collect the distinct `$signal` names referenced in an expression, in order
@@ -1938,6 +1946,12 @@ mod tests {
     use super::*;
 
     #[test]
+    fn transpile_keeps_non_ascii_string_literals() {
+        let out = transpile_signal_expr_with(r#"($a ? "prévus" : "été")"#, SignalScope::Scoped);
+        assert!(out.contains(r#""prévus""#) && out.contains(r#""été""#), "{out}");
+    }
+
+    #[test]
     fn collect_dotted_signal_reads_keeps_full_path() {
         // PLAN-119 W2: the extractor preserves the access path (unlike
         // collect_signal_deps, which truncates to the head).
@@ -2031,6 +2045,7 @@ mod tests {
             is_collection: false,
             arg_names: vec![None],
             node: None,
+            from_each: false,
             span: Default::default(),
         };
         let json = serde_json::to_string(&positional).unwrap();
@@ -2046,6 +2061,7 @@ mod tests {
             is_collection: false,
             arg_names: vec![Some("title".to_string())],
             node: None,
+            from_each: false,
             span: Default::default(),
         };
         let json = serde_json::to_string(&named).unwrap();
@@ -2111,6 +2127,7 @@ mod tests {
                 is_collection: false,
                 arg_names: vec![],
                 node: None,
+                from_each: false,
                 span: Default::default(),
             }],
             ..Default::default()

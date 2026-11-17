@@ -1319,10 +1319,51 @@ pub fn hot_binds(
         names.sort();
         for n in names {
             n.hash(&mut rest);
-            format!("{:?}", p.args[n]).hash(&mut rest);
+            hash_captured(&p.args[n], &mut rest);
         }
     }
     Ok((binds, rest.finish()))
+}
+
+/// Hash a captured value for the hot fingerprint by what it SAYS, not where it
+/// was written: a block's form matches carry byte spans, so hashing their Debug
+/// text made every call after an edit that changed a value's LENGTH look changed
+/// (a one-word edit to a list reloaded any page with a template below it). Named
+/// captures are hashed in key order, never in HashMap order.
+fn hash_captured<H: std::hash::Hasher>(value: &CapturedValue, h: &mut H) {
+    use std::hash::Hash;
+    match value {
+        CapturedValue::Block(matches) => {
+            "block".hash(h);
+            for m in matches {
+                m.macro_name.hash(h);
+                m.matched_macro.hash(h);
+                m.selector.hash(h);
+                let mut keys: Vec<&String> = m.captures.keys().collect();
+                keys.sort();
+                for k in keys {
+                    k.hash(h);
+                    hash_captured(&m.captures[k], h);
+                }
+            }
+        }
+        CapturedValue::Array(items) => {
+            "array".hash(h);
+            for i in items {
+                hash_captured(i, h);
+            }
+        }
+        CapturedValue::Named(map) => {
+            "named".hash(h);
+            let mut keys: Vec<&String> = map.keys().collect();
+            keys.sort();
+            for k in keys {
+                k.hash(h);
+                hash_captured(&map[k], h);
+            }
+        }
+        other => format!("{other:?}").hash(h),
+    }
 }
 
 /// Compile with detailed layer outputs for debugging
@@ -4598,6 +4639,7 @@ mod tests {
                 is_collection: true,
                 arg_names: vec![],
                 node: None,
+                from_each: false,
                 span: Default::default(),
             }],
             ..Default::default()
@@ -4624,6 +4666,7 @@ mod tests {
                 is_collection: true,
                 arg_names: vec![],
                 node: None,
+                from_each: false,
                 span: Default::default(),
             }],
         );
@@ -4663,6 +4706,7 @@ mod tests {
                     is_collection: false,
                     arg_names: vec![],
                     node: None,
+                    from_each: false,
                     span: Default::default(),
                 },
                 crate::syntax::TemplateRef {
@@ -4672,6 +4716,7 @@ mod tests {
                     is_collection: false,
                     arg_names: vec![],
                     node: None,
+                    from_each: false,
                     span: Default::default(),
                 },
             ],

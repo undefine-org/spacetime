@@ -150,6 +150,7 @@ impl Site {
                 Some(json!({
                     "binding": l.binding,
                     "kind": l.kind,
+                    "type": declared_type(text, &l.binding),
                     "file": self.files[l.file].path,
                     "span": [span.start, span.end],
                     "rows": rows,
@@ -239,7 +240,21 @@ fn row_json(index: usize, row: &Lit, text: &str) -> Value {
                         Lit::Other { .. } => "other",
                         _ => "nested",
                     };
-                    json!({ "key": e.key, "value": e.value.text(text), "kind": kind })
+                    let mut f = json!({ "key": e.key, "value": e.value.text(text), "kind": kind });
+                    // Nested values, so a typed editor can show and edit the parts
+                    // of a record field (`blocks.uvp`) or a list of words.
+                    match &e.value {
+                        Lit::Array { items, .. } => {
+                            f["items"] = json!(items.iter().map(|i| i.text(text)).collect::<Vec<_>>());
+                        }
+                        Lit::Object { entries, .. } => {
+                            let parts: serde_json::Map<String, Value> =
+                                entries.iter().map(|n| (n.key.clone(), json!(n.value.text(text)))).collect();
+                            f["entries"] = Value::Object(parts);
+                        }
+                        _ => {}
+                    }
+                    f
                 })
                 .collect();
             json!({ "index": index, "label": row_label(row, text), "fields": fields, "span": [span.start, span.end] })
@@ -251,6 +266,28 @@ fn row_json(index: usize, row: &Lit, text: &str) -> Value {
             "span": [span.start, span.end],
         }),
     }
+}
+
+/// The type a list's declaration names, as written (`Piece[]`), if any:
+/// `@data inline $pieces Piece[] : [...]`. The studio asks the type registry
+/// for its fields so each one is edited with the control its type calls for.
+pub fn declared_type(text: &str, binding: &str) -> Option<String> {
+    for kind in ["inline", "stored"] {
+        let needle = format!("@data {kind} ${binding}");
+        let mut from = 0;
+        while let Some(pos) = text[from..].find(&needle) {
+            let after = from + pos + needle.len();
+            from = after;
+            let rest = &text[after..];
+            if rest.starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+                continue;
+            }
+            let colon = rest.find(':')?;
+            let ty = rest[..colon].trim();
+            return (!ty.is_empty()).then(|| ty.to_string());
+        }
+    }
+    None
 }
 
 /// The text that best names a row in a list: a title-like field, else the

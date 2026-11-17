@@ -430,6 +430,23 @@ impl TypeRegistry {
         let field_name = &path[0];
         let remaining_path = &path[1..];
 
+        // Host members come before the type's own fields: an array has a
+        // `length` and its methods whatever its element type is, and a string
+        // has a `length` (BUG: `$pieces.length` on a typed `Piece[]` was
+        // checked against Piece's fields and refused). A method's result is
+        // not something this pass can type, so the walk stops there.
+        if let Some(member) = host_member(resolved, field_name) {
+            return match member {
+                HostMember::Length => self.validate_path_on_resolved(
+                    &ResolvedType::Primitive("number".to_string()),
+                    remaining_path,
+                    span,
+                    original_type,
+                ),
+                HostMember::Method => Ok(ResolvedType::Primitive("any".to_string())),
+            };
+        }
+
         match resolved {
             ResolvedType::Object(fields) => {
                 // Find the field
@@ -617,6 +634,40 @@ impl TypeRegistry {
         span: SourceSpan,
     ) -> Result<ResolvedType, Diagnostic> {
         self.validate_property_path(binding_type, path, span)
+    }
+}
+
+/// A member the JavaScript host gives a value regardless of its declared type.
+enum HostMember {
+    Length,
+    Method,
+}
+
+const ARRAY_METHODS: &[&str] = &[
+    "at", "concat", "entries", "every", "filter", "find", "findIndex", "findLast",
+    "findLastIndex", "flat", "flatMap", "forEach", "includes", "indexOf", "join", "keys",
+    "lastIndexOf", "map", "reduce", "reduceRight", "reverse", "slice", "some", "sort",
+    "toReversed", "toSorted", "values",
+];
+
+const STRING_METHODS: &[&str] = &[
+    "at", "charAt", "endsWith", "includes", "indexOf", "lastIndexOf", "localeCompare",
+    "padEnd", "padStart", "repeat", "replace", "replaceAll", "slice", "split", "startsWith",
+    "substring", "toLowerCase", "toUpperCase", "trim", "trimEnd", "trimStart",
+];
+
+fn host_member(resolved: &ResolvedType, name: &str) -> Option<HostMember> {
+    let methods = match resolved {
+        ResolvedType::Array(_) => ARRAY_METHODS,
+        ResolvedType::Primitive(p) if p == "string" => STRING_METHODS,
+        _ => return None,
+    };
+    if name == "length" {
+        Some(HostMember::Length)
+    } else if methods.contains(&name) {
+        Some(HostMember::Method)
+    } else {
+        None
     }
 }
 
@@ -1011,6 +1062,12 @@ pub(crate) fn parse_type_ref_to_expr(type_ref: &str) -> TypeExpr {
         return TypeExpr::Array(Box::new(parse_type_ref_to_expr(inner)));
     }
 
+    // Grouping parens: `("1x1" | "4x5")[]` is an array of that union, and the
+    // group's parens are not part of its first and last variants.
+    if let Some(inner) = trimmed.strip_prefix('(').and_then(|t| t.strip_suffix(')')) {
+        return parse_type_ref_to_expr(inner);
+    }
+
     // Check for union type (simple check for | character)
     if trimmed.contains('|') {
         let variants: Vec<String> = trimmed
@@ -1145,4 +1202,20 @@ pub fn validate_json_against_schema(
     }
 
     diagnostics
+}
+
+#[cfg(test)]
+mod grouped_union_tests {
+    use super::*;
+
+    #[test]
+    fn an_array_of_a_grouped_union_keeps_clean_variants() {
+        match parse_type_ref_to_expr(r#"("1x1" | "4x5" | "a4")[]"#) {
+            TypeExpr::Array(inner) => match *inner {
+                TypeExpr::Union(v) => assert_eq!(v, vec!["1x1", "4x5", "a4"]),
+                other => panic!("expected a union, got {other:?}"),
+            },
+            other => panic!("expected an array, got {other:?}"),
+        }
+    }
 }

@@ -447,6 +447,10 @@
   ST._hot = ST._hot || {};
   ST.hot = function(key, take) {
     if (!key || typeof take !== 'function') return;
+    // A dev-dock bundle (the Studio's own panels) is not the page's source:
+    // its calls are never handed the page's arguments, and counting them would
+    // make every page look like it needs a reload.
+    if (typeof window !== 'undefined' && window.__ST_BUNDLE_OWNER__) return;
     (ST._hot[key] = ST._hot[key] || []).push(take);
   };
   /// `binds`: `[{key, args: {name: js}}]`. Returns true when every call took

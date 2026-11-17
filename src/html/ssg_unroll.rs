@@ -152,6 +152,11 @@ fn unroll_scope(
         else {
             continue;
         };
+        // A row the build cannot evaluate is left to the runtime rather than
+        // served with an expression's text standing in for its value.
+        if has_computed_hole(&row_html, &item_var) {
+            continue;
+        }
 
         let rendered: String = items
             .iter()
@@ -728,6 +733,52 @@ fn fill_bare(html: &str, item_var: &str, item: &Value, index: usize) -> String {
     }
     out.push_str(&html[copy_from..]);
     out
+}
+
+/// Whether a row holds a hole the build cannot evaluate: an expression
+/// (`` `$r.k == $here` ``, `` `$p.tags.join(", ")` ``) or a page signal
+/// (`` `$here` ``). Only plain paths on the row's own item (`$item.field`,
+/// `$.field`, `$item`, `$index`, or a nested `@each`'s variable) are build
+/// data. Unrolling anything else served the expression's text as if it were
+/// the value (`a == " b"`, which also broke the attribute it sat in), so such
+/// a list hydrates instead, and the runtime evaluates the hole.
+fn has_computed_hole(row_html: &str, item_var: &str) -> bool {
+    let mut vars: Vec<&str> = vec![item_var, "index", ""];
+    let mut scan = row_html;
+    while let Some(at) = scan.find(" as $") {
+        let name = &scan[at + 5..];
+        let end = name
+            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .unwrap_or(name.len());
+        vars.push(&name[..end]);
+        scan = &name[end..];
+    }
+    let mut rest = row_html;
+    while let Some(open) = rest.find('`') {
+        if open > 0 && rest.as_bytes()[open - 1] == b'\\' {
+            rest = &rest[open + 1..];
+            continue;
+        }
+        let after = &rest[open + 1..];
+        let Some(close) = after.find('`') else {
+            return false;
+        };
+        let inner = after[..close].trim();
+        let plain = !inner.is_empty()
+            && inner
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.' || c == '$');
+        if !plain {
+            return true;
+        }
+        let path = inner.trim_start_matches('$');
+        let head = if path.starts_with('.') { "" } else { path.split('.').next().unwrap_or("") };
+        if !vars.contains(&head) {
+            return true;
+        }
+        rest = &after[close + 1..];
+    }
+    false
 }
 
 /// Resolve a `$…`-shaped token to a string against the item, or None when it is
@@ -1785,5 +1836,23 @@ pub fn expand_component_holes(ast: &StFile, blocks: &mut [HtmlBlockAst]) {
                 block.holes[idx] = String::new();
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod computed_hole_tests {
+    use super::has_computed_hole;
+
+    #[test]
+    fn plain_item_paths_unroll() {
+        assert!(!has_computed_hole("<p data-k=\"`$r.k`\">`$r.name` `$index` `$.id`</p>", "r"));
+        assert!(!has_computed_hole("<ul>@each($r.tags as $t) { <li>`$t`</li> }</ul>", "r"));
+    }
+
+    #[test]
+    fn expressions_and_signals_hydrate() {
+        assert!(has_computed_hole("<p data-on=\"`$r.k == $here`\"></p>", "r"));
+        assert!(has_computed_hole("<i>`$p.claims.join(\", \")`</i>", "p"));
+        assert!(has_computed_hole("<b>`$here`</b>", "r"));
     }
 }

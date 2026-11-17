@@ -2791,9 +2791,40 @@ async fn studio_outline_handler(
         Ok(site) => {
             let mut outline = site.outline();
             outline["pages"] = studio_pages(site_dir);
+            attach_list_schemas(&site, &mut outline);
             Json(outline).into_response()
         }
         Err(e) => Json(serde_json::json!({ "error": e })).into_response(),
+    }
+}
+
+/// Give every list whose declaration names a record type (`$pieces Piece[]`)
+/// that type's JSON schema, each field annotated with the control the admin
+/// uses for it (`annotate_widgets`: the scalar table's `%widget`, a union's
+/// choices, a list of words, a nested record). The studio inspector edits a
+/// row through these instead of one text box per field. Types come from the
+/// page's own files and the project prelude; an unknown type adds nothing.
+fn attach_list_schemas(site: &crate::studio::outline::Site, outline: &mut serde_json::Value) {
+    let mut matches = Vec::new();
+    for f in site.files.iter().filter(|f| f.path.ends_with(".st")) {
+        if let Ok(ast) = crate::parser::parse(&f.text) {
+            matches.extend(ast.matches);
+        }
+    }
+    let registry = crate::type_system::TypeRegistry::from_form_matches(&matches);
+    let Some(lists) = outline.get_mut("lists").and_then(|l| l.as_array_mut()) else {
+        return;
+    };
+    for list in lists {
+        let Some(ty) = list.get("type").and_then(|t| t.as_str()).map(|t| t.trim_end_matches("[]").trim().to_string()) else {
+            continue;
+        };
+        if registry.get_type(&ty).is_none() {
+            continue;
+        }
+        let mut schema = crate::type_system::generate_json_schema(&crate::parser::TypeExpr::Reference(ty), &registry);
+        annotate_widgets(&mut schema);
+        list["schema"] = schema;
     }
 }
 

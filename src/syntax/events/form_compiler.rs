@@ -4211,6 +4211,7 @@ fn parse_template_ref(line: &str) -> Option<crate::syntax::form_match::TemplateR
             // String-parser context (no source offsets); the span-bearing harvest
             // is scope_refs/harvest_dynamic_refs. Zero span = unknown (G2 skips it).
             node: None,
+            from_each: false,
             span: Default::default(),
         })
     } else {
@@ -4224,6 +4225,7 @@ fn parse_template_ref(line: &str) -> Option<crate::syntax::form_match::TemplateR
             is_collection: false,
             arg_names,
             node: None,
+            from_each: false,
             span: Default::default(),
         })
     }
@@ -6546,6 +6548,24 @@ mod tests {
             other => panic!("expected an arms array, got {:?}", other),
         }
     }
+    #[test]
+    fn derive_value_may_open_with_an_expression_array() {
+        // An array literal whose first element is an expression is still the
+        // derive's value: it must not be split off as a CSS rule.
+        for src in [
+            "@data derive $a : [($x > 0 ? \"y\" : null)].filter(v => v != null);\n.dm { color: red; }",
+            "@data derive $b : [({ k: \"all\" })].concat($rows);\n.dm { color: red; }",
+            "@data derive $c : [$x, $y].length;\n.dm { color: red; }",
+        ] {
+            let f = crate::parse(src).unwrap_or_else(|e| panic!("{src} parses: {e:?}"));
+            assert!(
+                f.matches.iter().any(|m| m.matched_macro.as_deref() == Some("data-derive")),
+                "{src}: data-derive must match (got {:?})",
+                f.matches.iter().map(|m| &m.matched_macro).collect::<Vec<_>>()
+            );
+        }
+    }
+
     #[test]
     fn plan077_w2_derive_match_form_parses_all_type_shapes() {
         // PLAN-077 W2: `@data derive $x T : @match { (g) => V; _ => G; }` matches

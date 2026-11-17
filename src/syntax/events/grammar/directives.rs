@@ -484,6 +484,10 @@ pub(crate) fn inline_args(p: &mut Parser) -> bool {
             // intact (BUG-042). The opener lookahead keeps attribute selectors
             // (`[data-x]`, peek = IDENT) on the per-token path. Twin of the CST
             // parser's consume_balanced_brackets.
+            // An element that is itself an expression (`[($a ? 1 : 2)]`,
+            // `[({ k: 1 })]`, `[$a, $b]`, `[-1]`) opens a literal just as surely:
+            // no attribute selector starts with `(`, `$` or `-`. Missing these
+            // split `@data derive $x : [(…)].concat(…)` into a stray CSS rule.
             if p.at(SyntaxKind::L_BRACKET)
                 && matches!(
                     p.nth(1),
@@ -493,6 +497,10 @@ pub(crate) fn inline_args(p: &mut Parser) -> bool {
                         | SyntaxKind::NUMBER_WITH_UNIT
                         | SyntaxKind::L_BRACKET
                         | SyntaxKind::R_BRACKET
+                        | SyntaxKind::L_PAREN
+                        | SyntaxKind::DOLLAR
+                        | SyntaxKind::VARIABLE_REF
+                        | SyntaxKind::MINUS
                 )
             {
                 consume_balanced_brackets(p);

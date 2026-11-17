@@ -11,7 +11,8 @@
 
 %primitive local-state-impl(
   name: ident,
-  initial: any
+  initial: any,
+  bind: string = ""
 ) {
   %emit js {
     // Initialize state. _localState is the backing store and SpacetimeLocal is
@@ -79,6 +80,18 @@
     // from their declared initial, not inherit the prior test's mutated value).
     window._localState[%name] = %initial;
     document.dispatchEvent(new CustomEvent(`local:${%name}:updated`, { detail: %initial }));
+
+    // PLAN-155 hot bind: an edit to the SOURCE value (a Studio field, an agent's
+    // rewrite) is taken in place. The write goes through the reactive proxy, so
+    // every derive, list and binding that reads this state recomputes exactly as
+    // for a runtime write; nothing reloads. A value the running page has changed
+    // since is replaced only when the source value itself moved (hotApply skips
+    // unchanged keys), so a reader's typed filter survives another list's edit.
+    ST.hot(%bind, (a) => {
+      if (a.name !== %name) return false;
+      window.SpacetimeLocal[%name] = a.initial;
+      return true;
+    });
   }
 
   %exports {

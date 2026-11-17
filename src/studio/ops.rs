@@ -521,18 +521,42 @@ fn row<'a>(items: &'a [Lit], binding: &str, index: usize) -> Result<&'a Lit, Str
 fn set_field(site: &Site, binding: &str, index: usize, field: &str, value: &str) -> Result<Changes, String> {
     let (list, items) = find_list(site, binding)?;
     let row = row(&items, binding, index)?;
-    let target = if field.is_empty() {
-        row
-    } else {
-        row.get(field).ok_or_else(|| format!("row {index} of ${binding} has no field '{field}'"))?
-    };
+    // A dotted field walks into a nested record (`blocks.uvp`), so a typed
+    // editor can write one part of it without rewriting the whole.
+    let mut target = row;
+    for part in field.split('.').filter(|p| !p.is_empty()) {
+        target = target
+            .get(part)
+            .ok_or_else(|| format!("row {index} of ${binding} has no field '{field}'"))?;
+    }
     let replacement = match target {
         Lit::Str { .. } => literal::encode_str(value),
         Lit::Other { .. } if value == "true" || value == "false" || value.trim().parse::<f64>().is_ok() => value.trim().to_string(),
         Lit::Other { .. } => literal::encode_str(value),
+        // A list of words or numbers (a piece's formats, its claims): the new
+        // value is a JSON array of scalars, written back in the source's style.
+        Lit::Array { .. } => encode_scalar_array(value)
+            .ok_or_else(|| format!("'{field}' takes a list of words or numbers, got {value}"))?,
         _ => return Err(format!("'{field}' is not a plain value; edit it in the source")),
     };
     Ok(splice(site, list.file, target.span(), &replacement))
+}
+
+/// `["4x5", "9x16"]` -> the same list as `.st` source, or None when the value
+/// is not an array of strings, numbers and booleans.
+fn encode_scalar_array(value: &str) -> Option<String> {
+    let parsed: serde_json::Value = serde_json::from_str(value).ok()?;
+    let items = parsed.as_array()?;
+    let parts: Option<Vec<String>> = items
+        .iter()
+        .map(|v| match v {
+            serde_json::Value::String(s) => Some(literal::encode_str(s)),
+            serde_json::Value::Number(n) => Some(n.to_string()),
+            serde_json::Value::Bool(b) => Some(b.to_string()),
+            _ => None,
+        })
+        .collect();
+    Some(format!("[{}]", parts?.join(", ")))
 }
 
 /// Rewrite a list's rows in a new order, keeping every separator where it was.
@@ -721,6 +745,24 @@ mod tests {
         let out = run(Op::Field { binding: "tenets".into(), index: 0, field: "n".into(), value: "1".into() }).unwrap();
         assert!(out.contains(r#"{ "n": "1", "pre""#));
         assert!(run(Op::Field { binding: "tenets".into(), index: 9, field: "n".into(), value: "x".into() }).is_err());
+    }
+
+    #[test]
+    fn typed_rows_take_nested_parts_and_lists() {
+        const ROWS: &str = r#"@data inline $pieces Piece[] : [
+  { "id": "KN-001", "formats": ["4x5"], "blocks": { "uvp": "Le savoir", "angle": "Histoire" }, "fresh": false }
+];
+"#;
+        let site = Site::from_files(&[("index.st", ROWS)]);
+        let run = |op: Op| apply(&site, &op).map(|c| c["index.st"].clone());
+        let out = run(Op::Field { binding: "pieces".into(), index: 0, field: "blocks.angle".into(), value: "Méthode".into() }).unwrap();
+        assert!(out.contains(r#""blocks": { "uvp": "Le savoir", "angle": "Méthode" }"#), "{out}");
+        let out = run(Op::Field { binding: "pieces".into(), index: 0, field: "formats".into(), value: r#"["4x5","9x16"]"#.into() }).unwrap();
+        assert!(out.contains(r#""formats": ["4x5", "9x16"]"#), "{out}");
+        let out = run(Op::Field { binding: "pieces".into(), index: 0, field: "fresh".into(), value: "true".into() }).unwrap();
+        assert!(out.contains(r#""fresh": true"#), "{out}");
+        assert!(run(Op::Field { binding: "pieces".into(), index: 0, field: "formats".into(), value: "4x5".into() }).is_err());
+        assert!(run(Op::Field { binding: "pieces".into(), index: 0, field: "blocks.nope".into(), value: "x".into() }).is_err());
     }
 
     #[test]

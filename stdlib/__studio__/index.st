@@ -177,12 +177,19 @@
 .stu-row__file { text <- $stuRowFile; }
 .stu-act { @on &.click { $stuNoop <- ST.stuRowAction($); } }
 
-.stu-fields {
-  @each($stuFields as $f) {
-    <label class="stu-field" data-kind="`$f.kind`"><span class="stu-field__key">`$f.key`</span><textarea class="stu-field__input" rows="`$f.rows`" data-binding="`$f.binding`" data-at="`$f.index`" data-field="`$f.field`" spellcheck="false">`$f.value`</textarea></label>
+/// One field of a list row, edited with the control its type calls for and
+/// shown through a viewer of its value (ST.stuFields builds the descriptor).
+@template &stu-field($f) {
+  <div class="stu-field" data-widget="`$f.widget`" data-json="`$f.json`"><span class="stu-field__key">`$f.label`</span><span class="stu-field__view"><i class="stu-field__swatch" style="background: `$f.swatch`"></i><img class="stu-field__thumb" src="`$f.thumb`" alt="" /><b>`$f.view`</b></span><textarea class="stu-field__input stu-in stu-in--text" rows="`$f.rows`" data-widget="`$f.widget`" data-binding="`$f.binding`" data-at="`$f.index`" data-field="`$f.field`" spellcheck="false">`$f.value`</textarea><textarea class="stu-field__input stu-in stu-in--words" rows="2" data-widget="words" data-binding="`$f.binding`" data-at="`$f.index`" data-field="`$f.field`" spellcheck="false">`$f.words`</textarea><input class="stu-field__input stu-in stu-in--date" type="date" value="`$f.value`" data-binding="`$f.binding`" data-at="`$f.index`" data-field="`$f.field`" /><input class="stu-field__input stu-in stu-in--number" type="number" step="any" value="`$f.value`" data-binding="`$f.binding`" data-at="`$f.index`" data-field="`$f.field`" /><input class="stu-in stu-in--color" type="color" value="`$f.hex`" data-binding="`$f.binding`" data-at="`$f.index`" data-field="`$f.field`" /><input class="stu-in stu-in--toggle" type="checkbox" checked="`$f.on`" data-binding="`$f.binding`" data-at="`$f.index`" data-field="`$f.field`" /><span class="stu-choices"></span></div>
+  .stu-choices {
+    @each($f.choices as $c) {
+      <button type="button" class="stu-choice" data-word="`$c.word`" data-on="`$c.on`" data-multi="`$c.multi`" data-binding="`$c.binding`" data-at="`$c.index`" data-field="`$c.field`">`$c.word`</button>
+    }
   }
 }
-.stu-field__input { @on &.change { $stuNoop <- ST.stuCommitField($); } }
+.stu-fields { @each($stuFields as $f) { &stu-field($f); } }
+.stu-in { @on &.change { $stuNoop <- ST.stuCommitField($); } }
+.stu-choice { @on &.click { $stuNoop <- ST.stuCommitChoice($); } }
 
 .stu-box {
   @each($stuBox as $b) {
@@ -516,8 +523,30 @@ html.stu-on body { margin-left: var(--stu-left) !important; margin-right: var(--
 .stu-act:hover { border-color: var(--stu-ink); }
 .stu-act--danger:hover { border-color: var(--stu-red); color: var(--stu-red); }
 
-.stu-field { display: grid; grid-template-columns: 64px 1fr; gap: 6px; align-items: start; margin-bottom: 6px; }
-.stu-field__key { padding-top: 6px; color: var(--stu-soft); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.stu-field { display: grid; grid-template-columns: 72px 1fr; gap: 3px 6px; align-items: start; margin-bottom: 8px; }
+.stu-field__key { grid-row: span 2; padding-top: 2px; color: var(--stu-soft); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* the viewer: the value as it reads, before it is edited */
+.stu-field__view { display: flex; align-items: center; gap: 6px; min-width: 0; font-size: 11px; color: var(--stu-ink); }
+.stu-field__view b { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.stu-field__swatch { display: none; width: 14px; height: 14px; border-radius: 3px; flex: none; box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.12); }
+.stu-field__thumb { display: none; width: 34px; height: 24px; object-fit: cover; border-radius: 3px; flex: none; }
+.stu-field[data-widget="color"] .stu-field__swatch { display: block; }
+.stu-field[data-widget="media"] .stu-field__thumb[src^="/"] { display: block; }
+.stu-field[data-widget="text"] .stu-field__view, .stu-field[data-widget="readonly"] .stu-field__view { display: none; }
+/* the control: exactly one per field, picked by its type */
+.stu-in { display: none; }
+.stu-field[data-widget="text"] .stu-in--text, .stu-field[data-widget="richtext"] .stu-in--text, .stu-field[data-widget="media"] .stu-in--text,
+.stu-field[data-widget="words"] .stu-in--words, .stu-field[data-widget="date"] .stu-in--date, .stu-field[data-widget="number"] .stu-in--number,
+.stu-field[data-widget="color"] .stu-in--color, .stu-field[data-widget="color"] .stu-in--text, .stu-field[data-widget="toggle"] .stu-in--toggle { display: block; }
+.stu-field[data-widget="readonly"] .stu-in--text { display: block; pointer-events: none; opacity: 0.6; }
+.stu-field[data-widget="color"] .stu-in--color { width: 34px; height: 24px; padding: 0; border: 0; background: none; }
+.stu-field[data-widget="color"] { grid-template-columns: 72px 1fr; }
+.stu-in--toggle { width: 16px; height: 16px; accent-color: var(--stu-blue); }
+.stu-choices { display: none; flex-wrap: wrap; gap: 3px; }
+.stu-field[data-widget="choice"] .stu-choices, .stu-field[data-widget="multi"] .stu-choices { display: flex; }
+.stu-choice { height: 22px; padding: 0 7px; border: 1px solid var(--stu-line); border-radius: 4px; background: #fff; color: var(--stu-ink); font: inherit; font-size: 11px; cursor: pointer; }
+.stu-choice:hover { border-color: var(--stu-ink); }
+.stu-choice[data-on="true"] { background: var(--stu-blue); border-color: var(--stu-blue); color: #fff; }
 .stu-field__input {
   width: 100%;
   box-sizing: border-box;

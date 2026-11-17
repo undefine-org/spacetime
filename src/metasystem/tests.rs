@@ -2378,8 +2378,11 @@ mod css_at_rules {
             css
         );
         assert!(
-            css.contains("font-family: Aspekta"),
-            "CSS should contain font-family.\nGot: {}",
+            // Quoted: an unquoted family is a CSS identifier sequence, and a
+            // name such as "Fraunces 72pt Soft" (a token starting with a digit)
+            // is invalid CSS, dropped silently by the browser.
+            css.contains("font-family: \"Aspekta\""),
+            "CSS should contain the quoted font-family.\nGot: {}",
             css
         );
         assert!(

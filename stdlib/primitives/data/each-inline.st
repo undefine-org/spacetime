@@ -113,16 +113,42 @@
         if (e === '$index') return String(index);
         if (e === '$' + v) return itemData;
         if (e === '$.') return itemData;
-        // ONLY $.field or $<v>.field are item references — a $other.field hole
-        // (e.g. a global signal) is NOT an item ref and is left verbatim, matching the
-        // SSG resolve_token classifier so unroll == hydrate (W4 reviewer fix).
-        if (e.startsWith('$.')) {
+        // A plain $.field / $<v>.field path is an item reference: the build
+        // unrolls exactly these (ssg_unroll::resolve_token), so unroll == hydrate.
+        if (e.startsWith('$.') && /^[\w.$]+$/.test(e)) {
           return getProperty(itemData, e.slice(2));
         }
-        if (e.startsWith('$' + v + '.')) {
+        if (e.startsWith('$' + v + '.') && /^[\w.$]+$/.test(e)) {
           return getProperty(itemData, e.slice(v.length + 2));
         }
-        return null;
+        // A nested row's pass leaves the OUTER item's holes for the outer pass.
+        if (varName && varName !== itemVar && new RegExp('\\$' + itemVar + '\\b').test(e)) return null;
+        // Anything else is a computed hole: an expression over the item, $index
+        // and the page's signals (`$r.key == $here`, `$p.tags.join(", ")`). The
+        // build leaves such a list to hydrate (ssg_unroll::has_computed_hole);
+        // here it is evaluated exactly as the `when` filter is.
+        return evaluateHole(e, itemData, index, v);
+      };
+
+      const evaluateHole = (expr, itemData, index, v) => {
+        try {
+          const resolved = expr.replace(/\$(\w*)((?:\.\w+(?![\w(]))*)/g, (match, name, path) => {
+            const fieldPath = path ? path.slice(1) : '';
+            if (name === '' ) return JSON.stringify(fieldPath ? (getProperty(itemData, fieldPath) ?? '') : itemData);
+            if (name === 'index') return String(index);
+            let base;
+            if (name === v) base = itemData;
+            else if (typeof window.SpacetimeLocal !== 'undefined' && name in window.SpacetimeLocal) base = window.SpacetimeLocal[name];
+            else base = (typeof ST !== 'undefined') ? ST.get(containerEl, name) : undefined;
+            const value = fieldPath ? getProperty(base, fieldPath) : base;
+            return JSON.stringify(value === undefined ? null : value);
+          });
+          const out = new Function('return (' + resolved + ')')();
+          return out == null ? '' : out;
+        } catch (err) {
+          console.warn('[Spacetime] @each hole error:', err.message, expr);
+          return '';
+        }
       };
 
       // Replace `\u0060\u2026\u0060` holes in a raw HTML string BEFORE building the row, so a

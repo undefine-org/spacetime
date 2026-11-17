@@ -137,16 +137,91 @@
           });
         };
 
+        /// A row's fields, each with the control its TYPE calls for. When the
+        /// list's declaration names a record type (`$pieces Piece[]`), the
+        /// outline carries that type's schema with the admin's widget per field
+        /// (server: attach_list_schemas): a union edits as choices, a list of a
+        /// union as chips, a date, a colour, a number or a flag with its own
+        /// control, a nested record as its parts (`blocks.uvp`). Every field also
+        /// gets a VIEWER: the value as it reads (a date in words, a swatch, a
+        /// thumbnail), so a row is legible before it is edited. Untyped lists
+        /// keep one text box per field.
+        var FR_DAYS = ['dim.', 'lun.', 'mar.', 'mer.', 'jeu.', 'ven.', 'sam.'];
+        var FR_MONTHS = ['janv.', 'févr.', 'mars', 'avr.', 'mai', 'juin', 'juil.', 'août', 'sept.', 'oct.', 'nov.', 'déc.'];
+        var unq = function (t) { return String(t == null ? '' : t).replace(/^"(.*)"$/s, '$1'); };
+        var widgetOf = function (node) {
+          var w = node.widget || 'text';
+          if (w === 'select') { return 'choice'; }
+          if (w === 'chips') { return node.items && node.items.enum ? 'multi' : 'words'; }
+          if (w === 'range-length' || w === 'range-duration' || w === 'range-percentage') { return 'text'; }
+          return w;
+        };
+        var fieldOf = function (sel, key, label, node, raw, items) {
+          var widget = widgetOf(node);
+          var value = unq(raw);
+          var list = (items || []).map(unq);
+          var d = {
+            key: key, field: key, label: label, widget: widget, value: value, kind: widget,
+            binding: sel.row.binding, index: sel.row.index, on: false, swatch: '', thumb: '', hex: '#000000',
+            words: list.join(', '), json: JSON.stringify(list), choices: [], view: value,
+            rows: Math.min(8, Math.max(1, Math.ceil(value.length / 34)))
+          };
+          if (widget === 'choice') {
+            d.choices = (node.enum || []).map(function (w) { return { word: String(w), on: String(w) === value, field: key, binding: d.binding, index: d.index, multi: false }; });
+          } else if (widget === 'multi') {
+            d.choices = (node.items.enum || []).map(function (w) { return { word: String(w), on: list.indexOf(String(w)) >= 0, field: key, binding: d.binding, index: d.index, multi: true }; });
+            d.view = list.join(' · ') || 'aucun';
+          } else if (widget === 'words') {
+            d.view = list.join(' · ') || 'aucun';
+          } else if (widget === 'toggle') {
+            d.on = value === 'true';
+            d.view = d.on ? 'oui' : 'non';
+          } else if (widget === 'date') {
+            var m = /^(\d{4})-(\d{2})-(\d{2})/.exec(value);
+            if (m) {
+              var dt = new Date(+m[1], +m[2] - 1, +m[3]);
+              d.view = FR_DAYS[dt.getDay()] + ' ' + dt.getDate() + ' ' + FR_MONTHS[dt.getMonth()] + ' ' + m[1];
+            }
+          } else if (widget === 'color') {
+            d.swatch = value;
+            d.hex = /^#[0-9a-f]{6}$/i.test(value) ? value : '#000000';
+          } else if (widget === 'media') {
+            if (/\.(png|jpe?g|webp|gif|svg|avif)$/i.test(value)) { d.thumb = value; }
+            d.view = value.split('/').pop();
+          } else if (widget === 'richtext') {
+            d.rows = Math.min(12, Math.max(3, Math.ceil(value.length / 34)));
+            d.view = value.length > 90 ? value.slice(0, 90) + '…' : value;
+          } else if (value.length > 60) {
+            d.view = value.slice(0, 60) + '…';
+          }
+          return d;
+        };
         ST.stuFields = function (sel) {
           if (!sel || !sel.row) { return []; }
-          return sel.row.fields.map(function (f) {
-            var v = String(f.value);
-            return {
-              key: f.key || 'value', field: f.key, value: v, kind: f.kind,
-              binding: sel.row.binding, index: sel.row.index,
-              rows: Math.min(6, Math.max(1, Math.ceil(v.length / 34)))
-            };
+          var o = outline();
+          var list = o && o.lists ? o.lists.filter(function (l) { return l.binding === sel.row.binding; })[0] : null;
+          var props = list && list.schema && list.schema.properties;
+          if (!props) {
+            return sel.row.fields.map(function (f) {
+              var v = String(f.value);
+              return fieldOf(sel, f.key || 'value', f.key || 'value', { widget: 'text' }, v, null);
+            });
+          }
+          var out = [];
+          Object.keys(props).forEach(function (k) {
+            var node = props[k];
+            var f = sel.row.fields.filter(function (x) { return x.key === k; })[0];
+            if (!f) { return; }
+            if (node.widget === 'fieldset' && node.properties && f.entries) {
+              Object.keys(node.properties).forEach(function (sub) {
+                if (!(sub in f.entries)) { return; }
+                out.push(fieldOf(sel, k + '.' + sub, k + ' · ' + sub, node.properties[sub], f.entries[sub], null));
+              });
+              return;
+            }
+            out.push(fieldOf(sel, k, k, node, f.value, f.items));
           });
+          return out;
         };
 
         /// The selected element, from the selection itself: the cached element
@@ -470,8 +545,37 @@
         // Actions the panels call through `$stuNoop <- ST.stuX($)`.
         ST.stuCommitField = function (input) {
           var d = input.dataset;
-          if (input.value === input.defaultValue) { return ''; }
-          S.apply({ op: 'field', binding: d.binding, index: +d.at, field: d.field || '', value: input.value });
+          var value;
+          if (input.type === 'checkbox') {
+            if (input.checked === input.defaultChecked) { return ''; }
+            value = String(input.checked);
+          } else {
+            if (input.value === input.defaultValue) { return ''; }
+            value = input.value;
+            // A list of free words is typed comma-separated and stored as a list.
+            if (d.widget === 'words') {
+              value = JSON.stringify(value.split(',').map(function (w) { return w.trim(); }).filter(Boolean));
+            }
+          }
+          S.apply({ op: 'field', binding: d.binding, index: +d.at, field: d.field || '', value: value });
+          return '';
+        };
+
+        /// A choice: one word for a union, the toggled set for a list of one.
+        ST.stuCommitChoice = function (button) {
+          var d = button.dataset;
+          var value = d.word;
+          if (d.multi === 'true') {
+            var field = button.closest('.stu-field');
+            var have = [];
+            try { have = JSON.parse(field.dataset.json || '[]'); } catch (e) { have = []; }
+            var at = have.indexOf(d.word);
+            if (at >= 0) { have.splice(at, 1); } else { have.push(d.word); }
+            value = JSON.stringify(have);
+          } else if (d.on === 'true') {
+            return '';
+          }
+          S.apply({ op: 'field', binding: d.binding, index: +d.at, field: d.field || '', value: value });
           return '';
         };
 

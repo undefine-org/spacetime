@@ -1,0 +1,98 @@
+#+TITLE: Typed rows and live data in Studio, from the Knowledger content studio
+#+STATE: DOING
+#+CUSTOM_ID: PLAN-160-typed-rows-and-live-data
+#+DATE: 2026-11-17
+
+* Request
+Build a full-vision prototype of a content studio for Knowledger in Spacetime
+(private repo Ora-Ventures/knowledger-studio): brand, voice, claims register,
+moodboard, editorial line, a 14-week calendar, asset registry and film, all
+as typed source data, edited in Studio. Use Spacetime to its full modularity,
+fix bugs and improve it directly on main; give FIELDS their own rich inputs
+and viewers; make data edits incremental (no reload). Research record:
+[[file:../../@research/knowledger-content-studio-2026-11-17.org]].
+
+Authorized by the user on 2026-11-17 ("fix bugs and improve directly on main").
+
+* Implementation log
+** DONE Typed reads: an array's `length` and methods are host members (E0401)
+`$pieces.length` on a typed `Piece[]` was checked against Piece's fields and
+refused; so was `.length` on any `.filter(…)` result. `validate_path_on_resolved`
+now answers `length` (number) and stops at an array/string method before
+reaching the element type. Test: analysis/tests.rs
+`test_validate_typed_reads_allows_array_and_string_host_members`.
+** DONE @each children are not also rendered at the template root
+BUG-130 harvests the children of an @each inside a template body into the
+factory's refs (for structure views); the runtime rendered every ref, so each
+parent instance gained one unbound ghost child. Refs now carry `from_each`
+(omitted when false: snapshots unchanged) and templates.js skips them. Test:
+parser/tests.rs `test_each_child_ref_is_marked_from_each`.
+** DONE Computed holes in @each rows evaluate; the build no longer half-unrolls them
+A hole other than `$item.field` (`$r.key == $here`, `$p.tags.join(", ")`, a page
+signal `$here`) was served as text (`a == " b"`, breaking its attribute) and
+hydrated to "". each-inline now evaluates such holes as its `when` filter does
+(item fields, $index, page signals); ssg_unroll leaves a list with a computed
+hole to hydrate (`has_computed_hole`, unit tests in ssg_unroll.rs).
+** DONE An expression array is a derive's value, not a CSS rule
+`@data derive $x : [($a ? 1 : 2)]…`, `[({ k: 1 })]`, `[$a, $b]`, `[-1]` split the
+directive (the array-literal lookahead knew only `{`, strings, numbers, `[`).
+`(`, `$`, `$name` and `-` open a literal too (no attribute selector starts so).
+Test: form_compiler.rs `derive_value_may_open_with_an_expression_array`.
+** DONE @font family names are quoted
+Reported by Amine's agent: `font-family: %family` emitted `Fraunces 72pt Soft`
+unquoted, invalid CSS dropped silently. The primitive quotes it; the metasystem
+font test now pins the quoted form.
+** DOING Typed rows in Studio: a field edits with its type's control and reads through a viewer
+- outline.json: each list gets `type` (as declared) and, when it names a record
+  type, `schema` = the type's JSON schema annotated by `annotate_widgets` (the
+  scalar table's `%widget`, a union's choices, chips, fieldset). Rows expose
+  nested `items` / `entries`.
+- `set_field` writes dotted paths (`blocks.uvp`) and arrays of scalars
+  (`["4x5", "9x16"]`). Test: ops.rs `typed_rows_take_nested_parts_and_lists`.
+- Studio kit: `ST.stuFields` builds typed descriptors (choice, multi, words,
+  date, number, color, toggle, media, richtext, readonly) with a viewer
+  (date in words, swatch, thumbnail, pills); `&stu-field` renders exactly one
+  control per field; `ST.stuCommitChoice` writes a union or a toggled list.
+** DOING Data edits are taken live (PLAN-155 hot binds extended to data)
+`local-state-impl` (what `@data inline` lowers to) declares `bind`, so a page's
+inline data is hot-keyed and excluded from the fingerprint; its taker writes the
+new value through the reactive SpacetimeLocal proxy, so derives and lists
+recompute with no reload. `ST.hot` ignores dock bundles (their keys are not the
+page's and broke `hotApply`'s key-set check). Test: studio_hot_binds_test.rs
+`editing_inline_data_is_hot`.
+
+** DOING Evidence (2026-11-17)
+- Nix release builds of the worktree: build 1 and build 2 succeeded on the
+  Build host; the studio was served and driven in Chromium on build 2.
+- Browser: Studio inspector on $pieces shows typed controls (date picker with
+  « mar. 1 déc. 2026 » viewer, union choices, multi chips, read-only id,
+  toggle, nested blocks.*). Choosing « instagram » wrote plan/calendar.st and
+  the page showed it; it RELOADED instead of patching: the hot fingerprint
+  hashed Debug text of block captures (byte spans), so any length-changing edit
+  above a template moved it. Fixed (`hash_captured`, test
+  `a_longer_value_does_not_move_a_template_below_it`), not yet rebuilt.
+- `cargo test --lib` on the Build host (before the last fixes): 3343 passed,
+  6 failed: five JS snapshots (they embed the runtime; updated with the two
+  runtime insertions) and `derive_value_may_open_with_an_expression_array`
+  (the CST parser has a twin lookahead; fixed in cst/parser.rs). The rerun was
+  stopped by the session's memory-pressure reaper (Work had ~1 GB free, other
+  services' BEAM VMs); it has NOT been rerun.
+- Also fixed after that run, uncompiled: UTF-8 in `text <-` expressions
+  (`transpile_signal_expr_with` pushed `u8 as char`: « prévus » -> « prÃ©vus »),
+  grouped union arrays `("a" | "b")[]` keeping their parens in the enum.
+- PRD validator not run: no emacsclient on Work.
+
+* Remaining
+- A derive value combining a leading `[…]` literal, a call chain and an
+  unparenthesised object literal argument (`Array.of({ k: … })`,
+  `[{…}].concat(…).map(c => Object.assign({}, c, { on: … }))`) still loses its
+  `{` to the body heuristic (`starts_object_literal` only trusts a COLON or a
+  quoted key). Worked around in knowledger-studio with typed option lists.
+- `:root { --x: $data.field }` is silently dropped; the same declaration on
+  `body` works. Either support it or fail loudly.
+- Computed @each holes are evaluated once per row render: a hole reading a page
+  signal does not re-render when only that signal changes (derive the flag).
+- Serve does not always reload an edited imported module (reported by Amine's
+  agent); not reproduced yet.
+- Render pieces to files: `spacetime render --stills` per workbench frame,
+  registered in the project's asset registry with provenance.

@@ -15,7 +15,7 @@
 ) {
   %emit css {
     @font-face {
-      font-family: %family;
+      font-family: "%family";
       %styles
     }
   }
